@@ -51,6 +51,13 @@ just deploy
 pinning to a specific `vX.Y.Z` (below) is safer for prod if you want deploys and releases to be the
 same event.
 
+## Running more than one backend replica
+
+Supported. Realtime nudges (the websocket's "something changed" signals) reach clients on every replica
+through Postgres `LISTEN/NOTIFY` on the `ois_realtime` channel, so nothing beyond the shared database is
+needed; each replica holds one extra Postgres connection for its listener. Delivery is best-effort — a
+nudge lost while a listener reconnects is picked up by the clients' 60-second fallback poll.
+
 ## What `just deploy` does
 
 ```bash

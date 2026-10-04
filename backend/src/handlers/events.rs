@@ -2945,7 +2945,7 @@ mod advisory_permission_tests {
     /// One pass of the event-package lifecycle job.
     async fn run_auto_publish_pass(pool: &PgPool) {
         // The real pass, so these tests cover how the job rebuilds whoever armed the package.
-        crate::jobs::event_package_lifecycle_once(pool, &tokio::sync::broadcast::channel(8).0)
+        crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None))
             .await
             .unwrap();
     }

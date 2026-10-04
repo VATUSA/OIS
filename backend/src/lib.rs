@@ -67,6 +67,11 @@ pub async fn run() -> color_eyre::Result<()> {
         state.db.clone(),
     );
     if let Some(pool) = state.db.clone() {
+        // Realtime nudges from the other replicas (#649). A failure here only costs cross-replica
+        // nudges — clients still poll — so it is logged, not fatal.
+        if let Err(e) = state.events.start_listener().await {
+            tracing::warn!(error = %e, "realtime: cross-replica listener did not start");
+        }
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());

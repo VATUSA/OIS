@@ -5,6 +5,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
 import {fetchHistTraffic} from "./historical";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
@@ -173,6 +174,8 @@ export function useFcas(eventId?: number) {
       if (error || !data) throw new Error("failed to load FCAs");
       return data;
     },
+    // Live sets poll as the socket's fallback (#649); a historical snapshot never changes.
+    refetchInterval: eventId != null || at == null ? SOCKET_FALLBACK_MS : false,
     staleTime: eventId != null || at == null ? undefined : Infinity,
     placeholderData: eventId == null && at != null ? keepPreviousData : undefined,
   });

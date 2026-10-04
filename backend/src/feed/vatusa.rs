@@ -372,9 +372,7 @@ pub async fn apply_and_announce(
 ) -> Result<String, String> {
     let (summary, access_moved) = apply_division(pool, members).await?;
     if access_moved {
-        let _ = events.send(crate::realtime::WsEvent {
-            topic: crate::realtime::topic::ACCESS_GRANTED.to_string(),
-        });
+        events.publish(crate::realtime::topic::ACCESS_GRANTED);
     }
     Ok(summary)
 }
@@ -614,7 +612,7 @@ mod tests {
 
     /// A realtime hub nothing listens on, for pulls whose nudge a test doesn't check.
     fn hub() -> crate::realtime::Events {
-        tokio::sync::broadcast::channel(16).0
+        crate::realtime::Events::new(None)
     }
     use serde_json::json;
 
@@ -1086,7 +1084,8 @@ mod tests {
         map(&pool, "MTR", "EC").await;
         let everyone: Vec<i64> = (1_644_600..1_644_610).collect();
         let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
 
         apply_and_announce(&pool, &pulled(roster(), vec![]), &events)
             .await
@@ -1111,7 +1110,8 @@ mod tests {
         let everyone: Vec<i64> = (1_644_700..1_644_710).collect();
         let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
         let roles = || everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
         apply_and_announce(&pool, &pulled(roster(), roles()), &events)
             .await
             .unwrap();
@@ -1130,7 +1130,8 @@ mod tests {
         let everyone: Vec<i64> = (1_644_800..1_644_810).collect();
         let roster = |who: &[i64]| who.iter().map(|c| controller(*c, "ZDC")).collect();
         let roles = |who: &[i64]| who.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
         apply_and_announce(&pool, &pulled(roster(&everyone), roles(&everyone)), &events)
             .await
             .unwrap();
@@ -1151,7 +1152,8 @@ mod tests {
         let everyone: Vec<i64> = (1_644_900..1_644_910).collect();
         let roster = |who: &[i64]| who.iter().map(|c| controller(*c, "ZDC")).collect();
         let roles = |who: &[i64]| who.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
         apply_and_announce(&pool, &pulled(roster(&everyone), roles(&everyone)), &events)
             .await
             .unwrap();

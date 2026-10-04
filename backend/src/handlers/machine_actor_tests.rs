@@ -3139,7 +3139,7 @@ async fn issued_advisory(pool: &PgPool) -> Option<(Option<String>, Option<String
 }
 
 async fn lifecycle_pass(pool: &PgPool) {
-    crate::jobs::event_package_lifecycle_once(pool, &tokio::sync::broadcast::channel(8).0)
+    crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None))
         .await
         .unwrap();
 }

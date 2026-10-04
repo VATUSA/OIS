@@ -25,6 +25,14 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "events.reminder": [["my-ace-claims"]],
 };
 
+/**
+ * How often a query the socket nudges polls anyway (#649). The socket is the fast path; this is what
+ * keeps "degrades cleanly to polling" true when a socket is down, a nudge is missed while a backend
+ * replica's listener reconnects, or a key has no other refresh. A minute, since the nudge normally
+ * gets there first.
+ */
+export const SOCKET_FALLBACK_MS = 60_000;
+
 /** The subprotocol the server selects for a desktop client; the token travels beside it. */
 const WS_PROTOCOL = "ois.v1";
 const WS_BEARER_PREFIX = "ois.bearer.";
