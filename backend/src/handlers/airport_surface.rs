@@ -171,7 +171,13 @@ pub async fn create_airport_gate(
     validate_gate(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_gate(pool, &icao, &req, principal.user_id()).await?;
+    let mut row = surface_repo::create_gate(
+        pool,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
@@ -196,9 +202,15 @@ pub async fn update_airport_gate(
     validate_gate(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_gate(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_gate(
+        pool,
+        &id,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
@@ -250,7 +262,13 @@ pub async fn create_airport_ramp_area(
     validate_ramp_area(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_ramp_area(pool, &icao, &req, principal.user_id()).await?;
+    let mut row = surface_repo::create_ramp_area(
+        pool,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -274,9 +292,15 @@ pub async fn update_airport_ramp_area(
     validate_ramp_area(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_ramp_area(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_ramp_area(
+        pool,
+        &id,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -326,7 +350,13 @@ pub async fn create_airport_taxiway(
     validate_taxiway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_taxiway(pool, &icao, &req, principal.user_id()).await?;
+    let mut row = surface_repo::create_taxiway(
+        pool,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -350,9 +380,15 @@ pub async fn update_airport_taxiway(
     validate_taxiway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_taxiway(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_taxiway(
+        pool,
+        &id,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -402,7 +438,13 @@ pub async fn create_airport_runway(
     validate_runway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_runway(pool, &icao, &req, principal.user_id()).await?;
+    let mut row = surface_repo::create_runway(
+        pool,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     row.editable = true;
     Ok(Json(row))
 }
@@ -426,9 +468,15 @@ pub async fn update_airport_runway(
     validate_runway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_runway(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_runway(
+        pool,
+        &id,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }

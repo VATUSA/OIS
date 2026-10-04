@@ -645,6 +645,12 @@ async fn generate_gdp_advisory(
         body: String::new(),
         structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
         decoded: None,
+        // No window (#537). A generated advisory's life is the program's life, and that is already
+        // enforced through `gdp_id`/`ground_stop_id`: the cleanup pass cancels it when the source
+        // expires. Setting `valid_to` here as well would be a second mechanism claiming the same
+        // expiry, which is the drift `ground_stop_until_ts` is used above to avoid.
+        valid_from: None,
+        valid_to: None,
     };
     tmu_repo::create_advisory_tx(
         tx,
@@ -965,6 +971,8 @@ mod tests {
             body: String::new(),
             structured: Some(serde_json::to_value(&doc).unwrap()),
             decoded: None,
+            valid_from: None,
+            valid_to: None,
         };
         let failed = tmu_repo::create_advisory_tx(
             &mut tx,
