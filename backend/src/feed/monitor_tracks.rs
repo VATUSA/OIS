@@ -170,7 +170,8 @@ impl Ctx<'_> {
         })
     }
 
-    /// A flight on the ground with a release: from its departure, starting at wheels-up.
+    /// A flight on the ground with a release: from its departure, starting at wheels-up — or now, if
+    /// that has passed and it is still on the ground. It can't have flown the minutes it sat out.
     fn proposed(
         &self,
         id: &str,
@@ -181,7 +182,7 @@ impl Ctx<'_> {
         edct_ms: i64,
     ) -> Option<OwnedTrack> {
         let path = self.path(fp, lat, lon, heading, 0)?;
-        let fixes = self.walk(&path, fp, false, 0.0, 0.0, edct_ms);
+        let fixes = self.walk(&path, fp, false, 0.0, 0.0, edct_ms.max(self.now_ms));
         Some(OwnedTrack {
             id: id.to_string(),
             population: Population::Proposed,
@@ -448,6 +449,35 @@ mod tests {
             (first.lat - 40.64).abs() < 0.05 && (first.lon + 73.78).abs() < 0.05,
             "it starts at KJFK: {first:?}"
         );
+    }
+
+    /// A release whose wheels-up has passed, for a flight still on the ground (a pilot at the gate, or
+    /// a prefile that never connected), departs no earlier than now: projecting it from the missed
+    /// wheels-up put it half an hour down its route, counted in sectors it isn't in (#701 review).
+    #[test]
+    fn a_late_proposed_flight_departs_now_not_at_its_missed_wheels_up() {
+        let edct = now() - 30 * MINUTE_MS;
+        // (feed, where the flight is now: a prefile at its departure, a pilot where it reports)
+        for (data, (lat, lon)) in [
+            (
+                VatsimData {
+                    prefiles: vec![prefile("LATE")],
+                    ..Default::default()
+                },
+                (40.64, -73.78),
+            ),
+            (pilots(vec![pilot("LATE", 0)]), (40.2, -74.0)),
+        ] {
+            let tracks = project(&data, &[("LATE", edct)], &[], None);
+            assert_eq!(tracks[0].population, Population::Proposed);
+            let first = tracks[0].fixes[0];
+            assert_eq!(first.t_ms, now());
+            assert!(
+                (first.lat - lat).abs() < 0.05 && (first.lon - lon).abs() < 0.05,
+                "still on the ground where it is, not down its route: {first:?}"
+            );
+            assert_eq!(first.alt_ft, Some(0.0), "still on the ground: {first:?}");
+        }
     }
 
     /// A flight is in exactly one population: airborne at 50 kt and over is active whether or not it
