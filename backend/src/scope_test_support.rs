@@ -47,6 +47,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         winds_refreshed: Arc::new(AtomicI64::new(0)),
         data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
         metar_cache: Arc::new(Mutex::new(HashMap::new())),
+        webhook_replays: Arc::default(),
         events: tokio::sync::broadcast::channel(256).0,
         jobs: Arc::new(crate::job_registry::JobRegistry::new()),
         metrics: crate::metrics::handle(),
