@@ -9,6 +9,7 @@ import {
   KeyRound,
   LayoutDashboard,
   type LucideIcon,
+  Users,
   MapPinned,
   Megaphone,
   MessageSquare,
@@ -120,6 +121,7 @@ export const AREAS: readonly NavArea[] = [
         label: "Admin",
         items: [
           { label: "Access", to: "/admin/access", icon: ShieldCheck, permission: "access.users.read" },
+      { label: "Groups", to: "/admin/groups", icon: Users, permission: "access.groups.read" },
           { label: "Audit", to: "/admin/audit", icon: ScrollText, permission: "audit.logs.read" },
           { label: "Jobs", to: "/admin/jobs", icon: Activity, permission: "system.jobs.read" },
           { label: "API Keys", to: "/admin/api-keys", icon: KeyRound, permission: "api_keys.key.read" },
