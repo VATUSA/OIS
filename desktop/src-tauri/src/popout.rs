@@ -20,7 +20,10 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     }
     for (label, secondary) in window.app_handle().webview_windows() {
         if is_secondary(&label) {
-            let _ = secondary.destroy();
+            // A window that survives this is an orphaned always-on-top pop-out with no main window.
+            if let Err(e) = secondary.destroy() {
+                log::warn!("could not close {label} with the main window: {e}");
+            }
         }
     }
 }

@@ -6,6 +6,8 @@ import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@oi
 
 import {router} from "./router";
 import {launchDesktop} from "./lib/desktop-launch";
+import {installLogger} from "./lib/logger";
+import {ErrorBoundary} from "./components/error-boundary";
 import {RealtimeProvider} from "./components/realtime-provider";
 import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
@@ -28,12 +30,16 @@ const queryClient = new QueryClient();
 // Main window only — `rotateOnLaunch` says why. It is followed by reopening last launch's route
 // windows (#350), and only once it has finished — `launchDesktop` says why, and pins the order.
 async function bootstrap() {
+  // First, so a failure during launch is logged too (#629).
+  installLogger();
   await launchDesktop();
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider defaultTheme="dark">
       <ToastProvider>
+        {/* Inside the toasts, so the crash screen's "Send diagnostics" can report its outcome. */}
+        <ErrorBoundary>
         <DialogProvider>
           <TooltipProvider>
             <QueryClientProvider client={queryClient}>
@@ -43,6 +49,7 @@ async function bootstrap() {
             </QueryClientProvider>
           </TooltipProvider>
         </DialogProvider>
+        </ErrorBoundary>
       </ToastProvider>
     </ThemeProvider>
   </React.StrictMode>,

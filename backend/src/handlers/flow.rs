@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::CurrentUser,
         permissions::{
             FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
         },
@@ -34,6 +34,7 @@ use crate::{
         vatsim::VatsimData,
         winds::Winds,
     },
+    handlers::release_authority,
     jobs,
     models::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
@@ -294,20 +295,14 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
 pub async fn create_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
-    require_fca_write_scope(
-        &state,
-        &Principal::User(user.clone()),
-        "flow.fca.update",
-        &[&payload.artcc],
-    )
-    .await?;
-    let id = flow_repo::create_fca(pool, &payload, &user.id).await?;
+    require_fca_write_scope(&state, &principal, "flow.fca.update", &[&payload.artcc]).await?;
+    let id = flow_repo::create_fca(pool, &payload, &by).await?;
     state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
         .await?
@@ -326,11 +321,11 @@ pub async fn create_fca(
 pub async fn update_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
     let existing = flow_repo::get_fca(pool, &id)
@@ -340,12 +335,12 @@ pub async fn update_fca(
     // caller doesn't hold (relabelling a ZNY FCA as ZDC would otherwise open its releases, #626).
     require_fca_write_scope(
         &state,
-        &Principal::User(user.clone()),
+        &principal,
         "flow.fca.update",
         &[&existing.artcc, &payload.artcc],
     )
     .await?;
-    if !flow_repo::update_fca(pool, &id, &payload, &user.id).await? {
+    if !flow_repo::update_fca(pool, &id, &payload, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
@@ -415,6 +410,24 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
 /// Permission names for route edit/delete scope checks (the caller must hold these for the route's ARTCC).
 const ROUTE_UPDATE_PERM: &str = "flow.route.update";
 const ROUTE_DELETE_PERM: &str = "flow.route.delete";
+/// The release writes' permission, checked against the FCA's owning ARTCC (#626).
+const FCA_UPDATE_PERM: &str = "flow.fca.update";
+
+/// Refuse a release write on an FCA outside the caller's `flow.fca.update` scope (#626). An FCA with
+/// no `artcc` is writable only nationally, as a global shared route is.
+async fn require_fca_scope(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    let artcc = flow_repo::norm_artcc(Some(&fca.artcc));
+    let scope = principal.permission_scope(state, FCA_UPDATE_PERM).await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
 
 /// Protective margin added to the separation when **issuing** a release (#356).
 ///
@@ -481,11 +494,9 @@ async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, A
 pub async fn create_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     // Facility scope: the caller must hold flow.route.update for the route's ARTCC (or nationally —
@@ -497,12 +508,7 @@ pub async fn create_route(
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    let id = flow_repo::create_route(
-        pool,
-        &payload,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
-    )
-    .await?;
+    let id = flow_repo::create_route(pool, &payload, &principal.attribution(&state).await?).await?;
     route_response(&state, &id).await
 }
 
@@ -517,12 +523,10 @@ pub async fn create_route(
 pub async fn update_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     let existing = flow_repo::get_route(pool, &id)
@@ -537,14 +541,7 @@ pub async fn update_route(
     if !scope.allows(existing.artcc.as_deref()) || !scope.allows(new_artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    if !flow_repo::update_route(
-        pool,
-        &id,
-        &payload,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
-    )
-    .await?
-    {
+    if !flow_repo::update_route(pool, &id, &payload, &principal.attribution(&state).await?).await? {
         return Err(ApiError::NotFound);
     }
     route_response(&state, &id).await
@@ -560,11 +557,9 @@ pub async fn update_route(
 pub async fn delete_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteDelete>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let existing = flow_repo::get_route(pool, &id)
         .await?
@@ -1657,6 +1652,7 @@ fn fca_flight(
         seq: 0,
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
+        release_version: None,
         groundspeed: gs,
         altitude: alt,
         heading: hdg,
@@ -2074,6 +2070,17 @@ fn finalize(
     flights
 }
 
+/// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
+/// beside the metering input, never from it: provenance cannot move a time.
+fn annotate_releases(
+    flights: &mut [FcaFlight],
+    holders: &HashMap<String, flow_repo::ReleaseHolder>,
+) {
+    for f in flights {
+        f.release_version = holders.get(&f.callsign).map(|h| h.version);
+    }
+}
+
 async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiError> {
     Ok(flow_repo::list_releases(pool, id)
         .await?
@@ -2163,10 +2170,11 @@ pub async fn fca_traffic(
         .await?
         .ok_or(ApiError::NotFound)?;
     let releases = load_releases(pool, &id).await?;
+    let holders = flow_repo::release_holders(pool, &id).await?;
     let now = Utc::now();
-    Ok(Json(
-        metered_flights(&state, fca, releases, now, q.debug).await?,
-    ))
+    let mut flights = metered_flights(&state, fca, releases, now, q.debug).await?;
+    annotate_releases(&mut flights, &holders);
+    Ok(Json(flights))
 }
 
 /// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
@@ -2234,14 +2242,19 @@ pub async fn list_idst(
     // Gather each enabled FCA with its releases (async DB) first, then hand the whole per-FCA metering
     // loop to a blocking thread — it resolves every ground departure's route for every FCA, which is
     // heavy CPU that must stay off the async workers (see `metered_flights`).
-    let mut fca_releases: Vec<(FcaBody, ReleaseMap)> = Vec::new();
+    let mut fca_releases: Vec<(
+        FcaBody,
+        ReleaseMap,
+        HashMap<String, flow_repo::ReleaseHolder>,
+    )> = Vec::new();
     for fca in flow_repo::list_fcas(pool)
         .await?
         .into_iter()
         .filter(|f| f.enabled && f.points.0.len() >= 2)
     {
         let releases = load_releases(pool, &fca.id).await?;
-        fca_releases.push((fca, releases));
+        let holders = flow_repo::release_holders(pool, &fca.id).await?;
+        fca_releases.push((fca, releases, holders));
     }
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
     // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
@@ -2270,7 +2283,7 @@ pub async fn list_idst(
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
-        for (fca, releases) in &fca_releases {
+        for (fca, releases, holders) in &fca_releases {
             let (flights, metas) = build_candidates(
                 fca,
                 &snap.data,
@@ -2311,6 +2324,11 @@ pub async fn list_idst(
                 let pick = predicted
                     .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
                     .cloned();
+                // Provenance for the controller (#585 AC4): a machine-issued release names it.
+                let released_by_machine = holders
+                    .get(&f.callsign)
+                    .and_then(|h| h.machine.as_ref())
+                    .map(|(_, name)| name.clone());
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2324,6 +2342,7 @@ pub async fn list_idst(
                     cross_time: f.cross_time,
                     edct,
                     released: f.released,
+                    released_by_machine,
                     runway: pick.as_ref().map(|(r, _)| r.clone()),
                     runway_source: pick.as_ref().map(|(_, s)| s.clone()),
                 };
@@ -2361,23 +2380,40 @@ pub async fn list_idst(
     tag = "flow",
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Replace only this release version (#585)"),
+        ("If-None-Match" = Option<String>, Header, description = "`*`: create only if the flight holds no release (#585)")
     ),
     request_body = ReleaseRequest,
-    responses((status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
+        (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
+    )
 )]
 pub async fn mark_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
     Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(payload): Json<ReleaseRequest>,
-) -> Result<Json<Vec<FcaFlight>>, ApiError> {
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
+    // Who may write it, and on what condition, before any metering work (#585).
+    let expect = release_authority::precondition(&headers, &principal)?;
+    let by = principal.attribution(&state).await?;
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
@@ -2423,15 +2459,23 @@ pub async fn mark_release(
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
     let edct = cta - (eta_ms - now_ms);
-    let by = principal.attribution(&state).await?;
-    flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by).await?;
+    let Some(version) =
+        flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by, expect).await?
+    else {
+        let now = flow_repo::release_holder(pool, &id, &callsign).await?;
+        return Err(ApiError::PreconditionFailed {
+            etag: now.map(|h| h.version),
+        });
+    };
     state.publish(crate::realtime::topic::RELEASE);
 
     // Reflect the new release and re-meter without another snapshot read.
     metas[ti].frozen_ms = Some(cta);
     flights[ti].released = true;
     flights[ti].edct = DateTime::from_timestamp_millis(edct);
-    Ok(Json(finalize(&fca, flights, &metas)))
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok((release_authority::etag(version), Json(flights)))
 }
 
 #[utoipa::path(
@@ -2440,20 +2484,50 @@ pub async fn mark_release(
     tag = "flow",
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Clear only this release version (#585)")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not clear it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent no `If-Match`")
+    )
 )]
 pub async fn clear_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    flow_repo::delete_release(pool, &id, &callsign.to_ascii_uppercase()).await?;
+    require_fca_scope(&state, &principal, &fca).await?;
+    let callsign = callsign.to_ascii_uppercase();
+    // A machine may clear only its own release, and only the version it last saw (#585). "Clear if
+    // absent" means nothing, so `If-None-Match` is refused rather than read as a no-op.
+    let version = match release_authority::precondition(&headers, &principal)? {
+        Some(flow_repo::Expect::Absent) => return Err(ApiError::BadRequest),
+        Some(flow_repo::Expect::Version(v)) => Some(v),
+        None => None,
+    };
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    let by = principal.attribution(&state).await?;
+    if holder.is_some() {
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
+    // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
+    let deleted = flow_repo::delete_release(pool, &id, &callsign, version, &by).await?;
+    if !deleted && version.is_some() {
+        return Err(ApiError::PreconditionFailed {
+            etag: holder.map(|h| h.version),
+        });
+    }
     state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
@@ -2483,7 +2557,11 @@ pub async fn clear_release(
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    // The other flights' versions, as `mark_release` and the traffic list return them: a writer
+    // reading this list must not see a released flight with `release_version: null` (#585 QA).
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok(Json(flights))
 }
 
 /// Trade two flights' release times.
@@ -2509,7 +2587,12 @@ pub async fn clear_release(
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
-    responses((status = 200), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
+    )
 )]
 pub async fn swap_releases(
     State(state): State<AppState>,
@@ -2526,10 +2609,28 @@ pub async fn swap_releases(
     if a.is_empty() || b.is_empty() || a == b {
         return Err(ApiError::BadRequest);
     }
+    let fca = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
+    // A swap changes both releases, so a machine needs authority over both (#585). It takes no
+    // precondition: it trades two current times rather than writing one the caller computed.
+    let by = principal.attribution(&state).await?;
+    for callsign in [&a, &b] {
+        let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
-    let by = principal.attribution(&state).await?;
     if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
+        // For a machine the write also required it to hold both. If someone took one over between
+        // the check above and the write, say so rather than claiming there is no release (#585 review).
+        if by.machine_actor().is_some() {
+            for callsign in [&a, &b] {
+                let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+                release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+            }
+        }
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::RELEASE);
@@ -2547,25 +2648,19 @@ pub async fn swap_releases(
 pub async fn reorder_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<ReorderRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let existing = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    require_fca_write_scope(
-        &state,
-        &Principal::User(user.clone()),
-        "flow.fca.update",
-        &[&existing.artcc],
-    )
-    .await?;
+    require_fca_write_scope(&state, &principal, "flow.fca.update", &[&existing.artcc]).await?;
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();
-    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &user.id).await? {
+    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
@@ -4465,6 +4560,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4475,6 +4571,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4500,9 +4597,17 @@ mod release_swap_tests {
             ("UAL2", 2_000, 1_900),
             ("DAL3", 3_000, 2_900),
         ] {
-            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &Attribution::user_only(&user))
-                .await
-                .unwrap();
+            flow_repo::upsert_release(
+                &pool,
+                &id,
+                cs,
+                cta,
+                edct,
+                &Attribution::user_only(&user),
+                None,
+            )
+            .await
+            .unwrap();
         }
 
         flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
@@ -4529,6 +4634,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4539,6 +4645,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4571,6 +4678,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4581,6 +4689,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4617,6 +4726,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4652,6 +4762,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4679,6 +4790,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4689,6 +4801,7 @@ mod release_swap_tests {
             2_000,
             1_900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4722,6 +4835,7 @@ mod release_swap_tests {
             1_000,
             900,
             &Attribution::user_only(&user),
+            None,
         )
         .await
         .unwrap();
@@ -4760,7 +4874,11 @@ mod fca_scope_tests {
 
     async fn seed_fca(pool: &PgPool, owner: &str, artcc: &str) -> String {
         let req = serde_json::from_value(fca(artcc)).unwrap();
-        flow_repo::create_fca(pool, &req, owner).await.unwrap()
+        let by = crate::auth::principal::Attribution {
+            user_id: Some(owner.to_string()),
+            actor_id: None,
+        };
+        flow_repo::create_fca(pool, &req, &by).await.unwrap()
     }
 
     async fn artcc_of(pool: &PgPool, id: &str) -> Option<String> {

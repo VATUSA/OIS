@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     models::{AceClaimBody, AceRequestBody, MyAceClaim},
 };
@@ -22,10 +23,11 @@ const REQUEST_SELECT: &str = "select r.id, r.event_id, \
       from ace.claims cl join identity.users cu on cu.id = cl.claimed_by \
       where cl.request_id = r.id), '[]'::json) as claims, \
     (select count(*) from ace.claims cl where cl.request_id = r.id) as claims_count, \
-    du.display_name as decided_by_name, r.decided_at, r.created_at \
+    coalesce(du.display_name, da.display_name) as decided_by_name, r.decided_at, r.created_at \
     from ace.requests r \
     join identity.users ru on ru.id = r.requested_by \
-    left join identity.users du on du.id = r.decided_by";
+    left join identity.users du on du.id = r.decided_by \
+    left join access.actors da on da.id = r.decided_by_actor";
 
 /// An event's ACE requests, optionally filtered by status, newest first.
 pub async fn list_requests(
@@ -199,7 +201,7 @@ pub async fn delete_request(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
 pub async fn decide_request(
     pool: &PgPool,
     id: &str,
-    decider: &str,
+    by: &Attribution,
     outcome: &str,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
@@ -215,11 +217,13 @@ pub async fn decide_request(
         Some(_) => {}
     }
     sqlx::query(
-        "update ace.requests set status = $2, decided_by = $3, decided_at = now() where id = $1",
+        "update ace.requests set status = $2, decided_by = $3, decided_by_actor = $4, \
+         decided_at = now() where id = $1",
     )
     .bind(id)
     .bind(outcome)
-    .bind(decider)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(&mut *tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -540,9 +544,16 @@ mod tests {
         let event_id = seed_event(&pool, 1, 5).await; // inside the T-6h window too
 
         let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
-        decide_request(&pool, &request_id, &requester, "cancelled")
-            .await
-            .unwrap();
+        decide_request(
+            &pool,
+            &request_id,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &requester)
+                .await
+                .unwrap(),
+            "cancelled",
+        )
+        .await
+        .unwrap();
 
         let due = claims_due_for_reminder(&pool, 0, 6, "ace_claim_reminder_6h")
             .await

@@ -11,7 +11,7 @@ surface, and its Discord touchpoints.
 |--------------------------------------------------|----------------------|---------------------------------|
 | [access-control.md](access-control.md)           | access               | built                           |
 | [api-keys.md](api-keys.md)                        | access (api_keys)    | built                           |
-| [vatusa-sync.md](vatusa-sync.md)                 | access, identity     | built (mapping UI pending)      |
+| [vatusa-sync.md](vatusa-sync.md)                 | access, identity     | built                           |
 | [stats-replay.md](stats-replay.md)               | stats                | built                           |
 | [events-workflow.md](events-workflow.md)         | events               | built (diverged from original spec) |
 | [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | built (diverged from original spec) |
@@ -22,6 +22,7 @@ surface, and its Discord touchpoints.
 | [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
 | [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — no data model, permissions, API or Discord of its own) |
+| [diagnostics.md](diagnostics.md)                 | diagnostics          | built |
 
 Every spec above is built. The "diverged from original spec" ones have live migrations,
 handlers, and routes, but the shipped shape differs from the original design — each doc

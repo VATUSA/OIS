@@ -4,16 +4,15 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use reqwest::Url;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{FacilitiesDocsRead, FacilitiesDocsUpdate},
-        principal::Principal,
+        principal::Actor,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -60,11 +59,9 @@ fn validate(req: &UpsertFacilityDocumentRequest) -> Result<(), ApiError> {
 pub async fn list_facility_documents(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(facility_id): Path<String>,
 ) -> Result<Json<Vec<FacilityDocumentBody>>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 
@@ -87,12 +84,10 @@ pub async fn list_facility_documents(
 pub async fn create_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(facility_id): Path<String>,
     Json(req): Json<UpsertFacilityDocumentRequest>,
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -118,12 +113,10 @@ pub async fn create_facility_document(
 pub async fn update_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((facility_id, id)): Path<(String, String)>,
     Json(req): Json<UpsertFacilityDocumentRequest>,
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -150,11 +143,9 @@ pub async fn update_facility_document(
 pub async fn delete_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((facility_id, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 

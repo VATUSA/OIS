@@ -1,3 +1,4 @@
+import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
@@ -31,12 +32,14 @@ export function useIdstScope() {
 
 /** FCA-metered ground departures in scope, split into unscheduled / released. Polls while in scope. */
 export function useIdst(scope: IdstScope) {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: ["idst", scope],
     enabled: !scopeIsEmpty(scope),
     // Release/FCA changes arrive instantly via the websocket; the poll only refreshes the drifting
     // advisory EDCTs and is the fallback when the socket is down.
-    refetchInterval: 30_000,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: pollUnlessLive(30_000, live),
     queryFn: async (): Promise<IdstResponse> => {
       const { data, error } = await ois.GET("/api/v1/flow/idst", {
         params: {

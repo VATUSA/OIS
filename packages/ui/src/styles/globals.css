@@ -149,12 +149,22 @@
    Tailwind utilities.
    ============================================================ */
 @theme inline {
+  /* the What's new icon's hover twinkle — DESIGN.md's one named icon exception (#680) */
+  --animate-sparkle: sparkle 1.6s ease-in-out infinite;
+  @keyframes sparkle {
+    0%, 100% { color: var(--warning); transform: scale(1) rotate(0deg); }
+    50% { color: color-mix(in oklab, var(--warning), white 45%); transform: scale(1.15) rotate(12deg); }
+  }
+
   /* radius scale (DESIGN.md) — generates rounded-xs … rounded-xl */
   --radius-xs: 6px;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 20px;
+
+  /* screenshot frame (DESIGN.md § Components, Screenshots) — generates aspect-shot */
+  --aspect-shot: 16 / 10;
 
   --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;

@@ -193,7 +193,10 @@ mod store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Stored::Missing),
             // Anything else — unreadable, a directory, bad encoding — reads as signed out rather
             // than taking the app down. The user can sign in again, which rewrites the file.
-            Err(_) => Ok(Stored::SignedOut),
+            Err(e) => {
+                log::warn!("session file unreadable, treating as signed out: {e}");
+                Ok(Stored::SignedOut)
+            }
         }
     }
 
@@ -240,10 +243,18 @@ mod store {
             Stored::Missing => {
                 // A dismissed or broken read is signed out. The write below still marks migration
                 // done, so this costs one prompt in total, not one per launch.
-                let migrated = read_keychain().unwrap_or_default();
+                let migrated = read_keychain().unwrap_or_else(|e| {
+                    log::warn!(
+                        "keychain read during migration failed, treating as signed out: {e}"
+                    );
+                    None
+                });
                 write_file(path, migrated.as_deref().unwrap_or(""))?;
                 if migrated.is_some() {
-                    let _ = delete_keychain();
+                    // Harmless if left behind (the file now wins), but worth knowing about.
+                    if let Err(e) = delete_keychain() {
+                        log::warn!("could not remove the migrated keychain entry: {e}");
+                    }
                 }
                 Ok(migrated)
             }
@@ -418,14 +429,21 @@ fn wait_for_code_until(
                 // discarding the real callback and hanging until the timeout. Put the accepted
                 // socket back into blocking mode with a short deadline so a slow client is waited
                 // for, and a genuinely dead one still can't stall the loop.
-                let _ = stream.set_nonblocking(false);
-                let _ = stream.set_read_timeout(Some(PER_CONNECTION_READ_TIMEOUT));
+                // A failure here is exactly the "callback hangs" bug above, so it is logged.
+                if let Err(e) = stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_read_timeout(Some(PER_CONNECTION_READ_TIMEOUT)))
+                {
+                    log::warn!("sign-in callback socket could not be made blocking: {e}");
+                }
 
                 let request = match read_request_head(&mut stream) {
                     Ok(request) => request,
                     // A read error is NOT the same as "carried no code" — say so and move on
                     // rather than treating this connection as an answered non-callback.
-                    Err(_) => {
+                    // Never the request text: it carries the one-time code and state.
+                    Err(e) => {
+                        log::warn!("sign-in callback request could not be read: {e}");
                         respond(&mut stream, CallbackState::Waiting);
                         continue;
                     }

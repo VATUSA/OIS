@@ -17,6 +17,7 @@ import {
   PlaneTakeoff,
   Radar,
   ScrollText,
+  Stethoscope,
   ShieldCheck,
   Split,
   Timer,
@@ -104,6 +105,7 @@ export const AREAS: readonly NavArea[] = [
           { label: "Facility Documents", to: "/admin/planning/facility-documents", icon: FileText, permission: "facilities.docs.read" },
           { label: "Airport Surface", to: "/admin/planning/airport-surface", icon: MapPinned, permission: "events.plan.read" },
           { label: "Aircraft Profiles", to: "/admin/planning/aircraft-profiles", icon: Plane, permission: "flow.aircraft_profiles.read" },
+          { label: "Monitor Alert Parameters", to: "/admin/planning/sector-maps", icon: Gauge, permission: "flow.monitor.read" },
         ],
       },
       {
@@ -123,6 +125,12 @@ export const AREAS: readonly NavArea[] = [
           { label: "Access", to: "/admin/access", icon: ShieldCheck, permission: "access.users.read" },
       { label: "Groups", to: "/admin/groups", icon: Users, permission: "access.groups.read" },
           { label: "Audit", to: "/admin/audit", icon: ScrollText, permission: "audit.logs.read" },
+          {
+            label: "Diagnostics",
+            to: "/admin/diagnostics",
+            icon: Stethoscope,
+            permission: "diagnostics.reports.read",
+          },
           { label: "Jobs", to: "/admin/jobs", icon: Activity, permission: "system.jobs.read" },
           { label: "API Keys", to: "/admin/api-keys", icon: KeyRound, permission: "api_keys.key.read" },
       {

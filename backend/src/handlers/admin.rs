@@ -1,13 +1,12 @@
 //! The Admin page's landing summary (#292).
 
-use axum::{Extension, Json, extract::State};
+use axum::{Json, extract::State};
 
 use crate::{
     auth::{
         acl::{self, PermissionPath},
-        context::{CurrentApiKey, CurrentUser},
         permissions::{AccessUsersRead, AuditLogsRead, SystemJobsRead},
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::Permission,
     },
     errors::ApiError,
@@ -24,10 +23,8 @@ use crate::{
 )]
 pub async fn get_admin_summary(
     State(state): State<AppState>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
 ) -> Result<Json<AdminSummaryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     Ok(Json(build_summary(&state, &principal).await?))
 }
 
@@ -82,6 +79,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::auth::context::CurrentApiKey;
     use crate::scope_test_support::{grant, principal_for, seed_user, test_state};
 
     #[sqlx::test]
