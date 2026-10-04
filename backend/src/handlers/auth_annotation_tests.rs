@@ -292,7 +292,7 @@ fn every_gated_handler_declares_the_credentials_and_permission_it_requires() {
     let handlers = scan();
     let wrong: Vec<String> = handlers
         .iter()
-        .filter(|h| h.takes_auth)
+        .filter(|h| h.takes_auth && !optional_identity(h))
         .filter_map(|h| {
             let scope = match &h.marker {
                 Some(marker) => format!(
@@ -346,11 +346,19 @@ fn a_principal_require_path_does_not_offer_service_accounts() {
     assert!(!security.contains("service_account"), "{security}");
 }
 
+/// A public handler that reads an optional identity (#586) is still public: it declares no security,
+/// or Swagger would ask for a credential the route doesn't need.
+fn optional_identity(h: &Handler) -> bool {
+    PUBLIC_WITH_OPTIONAL_IDENTITY
+        .iter()
+        .any(|(file, name)| h.file == *file && h.name == *name)
+}
+
 #[test]
 fn no_public_handler_declares_security() {
     let claimed = ids(scan()
         .iter()
-        .filter(|h| !h.takes_auth && h.security.is_some()));
+        .filter(|h| (!h.takes_auth || optional_identity(h)) && h.security.is_some()));
     assert!(
         claimed.is_empty(),
         "these take no credential but declare security, so Swagger would ask for one: {claimed:?}"
