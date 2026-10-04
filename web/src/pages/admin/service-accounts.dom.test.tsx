@@ -52,9 +52,12 @@ const account: ServiceAccount = {
   name: "Discord bot",
   description: null,
   roles: [],
+  permissions: [],
   status: "active",
   created_at: "2026-09-01T00:00:00Z",
   last_used_at: null,
+  expires_at: "2026-11-30T00:00:00Z",
+  stale: false,
 };
 
 /** Types into a field through React's own value tracking (mirrors command-search.dom.test.tsx). */
@@ -67,7 +70,7 @@ const type = (input: HTMLInputElement, text: string) =>
 const HeaderActions = () => <div data-testid="header-actions">{header.actions}</div>;
 
 /** Mounts the page against a seeded cache — nothing reaches the network. */
-async function mount() {
+async function mount(accounts: ServiceAccount[] = [account]) {
   const qc = new QueryClient({
     defaultOptions: {
       queries: {
@@ -78,8 +81,12 @@ async function mount() {
       },
     },
   });
-  qc.setQueryData(ACCOUNTS, [account]);
+  qc.setQueryData(ACCOUNTS, accounts);
   qc.setQueryData(["service-account-roles"], ["BOT", "SERVICE_APP"]);
+  qc.setQueryData(["service-account-grantable"], [
+    {permission: "flow.fca.update", national: false, artccs: ["ZDC"]},
+  ]);
+  qc.setQueryData(["facilities"], [{id: "ZDC", name: "Washington"}]);
 
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -162,6 +169,47 @@ describe("AdminServiceAccounts (VATUSA/OIS#531)", () => {
     expect(revealed, "the token itself must be on screen").toBe(true);
     // No roles were picked, so no roles call should have been attempted.
     expect(put).not.toHaveBeenCalled();
+    // The default lifetime is sent, not left to chance.
+    expect(post.mock.calls[0][1].body.expires_in_days).toBe(90);
+  });
+});
+
+describe("grants and credential lifetime (VATUSA/OIS#584)", () => {
+  it("flags a stale credential and shows when it expires", async () => {
+    const host = await mount([{...account, stale: true}]);
+    expect(host.textContent).toContain("stale");
+    expect(host.textContent).toContain(new Date("2026-11-30T00:00:00Z").toLocaleDateString());
+  });
+
+  it("lists an account's scoped grants and saves them back as (permission, artcc)", async () => {
+    const granted = {...account, permissions: [{permission: "flow.fca.update", artcc_id: "ZDC"}]};
+    put.mockResolvedValue({data: granted, error: undefined});
+    const host = await mount([granted]);
+    expect(host.textContent).toContain("flow.fca.update@ZDC");
+
+    await click(host.querySelector("tbody")!, "Permissions");
+    await click(document.body, "Save permissions");
+
+    expect(put).toHaveBeenCalledWith("/api/v1/admin/service-accounts/{id}/permissions", {
+      params: {path: {id: "sa-1"}},
+      body: {permissions: [{permission: "flow.fca.update", artcc_id: "ZDC"}]},
+    });
+  });
+
+  it("rotates a token with a fresh lifetime and reveals the new one", async () => {
+    post.mockResolvedValue({data: {account, token: "ois_sa_rotated"}, error: undefined});
+    const host = await mount();
+    await click(host.querySelector("tbody")!, "Rotate");
+    await click(document.body, "Rotate token");
+
+    expect(post).toHaveBeenCalledWith("/api/v1/admin/service-accounts/{id}/rotate", {
+      params: {path: {id: "sa-1"}},
+      body: {expires_in_days: 90},
+    });
+    const revealed = [...host.querySelectorAll("input")].some(
+      (i) => (i as HTMLInputElement).value === "ois_sa_rotated",
+    );
+    expect(revealed, "the rotated token must be shown once").toBe(true);
   });
 });
 

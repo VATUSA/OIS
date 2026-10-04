@@ -35,6 +35,7 @@ moving to `published`). The row carries:
 
 | column | meaning |
 | --- | --- |
+| `consumer` | whose job it is; everything enqueued today is `discord` (#590) |
 | `job_type` | discriminator selecting the handler (see [Job types](#job-types)) |
 | `payload` (jsonb) | everything the handler needs: resolved channel/role logical names, embed fields, subject ids |
 | `subject_type` / `subject_id` | back-reference to the originating row (e.g. `event` / `<event_id>`) for idempotency and audit |
@@ -46,13 +47,19 @@ moving to `published`). The row carries:
 Job lifecycle:
 
 1. **Enqueue** — feature handler inserts a `pending` job with `next_attempt_at = now()`.
-2. **Lease** — the bot asks the backend for due pending jobs (`status = pending AND next_attempt_at <= now()`); the
+2. **Lease** — the bot asks the backend for its due pending jobs (`POST /api/v1/integration/jobs/lease?consumer=discord`:
+   `consumer = discord AND status = pending AND next_attempt_at <= now()`; `consumer` is required, #590); the
    backend marks them `in_progress` and hands them over. Leasing is claim-and-lock so concurrent bot instances don't
    double-deliver.
 3. **Perform** — the bot executes the Discord action (create thread, post embed, edit embed, DM/ping).
-4. **Ack** — the bot calls back to mark the job `succeeded` (recording any Discord ids the backend must remember, e.g.
+4. **Ack** — the bot calls back (`POST /api/v1/integration/jobs/{id}/ack?consumer=discord`; an ack applies only to that
+   consumer's job) to mark the job `succeeded` (recording any Discord ids the backend must remember, e.g.
    the created message/thread id) or `failed` (with `error`). On failure the backend bumps `attempt_count` and pushes
    `next_attempt_at` out by a backoff; past a max attempt count the job is left `failed` for operator review.
+
+The `consumer` is **declared by the caller, not bound to its credential**, so it keeps cooperating consumers apart but
+does not stop a hostile one: grant `integration.jobs.update` only to trusted queue consumers until #656 derives the
+consumer from the service account.
 
 **Interaction callback (Discord → backend).** For user-initiated interactions (button clicks, select menus, modal
 submits — see [Interactions the bot calls back for](#interactions-the-bot-calls-back-for)) the bot does **not** mutate anything itself. It calls back into `/api/v1` as a **service account** (bearer token, matched by

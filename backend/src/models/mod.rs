@@ -1,3 +1,10 @@
+//! Request and response bodies, and the OpenAPI schemas generated from them.
+//!
+//! **A `///` doc comment on a `ToSchema` model or field is contract, not prose** (#591). utoipa emits
+//! it as the schema's `description`, so editing one changes `packages/api-client`'s generated types:
+//! regenerate the client in the same change, or CI's `client-drift` fails. See `AGENTS.md`
+//! § "The API contract → typed client".
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -373,6 +380,62 @@ pub struct AuditLogPage {
     pub total: i64,
     pub page: i64,
     pub page_size: i64,
+}
+
+// --- desktop diagnostics reports (#629) ---
+
+/// One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+/// the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReportSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    /// The sender's VATUSA home facility, when synced.
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    /// `main`, a route window (`window-…`) or a pop-out (`popout-…`).
+    pub window_label: String,
+    pub route: String,
+    pub has_note: bool,
+    /// Size of the gzipped logs.
+    pub logs_bytes: i32,
+}
+
+/// A page of diagnostics reports, newest first.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticsReportPage {
+    pub items: Vec<DiagnosticsReportSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// One report in full, apart from the logs (downloaded separately as gzip).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReport {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    pub webview_version: String,
+    pub window_label: String,
+    pub route: String,
+    pub note: String,
+    /// Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+    /// webview's log tail, WebGL2 availability, updater status.
+    #[schema(value_type = Object)]
+    pub meta: Value,
+    pub logs_bytes: i32,
 }
 
 // --- taxi insights (#183): browsable history over raw observations + derived estimates ---
@@ -946,6 +1009,10 @@ pub struct DepartureFlight {
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
+    /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+    /// is issued for this callsign.
+    #[serde(default)]
+    pub cfr_version: Option<i64>,
     pub seq: Option<i64>,
 }
 
@@ -2290,6 +2357,9 @@ pub struct FcaFlight {
     pub edct: Option<DateTime<Utc>>,
     /// True when this aircraft has a frozen (issued) CFR release.
     pub released: bool,
+    /// The release's version, for `If-Match` (#585); null when not released.
+    #[serde(default)]
+    pub release_version: Option<i64>,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
@@ -2404,6 +2474,9 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released; null while unscheduled.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
+    /// The display name of the service account or API key that issued this release, or null when a
+    /// person did (or it is not released) — so a controller can see a time came from a tool (#585).
+    pub released_by_machine: Option<String>,
     /// The predicted departure runway (#511), or null when nothing could predict one — no airport
     /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
     /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
@@ -2757,6 +2830,16 @@ pub struct CreateServiceAccountRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Credential lifetime in days: default 90, at most 365.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+}
+
+/// Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365).
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct RotateServiceAccountRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2764,7 +2847,15 @@ pub struct SetServiceAccountRolesRequest {
     pub role_names: Vec<String>,
 }
 
-/// A service account as listed (no secret). `roles` are its granted role names.
+/// A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetServiceAccountPermissionsRequest {
+    pub permissions: Vec<ApiKeyPermissionInput>,
+}
+
+/// A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+/// direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+/// been used (or, if never used, issued) in 30 days.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceAccountBody {
     pub id: String,
@@ -2773,7 +2864,10 @@ pub struct ServiceAccountBody {
     pub description: Option<String>,
     pub status: String,
     pub roles: Vec<String>,
+    pub permissions: Vec<ApiKeyPermissionBody>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub stale: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -3169,4 +3263,54 @@ pub struct FlightExclusionsBody {
 pub struct ExcludeFlightRequest {
     #[serde(default)]
     pub reason: String,
+}
+
+/// One Airspace Monitor sector and the alert parameter its count is coloured against (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    /// The sector's Monitor Alert Parameter: its override, or the default.
+    pub map: i32,
+    /// Whether `map` is a stored override rather than the default.
+    pub overridden: bool,
+}
+
+/// An ARTCC's sectors with their Monitor Alert Parameters (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapsBody {
+    /// Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped).
+    pub editable: bool,
+    /// What a sector reads until overridden.
+    pub default_map: i32,
+    pub sectors: Vec<SectorMapBody>,
+}
+
+/// Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetSectorMapRequest {
+    pub map: i32,
+}
+
+/// A sector worked at another sector's position (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationBody {
+    pub sector_id: String,
+    pub target_sector_id: String,
+}
+
+/// An ARTCC's sector consolidations (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationsBody {
+    /// Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
+    /// or scoped).
+    pub editable: bool,
+    /// Sorted by sector.
+    pub consolidations: Vec<SectorConsolidationBody>,
+}
+
+/// Work a sector at another sector's position in the same ARTCC.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorRequest {
+    pub target_sector_id: String,
 }

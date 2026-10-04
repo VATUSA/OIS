@@ -27,7 +27,7 @@ curl -H "Authorization: Bearer ois_pat_xxxxxxxx…" \
   https://<your-ois-host>/api/v1/flow/traffic
 ```
 
-The full API is described by the OpenAPI document at **`/docs/api/v1/openapi.json`** — point your client generator at it.
+The full API is described by the OpenAPI document at **`/docs/api/v1/openapi.json`** — point your client generator at it — and you can browse and try it in **Swagger UI** at **`/docs/swagger`**. See [Using the API](/reference/api), and [API permissions](/reference/api-permissions) for what each endpoint requires.
 
 ::: tip User keys vs. service accounts
 A `ois_pat_…` token is a **user** key, owned by and capped to a person. Machine clients that aren't tied to a person (a bot, shared tooling) use **service accounts** (`ois_sa_…`), which an administrator manages separately.

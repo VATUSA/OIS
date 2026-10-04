@@ -16,6 +16,7 @@ explains how it's built.
 - [architecture/data-model.md](architecture/data-model.md) — Postgres schemas and key tables.
 - [architecture/permissions.md](architecture/permissions.md) — the fine-grained permission model.
 - [architecture/api-conventions.md](architecture/api-conventions.md) — REST shape, auth, errors, OpenAPI.
+- [architecture/api-surface.md](architecture/api-surface.md) — the operations proposed as supported from 1.0 (not stable before).
 - [architecture/integrations.md](architecture/integrations.md) — VATSIM, VATUSA, Discord, email, service accounts.
 
 ## Operating OIS

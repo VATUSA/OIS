@@ -3,6 +3,7 @@
 //! and keeps a national roster. Create/claim/release enqueue Discord jobs (`ace_request_post` /
 //! `ace_request_notify`) in the same tx as the state change; enqueue is skipped when no channel is set.
 
+use crate::auth::principal::Actor;
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
@@ -331,6 +332,8 @@ pub async fn create_request(
     )
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &id)
         .await?
@@ -385,6 +388,8 @@ pub async fn delete_request(
     Path((_event_id, req)): Path<(i64, String)>,
 ) -> Result<StatusCode, ApiError> {
     if ace_repo::delete_request(pool(&state)?, &req).await? {
+        // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+        state.publish(crate::realtime::topic::ACE);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -436,6 +441,8 @@ pub async fn claim_request(
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
     enqueue_claim_dm(&mut tx, p, &req, &user.id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &req)
         .await?
@@ -461,6 +468,8 @@ pub async fn release_claim(
     let (slots, count) = ace_repo::release_claim(&mut tx, &req, &user.id).await?;
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &req)
         .await?
@@ -476,16 +485,18 @@ pub async fn release_claim(
 pub async fn decide_request(
     State(state): State<AppState>,
     _permission: RequirePermission<AceRequestsDecide>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((_event_id, req)): Path<(i64, String)>,
     Json(payload): Json<DecideAceRequestRequest>,
 ) -> Result<Json<AceRequestBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let p = pool(&state)?;
     if !matches!(payload.outcome.as_str(), "completed" | "cancelled") {
         return Err(ApiError::BadRequest);
     }
-    ace_repo::decide_request(p, &req, &user.id, &payload.outcome).await?;
+    ace_repo::decide_request(p, &req, &by, &payload.outcome).await?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
     ace_repo::get_request(p, &req)
         .await?
         .map(Json)
