@@ -124,7 +124,8 @@ describe("Airspace Monitor page (#601)", () => {
     localStorage.setItem("ois.monitor.artcc", JSON.stringify("ZDC"));
     const qc = new QueryClient({defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}}});
     qc.setQueryData(monitorKey("ZDC"), table(false, [row("02", "red")]));
-    qc.setQueryData(monitorKey("ZNY"), {...table(false, [row("10", "red")]), artcc: "ZNY"});
+    // The server would let this caller edit ZNY (a national editor): the neighbour must stay inert anyway.
+    qc.setQueryData(monitorKey("ZNY"), {...table(true, [row("10", "red")]), artcc: "ZNY"});
     qc.setQueryData(monitorNeighboursKey("ZDC"), ["ZNY"]);
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -145,5 +146,6 @@ describe("Airspace Monitor page (#601)", () => {
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(host.querySelectorAll("table")).toHaveLength(2);
+    expect(host.querySelector('input[aria-label="10 alert parameter"]')).toBeNull();
   });
 });
