@@ -2,8 +2,8 @@
 //! account — so the scope-enforcing handlers work identically for all of them. A key's scope is
 //! always capped by its owner's live scope, so a key can never reach an ARTCC its owner can't.
 //!
-//! [`Principal::require`] admits a user or a key only; [`Actor`] (via [`Principal::require_any`])
-//! also admits a service account, and is what a handler migrated off `CurrentUser` takes (#583).
+//! A handler takes [`Actor`] (via [`Principal::require_any`]), which admits all three (#583, #607);
+//! `Option<Actor>` for a public route that only reads the caller.
 
 use crate::{
     auth::context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
@@ -67,6 +67,23 @@ impl Attribution {
 }
 
 #[cfg(test)]
+impl Principal {
+    /// A signed-in user's principal from their id — for tests that drive `activate_package` directly.
+    pub async fn for_user_id(pool: &sqlx::PgPool, user_id: &str) -> Self {
+        Principal::User(
+            sqlx::query_as::<_, CurrentUser>(
+                "select id, coalesce(cid, 0) as cid, coalesce(email::text, '') as email, display_name, rating, \
+                 null::text as primary_role from identity.users where id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .expect("a seeded user"),
+        )
+    }
+}
+
+#[cfg(test)]
 impl Attribution {
     /// A user's attribution without resolving an actor — for repo-level tests only. Production code
     /// goes through [`Principal::attribution`], which always names the actor.
@@ -81,7 +98,7 @@ impl Attribution {
 impl Principal {
     /// Build from the request's resolved principals (a request carries at most one). Prefers a
     /// session user over a bearer key; returns `Unauthorized` if neither is present.
-    pub fn require(
+    fn require(
         user: Option<&CurrentUser>,
         api_key: Option<&CurrentApiKey>,
     ) -> Result<Self, ApiError> {
@@ -107,12 +124,6 @@ impl Principal {
         }
     }
 
-    /// Same as [`Principal::require`] but yields `None` instead of an error when unauthenticated —
-    /// for endpoints (e.g. public reads) that resolve an optional caller.
-    pub fn optional(user: Option<&CurrentUser>, api_key: Option<&CurrentApiKey>) -> Option<Self> {
-        Self::require(user, api_key).ok()
-    }
-
     /// The owning user's id — the user for a session, the key's owner for a key, and `None` for a
     /// service account, which belongs to no user. Use this for "who acted" attribution (`updated_by`)
     /// where the column is a user foreign key; a handler that admits service accounts uses
@@ -129,7 +140,12 @@ impl Principal {
     /// service account only by its own actor, so the row says a machine did it (#583 AC2). A key's
     /// owner stays reachable through `access.actors.api_key_id`.
     pub async fn attribution(&self, state: &AppState) -> Result<Attribution, ApiError> {
-        let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+        self.attribution_in(state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?)
+            .await
+    }
+
+    /// [`Principal::attribution`] for work outside a request, which has a pool but no `AppState`.
+    pub async fn attribution_in(&self, pool: &sqlx::PgPool) -> Result<Attribution, ApiError> {
         Ok(match self {
             Principal::User(u) => Attribution {
                 user_id: Some(u.id.clone()),
@@ -159,7 +175,19 @@ impl Principal {
         state: &AppState,
         permission_name: &str,
     ) -> Result<PermissionScope, ApiError> {
-        let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+        self.permission_scope_in(
+            state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?,
+            permission_name,
+        )
+        .await
+    }
+
+    /// [`Principal::permission_scope`] for work outside a request.
+    pub async fn permission_scope_in(
+        &self,
+        pool: &sqlx::PgPool,
+        permission_name: &str,
+    ) -> Result<PermissionScope, ApiError> {
         match self {
             Principal::User(u) => access_repo::permission_scope(pool, &u.id, permission_name).await,
             Principal::ApiKey(k) => {
@@ -174,6 +202,24 @@ impl Principal {
                 access_repo::service_account_permission_scope(pool, &sa.id, permission_name).await
             }
         }
+    }
+
+    /// Rebuild the principal an `access.actors` row names, for work done later on its behalf — the
+    /// event-package lifecycle job publishes a package as whoever armed it (#607). `None` when that
+    /// credential no longer works: a revoked or expired key, a disabled service account, a deleted
+    /// user or key. Nothing then acts as it, exactly as a request with that credential would be refused.
+    pub async fn from_actor(pool: &sqlx::PgPool, actor_id: &str) -> Result<Option<Self>, ApiError> {
+        if let Some(u) = access_repo::find_current_user_by_actor(pool, actor_id).await? {
+            return Ok(Some(Principal::User(u)));
+        }
+        if let Some(k) = access_repo::find_current_api_key_by_actor(pool, actor_id).await? {
+            return Ok(Some(Principal::ApiKey(k)));
+        }
+        Ok(
+            access_repo::find_current_service_account_by_actor(pool, actor_id)
+                .await?
+                .map(Principal::ServiceAccount),
+        )
     }
 }
 
@@ -200,5 +246,24 @@ where
             ext.get::<Option<CurrentApiKey>>().and_then(Option::as_ref),
         )
         .map(Actor)
+    }
+}
+
+/// `Option<Actor>`, for a public route that only reads the caller to decide what it may edit.
+impl<S> axum::extract::OptionalFromRequestParts<S> for Actor
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(
+            <Actor as axum::extract::FromRequestParts<S>>::from_request_parts(parts, state)
+                .await
+                .ok(),
+        )
     }
 }

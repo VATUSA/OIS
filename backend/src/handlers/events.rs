@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::CurrentUser,
         permissions::{
             EventsDebriefCreate, EventsDiscordPublish, EventsPlanRead, EventsPlanUpdate,
             EventsRateUpdate, EventsSupportUpdate, StatsCaptureUpdate,
@@ -1101,12 +1101,9 @@ pub async fn delete_event_package_item(
 pub async fn activate_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if package_status(pool, id, &package_id).await? != "draft" {
         return Err(ApiError::Conflict); // already activated
@@ -1115,12 +1112,10 @@ pub async fn activate_event_package(
     // planner whose scope has since been narrowed, and activation is the moment the document actually
     // gets issued under a facility's name.
     //
-    // Checked here as well as inside `activate_package` for the principal's sake: an API key's scope is
-    // its owner's intersected with the key's own grant, which only the principal knows, and this is
-    // also where the 401/403 distinction is made. `activate_package` repeats the rule against the user
-    // id it acts as, which is what covers the auto-publish job.
+    // Checked here as well as inside `activate_package` because this is where the 401/403 distinction
+    // is made; `activate_package` repeats the rule for the auto-publish job, which has no request.
     require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
-    activate_package(pool, id, &package_id, &user.id).await?;
+    activate_package(pool, id, &package_id, &principal).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -1178,15 +1173,16 @@ async fn require_advisory_scope_for_package(
     Ok(())
 }
 
-/// The same check, made against the user `activate_package` acts as.
+/// The same check, made against the principal `activate_package` acts as.
 ///
 /// This is what covers `auto_publish`. The lifecycle job is not principal-less: it activates as the
-/// package's `updated_by`, a real user id, so it can be held to the same rule as a person pressing
-/// Activate. Without it, a scope withdrawn between planning and the event was honoured on one
-/// activation path and ignored on the other.
+/// package's `updated_by_actor`, rebuilt by [`Principal::from_actor`], so it is held to the same rule
+/// as whoever pressed Activate — a key at its owner's scope intersected with its grant, a service
+/// account at its roles' ARTCCs. Without it, a scope withdrawn between planning and the event was
+/// honoured on one activation path and ignored on the other.
 async fn require_actor_may_issue_package(
     pool: &sqlx::PgPool,
-    actor: &str,
+    principal: &Principal,
     package_id: &str,
 ) -> Result<(), ApiError> {
     let items = events_repo::list_package_items(pool, package_id).await?;
@@ -1197,7 +1193,7 @@ async fn require_actor_may_issue_package(
     if facilities.is_empty() {
         return Ok(());
     }
-    let scope = crate::repos::access::permission_scope(pool, actor, ADVISORY_ISSUE).await?;
+    let scope = principal.permission_scope_in(pool, ADVISORY_ISSUE).await?;
     for facility in &facilities {
         if !scope.allows(Some(facility)) {
             return Err(ApiError::Forbidden);
@@ -1208,20 +1204,19 @@ async fn require_actor_may_issue_package(
 
 /// Materialize a draft package's items into the live TMU tables (programs/restrictions/ground stops),
 /// recording each item's `live_ref`, then mark the package activated. Shared by the manual Activate
-/// handler and the auto-publish scheduler; `actor` is a real user id (stored as created_by/updated_by).
-/// Assumes the package is currently a draft.
+/// handler and the auto-publish scheduler, acting as `principal` — whoever pressed Activate, or whoever
+/// armed the package. Assumes the package is currently a draft.
 pub(crate) async fn activate_package(
     pool: &sqlx::PgPool,
     event_id: i64,
     package_id: &str,
-    actor: &str,
+    principal: &Principal,
 ) -> Result<(), ApiError> {
     // Both callers — the Activate handler and the auto-publish job — come through here, so this is the
     // one place an advisory item's issuer is checked for every path (#537 review).
-    require_actor_may_issue_package(pool, actor, package_id).await?;
-    // The TMU writes below name the scheduling person in both attribution columns (#607). Resolved
-    // from the id because the auto-publish job has no request, so no `Principal`.
-    let by = crate::auth::principal::Attribution::for_user_id(pool, actor).await?;
+    require_actor_may_issue_package(pool, principal, package_id).await?;
+    // The TMU writes below name that principal: a person in both columns, a machine by its actor.
+    let by = principal.attribution_in(pool).await?;
     let event = events_repo::get(pool, event_id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1512,12 +1507,10 @@ pub(crate) async fn deactivate_package(
 pub async fn set_event_package_auto(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<SetFcaAutoRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     // Ownership: the package must belong to this event.
     match events_repo::get_package_owner(pool, &package_id).await? {
@@ -1530,15 +1523,14 @@ pub async fn set_event_package_auto(
     if payload.auto_publish {
         require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
     }
-    // Recorded as the package's `updated_by`, which is who the job activates as — so the person who
-    // chose automatic issuance is the one held to the rule, and the one the advisory is attributed to.
+    // Recorded as the package's `updated_by_actor`, which is who the job activates as — so whoever
+    // chose automatic issuance (a person, a key at its capped scope, or a service account) is the one
+    // held to the rule, and the one the advisory is attributed to.
     events_repo::set_package_auto(
         pool,
         &package_id,
         payload.auto_publish,
-        // Still a person (arming stays user-only until the job can act as a machine, #607); their
-        // actor is recorded too, so the package's pair of attribution columns never disagrees.
-        &Attribution::for_user_id(pool, principal.user_id().ok_or(ApiError::Forbidden)?).await?,
+        &principal.attribution(&state).await?,
     )
     .await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
@@ -2533,7 +2525,14 @@ mod advisory_package_tests {
         let actor = seed_event(&pool).await;
         let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
 
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         let rows = advisories(&pool).await;
         assert_eq!(rows.len(), 1, "one advisory");
@@ -2572,7 +2571,14 @@ mod advisory_package_tests {
         )
         .await;
 
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         let rows = advisories(&pool).await;
         assert_eq!(rows.len(), 3, "no item was skipped or lost to the lock");
@@ -2602,7 +2608,14 @@ mod advisory_package_tests {
     async fn deactivating_a_package_cancels_its_advisory(pool: PgPool) {
         let actor = seed_event(&pool).await;
         let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         deactivate_package(
             &pool,
@@ -2620,7 +2633,14 @@ mod advisory_package_tests {
     async fn deactivating_cancels_every_advisory_in_the_package(pool: PgPool) {
         let actor = seed_event(&pool).await;
         let pkg = package_with(&pool, &actor, &[item("DCC", 1), item("DCC", 2)]).await;
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         deactivate_package(
             &pool,
@@ -2642,7 +2662,14 @@ mod advisory_package_tests {
         let actor = seed_event(&pool).await;
         let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
 
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         let (from, to): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
             sqlx::query_as("select valid_from, valid_to from tmu.advisories")
@@ -2915,14 +2942,12 @@ mod advisory_permission_tests {
             .unwrap()
     }
 
-    /// One pass of the auto-publish job, as `jobs::event_package_lifecycle_once` runs it: select the
-    /// due packages and activate each as its `updated_by`.
+    /// One pass of the event-package lifecycle job.
     async fn run_auto_publish_pass(pool: &PgPool) {
-        for (package_id, event_id, actor) in
-            crate::repos::events::auto_due_packages(pool).await.unwrap()
-        {
-            let _ = super::activate_package(pool, event_id, &package_id, &actor).await;
-        }
+        // The real pass, so these tests cover how the job rebuilds whoever armed the package.
+        crate::jobs::event_package_lifecycle_once(pool, &tokio::sync::broadcast::channel(8).0)
+            .await
+            .unwrap();
     }
 
     async fn arm(
@@ -3196,7 +3221,16 @@ mod atomic_activation_tests {
         add(&pool, &pkg, "advisory", advisory(BOOM)).await;
         arm_the_failure(&pool).await;
 
-        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
 
         // Nothing from the first attempt survives — not even item 1, which was written before item 2
         // failed.
@@ -3226,7 +3260,14 @@ mod atomic_activation_tests {
         .execute(&pool)
         .await
         .unwrap();
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         let numbers: Vec<i32> =
             sqlx::query_scalar("select number from tmu.advisories order by number")
@@ -3268,9 +3309,10 @@ mod atomic_activation_tests {
         .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
 
+        let principal = crate::auth::principal::Principal::for_user_id(&pool, &actor).await;
         let (a, b) = tokio::join!(
-            activate_package(&pool, EVENT, &pkg, &actor),
-            activate_package(&pool, EVENT, &pkg, &actor),
+            activate_package(&pool, EVENT, &pkg, &principal),
+            activate_package(&pool, EVENT, &pkg, &principal),
         );
 
         let outcomes = [a, b];
@@ -3312,10 +3354,23 @@ mod atomic_activation_tests {
         .await
         .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
-        activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
 
         assert!(matches!(
-            activate_package(&pool, EVENT, &pkg, &actor).await,
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await,
             Err(ApiError::Conflict)
         ));
         assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 1);
@@ -3346,7 +3401,16 @@ mod atomic_activation_tests {
         .await
         .unwrap();
 
-        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
 
         assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 0);
         assert_eq!(status(&pool, &pkg).await, "draft");
@@ -3379,7 +3443,16 @@ mod atomic_activation_tests {
         add(&pool, &pkg, "advisory", advisory(BOOM)).await;
         arm_the_failure(&pool).await;
 
-        assert!(activate_package(&pool, EVENT, &pkg, &actor).await.is_err());
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
 
         for table in [
             "tmu.programs",
@@ -3485,7 +3558,14 @@ mod deactivation_correction_tests {
         events_repo::add_package_item(pool, &pkg, "advisory", &advisory)
             .await
             .unwrap();
-        activate_package(pool, EVENT, &pkg, actor).await.unwrap();
+        activate_package(
+            pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(pool, actor).await,
+        )
+        .await
+        .unwrap();
         pkg
     }
 
@@ -3602,7 +3682,14 @@ mod deactivation_correction_tests {
         events_repo::add_package_item(pool, &pkg, "restriction", &restriction)
             .await
             .unwrap();
-        activate_package(pool, EVENT, &pkg, actor).await.unwrap();
+        activate_package(
+            pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(pool, actor).await,
+        )
+        .await
+        .unwrap();
         pkg
     }
 

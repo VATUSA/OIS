@@ -2554,3 +2554,499 @@ async fn a_scoped_machine_is_refused_another_artccs_airport(pool: PgPool) {
         assert_eq!(status, http::StatusCode::OK, "{path}: inside it");
     }
 }
+
+// ---- #607 PR 4: the long tail, and the lifecycle job acting as an actor ----
+
+const PKG_EVENT: i64 = 6074;
+
+/// An event inside the auto-publish window (it starts now), and a draft package on it holding one ZDC
+/// advisory. Returns the package id.
+async fn advisory_package(pool: &PgPool, state: &AppState, auth: &str) -> String {
+    sqlx::query(
+        "insert into events.event (id, title, start_time, end_time, facility) \
+         values ($1, 'T607d', now(), now() + interval '2 hours', 'ZDC')",
+    )
+    .bind(PKG_EVENT)
+    .execute(pool)
+    .await
+    .unwrap();
+    let base = format!("/api/v1/events/{PKG_EVENT}/packages");
+    let (status, body) = call(
+        state,
+        http::Method::POST,
+        &base,
+        auth,
+        Some(json!({ "name": "Plan" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create package: {body}");
+    let pkg = body[0]["id"].as_str().unwrap().to_string();
+    let from = Utc::now();
+    let item = json!({ "kind": "advisory", "payload": {
+        "facility": "ZDC", "kind": "reroute", "body": "vATCSCC ADVZY 607",
+        "valid_from": from, "valid_to": from + Duration::hours(2) } });
+    let (status, body) = call(
+        state,
+        http::Method::POST,
+        &format!("{base}/{pkg}/items"),
+        auth,
+        Some(item),
+    )
+    .await;
+    assert!(status.is_success(), "add advisory: {status} {body}");
+    pkg
+}
+
+async fn arm(state: &AppState, auth: &str, pkg: &str) -> http::StatusCode {
+    call(
+        state,
+        http::Method::PUT,
+        &format!("/api/v1/events/{PKG_EVENT}/packages/{pkg}/auto"),
+        auth,
+        Some(json!({ "auto_publish": true })),
+    )
+    .await
+    .0
+}
+
+async fn package_status(pool: &PgPool, pkg: &str) -> String {
+    sqlx::query_scalar("select status from events.tmi_package where id = $1")
+        .bind(pkg)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `(created_by, created_by_actor)` of the one advisory a package issued, if any.
+async fn issued_advisory(pool: &PgPool) -> Option<(Option<String>, Option<String>)> {
+    sqlx::query_as("select created_by, created_by_actor from tmu.advisories")
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+async fn lifecycle_pass(pool: &PgPool) {
+    crate::jobs::event_package_lifecycle_once(pool, &tokio::sync::broadcast::channel(8).0)
+        .await
+        .unwrap();
+}
+
+/// The package handlers' half of AC1: a service account arms auto-publish, and the lifecycle job —
+/// which used to act only as a person — publishes the advisory **as the machine**, then archives it as
+/// the machine when the event ends.
+#[sqlx::test]
+async fn a_machine_arms_a_package_and_the_job_publishes_as_it(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &["events.plan.update", "tmu.adv.create", "tmu.adv.publish"],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let pkg = advisory_package(&pool, &state, &auth).await;
+    assert_eq!(arm(&state, &auth, &pkg).await, http::StatusCode::OK);
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &format!("id = '{pkg}'")).await,
+        (None, Some(actor.clone()))
+    );
+
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "activated");
+    assert_eq!(
+        issued_advisory(&pool).await,
+        Some((None, Some(actor.clone()))),
+        "issued as the machine"
+    );
+
+    sqlx::query("update events.event set start_time = now() - interval '3 hours', end_time = now() - interval '1 minute' where id = $1")
+        .bind(PKG_EVENT)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "archived");
+}
+
+/// A machine whose credential stops working between arming and the event issues nothing — exactly as
+/// its request would be refused. Archiving still runs on a revoked actor, so a package it activated
+/// cannot outlive its event.
+#[sqlx::test]
+async fn a_disabled_machine_publishes_nothing(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &["events.plan.update", "tmu.adv.create", "tmu.adv.publish"],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let pkg = advisory_package(&pool, &state, &auth).await;
+    assert_eq!(arm(&state, &auth, &pkg).await, http::StatusCode::OK);
+    sqlx::query("update access.service_accounts set status = 'disabled' where key = 'vtbfm'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "draft");
+    assert_eq!(issued_advisory(&pool).await, None);
+}
+
+/// AC4 at fire time: an API key arms, then loses its own `tmu.adv.publish` grant while its owner keeps
+/// it. The job re-checks the **key** (owner ∩ key), not the owner, so nothing is issued. Before #607 a
+/// key's arm was recorded under its owner and the job checked only the owner.
+#[sqlx::test]
+async fn a_keys_armed_package_is_held_to_the_keys_scope(pool: PgPool) {
+    let (key, auth) = api_key(&pool, "events.plan.update").await;
+    let owner: String =
+        sqlx::query_scalar("select owner_user_id from access.api_keys where id = $1")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for p in ["tmu.adv.create", "tmu.adv.publish"] {
+        grant(&pool, &owner, p, None).await;
+        sqlx::query(
+            "insert into access.api_key_permissions (api_key_id, permission_name) values ($1, $2)",
+        )
+        .bind(&key)
+        .bind(p)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let state = test_state(pool.clone(), HashMap::new());
+    let pkg = advisory_package(&pool, &state, &auth).await;
+    assert_eq!(arm(&state, &auth, &pkg).await, http::StatusCode::OK);
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &format!("id = '{pkg}'")).await,
+        (None, actor_of(&pool, "api_key_id", &key).await),
+        "the key is recorded, not its owner"
+    );
+
+    sqlx::query("delete from access.api_key_permissions where api_key_id = $1 and permission_name = 'tmu.adv.publish'")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lifecycle_pass(&pool).await;
+    assert_eq!(
+        package_status(&pool, &pkg).await,
+        "draft",
+        "the owner still holds it; the key does not"
+    );
+    assert_eq!(issued_advisory(&pool).await, None);
+}
+
+/// The data migration: a package armed before 0114 has a person in `updated_by` and no actor. The
+/// backfill names that person's actor, so the job — which now keys on the actor — still serves it.
+#[sqlx::test]
+async fn a_package_armed_before_actors_is_still_published(pool: PgPool) {
+    let person = seed_user(&pool).await;
+    for p in ["events.plan.update", "tmu.adv.create", "tmu.adv.publish"] {
+        grant(&pool, &person, p, None).await;
+    }
+    let cookie = session_cookie(&pool, &person).await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let pkg = advisory_package(&pool, &state, &cookie).await;
+    assert_eq!(arm(&state, &cookie, &pkg).await, http::StatusCode::OK);
+    // Back to the pre-0114 shape: a person, no actor (and no actor row for them at all).
+    sqlx::query("update events.tmi_package set updated_by_actor = null where id = $1")
+        .bind(&pkg)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from access.actors where user_id = $1")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let migration = include_str!("../../migrations/0119_machine_long_tail_attribution.sql");
+    let backfill = &migration[migration.find("insert into access.actors").unwrap()..];
+    sqlx::raw_sql(backfill).execute(&pool).await.unwrap();
+
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "activated");
+    let (by, by_actor) = issued_advisory(&pool).await.unwrap();
+    assert_eq!(by.as_deref(), Some(person.as_str()));
+    assert_eq!(by_actor, actor_of(&pool, "user_id", &person).await);
+}
+
+/// AC3, the long tail: a service account drives each remaining write — each refused or anonymous
+/// before #607 — and every row that records who did it names the machine.
+#[sqlx::test]
+async fn a_machine_drives_the_long_tail_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &[
+            "facilities.docs.update",
+            "facilities.docs.read",
+            "flow.fca.update",
+            "flow.fca.read",
+            "flow.aircraft_profiles.update",
+            "flow.facility_map.update",
+            "flow.runway.update",
+            "stats.capture.update",
+            "ace.requests.decide",
+        ],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let send = |method: http::Method, path: String, body: Option<Value>| {
+        let (state, auth) = (state.clone(), auth.clone());
+        async move { call(&state, method, &format!("/api/v1{path}"), &auth, body).await }
+    };
+
+    let (status, body) = send(
+        http::Method::POST,
+        "/facilities/ZDC/documents".into(),
+        Some(json!({ "title": "SOP", "url": "https://example.org/sop.pdf" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "document: {body}");
+    let (status, body) = send(http::Method::GET, "/facilities/ZDC/documents".into(), None).await;
+    assert_eq!(status, http::StatusCode::OK, "documents: {body}");
+
+    let fca = fca(&pool).await;
+    let (status, body) = send(
+        http::Method::POST,
+        format!("/flow/fcas/{fca}/exclusions/BOGUS1"),
+        Some(json!({ "reason": "teleporting" })),
+    )
+    .await;
+    assert!(status.is_success(), "exclude: {status} {body}");
+    let actor = machine_actor(&pool).await;
+    let machine_row = (None, Some(actor.clone()));
+    assert_eq!(
+        attributed(
+            &pool,
+            "flow.manual_flight_exclusion",
+            "created_by",
+            "callsign",
+            "BOGUS1"
+        )
+        .await,
+        machine_row
+    );
+    let (_, list) = send(
+        http::Method::GET,
+        format!("/flow/fcas/{fca}/exclusions"),
+        None,
+    )
+    .await;
+    assert_eq!(list["exclusions"][0]["created_by_name"], "vTBFM", "{list}");
+    let (status, _) = send(
+        http::Method::DELETE,
+        format!("/flow/fcas/{fca}/exclusions/BOGUS1"),
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "restore: {status}");
+
+    let profile = json!({ "name": "Test jet", "climb_ias_lo": 250.0, "climb_ias_hi": 290.0, "climb_fpm_lo": 1500.0,
+        "climb_fpm_hi": 2500.0, "service_ceiling_ft": 41000.0, "desc_ias_hi": 290.0, "desc_ias_lo": 250.0, "desc_fpm": 2000.0 });
+    let (status, body) = send(
+        http::Method::PUT,
+        "/flow/aircraft-profiles/type/T607".into(),
+        Some(profile),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "profile: {body}");
+    assert_eq!(
+        attributed(&pool, "flow.aircraft_profile", "updated_by", "key", "T607").await,
+        machine_row
+    );
+    assert_eq!(body["updated_by"], "vTBFM");
+
+    let (status, body) = send(
+        http::Method::PUT,
+        "/facility-map/ZDC/config".into(),
+        Some(json!({ "rules": [], "default_color": "#888888" })),
+    )
+    .await;
+    assert!(status.is_success(), "facility map: {status} {body}");
+    assert_eq!(
+        attributed(
+            &pool,
+            "flow.facility_map_config",
+            "updated_by",
+            "facility_id",
+            "ZDC"
+        )
+        .await,
+        machine_row
+    );
+    let (_, body) = send(http::Method::GET, "/facility-map/ZDC/config".into(), None).await;
+    assert_eq!(
+        body["editable"], true,
+        "the machine may edit its own map: {body}"
+    );
+    let (status, body) = call_with(
+        &state,
+        http::Method::GET,
+        "/api/v1/facility-map/ZDC/config",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "still public");
+    assert_eq!(body["editable"], false);
+
+    let (status, body) = send(
+        http::Method::PUT,
+        "/flow/runway/KIAD".into(),
+        Some(json!({ "active_ends": ["01C"] })),
+    )
+    .await;
+    assert!(status.is_success(), "runway: {status} {body}");
+    assert_eq!(
+        attributed(&pool, "flow.runway_config", "updated_by", "icao", "KIAD").await,
+        machine_row
+    );
+    let (status, body) = send(
+        http::Method::PUT,
+        "/flow/runway/KIAD/configs/South".into(),
+        Some(json!({ "active_ends": ["19C"], "star_rules": {} })),
+    )
+    .await;
+    assert!(status.is_success(), "saved runway config: {status} {body}");
+    assert_eq!(
+        attributed(
+            &pool,
+            "flow.runway_saved_config",
+            "updated_by",
+            "name",
+            "South"
+        )
+        .await,
+        machine_row
+    );
+
+    sqlx::query(
+        "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+                 values (1, now() - interval '30 minutes', 38.9, -77.4, 10000, 300, 90)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = Utc::now().timestamp();
+    let (status, body) = send(
+        http::Method::POST,
+        "/stats/captures".into(),
+        Some(json!({ "label": "T607", "from": now - 3600, "to": now })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "capture: {body}");
+    assert_eq!(
+        attributed(&pool, "stats.capture", "created_by", "label", "T607").await,
+        machine_row
+    );
+
+    let requester = seed_user(&pool).await;
+    sqlx::query(
+        "insert into events.event (id, title, start_time, end_time, facility) \
+                 values (6075, 'ACE', now(), now() + interval '2 hours', 'ZDC')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let req: String = sqlx::query_scalar("insert into ace.requests (event_id, requested_by, slots) values (6075, $1, 1) returning id")
+        .bind(&requester)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        http::Method::POST,
+        format!("/events/6075/ace/{req}/decide"),
+        Some(json!({ "outcome": "completed" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "decide: {body}");
+    assert_eq!(
+        attributed(&pool, "ace.requests", "decided_by", "id", &req).await,
+        machine_row
+    );
+    assert_eq!(body["decided_by_name"], "vTBFM");
+
+    let (status, _) = send(http::Method::GET, "/admin/summary".into(), None).await;
+    assert_eq!(status, http::StatusCode::OK, "admin summary");
+}
+
+/// AC4, the long tail: a ZDC-scoped machine is refused another ARTCC's documents and facility map.
+#[sqlx::test]
+async fn a_scoped_machine_is_refused_another_artccs_documents_and_map(pool: PgPool) {
+    let (_, auth) = service_account(&pool, "facilities.docs.update", Some("ZDC")).await;
+    allow(&pool, "flow.facility_map.update").await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let doc = json!({ "title": "SOP", "url": "https://example.org/sop.pdf" });
+    let map = json!({ "rules": [], "default_color": "#888888" });
+
+    for (method, artcc, path, body) in [
+        (
+            http::Method::POST,
+            "ZNY",
+            "/api/v1/facilities/ZNY/documents",
+            doc.clone(),
+        ),
+        (
+            http::Method::PUT,
+            "ZNY",
+            "/api/v1/facility-map/ZNY/config",
+            map.clone(),
+        ),
+        (
+            http::Method::POST,
+            "ZDC",
+            "/api/v1/facilities/ZDC/documents",
+            doc,
+        ),
+        (
+            http::Method::PUT,
+            "ZDC",
+            "/api/v1/facility-map/ZDC/config",
+            map,
+        ),
+    ] {
+        let (status, _) = call(&state, method, path, &auth, Some(body)).await;
+        if artcc == "ZNY" {
+            assert_eq!(
+                status,
+                http::StatusCode::FORBIDDEN,
+                "{path}: outside the machine's ARTCC"
+            );
+        } else {
+            assert!(status.is_success(), "{path}: inside it ({status})");
+        }
+    }
+}
+
+/// Archiving only cancels what a package issued, so it runs even after the activating machine is
+/// disabled — otherwise its advisory would outlive the event.
+#[sqlx::test]
+async fn a_disabled_machines_package_is_still_archived(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &["events.plan.update", "tmu.adv.create", "tmu.adv.publish"],
+    )
+    .await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let pkg = advisory_package(&pool, &state, &auth).await;
+    assert_eq!(arm(&state, &auth, &pkg).await, http::StatusCode::OK);
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "activated");
+
+    sqlx::query("update access.service_accounts set status = 'disabled' where key = 'vtbfm'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update events.event set start_time = now() - interval '3 hours', end_time = now() - interval '1 minute' where id = $1")
+        .bind(PKG_EVENT)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lifecycle_pass(&pool).await;
+    assert_eq!(package_status(&pool, &pkg).await, "archived");
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &format!("id = '{pkg}'")).await,
+        (None, Some(actor))
+    );
+}
