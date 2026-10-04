@@ -53,6 +53,67 @@ From the same page you can, per key:
 - **Delete** — remove it permanently.
 - **Activity** — see what the key has done, from the audit log.
 
+## Live updates (websocket)
+
+Rather than polling, a key or service account can hold a websocket open and be told the moment
+something changes, then fetch the new data over the API as usual.
+
+**Connect** to `wss://<your-ois-host>/api/v1/ws` with your token, either as a header (server-side
+clients):
+
+```http
+Authorization: Bearer ois_pat_xxxxxxxx…
+```
+
+or, from a browser — whose `WebSocket` can't set headers — as subprotocols:
+
+```js
+new WebSocket("wss://<your-ois-host>/api/v1/ws", ["ois.v1", "ois.bearer.ois_pat_xxxxxxxx…"]);
+```
+
+The server selects `ois.v1` and never echoes the token back. A missing, revoked or expired
+credential is refused with `401` before the upgrade. Never put the token in the URL — URLs end up
+in logs.
+
+**Messages are nudges, not data.** Each one is just the name of what changed:
+
+```json
+{ "topic": "flow.release" }
+```
+
+When you get one, re-fetch the matching resource — the API, with your key's own access, stays the
+only source of the data. A nudge never says *what* changed or for whom.
+
+| Topic | Changed |
+| --- | --- |
+| `flow.release` | departure releases |
+| `flow.cfr` | call-for-release requests |
+| `flow.fca` | flow constrained areas |
+| `tmu.gdp` | ground delay programs |
+| `tmu.tmi` | traffic management initiatives |
+| `tmu.groundstop` | ground stops |
+| `tmu.program` | rate programs |
+| `events.availability` | event availability responses (NTMO / DCC staff) |
+| `events.reminder` | ACE claim reminders |
+| `access.granted` | someone's access changed (re-check your own) |
+
+**Choose your topics.** Until you say otherwise you receive every topic. Send a subscribe message to
+receive only some — it replaces your current set:
+
+```json
+{ "subscribe": ["flow.release"] }
+```
+
+The server answers `{"subscribed":["flow.release"]}`. A name it doesn't know is refused as a whole —
+`{"error":"unknown_topic","topics":["flow.releases"]}` — and your previous subscription stays in
+place. Anything else that isn't a subscribe message gets `{"error":"bad_request"}`.
+
+**Stay connected.** The server pings every 30 seconds; standard clients answer automatically. If the
+connection drops, reconnect with exponential backoff (for example 1 s doubling to a 60 s cap, with
+random jitter) and **send your subscribe message again** — subscriptions don't survive a reconnect.
+Nudges sent while you were disconnected are not replayed, so after reconnecting, fetch once to catch
+up. Polling remains the fallback: if you can't hold a socket, poll no faster than the data changes.
+
 ## Oversight & auditing
 
 Everything a key does is **audited**: every change to a key (create, rotate, permission edit, disable, delete) and every action a key performs is recorded with the key identified. Administrators with the oversight permissions can view **every** key across the platform and revoke any of them.
