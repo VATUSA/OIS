@@ -46,15 +46,27 @@ use crate::errors::ApiError;
 /// no reason to block each other.
 const SEED_LOCK_KEY: i64 = 0x004F_4953_5F58_5047; // "OIS_XPG"
 
-/// One stand as committed by the importer. `heading` is present in the extract but deliberately not
-/// deserialized: the model has no heading column, and parsing a field we discard would invite someone
-/// to believe it is stored.
+/// One stand as committed by the importer.
+///
+/// Every field the extract carries is deserialized and stored as of VATUSA/OIS#541. The optional ones
+/// default rather than being required: an extract regenerated before #541 has no `size_code` or
+/// `operation_type`, and the seed must still load it rather than panicking at boot.
 #[derive(Debug, Deserialize)]
 struct ExtractStand {
     name: String,
     lat: f64,
     lon: f64,
     kind: String,
+    #[serde(default)]
+    heading: Option<f64>,
+    #[serde(default)]
+    size_code: Option<String>,
+    #[serde(default)]
+    operation_type: Option<String>,
+    #[serde(default)]
+    aircraft_classes: Vec<String>,
+    #[serde(default)]
+    airline_codes: Vec<String>,
 }
 
 fn load_bundled_extract() -> HashMap<String, Vec<ExtractStand>> {
@@ -168,17 +180,26 @@ pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<GateSeedSummary,
     // Refresh the ones we already have, by name, so their ids (and observations) survive.
     let (mut u_name, mut u_lat, mut u_lon, mut u_kind) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut d = StandDetail::with_capacity(stands.len());
     for s in stands {
         u_name.push(s.name.as_str());
         u_lat.push(s.lat);
         u_lon.push(s.lon);
         u_kind.push(s.kind.as_str());
+        d.push(s);
     }
+    // The detail columns are refreshed here too, not only inserted. A re-pull is how a stand that
+    // predates #541 — or one whose pack gained a `1301` row since the last import — acquires them.
     let updated = sqlx::query(
         "update flow.airport_gate as g \
-         set lat = t.lat, lon = t.lon, kind = t.kind \
-         from unnest($2::text[], $3::float8[], $4::float8[], $5::text[]) \
-              as t(name, lat, lon, kind) \
+         set lat = t.lat, lon = t.lon, kind = t.kind, heading = t.heading, \
+             size_code = t.size_code, operation_type = t.operation_type, \
+             aircraft_classes = string_to_array(nullif(t.classes, ''), ','), \
+             airline_codes = string_to_array(nullif(t.airlines, ''), ',') \
+         from unnest($2::text[], $3::float8[], $4::float8[], $5::text[], \
+                     $6::float8[], $7::text[], $8::text[], $9::text[], $10::text[]) \
+              as t(name, lat, lon, kind, \
+                   heading, size_code, operation_type, classes, airlines) \
          where g.icao = $1 and g.source = 'xplane' and g.name = t.name",
     )
     .bind(icao)
@@ -186,6 +207,11 @@ pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<GateSeedSummary,
     .bind(&u_lat)
     .bind(&u_lon)
     .bind(&u_kind)
+    .bind(&d.heading)
+    .bind(&d.size_code)
+    .bind(&d.operation_type)
+    .bind(&d.classes)
+    .bind(&d.airlines)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?
@@ -193,21 +219,30 @@ pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<GateSeedSummary,
 
     // Insert whatever is genuinely new. `where not exists` rather than an upsert: there is no unique
     // constraint on (icao, name) — manual rows may legitimately share a stand's name.
-    let inserted = sqlx::query(
-        "insert into flow.airport_gate (icao, name, lat, lon, kind, source) \
-         select $1, t.name, t.lat, t.lon, t.kind, 'xplane' \
-         from unnest($2::text[], $3::float8[], $4::float8[], $5::text[]) \
-              as t(name, lat, lon, kind) \
+    let inserted = sqlx::query(&format!(
+        "insert into flow.airport_gate \
+             (icao, name, lat, lon, kind, source, \
+              heading, size_code, operation_type, aircraft_classes, airline_codes) \
+         select $1, t.name, t.lat, t.lon, t.kind, 'xplane', {DETAIL_SELECT} \
+         from unnest($2::text[], $3::float8[], $4::float8[], $5::text[], \
+                     $6::float8[], $7::text[], $8::text[], $9::text[], $10::text[]) \
+              as t(name, lat, lon, kind, \
+                   heading, size_code, operation_type, classes, airlines) \
          where not exists ( \
              select 1 from flow.airport_gate g \
              where g.icao = $1 and g.source = 'xplane' and g.name = t.name \
-         )",
-    )
+         )"
+    ))
     .bind(icao)
     .bind(&u_name)
     .bind(&u_lat)
     .bind(&u_lon)
     .bind(&u_kind)
+    .bind(&d.heading)
+    .bind(&d.size_code)
+    .bind(&d.operation_type)
+    .bind(&d.classes)
+    .bind(&d.airlines)
     .execute(&mut *tx)
     .await
     .map_err(db_err)?
@@ -257,6 +292,50 @@ async fn retire_osm_gates(
     )
 }
 
+/// The X-Plane detail columns, in the shape the `unnest` statements below bind.
+///
+/// `aircraft_classes` and `airline_codes` are `text[]` *per row*, and a jagged array-of-arrays cannot
+/// go through `unnest` — so each list travels as one comma-joined string and is split back out by
+/// `string_to_array` in SQL. Safe because every value is lowercase alphanumeric: classes come from a
+/// fixed vocabulary (`heavy`/`jets`/`turboprops`/`props`) and airline codes are three-letter ICAO
+/// designators, so none can contain a comma.
+///
+/// An empty list becomes `NULL` rather than `'{}'`: the extract cannot distinguish "no restriction
+/// recorded" from "explicitly none" (the importer maps the source's `all` to an empty list), and
+/// `NULL` is the honest encoding of the one we actually have.
+struct StandDetail<'a> {
+    heading: Vec<Option<f64>>,
+    size_code: Vec<Option<&'a str>>,
+    operation_type: Vec<Option<&'a str>>,
+    classes: Vec<String>,
+    airlines: Vec<String>,
+}
+
+impl<'a> StandDetail<'a> {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            heading: Vec::with_capacity(n),
+            size_code: Vec::with_capacity(n),
+            operation_type: Vec::with_capacity(n),
+            classes: Vec::with_capacity(n),
+            airlines: Vec::with_capacity(n),
+        }
+    }
+
+    fn push(&mut self, s: &'a ExtractStand) {
+        self.heading.push(s.heading);
+        self.size_code.push(s.size_code.as_deref());
+        self.operation_type.push(s.operation_type.as_deref());
+        self.classes.push(s.aircraft_classes.join(","));
+        self.airlines.push(s.airline_codes.join(","));
+    }
+}
+
+/// The `select` list and `unnest` tail shared by both inserts, so the two cannot drift apart.
+const DETAIL_SELECT: &str = "heading, size_code, operation_type, \
+     string_to_array(nullif(classes, ''), ','), \
+     string_to_array(nullif(airlines, ''), ',')";
+
 /// Inserts every extract stand for `icaos` as `source='xplane'` — one set-based insert via `unnest`
 /// rather than a round trip per row.
 async fn insert_gates(
@@ -266,6 +345,7 @@ async fn insert_gates(
 ) -> Result<usize, ApiError> {
     let (mut icao, mut name, mut lat, mut lon, mut kind) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut d = StandDetail::with_capacity(icaos.len());
     for i in icaos {
         for s in &extract[*i] {
             icao.push(*i);
@@ -273,19 +353,29 @@ async fn insert_gates(
             lat.push(s.lat);
             lon.push(s.lon);
             kind.push(s.kind.as_str());
+            d.push(s);
         }
     }
-    Ok(sqlx::query(
-        "insert into flow.airport_gate (icao, name, lat, lon, kind, source) \
-         select icao, name, lat, lon, kind, 'xplane' \
-         from unnest($1::text[], $2::text[], $3::float8[], $4::float8[], $5::text[]) \
-              as t(icao, name, lat, lon, kind)",
-    )
+    Ok(sqlx::query(&format!(
+        "insert into flow.airport_gate \
+             (icao, name, lat, lon, kind, source, \
+              heading, size_code, operation_type, aircraft_classes, airline_codes) \
+         select icao, name, lat, lon, kind, 'xplane', {DETAIL_SELECT} \
+         from unnest($1::text[], $2::text[], $3::float8[], $4::float8[], $5::text[], \
+                     $6::float8[], $7::text[], $8::text[], $9::text[], $10::text[]) \
+              as t(icao, name, lat, lon, kind, \
+                   heading, size_code, operation_type, classes, airlines)"
+    ))
     .bind(&icao)
     .bind(&name)
     .bind(&lat)
     .bind(&lon)
     .bind(&kind)
+    .bind(&d.heading)
+    .bind(&d.size_code)
+    .bind(&d.operation_type)
+    .bind(&d.classes)
+    .bind(&d.airlines)
     .execute(&mut *conn)
     .await
     .map_err(db_err)?
@@ -734,5 +824,160 @@ mod tests {
             tie_downs > 0,
             "the extract is mostly tie-downs; losing the distinction would be silent"
         );
+    }
+
+    /// AC1/AC3: the boot seed must actually land the detail columns, not just accept them. Asserted
+    /// against the committed extract rather than a fixture, so a future re-import that silently stops
+    /// emitting a field fails here.
+    #[sqlx::test]
+    async fn the_seed_stores_the_xplane_detail(pool: PgPool) {
+        seed(&pool).await.unwrap();
+
+        let (heading, size, op, classes, airlines): (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "select count(heading), count(size_code), count(operation_type), \
+                    count(aircraft_classes), count(airline_codes) \
+             from flow.airport_gate where source = 'xplane'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(heading > 0, "heading is in the extract for every stand");
+        assert!(size > 0, "size_code comes from row 1301");
+        assert!(op > 0, "operation_type comes from row 1301");
+        assert!(classes > 0, "aircraft_classes comes from row 1300");
+        assert!(
+            airlines > 0,
+            "airline_codes is sparse (~30% of stands) but must not be universally null"
+        );
+    }
+
+    /// The column carries a `^[A-F]$` check and the lists are split from comma-joined strings, so this
+    /// pins the *shape* that reaches Postgres — a bad join or a stray delimiter would show up here.
+    #[sqlx::test]
+    async fn the_stored_detail_has_the_shape_the_source_gives(pool: PgPool) {
+        seed(&pool).await.unwrap();
+
+        let bad_size: i64 = sqlx::query_scalar(
+            "select count(*) from flow.airport_gate \
+             where source = 'xplane' and size_code is not null and size_code !~ '^[A-F]$'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bad_size, 0, "every size_code is a single ICAO code letter");
+
+        // A comma surviving inside an element means string_to_array never split it.
+        let unsplit: i64 = sqlx::query_scalar(
+            "select count(*) from flow.airport_gate \
+             where source = 'xplane' \
+               and (exists (select 1 from unnest(aircraft_classes) c where c like '%,%') \
+                 or exists (select 1 from unnest(airline_codes) a where a like '%,%'))",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unsplit, 0, "the joined lists were split back apart");
+
+        // An empty list must be NULL, not `{}` or `{""}` — the encoding the seed documents.
+        let empty_element: i64 = sqlx::query_scalar(
+            "select count(*) from flow.airport_gate \
+             where source = 'xplane' \
+               and (aircraft_classes = '{\"\"}' or airline_codes = '{\"\"}' \
+                 or aircraft_classes = '{}' or airline_codes = '{}')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            empty_element, 0,
+            "an empty list is NULL, never an empty-string element"
+        );
+    }
+
+    /// AC3 names this case specifically: the re-pull's **in-place update** has to refresh the detail,
+    /// not only carry it on insert. This is how a stand seeded before #541 ever acquires the columns —
+    /// the row already exists, so the insert branch never runs for it.
+    #[sqlx::test]
+    async fn a_repull_refreshes_the_detail_on_rows_that_already_exist(pool: PgPool) {
+        let icao = a_covered_icao();
+        seed(&pool).await.unwrap();
+        // Simulate rows seeded by the pre-#541 code: present, matched by name, detail all null.
+        sqlx::query(
+            "update flow.airport_gate \
+             set heading = null, size_code = null, operation_type = null, \
+                 aircraft_classes = null, airline_codes = null \
+             where icao = $1 and source = 'xplane'",
+        )
+        .bind(&icao)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids_before: Vec<String> = sqlx::query_scalar(
+            "select id::text from flow.airport_gate where icao = $1 and source = 'xplane' order by name",
+        )
+        .bind(&icao)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let summary = seed_for_icao(&pool, &icao).await.unwrap();
+
+        assert!(
+            summary.gates_refreshed > 0,
+            "these rows are updated, not inserted"
+        );
+        assert_eq!(summary.gates_inserted, 0, "nothing is new");
+        let still_null: i64 = sqlx::query_scalar(
+            "select count(*) from flow.airport_gate \
+             where icao = $1 and source = 'xplane' and heading is null",
+        )
+        .bind(&icao)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            still_null, 0,
+            "every stand's heading was refreshed in place"
+        );
+
+        // AC4: and the ids survived, which is what keeps stats.taxi_observation.gate_id intact.
+        let ids_after: Vec<String> = sqlx::query_scalar(
+            "select id::text from flow.airport_gate where icao = $1 and source = 'xplane' order by name",
+        )
+        .bind(&icao)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ids_before, ids_after, "a refresh must not recreate rows");
+    }
+
+    /// The detail columns describe the X-Plane source, so a hand-entered stand must not acquire them —
+    /// the same reason `kind` is null for manual rows.
+    #[sqlx::test]
+    async fn a_manual_gate_gets_no_xplane_detail(pool: PgPool) {
+        let icao = a_covered_icao();
+        sqlx::query(
+            "insert into flow.airport_gate (icao, name, lat, lon, source) \
+             values ($1, 'HAND ENTERED', 1.0, 2.0, 'manual')",
+        )
+        .bind(&icao)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        seed(&pool).await.unwrap();
+        seed_for_icao(&pool, &icao).await.unwrap();
+
+        let (heading, size): (Option<f64>, Option<String>) = sqlx::query_as(
+            "select heading, size_code from flow.airport_gate \
+             where icao = $1 and name = 'HAND ENTERED'",
+        )
+        .bind(&icao)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(heading, None, "a manual stand has no X-Plane heading");
+        assert_eq!(size, None);
     }
 }

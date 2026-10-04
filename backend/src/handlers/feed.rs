@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
@@ -16,8 +16,8 @@ use utoipa::ToSchema;
 
 use crate::{
     auth::{
-        context::CurrentUser,
         permissions::{TmuCfrAssign, TmuProgramRead},
+        principal::Actor,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -646,10 +646,9 @@ struct MeteredCfr {
 pub async fn issue_cfr(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuCfrAssign>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<IssueCfrRequest>,
 ) -> Result<Json<IssuedCfrBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let callsign = payload.callsign.trim().to_ascii_uppercase();
@@ -719,7 +718,8 @@ pub async fn issue_cfr(
         }
     };
 
-    tmu_repo::upsert_issued_cfr(pool, &callsign, &airport, wheels_up, &user.id).await?;
+    let by = principal.attribution(&state).await?;
+    tmu_repo::upsert_issued_cfr(pool, &callsign, &airport, wheels_up, &by).await?;
     state.publish(crate::realtime::topic::CFR);
     let _ = tmu_repo::prune_stale_cfrs(pool).await;
     let cfr = tmu_repo::get_issued_cfr(pool, &callsign)

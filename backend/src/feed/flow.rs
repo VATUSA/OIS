@@ -1766,6 +1766,13 @@ mod tests {
             lon,
             source: "manual".to_string(),
             kind: None,
+            // `nearest_gate` reads only id/lat/lon/name, so the X-Plane detail is None here for the
+            // same reason `kind` is: this helper builds a hand-entered stand (#541).
+            heading: None,
+            size_code: None,
+            operation_type: None,
+            aircraft_classes: None,
+            airline_codes: None,
             updated_at: Utc::now(),
             editable: false,
         }

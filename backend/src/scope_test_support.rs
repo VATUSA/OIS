@@ -99,8 +99,8 @@ pub(crate) async fn deny_scoped(
     artcc: Option<&str>,
 ) {
     sqlx::query(
-        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-         values ($1, $2, false, $3)",
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, false, $3, 'manual')",
     )
     .bind(user_id)
     .bind(permission_name)
@@ -119,8 +119,8 @@ pub(crate) async fn grant(
     artcc: Option<&str>,
 ) {
     sqlx::query(
-        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-         values ($1, $2, true, $3)",
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, true, $3, 'manual')",
     )
     .bind(user_id)
     .bind(permission_name)

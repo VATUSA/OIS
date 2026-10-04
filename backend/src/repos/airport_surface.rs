@@ -18,8 +18,8 @@ use crate::{
 
 // ---- gates ----------------------------------------------------------------
 
-const GATE_SELECT: &str =
-    "select id, icao, name, lat, lon, source, kind, updated_at from flow.airport_gate";
+const GATE_SELECT: &str = "select id, icao, name, lat, lon, source, kind, heading, size_code, \
+     operation_type, aircraft_classes, airline_codes, updated_at from flow.airport_gate";
 
 pub async fn list_gates(pool: &PgPool, icao: &str) -> Result<Vec<AirportGateBody>, ApiError> {
     sqlx::query_as::<_, AirportGateBody>(&format!("{GATE_SELECT} where icao = $1 order by name"))

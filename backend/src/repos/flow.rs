@@ -1,5 +1,6 @@
 //! Flow Constrained Area (FCA) storage. Shared, server-side — one FCA set for everyone.
 
+use crate::auth::principal::Attribution;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -416,19 +417,21 @@ pub async fn upsert_release(
     callsign: &str,
     cta_ms: i64,
     edct_ms: i64,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by)
-         values ($1, $2, $3, $4, $5)
+        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5, $6)
          on conflict (fca_id, callsign) do update set
-             cta_ms = excluded.cta_ms, edct_ms = excluded.edct_ms, updated_by = excluded.updated_by",
+             cta_ms = excluded.cta_ms, edct_ms = excluded.edct_ms,
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(fca_id)
     .bind(callsign)
     .bind(cta_ms)
     .bind(edct_ms)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -462,11 +465,11 @@ pub async fn swap_releases(
     fca_id: &str,
     a: &str,
     b: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update flow.fca_release r \
-            set cta_ms = o.cta_ms, edct_ms = o.edct_ms, updated_by = $4 \
+            set cta_ms = o.cta_ms, edct_ms = o.edct_ms, updated_by = $4, updated_by_actor = $5 \
            from flow.fca_release o \
           where r.fca_id = $1 and o.fca_id = $1 \
             and ((r.callsign = $2 and o.callsign = $3) \
@@ -475,7 +478,8 @@ pub async fn swap_releases(
     .bind(fca_id)
     .bind(a)
     .bind(b)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
