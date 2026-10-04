@@ -38,6 +38,67 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-04-airspace-monitor",
+    date: "2026-10-04",
+    title: "The Airspace Monitor, live screens, and an API for machines",
+    sections: [
+      {
+        heading: "Airspace Monitor",
+        highlights: [
+          "OIS now has an Airspace Monitor: one table per ARTCC, a row per high sector, showing peak concurrent traffic in 15-minute Zulu bins against each sector's Monitor Alert Parameter.",
+          "A sector turns amber when airborne plus proposed traffic would exceed its MAP, and red when airborne traffic alone already does — the same reading as the FAA's Monitor.",
+          "Each sector's MAP is yours to set, facility by facility, and resetting one back to the default clears the override rather than pinning the default in place.",
+          "You can consolidate a whole area into one sector from the row menu, and see an ARTCC's first-tier neighbours beneath its own table.",
+          "ATC sector volumes — geometry and altitude limits — are held in Postgres and drawn on an admin sector map, with tooltips, a legend and layer toggles.",
+          "Live sector staffing comes from vNAS, so a sector shows who is working it.",
+        ],
+      },
+      {
+        heading: "Screens that update themselves",
+        highlights: [
+          "Live views no longer poll. When the traffic feed brings new data, OIS tells the screens that are open, and advisories, the ACE board, runway views and FCA lists refresh as they change.",
+          "Nudges reach every replica, so what you see is the same whichever server answered you.",
+          "A memory leak that restarted the backend roughly every half hour is fixed.",
+        ],
+      },
+      {
+        heading: "For integrators",
+        highlights: [
+          "Machine credentials can now drive the TMU, flow, GDP and release paths, not just read them, and they can open the realtime socket and subscribe to topics.",
+          "A service account can be granted scoped permissions, capped by expiry, and every API caller now has a rate limit you can set per credential — with its request volume visible alongside it.",
+          "There is an integrator guide, a generated permission map, and Swagger on the API docs, so an endpoint's credentials and permission are written down rather than discovered.",
+          "The API documents exactly which credentials each endpoint accepts, so a key is never offered a path that would refuse it.",
+        ],
+      },
+      {
+        heading: "Access and groups",
+        highlights: [
+          "Groups are managed from the UI — what they grant, who is in them, and which VATUSA staff roles map onto them — with cards and permission domains collapsed until you open them.",
+          "One permission resolver now honours scope and deny together, and the editor's no-escalation guard is scope-aware, so you cannot grant past what you hold.",
+          "VATUSA role sync pulls the whole division daily, ignores a replayed webhook, says what VATUSA objected to, and records where each grant came from so a later sync can revoke only its own rows.",
+          "A hand-edited user can be taken off role sync, with that fact shown and a resync available.",
+        ],
+      },
+      {
+        heading: "Flow, TMU and maps",
+        highlights: [
+          "A TGUI arrival ladder shows ETA and STA on opposing rails.",
+          "Two held IDST departures can swap release times when they share an airport and runway.",
+          "FCA colours are named swatches with a custom pick, and FCA create, edit, reorder and delete are gated on the FCA's own ARTCC.",
+          "An advisory can be planned inside an event package, and deactivating a package posts cancellations for what it ends early.",
+          "Map fixes: hover cards render on screen and the nearer of an aircraft or ATC pill wins, the surface viewer centres on the airport, X-Plane stand detail is kept, and Honolulu and San Francisco Oceanic resolve correctly.",
+        ],
+      },
+      {
+        heading: "Desktop app",
+        highlights: [
+          "The desktop app writes a redacted log file and can send diagnostics to staff when something goes wrong.",
+          "macOS no longer re-prompts for the keychain, sign-in has its own OIS-styled tab, and a cached release is served when the GitHub refresh fails.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-01-advisories-and-departure-runways",
     date: "2026-10-01",
     title: "Advisories, departure runways, and a national view",
