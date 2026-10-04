@@ -102,6 +102,7 @@ export default defineConfig({
         items: [
           { text: "Roles & permissions", link: "/reference/permissions" },
           { text: "API keys", link: "/reference/api-keys" },
+          { text: "API changelog", link: "/reference/api-changelog" },
           { text: "Glossary", link: "/reference/glossary" },
           { text: "FAQ", link: "/reference/faq" },
         ],
