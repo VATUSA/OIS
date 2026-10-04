@@ -157,6 +157,24 @@ pub struct SelfAccessBody {
     pub role_names: Vec<String>,
     #[schema(value_type = Object)]
     pub permissions: Value,
+    /// The groups the caller holds, each with the permissions it grants (#550).
+    ///
+    /// This is what an API key is templated from now that presets are gone. It lists only the
+    /// caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+    /// listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+    /// path at all.
+    pub groups: Vec<HeldGroupBody>,
+}
+
+/// One group the caller holds, as a template for an API key's permissions (#550).
+///
+/// No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+/// its owner's live access when it is created, so expanding a template cannot grant more than its
+/// owner holds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeldGroupBody {
+    pub name: String,
+    pub permissions: Vec<String>,
 }
 
 /// A target user's editable access: direct permission grants + role assignments,

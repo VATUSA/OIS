@@ -283,6 +283,7 @@ use utoipa::OpenApi;
         crate::models::UpsertFacilityDocumentRequest,
         crate::models::AccessCatalogBody,
         crate::models::SelfAccessBody,
+        crate::models::HeldGroupBody,
         crate::models::UserAccessBody,
         crate::models::ScopeAccess,
         crate::models::UpdateUserAccessRequest,
