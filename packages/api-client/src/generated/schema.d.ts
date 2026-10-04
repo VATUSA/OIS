@@ -246,6 +246,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/grantable-permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The permission picker's source: what the calling admin holds, minus what a service account may
+         *     never hold — exactly what `set_service_account_permissions` will accept from them.
+         */
+        get: operations["grantable_service_account_permissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/roles": {
         parameters: {
             query?: never;
@@ -282,6 +302,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace an account's direct `(permission, ARTCC)` grants (#584). Each must be within the calling
+         *     admin's own live authority (403 otherwise), and none may let a machine mint credentials (400).
+         */
+        put: operations["set_service_account_permissions"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/{id}/roles": {
         parameters: {
             query?: never;
@@ -307,6 +347,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+         *     account's authority — so, like a grant, it is capped: the admin must hold everything the account
+         *     holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
+         */
         post: operations["rotate_service_account"];
         delete?: never;
         options?: never;
@@ -4166,6 +4211,11 @@ export interface components {
         };
         CreateServiceAccountRequest: {
             description?: string | null;
+            /**
+             * Format: int32
+             * @description Credential lifetime in days: default 90, at most 365.
+             */
+            expires_in_days?: number | null;
             name: string;
         };
         CreateTmiRequest: {
@@ -6139,6 +6189,11 @@ export interface components {
         RevokeApiKeyRequest: {
             reason?: string | null;
         };
+        /** @description Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365). */
+        RotateServiceAccountRequest: {
+            /** Format: int32 */
+            expires_in_days?: number | null;
+        };
         /**
          * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
          *     track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
@@ -6350,17 +6405,25 @@ export interface components {
             role_names: string[];
             server_admin: boolean;
         };
-        /** @description A service account as listed (no secret). `roles` are its granted role names. */
+        /**
+         * @description A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+         *     direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+         *     been used (or, if never used, issued) in 30 days.
+         */
         ServiceAccountBody: {
             /** Format: date-time */
             created_at: string;
             description?: string | null;
+            /** Format: date-time */
+            expires_at?: string | null;
             id: string;
             key: string;
             /** Format: date-time */
             last_used_at?: string | null;
             name: string;
+            permissions: components["schemas"]["ApiKeyPermissionBody"][];
             roles: string[];
+            stale: boolean;
             status: string;
         };
         /**
@@ -6378,6 +6441,10 @@ export interface components {
         /** @description Toggle an event FCA's auto-publish flag (publish 30 min before the event starts). */
         SetFcaAutoRequest: {
             auto_publish: boolean;
+        };
+        /** @description A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national. */
+        SetServiceAccountPermissionsRequest: {
+            permissions: components["schemas"]["ApiKeyPermissionInput"][];
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
@@ -7768,6 +7835,32 @@ export interface operations {
             };
         };
     };
+    grantable_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the caller may grant a service account, with the scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantablePermissionBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_service_account_roles: {
         parameters: {
             query?: never;
@@ -7827,6 +7920,56 @@ export interface operations {
             };
         };
     };
+    set_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Service account id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetServiceAccountPermissionsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_service_account_roles: {
         parameters: {
             query?: never;
@@ -7863,6 +8006,12 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -7881,7 +8030,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional lifetime; default 90 days */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["RotateServiceAccountRequest"];
+            };
+        };
         responses: {
             /** @description Rotated; new token shown once */
             200: {
@@ -7892,7 +8046,19 @@ export interface operations {
                     "application/json": components["schemas"]["ServiceAccountTokenBody"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -2813,6 +2813,16 @@ pub struct CreateServiceAccountRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Credential lifetime in days: default 90, at most 365.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+}
+
+/// Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365).
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct RotateServiceAccountRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2820,7 +2830,15 @@ pub struct SetServiceAccountRolesRequest {
     pub role_names: Vec<String>,
 }
 
-/// A service account as listed (no secret). `roles` are its granted role names.
+/// A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetServiceAccountPermissionsRequest {
+    pub permissions: Vec<ApiKeyPermissionInput>,
+}
+
+/// A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+/// direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+/// been used (or, if never used, issued) in 30 days.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceAccountBody {
     pub id: String,
@@ -2829,7 +2847,10 @@ pub struct ServiceAccountBody {
     pub description: Option<String>,
     pub status: String,
     pub roles: Vec<String>,
+    pub permissions: Vec<ApiKeyPermissionBody>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub stale: bool,
     pub created_at: DateTime<Utc>,
 }
 

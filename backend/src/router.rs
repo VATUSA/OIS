@@ -660,6 +660,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/service-accounts/{id}/roles",
             put(service_accounts::set_service_account_roles),
         )
+        .route(
+            "/api/v1/admin/service-accounts/grantable-permissions",
+            get(service_accounts::grantable_service_account_permissions),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/permissions",
+            put(service_accounts::set_service_account_permissions),
+        )
         // Innermost app layer: records every successful mutation to the audit log. Added
         // before resolve_current_user so it runs *after* it inbound and sees CurrentUser.
         .layer(middleware::from_fn_with_state(
