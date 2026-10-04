@@ -7,6 +7,7 @@ import {
   Film,
   Gauge,
   KeyRound,
+  Layers,
   LayoutDashboard,
   type LucideIcon,
   Users,
@@ -104,6 +105,13 @@ export const AREAS: readonly NavArea[] = [
           { label: "Facility Documents", to: "/admin/planning/facility-documents", icon: FileText, permission: "facilities.docs.read" },
           { label: "Airport Surface", to: "/admin/planning/airport-surface", icon: MapPinned, permission: "events.plan.read" },
           { label: "Aircraft Profiles", to: "/admin/planning/aircraft-profiles", icon: Plane, permission: "flow.aircraft_profiles.read" },
+        ],
+      },
+      {
+        label: "Flow",
+        prefix: "/admin/flow",
+        items: [
+          { label: "Sectors", to: "/admin/flow/sectors", icon: Layers, permission: "flow.sectors.read" },
         ],
       },
       {

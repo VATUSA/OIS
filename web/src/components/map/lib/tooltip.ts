@@ -8,6 +8,20 @@ import {objectUnder} from "./pick";
 import type {NormAircraft} from "./types";
 import type {MatchedFlight} from "../layers/matched";
 import {anchorHeader, type AtcAnchor, type AtcPositionLite} from "../layers/atc";
+import {SECTOR_LAYER_ID, SECTOR_TIERS} from "../layers/sectors";
+import type {SectorVolume} from "@/lib/sectors";
+
+/** The hover card's look, shared by every map card so they read as one design (tokens only, no shadow). */
+const CARD_STYLE = {
+  background: "var(--panel)",
+  color: "var(--ink)",
+  border: "1px solid var(--line)",
+  fontSize: "12px",
+  padding: "6px 8px",
+  borderRadius: "6px",
+  boxShadow: "none",
+  maxWidth: "260px",
+};
 
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
@@ -128,22 +142,40 @@ const ATC_ONLY_TOOLTIP = mapTooltip({ aircraft: false });
  * the traffic and ATC cards an operator already reads, not like a second design.
  */
 export function surfaceTooltip() {
-  const style = {
-    background: "var(--panel)",
-    color: "var(--ink)",
-    border: "1px solid var(--line)",
-    fontSize: "12px",
-    padding: "6px 8px",
-    borderRadius: "6px",
-    boxShadow: "none",
-    maxWidth: "260px",
-  };
   return (info: PickingInfo) => {
     if (info.layer?.id !== "surface-gates") return null;
     const d = info.object as { name?: string; kind?: string | null; source?: string } | undefined;
     if (!d?.name) return null;
-    return { html: standHtml(d), style };
+    return { html: standHtml(d), style: CARD_STYLE };
   };
+}
+
+/** The admin sector map's hover card (#602): sector, tier and vertical band, in the same card shape. */
+export function sectorTooltip() {
+  return (info: PickingInfo) => {
+    if (info.layer?.id !== SECTOR_LAYER_ID) return null;
+    const v = (info.object as { volume?: SectorVolume } | undefined)?.volume;
+    return v ? { html: sectorHtml(v), style: CARD_STYLE } : null;
+  };
+}
+
+/** `SFC` for a floor at the surface, else a flight level (`FL240`). */
+export const flightLevel = (ft: number) => (ft <= 0 ? "SFC" : `FL${String(Math.round(ft / 100)).padStart(3, "0")}`);
+
+/**
+ * The sector card: `ZDC 32 · High`, its name, and `FL240–FL350`. Every field goes through `esc` — the
+ * name comes from imported data and this is rendered as `html`, so an unescaped name would be a
+ * stored-XSS vector.
+ */
+export function sectorHtml(v: SectorVolume): string {
+  const mono = "'JetBrains Mono',ui-monospace,monospace";
+  const tier = SECTOR_TIERS.find((t) => t.tier === v.tier)?.label ?? v.tier;
+  const name = v.name ? `<div>${esc(v.name)}</div>` : "";
+  const band = `${flightLevel(v.base_alt_ft)}–${flightLevel(v.top_alt_ft)}`;
+  return (
+    `<div style="font:700 13px ${mono}">${esc(v.artcc)} ${esc(v.sector_id)} · ${esc(tier)}</div>${name}` +
+    `<div style="color:var(--ink-2);font-family:${mono}">${esc(band)}</div>`
+  );
 }
 
 /**
