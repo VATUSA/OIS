@@ -54,6 +54,7 @@ fn validate(req: &UpsertFacilityDocumentRequest) -> Result<(), ApiError> {
 
 #[utoipa::path(
     get, path = "/api/v1/facilities/{facility_id}/documents", tag = "facilities",
+    security(("session" = ["facilities.docs.read"]), ("api_key" = ["facilities.docs.read"])),
     params(("facility_id" = String, Path)),
     responses((status = 200, body = Vec<FacilityDocumentBody>), (status = 401))
 )]
@@ -81,6 +82,7 @@ pub async fn list_facility_documents(
 
 #[utoipa::path(
     post, path = "/api/v1/facilities/{facility_id}/documents", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path)), request_body = UpsertFacilityDocumentRequest,
     responses((status = 200, body = FacilityDocumentBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -111,6 +113,7 @@ pub async fn create_facility_document(
 
 #[utoipa::path(
     put, path = "/api/v1/facilities/{facility_id}/documents/{id}", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path), ("id" = String, Path)),
     request_body = UpsertFacilityDocumentRequest,
     responses((status = 200, body = FacilityDocumentBody), (status = 400), (status = 401), (status = 403), (status = 404))
@@ -144,6 +147,7 @@ pub async fn update_facility_document(
 
 #[utoipa::path(
     delete, path = "/api/v1/facilities/{facility_id}/documents/{id}", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]

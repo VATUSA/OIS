@@ -52,6 +52,7 @@ pub struct UserListQuery {
     get,
     path = "/api/v1/admin/users",
     tag = "access",
+    security(("session" = ["access.users.read"]), ("api_key" = ["access.users.read"]), ("service_account" = ["access.users.read"])),
     params(
         ("q" = Option<String>, Query, description = "Name substring or CID prefix"),
         ("page" = Option<i64>, Query, description = "1-based page (default 1)"),
@@ -84,6 +85,7 @@ pub async fn list_users(
     get,
     path = "/api/v1/access/catalog",
     tag = "access",
+    security(("session" = ["access.catalog.read"]), ("api_key" = ["access.catalog.read"]), ("service_account" = ["access.catalog.read"])),
     responses((status = 200, body = AccessCatalogBody), (status = 401))
 )]
 pub async fn get_access_catalog(
@@ -105,6 +107,7 @@ pub async fn get_access_catalog(
     get,
     path = "/api/v1/access/self",
     tag = "access",
+    security(("session" = ["access.self.read"])),
     responses((status = 200, body = SelfAccessBody), (status = 401))
 )]
 pub async fn get_self_access(
@@ -156,6 +159,7 @@ async fn held_groups(
     get,
     path = "/api/v1/admin/users/{cid}/access",
     tag = "access",
+    security(("session" = ["access.users.read"]), ("api_key" = ["access.users.read"]), ("service_account" = ["access.users.read"])),
     params(("cid" = i64, Path, description = "VATSIM CID")),
     responses((status = 200, body = UserAccessBody), (status = 401), (status = 404))
 )]
@@ -193,6 +197,7 @@ async fn fill_server_admin_permissions(
     post,
     path = "/api/v1/admin/users/{cid}/access",
     tag = "access",
+    security(("session" = ["access.users.update"])),
     params(("cid" = i64, Path, description = "VATSIM CID")),
     request_body = UpdateUserAccessRequest,
     responses((status = 200, body = UserAccessBody), (status = 400), (status = 401), (status = 403), (status = 404))
@@ -546,7 +551,8 @@ fn group_body(row: access_repo::GroupRow, permissions: Vec<String>) -> GroupBody
     get,
     path = "/api/v1/admin/groups",
     tag = "access",
-    responses((status = 200, body = Vec<GroupBody>), (status = 401))
+    responses((status = 200, body = Vec<GroupBody>), (status = 401)),
+    security(("session" = ["access.groups.read"]), ("api_key" = ["access.groups.read"]), ("service_account" = ["access.groups.read"]))
 )]
 pub async fn list_groups(
     State(state): State<AppState>,
@@ -574,7 +580,8 @@ pub async fn list_groups(
     path = "/api/v1/admin/groups",
     tag = "access",
     request_body = CreateGroupRequest,
-    responses((status = 200, body = GroupBody), (status = 400), (status = 401), (status = 403), (status = 409))
+    responses((status = 200, body = GroupBody), (status = 400), (status = 401), (status = 403), (status = 409)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn create_group(
     State(state): State<AppState>,
@@ -637,7 +644,8 @@ pub async fn create_group(
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
     request_body = UpdateGroupRequest,
-    responses((status = 200, body = GroupBody), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 200, body = GroupBody), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn update_group(
     State(state): State<AppState>,
@@ -724,7 +732,8 @@ pub async fn update_group(
     path = "/api/v1/admin/groups/{name}",
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
-    responses((status = 204), (status = 401), (status = 403), (status = 404), (status = 409))
+    responses((status = 204), (status = 401), (status = 403), (status = 404), (status = 409)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn delete_group(
     State(state): State<AppState>,
@@ -884,7 +893,8 @@ async fn audit_mapping(
     get,
     path = "/api/v1/admin/vatusa-role-mappings",
     tag = "access",
-    responses((status = 200, body = VatusaRoleMappingList), (status = 401), (status = 403))
+    responses((status = 200, body = VatusaRoleMappingList), (status = 401), (status = 403)),
+    security(("session" = ["access.groups.read"]), ("api_key" = ["access.groups.read"]), ("service_account" = ["access.groups.read"]))
 )]
 pub async fn list_vatusa_role_mappings(
     State(state): State<AppState>,
@@ -905,7 +915,8 @@ pub async fn list_vatusa_role_mappings(
     responses(
         (status = 200, body = VatusaRoleMappingBody),
         (status = 400), (status = 401), (status = 403), (status = 404), (status = 409)
-    )
+    ),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn create_vatusa_role_mapping(
     State(state): State<AppState>,
@@ -987,7 +998,8 @@ async fn create_mapping(
     path = "/api/v1/admin/vatusa-role-mappings/{id}",
     tag = "access",
     params(("id" = i64, Path, description = "Mapping id")),
-    responses((status = 204), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn delete_vatusa_role_mapping(
     State(state): State<AppState>,
@@ -2020,7 +2032,8 @@ pub struct MemberListQuery {
         ("page" = Option<i64>, Query, description = "1-based page"),
         ("page_size" = Option<i64>, Query, description = "Rows per page (default 25, max 100)")
     ),
-    responses((status = 200, body = GroupMemberPage), (status = 401), (status = 404))
+    responses((status = 200, body = GroupMemberPage), (status = 401), (status = 404)),
+    security(("session" = ["access.groups.read"]), ("api_key" = ["access.groups.read"]), ("service_account" = ["access.groups.read"]))
 )]
 pub async fn list_group_members(
     State(state): State<AppState>,
@@ -2167,7 +2180,8 @@ async fn change_membership(
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
     request_body = GroupMemberRequest,
-    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn add_group_member(
     State(state): State<AppState>,
@@ -2187,7 +2201,8 @@ pub async fn add_group_member(
     tag = "access",
     params(("name" = String, Path, description = "Group name")),
     request_body = GroupMemberRequest,
-    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("session" = ["access.groups.update"]))
 )]
 pub async fn remove_group_member(
     State(state): State<AppState>,

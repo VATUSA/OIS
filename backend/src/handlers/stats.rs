@@ -62,6 +62,7 @@ pub struct HistoryQuery {
     get,
     path = "/api/v1/stats/network/history",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("from" = Option<String>, Query, description = "RFC3339 start (default 7d ago)"),
         ("to" = Option<String>, Query, description = "RFC3339 end (default now)")
@@ -89,6 +90,7 @@ pub struct LimitQuery {
     get,
     path = "/api/v1/stats/airports/top",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("limit" = Option<i64>, Query, description = "Max airports (default 20)")),
     responses((status = 200, body = Vec<crate::models::KeyCountBody>), (status = 401))
 )]
@@ -105,6 +107,7 @@ pub async fn airports_top(
     get,
     path = "/api/v1/stats/airports/{icao}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 200, body = StatsAirportBody), (status = 401))
 )]
@@ -151,6 +154,7 @@ fn norm_opt(s: Option<String>) -> Option<String> {
     get,
     path = "/api/v1/stats/delays",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("kind" = Option<String>, Query, description = "departure | arrival (default departure)"),
         ("airport" = Option<String>, Query, description = "Filter to one airport ICAO"),
@@ -206,6 +210,7 @@ pub struct MovementsQuery {
     get,
     path = "/api/v1/stats/airports/{icao}/movements",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("dir" = Option<String>, Query, description = "arr | dep (default dep)"),
@@ -230,6 +235,7 @@ pub async fn airport_movements(
     get,
     path = "/api/v1/stats/members/{cid}/flights",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("cid" = i32, Path, description = "VATSIM CID"),
         ("limit" = Option<i64>, Query, description = "Max rows (default 50)")
@@ -257,6 +263,7 @@ fn parse_session_id(raw: &str) -> Result<i64, ApiError> {
     get,
     path = "/api/v1/stats/flights/{id}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("id" = String, Path, description = "Flight session id")),
     responses((status = 200, body = StatsFlightDetail), (status = 400), (status = 401), (status = 404))
 )]
@@ -278,6 +285,7 @@ pub async fn flight_detail(
     get,
     path = "/api/v1/stats/flights/{id}/track",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("id" = String, Path, description = "Flight session id")),
     responses((status = 200, body = StatsTrackBody), (status = 400), (status = 401), (status = 404))
 )]
@@ -323,6 +331,7 @@ pub async fn flight_track(
     get,
     path = "/api/v1/stats/captures",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     responses((status = 200, body = Vec<CaptureSummaryBody>), (status = 401))
 )]
 pub async fn list_captures(
@@ -354,6 +363,7 @@ pub async fn list_captures(
     delete,
     path = "/api/v1/stats/captures/{id}",
     tag = "stats",
+    security(("session" = ["stats.capture.delete"]), ("api_key" = ["stats.capture.delete"]), ("service_account" = ["stats.capture.delete"])),
     params(("id" = String, Path, description = "Capture id")),
     responses(
         (status = 204),
@@ -385,6 +395,7 @@ pub async fn delete_capture(
     post,
     path = "/api/v1/stats/captures",
     tag = "stats",
+    security(("session" = ["stats.capture.update"])),
     request_body = SaveCaptureRequest,
     responses((status = 200, body = CaptureSummaryBody), (status = 400), (status = 401), (status = 404))
 )]
@@ -432,6 +443,7 @@ pub struct ReplayQuery {
     get,
     path = "/api/v1/stats/captures/{id}/replay",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("id" = String, Path, description = "Capture id"),
         ("step" = Option<i64>, Query, description = "Sample spacing seconds (default 30)")
@@ -470,6 +482,7 @@ pub struct WindowReplayQuery {
     get,
     path = "/api/v1/stats/replay",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("from" = i64, Query, description = "Window start (Unix epoch seconds)"),
         ("to" = i64, Query, description = "Window end (Unix epoch seconds)"),
@@ -619,6 +632,7 @@ pub struct ChunkQuery {
     get,
     path = "/api/v1/stats/replay/positions",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("from" = i64, Query, description = "Window start (Unix seconds)"),
         ("to" = i64, Query, description = "Window end (Unix seconds)"),
@@ -683,6 +697,7 @@ async fn winds_for(
     get,
     path = "/api/v1/stats/hist/flow/{icao}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("icao" = String, Path, description = "Arrival airport ICAO"),
         ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
@@ -710,6 +725,7 @@ pub async fn hist_flow(
     get,
     path = "/api/v1/stats/hist/departures/{dep}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("dep" = String, Path, description = "Departure field: airport, TRACON, or ARTCC"),
         ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
@@ -737,6 +753,7 @@ pub async fn hist_departures(
     get,
     path = "/api/v1/stats/hist/atc",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = AtcBoard), (status = 400), (status = 401), (status = 503))
 )]
@@ -766,6 +783,7 @@ pub async fn hist_atc(
     get,
     path = "/api/v1/stats/hist/traffic",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401), (status = 503))
 )]
@@ -789,6 +807,7 @@ pub async fn hist_traffic(
     get,
     path = "/api/v1/stats/hist/runway/{icao}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
@@ -816,6 +835,7 @@ pub async fn hist_runway(
     get,
     path = "/api/v1/stats/hist/taxi/{icao}",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")
@@ -845,6 +865,7 @@ pub async fn hist_taxi(
     get,
     path = "/api/v1/stats/hist/fcas",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = Vec<crate::models::FcaBody>), (status = 400), (status = 401), (status = 503))
 )]
@@ -863,6 +884,7 @@ pub async fn hist_fcas(
     get,
     path = "/api/v1/stats/hist/tmis",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = Vec<crate::models::TmiBody>), (status = 400), (status = 401), (status = 503))
 )]
@@ -881,6 +903,7 @@ pub async fn hist_tmis(
     get,
     path = "/api/v1/stats/hist/gdps",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = Vec<crate::models::GdpBody>), (status = 400), (status = 401), (status = 503))
 )]
@@ -899,6 +922,7 @@ pub async fn hist_gdps(
     get,
     path = "/api/v1/stats/hist/ground-stops",
     tag = "stats",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(("at" = i64, Query, description = "Reconstruct instant (Unix epoch seconds)")),
     responses((status = 200, body = Vec<crate::models::GroundStopBody>), (status = 400), (status = 401), (status = 503))
 )]
@@ -920,6 +944,7 @@ pub async fn hist_ground_stops(
     get,
     path = "/api/v1/stats/storage-forecast",
     tag = "stats",
+    security(("session" = ["system.jobs.read"]), ("api_key" = ["system.jobs.read"]), ("service_account" = ["system.jobs.read"])),
     responses((status = 200, body = StorageForecastBody), (status = 401))
 )]
 pub async fn storage_forecast(

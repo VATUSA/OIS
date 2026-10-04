@@ -86,7 +86,8 @@ async fn require_edit(
 #[utoipa::path(
     get, path = "/api/v1/facility-map/{id}/config", tag = "flow",
     params(("id" = String, Path)),
-    responses((status = 200, body = FacilityMapConfigBody), (status = 400))
+    responses((status = 200, body = FacilityMapConfigBody), (status = 400)),
+    security(("session" = []), ("api_key" = []))
 )]
 pub async fn get_config(
     State(state): State<AppState>,
@@ -112,6 +113,7 @@ pub async fn get_config(
 
 #[utoipa::path(
     put, path = "/api/v1/facility-map/{id}/config", tag = "flow",
+    security(("session" = ["flow.facility_map.update"]), ("api_key" = ["flow.facility_map.update"])),
     params(("id" = String, Path)), request_body = UpsertFacilityMapConfigRequest,
     responses((status = 200, body = FacilityMapConfigBody), (status = 400), (status = 401), (status = 403))
 )]

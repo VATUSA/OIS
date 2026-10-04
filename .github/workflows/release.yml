@@ -27,6 +27,23 @@ jobs:
         with:
           generate_release_notes: true
 
+  # The OpenAPI document this release serves, pinned to its tag (#587), so an integrator can
+  # generate against a version instead of scraping a live server. Its own job so compiling the
+  # backend doesn't hold up the desktop builds; same dump as ci.yml's client-drift job.
+  openapi:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ois-backend --lib openapi::dump_openapi_json -- --exact --ignored
+      - run: cp /tmp/ois-openapi.json openapi.json
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: openapi.json
+
   desktop:
     # Builds, signs and uploads the desktop installers plus `latest.json`, which is the feed the
     # app's updater reads (see desktop/src-tauri/tauri.conf.json). Runs after `release` so the

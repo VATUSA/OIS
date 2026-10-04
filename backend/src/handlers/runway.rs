@@ -230,6 +230,7 @@ pub(crate) async fn build_board_from(
     get,
     path = "/api/v1/flow/runway/{icao}",
     tag = "flow",
+    security(("session" = ["flow.runway.read"]), ("api_key" = ["flow.runway.read"]), ("service_account" = ["flow.runway.read"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 200, body = RunwayBoard), (status = 401))
 )]
@@ -247,6 +248,7 @@ pub async fn get_runway(
     put,
     path = "/api/v1/flow/runway/{icao}",
     tag = "flow",
+    security(("session" = ["flow.runway.update"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     request_body = RunwayConfigRequest,
     responses((status = 200, body = RunwayBoard), (status = 401), (status = 503))
@@ -281,6 +283,7 @@ pub async fn put_runway(
     get,
     path = "/api/v1/flow/runway/{icao}/configs",
     tag = "flow",
+    security(("session" = ["flow.runway.read"]), ("api_key" = ["flow.runway.read"]), ("service_account" = ["flow.runway.read"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 200, body = Vec<SavedRunwayConfig>), (status = 401), (status = 503))
 )]
@@ -307,6 +310,7 @@ pub async fn list_saved_configs(
     put,
     path = "/api/v1/flow/runway/{icao}/configs/{name}",
     tag = "flow",
+    security(("session" = ["flow.runway.update"])),
     params(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("name" = String, Path, description = "Config name")
@@ -346,6 +350,7 @@ pub async fn save_config(
     delete,
     path = "/api/v1/flow/runway/{icao}/configs/{name}",
     tag = "flow",
+    security(("session" = ["flow.runway.update"]), ("api_key" = ["flow.runway.update"]), ("service_account" = ["flow.runway.update"])),
     params(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("name" = String, Path, description = "Config name")

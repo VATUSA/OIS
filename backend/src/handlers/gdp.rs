@@ -358,6 +358,7 @@ async fn build_board(
     get,
     path = "/api/v1/tmu/gdp",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.read"]), ("api_key" = ["tmu.gdp.read"]), ("service_account" = ["tmu.gdp.read"])),
     responses((status = 200, body = Vec<GdpBody>), (status = 401), (status = 503))
 )]
 pub async fn list_gdps(
@@ -374,6 +375,7 @@ pub async fn list_gdps(
     post,
     path = "/api/v1/tmu/gdp",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.create"])),
     request_body = CreateGdpRequest,
     responses((status = 200, body = GdpBody), (status = 400), (status = 401), (status = 503))
 )]
@@ -432,6 +434,7 @@ pub async fn create_gdp(
     put,
     path = "/api/v1/tmu/gdp/{id}",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.create"])),
     params(("id" = String, Path, description = "GDP id")),
     request_body = UpdateGdpRequest,
     responses((status = 200, body = GdpBoard), (status = 400), (status = 401), (status = 404), (status = 409), (status = 503))
@@ -519,6 +522,7 @@ pub async fn revise_gdp(
     get,
     path = "/api/v1/tmu/gdp/{id}/board",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.read"]), ("api_key" = ["tmu.gdp.read"]), ("service_account" = ["tmu.gdp.read"])),
     params(("id" = String, Path, description = "GDP id")),
     responses((status = 200, body = GdpBoard), (status = 401), (status = 404), (status = 503))
 )]
@@ -538,6 +542,7 @@ pub async fn get_gdp_board(
     post,
     path = "/api/v1/tmu/gdp/{id}/publish",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.publish"])),
     params(("id" = String, Path, description = "GDP id")),
     request_body(
         content = Option<PublishGdpRequest>,
@@ -665,6 +670,7 @@ async fn generate_gdp_advisory(
     post,
     path = "/api/v1/tmu/gdp/{id}/cancel",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.publish"]), ("api_key" = ["tmu.gdp.publish"]), ("service_account" = ["tmu.gdp.publish"])),
     params(("id" = String, Path, description = "GDP id")),
     responses((status = 200, body = GdpBody), (status = 401), (status = 409), (status = 503))
 )]
@@ -688,6 +694,7 @@ pub async fn cancel_gdp(
     delete,
     path = "/api/v1/tmu/gdp/{id}",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.delete"]), ("api_key" = ["tmu.gdp.delete"]), ("service_account" = ["tmu.gdp.delete"])),
     params(("id" = String, Path, description = "GDP id")),
     responses((status = 204), (status = 401), (status = 404), (status = 503))
 )]
@@ -709,6 +716,7 @@ pub async fn delete_gdp(
     post,
     path = "/api/v1/tmu/gdp/{id}/slots/{callsign}",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.publish"]), ("api_key" = ["tmu.gdp.publish"]), ("service_account" = ["tmu.gdp.publish"])),
     params(
         ("id" = String, Path, description = "GDP id"),
         ("callsign" = String, Path, description = "Flight callsign")
@@ -756,6 +764,7 @@ pub async fn lock_slot(
     delete,
     path = "/api/v1/tmu/gdp/{id}/slots/{callsign}",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.publish"]), ("api_key" = ["tmu.gdp.publish"]), ("service_account" = ["tmu.gdp.publish"])),
     params(
         ("id" = String, Path, description = "GDP id"),
         ("callsign" = String, Path, description = "Flight callsign")
@@ -784,6 +793,7 @@ pub async fn unlock_slot(
     post,
     path = "/api/v1/tmu/gdp/{id}/compress",
     tag = "tmu",
+    security(("session" = ["tmu.gdp.publish"]), ("api_key" = ["tmu.gdp.publish"]), ("service_account" = ["tmu.gdp.publish"])),
     params(("id" = String, Path, description = "GDP id")),
     responses((status = 200, body = GdpBoard), (status = 401), (status = 404), (status = 409), (status = 503))
 )]

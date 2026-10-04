@@ -125,47 +125,55 @@ permission!(StatsRead, ["stats", "data"], Read);
 permission!(StatsCaptureUpdate, ["stats", "capture"], Update);
 permission!(StatsCaptureDelete, ["stats", "capture"], Delete);
 
+/// Every `permission!` macro invocation as `(marker type, dotted permission name)`, parsed directly
+/// from this file's own source — the only way to enumerate every marker without a compile-time
+/// registry (no `inventory`/`linkme` dependency exists in this workspace, and source-parsing is the
+/// standard cheap-test pattern for this). Shared by the catalog sync tests below and the OpenAPI
+/// annotation test (#587), which checks each path's declared permission against its marker. Note:
+/// avoid writing the macro-call text `permission!` immediately followed by an open paren anywhere
+/// in this file's comments/strings, or the scan will find and misparse it too.
+#[cfg(test)]
+pub(crate) fn marker_permissions() -> Vec<(String, String)> {
+    let source = include_str!("permissions.rs");
+    // Split across two literals so this very source line doesn't match itself.
+    let needle = concat!("permission", "!(");
+    let mut markers = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(needle) {
+        rest = &rest[start + needle.len()..];
+        let end = rest.find(')').expect("unterminated permission! invocation");
+        let args = &rest[..end];
+        rest = &rest[end + 1..];
+
+        // `args` is `Name, ["seg1", "seg2"], Action` (whitespace/newlines allowed anywhere).
+        let marker = args.split(',').next().unwrap().trim().to_string();
+        let bracket_start = args.find('[').expect("permission! missing segment list");
+        let bracket_end = args.find(']').expect("permission! missing segment list");
+        let segments: Vec<&str> = args[bracket_start + 1..bracket_end]
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let action = args[bracket_end + 1..].trim_start_matches(',').trim();
+        markers.push((
+            marker,
+            format!("{}.{}", segments.join("."), action.to_ascii_lowercase()),
+        ));
+    }
+    markers
+}
+
 #[cfg(test)]
 mod sync_tests {
     use std::collections::HashSet;
 
     use sqlx::PgPool;
 
-    /// Every `permission!` macro invocation's derived dotted name (`segments.joined.action`),
-    /// parsed directly from this file's own source — the only way to enumerate every marker
-    /// without a compile-time registry (no `inventory`/`linkme` dependency exists in this
-    /// workspace, and source-parsing is the standard cheap-test pattern for this). Note: avoid
-    /// writing the macro-call text `permission!` immediately followed by an open paren anywhere
-    /// in this module's own comments/strings, or the scan below will find and misparse it too.
     fn parse_marker_names() -> Vec<String> {
-        let source = include_str!("permissions.rs");
-        // Split across two literals so this very source line doesn't match itself when the whole
-        // file (this test module included) gets scanned below.
-        let needle = concat!("permission", "!(");
-        let mut names = Vec::new();
-        let mut rest = source;
-        while let Some(start) = rest.find(needle) {
-            rest = &rest[start + needle.len()..];
-            let end = rest.find(')').expect("unterminated permission! invocation");
-            let args = &rest[..end];
-            rest = &rest[end + 1..];
-
-            // `args` is `Name, ["seg1", "seg2"], Action` (whitespace/newlines allowed anywhere).
-            let bracket_start = args.find('[').expect("permission! missing segment list");
-            let bracket_end = args.find(']').expect("permission! missing segment list");
-            let segments: Vec<&str> = args[bracket_start + 1..bracket_end]
-                .split(',')
-                .map(|s| s.trim().trim_matches('"'))
-                .filter(|s| !s.is_empty())
-                .collect();
-            let action = args[bracket_end + 1..].trim_start_matches(',').trim();
-            names.push(format!(
-                "{}.{}",
-                segments.join("."),
-                action.to_ascii_lowercase()
-            ));
-        }
-        names
+        super::marker_permissions()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
     }
 
     /// A `permission!` marker is meant to be grantable and documented, not just enforced — if it

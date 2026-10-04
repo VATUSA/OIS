@@ -39,6 +39,7 @@ fn generate_token() -> String {
     get,
     path = "/api/v1/admin/service-accounts",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.read"]), ("api_key" = ["service_accounts.read"]), ("service_account" = ["service_accounts.read"])),
     responses((status = 200, body = Vec<ServiceAccountBody>), (status = 401))
 )]
 pub async fn list_service_accounts(
@@ -53,6 +54,7 @@ pub async fn list_service_accounts(
     post,
     path = "/api/v1/admin/service-accounts",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.create"]), ("api_key" = ["service_accounts.create"]), ("service_account" = ["service_accounts.create"])),
     request_body = CreateServiceAccountRequest,
     responses((status = 200, description = "Created; token shown once", body = ServiceAccountTokenBody), (status = 400), (status = 401))
 )]
@@ -87,6 +89,7 @@ pub async fn create_service_account(
     post,
     path = "/api/v1/admin/service-accounts/{id}/rotate",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"])),
     params(("id" = String, Path, description = "Service account id")),
     responses((status = 200, description = "Rotated; new token shown once", body = ServiceAccountTokenBody), (status = 401), (status = 404))
 )]
@@ -108,6 +111,7 @@ pub async fn rotate_service_account(
     post,
     path = "/api/v1/admin/service-accounts/{id}/disable",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.delete"]), ("api_key" = ["service_accounts.delete"]), ("service_account" = ["service_accounts.delete"])),
     params(("id" = String, Path, description = "Service account id")),
     responses((status = 204, description = "Disabled + credentials revoked"), (status = 401), (status = 404))
 )]
@@ -137,6 +141,7 @@ fn first_unassignable<'a>(
     get,
     path = "/api/v1/admin/service-accounts/roles",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"])),
     responses(
         (status = 200, description = "Role names a service account may hold", body = Vec<String>),
         (status = 401)
@@ -158,6 +163,7 @@ pub async fn list_service_account_roles(
     put,
     path = "/api/v1/admin/service-accounts/{id}/roles",
     tag = "service-accounts",
+    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"])),
     params(("id" = String, Path, description = "Service account id")),
     request_body = SetServiceAccountRolesRequest,
     responses((status = 200, body = ServiceAccountBody), (status = 400), (status = 401), (status = 404))
