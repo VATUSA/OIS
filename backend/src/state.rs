@@ -66,6 +66,8 @@ pub struct AppState {
     pub data_refresh_in_flight: Arc<AtomicBool>,
     /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
     pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
+    /// Verified VATUSA webhook bodies seen recently, so a replayed delivery isn't acted on twice (#627).
+    pub webhook_replays: Arc<crate::handlers::webhooks::ReplayGuard>,
     /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
     /// clients, which then refetch via REST (see `crate::realtime`).
     pub events: crate::realtime::Events,
@@ -149,6 +151,7 @@ impl AppState {
                 winds_refreshed,
                 data_refresh_in_flight,
                 metar_cache,
+                webhook_replays: Arc::default(),
                 events,
                 jobs,
                 metrics: crate::metrics::handle(),
@@ -173,6 +176,7 @@ impl AppState {
             winds_refreshed,
             data_refresh_in_flight,
             metar_cache,
+            webhook_replays: Arc::default(),
             events,
             jobs,
             metrics: crate::metrics::handle(),
@@ -198,6 +202,7 @@ impl AppState {
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
+            webhook_replays: Arc::default(),
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
             metrics: crate::metrics::handle(),

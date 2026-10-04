@@ -16,6 +16,7 @@ pub const DOMAINS: &[&str] = &[
     "api_keys",
     "audit",
     "auth",
+    "diagnostics",
     "discord",
     "emails",
     "events",
@@ -157,6 +158,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "stats.data.read",
         "stats.capture.update",
         "stats.capture.delete",
+        // --- diagnostics: desktop "Send diagnostics" reports (#629) ---
+        "diagnostics.reports.read",
+        "diagnostics.reports.delete",
         // --- discord / integration: outbound-job queue (the bot) + guild config mapping ---
         "discord.config.read",
         "discord.config.update",

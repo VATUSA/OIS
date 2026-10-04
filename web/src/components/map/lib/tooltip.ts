@@ -41,6 +41,29 @@ function meteringHtml(f: MatchedFlight): string {
   return `<div style="font-family:'JetBrains Mono',ui-monospace,monospace">#${f.seq} · STA ${hhmmZulu(f.cross_time)} · ETA ${hhmmZulu(f.eta)} · ${delay}</div>`;
 }
 
+/**
+ * Whether the aircraft is the nearer of two overlapping hover targets to the cursor (#555), comparing
+ * their projected centres in screen pixels. A tie goes to the pill.
+ */
+export function nearerIsAircraft(
+  cursor: [number, number],
+  aircraft: [number, number],
+  pill: [number, number],
+): boolean {
+  const dist = ([x, y]: [number, number]) => Math.hypot(x - cursor[0], y - cursor[1]);
+  return dist(aircraft) < dist(pill);
+}
+
+type Projector = { project: (lngLat: [number, number]) => number[] };
+
+/** `[lon, lat]` → screen pixels through the pick's viewport, or `null` without one (as in unit tests). */
+function toScreen(info: PickingInfo, lon: number, lat: number): [number, number] | null {
+  const viewport = (info as { viewport?: Projector }).viewport;
+  if (!viewport) return null;
+  const [x, y] = viewport.project([lon, lat]);
+  return [x, y];
+}
+
 /** An ATC hover card for `a`, or no card at all when there's no anchor there. */
 function atcCard(a: AtcAnchor | null | undefined, style: Record<string, string>) {
   return a ? { html: atcHtml(a), style } : null;
@@ -82,16 +105,24 @@ export function mapTooltip({ aircraft = true }: { aircraft?: boolean } = {}) {
       // that draw a DEL/GND/TWR/ATIS stack there is usually a plane on the badge. #323 added this
       // re-pick but applied it only when aircraft cards were off, so with default settings the ATC
       // card could never render while aircraft tooltips visibly worked (#477).
-      //
-      // The pill wins the overlap: it is a small, deliberate target, and its card is the one a
-      // controller is reaching for when they hover an airport badge.
-      const pill = atcCard(objectUnder(info, "atc-hover") as AtcAnchor | null, style);
-      if (pill) return pill;
-      // Nothing underneath. With aircraft cards off that means no card, rather than an empty one.
-      if (!aircraft) return null;
+      const anchor = objectUnder(info, "atc-hover") as AtcAnchor | null;
       // The plain "aircraft" layer holds NormAircraft (actype/alt/gs); the matched (in-FCA) layers
       // hold MatchedFlight (aircraft_type/altitude/groundspeed + metering). Read whichever it carries.
       const d = info.object as (NormAircraft & Partial<MatchedFlight>) | undefined;
+      // When both overlap, the nearer target wins (#555). #477 gave the pill every overlap, which made
+      // the aircraft card unreachable at the staffed airports operators watch most. Comparing the
+      // cursor's distance to each centre keeps both reachable — nudge toward the one you want — and a
+      // tie (or no viewport to measure with) still goes to the pill, the smaller and more deliberate
+      // target. With aircraft cards off there is nothing to compare: the pill shows.
+      if (anchor) {
+        const plane = aircraft && d ? toScreen(info, d.lon, d.lat) : null;
+        const badge = toScreen(info, anchor.lon, anchor.lat);
+        if (!plane || !badge || !nearerIsAircraft([info.x, info.y], plane, badge)) {
+          return atcCard(anchor, style);
+        }
+      }
+      // With aircraft cards off and nothing underneath, no card rather than an empty one.
+      if (!aircraft) return null;
       if (!d) return null;
       const actype = d.actype || d.aircraft_type || "";
       const alt = d.alt ?? d.altitude;

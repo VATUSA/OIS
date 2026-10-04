@@ -1,21 +1,72 @@
 # VATUSA sync and role mapping
 
-> **Status: built (#548, 2026-10).** Member sync, the role → group mapping, and its editor. Mappings
-> ship **unseeded** — VATUSA grants nobody anything until an admin adds a mapping.
+> **Status: built (#548, #605, 2026-10).** A daily v3 pull of the whole division, the role → group
+> mapping, and its editor. Mappings ship **unseeded** — VATUSA grants nobody anything until an admin
+> adds a mapping.
 
 ## What is synced
 
-`backend/src/feed/vatusa.rs` fetches `GET /v2/user/{cid}` and `repos::vatusa::upsert_member` stores the
-member's details, roles (`identity.vatusa_roles`) and visits. It runs on three paths:
+| Path | API | When | What |
+|---|---|---|---|
+| `vatusa_division_pull` job | v3 `GET /v3/division/controllers` | daily; on demand from Background Tasks; when a webhook delivery says the roster changed | **every controller** and every role grant |
+| Sign-in | v2 `GET /v2/user/{cid}` | every login, **awaited** before the session is issued (5 s budget) | that one person |
 
-| Path | When | Bound |
-|---|---|---|
-| Sign-in | every login, **awaited** before the session is issued | 5 s budget, then finishes in the background |
-| Roster webhook | VATUSA notifies a roster change for a CID we know | single attempt, no retry |
-| `vatusa_reconcile` job | every 6 h, the 200 least-recently-synced members | listed on Background Tasks |
+**The pull** (`feed::vatusa::apply_division`, #605) seeds or refreshes every controller in
+`identity.users`, and **diffs** their roles and visits rather than rewriting them — 500 controllers per
+transaction, a handful of bulk statements each. 10,000 controllers with 1,500 role grants took **2.0 s**
+locally the first time and **0.2 s** on a rerun. Members whose roles changed are re-reconciled through
+the role mapping, below. Controllers no longer in the division lose their stored roles, and so the
+access mapped from them.
 
-Everything no-ops when `VATUSA_API_KEY` is unset. Role and facility codes are trimmed and uppercased on
-ingest.
+⚠️ **A truncated response is refused, not applied.** Absence from the pull strips roles, so an empty
+response, or one under half the members already synced, fails the run on Background Tasks and writes
+nothing.
+
+**Sign-in's v2 fetch is the one remaining v2 call, deliberately.** v3 carries no `discord_id`, which
+the bot resolves DMs through, and sign-in makes a brand-new member correct before the next daily pull.
+The pull therefore **never touches Discord mappings** — a missing field is not a cleared link. A source
+test fails if a second v2 call appears.
+
+**Seeded users** — controllers who have never signed in — have no audit actor and `last_login_at` null.
+The admin user browser and search show only people who have signed in, **except on an exact CID
+match**, so an admin can still grant access before someone's first sign-in. Sign-in owns names and
+email (from VATSIM Connect); the pull never overwrites them.
+
+v3 marks a division-wide role with facility `*`; OIS stores it as **`ZHQ`**, the marker v2 used, so the
+national mapping below works whichever API a role came from. Codes are trimmed and uppercased.
+
+Everything no-ops when `VATUSA_API_KEY` is unset.
+
+## The division webhook
+
+v3 scopes a webhook to the calling key, so the division has **one** (it replaced 22 per-facility
+registrations, deleted on VATUSA's side by the first registration). VATUSA returns its secret **once**,
+and verifying a delivery's HMAC needs the secret itself, so it can't be hashed like every other
+credential: it is stored **encrypted** with XChaCha20-Poly1305 under `OIS_SECRET_KEY`
+(`backend/src/secrets.rs`), in `identity.vatusa_webhook`.
+
+The receiver, `POST /api/v1/webhooks/vatusa`, verifies `X-Mithril-Signature` in constant time and, on a
+`roster_change`, **triggers the division pull** — one request for everyone, with a burst of deliveries
+coalesced into a single run. Registration runs at startup and is re-checked after every pull: a webhook
+missing from VATUSA's list, written under another key, or unreadable is deleted and registered again.
+There is no re-encryption path, by design — the webhook is disposable.
+
+Without `OIS_PUBLIC_URL` or `OIS_SECRET_KEY` there is simply no webhook; the daily pull keeps everyone
+current regardless.
+
+### Replay protection
+
+The HMAC proves who signed a body, not when, so a captured delivery would verify forever (#627). The
+preferred fix binds the signature to a moment: reject a signed timestamp outside a window. v3 offers
+nothing to bind to, though. Its spec documents no delivery schema and no signed timestamp header, and
+VATUSA has not been asked to add one. So the receiver **dedupes** instead: it remembers the SHA-256 of
+every *verified* body (`ReplayGuard` in `backend/src/handlers/webhooks.rs`) and acknowledges a repeat
+with `200` without acting on it. A body is forgotten once 10 minutes pass without it being seen again.
+
+The set is in memory and per process. A restart forgets it, and each replica guards alone. An identical
+body that VATUSA itself re-sends inside the window is skipped too. All three are acceptable while a
+delivery only brings the idempotent, coalesced pull forward. If the receiver ever starts acting on a
+payload's contents, revisit this with VATUSA (a signed timestamp) or move the set to Postgres.
 
 ## Role → group mapping
 
@@ -50,17 +101,10 @@ unrestricted (`VATUSA_STAFF` is server-admin only). **System groups — `SERVER_
 `SERVICE_APP` — can never be mapped**, even by a server admin: `SERVER_ADMIN` has no `role_permissions`
 for the gate to check, so without that refusal VATUSA could become a source of server admins.
 
-## Known gap: does the webhook fire for role changes?
+## Freshness
 
-**Unverified against the live VATUSA contract.** `changed_cids` takes the CID from `row_pk` for a
-`controllers` row and otherwise from `old_value.cid` / `new_value.cid`. A change to VATUSA's `roles`
-table therefore triggers a sync **only if VATUSA includes `cid` in the role row snapshot** — and nobody
-has confirmed it does. It was deliberately not probed against VATUSA's production API.
-
-Until it is confirmed, **the reconcile job is the guaranteed path**: 200 members per 6 h is 800 a day,
-so once there are more than ~800 synced users, a role change can take longer than a day to reach OIS
-access, and that delay grows with the user count. Sign-in is always fresh — a member who logs in is
-reconciled at that moment.
-
-To close the gap: confirm the `roles` webhook payload with VATUSA, or capture one delivery from the
-receiver's logs.
+Every controller is at most **a day** stale, whatever the division's size — the old per-member reconcile
+reached ≤ 800 members a day, so its staleness grew with the user count. A webhook delivery brings the
+pull forward. Whether VATUSA sends one for a *role* change specifically is still unverified against the
+live contract (v3 documents no delivery schema); it no longer matters for correctness, only for how soon
+inside that day a change lands. Sign-in is always fresh for the person signing in.
