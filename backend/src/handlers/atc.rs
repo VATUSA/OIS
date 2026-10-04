@@ -106,7 +106,9 @@ pub(crate) fn center_artcc(prefix: &str) -> Option<String> {
         "MIA" => "ZMA",
         "MSP" => "ZMP",
         "OAK" => "ZOA",
-        "OO" | "OOR" | "OORO" => "ZAK",
+        // San Francisco Oceanic (`SF`/`SFR`/`SFRO`, VATSpy FIR `KZA1`) draws on the `KZAK` boundary:
+        // it is Oakland Oceanic airspace under another callsign, not a facility of its own (#580).
+        "OO" | "OOR" | "OORO" | "SF" | "SFR" | "SFRO" => "ZAK",
         "SEA" => "ZSE",
         "SLC" => "ZLC",
         "ANC" => "ZAN",
@@ -362,6 +364,18 @@ mod tests {
         // `ZMO` used to appear in the table as an alias for ZMA; it never fired, because this
         // branch answers first. Pinning it stops the arm being reintroduced.
         assert_eq!(center_artcc("ZMO"), Some("ZMO".to_string()));
+    }
+
+    /// #580: VATSpy's San Francisco Oceanic rows (`KZA1`) use the `KZAK` boundary, so they are
+    /// Oakland Oceanic positions. Before, all three fell through to `None` and the controller was
+    /// neither drawn nor counted as American.
+    #[test]
+    fn san_francisco_oceanic_is_oakland_oceanic() {
+        for prefix in ["SF", "SFR", "SFRO"] {
+            assert_eq!(center_artcc(prefix), Some("ZAK".to_string()), "{prefix}");
+        }
+        // San Francisco *International* is an airport, decided by the airport/IATA path, not here.
+        assert_eq!(center_artcc("SFO"), None);
     }
 
     #[test]
