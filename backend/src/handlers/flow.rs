@@ -2475,8 +2475,7 @@ pub async fn clear_release(
         release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     }
     // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
-    let deleted =
-        flow_repo::delete_release(pool, &id, &callsign, version, by.machine_actor()).await?;
+    let deleted = flow_repo::delete_release(pool, &id, &callsign, version, &by).await?;
     if !deleted && version.is_some() {
         return Err(ApiError::PreconditionFailed {
             etag: holder.map(|h| h.version),

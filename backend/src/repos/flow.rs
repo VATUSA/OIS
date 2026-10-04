@@ -588,14 +588,16 @@ pub async fn swap_releases(
     Ok(result.rows_affected() == 2)
 }
 
-/// Clear a release, only at `version` when given and, for a machine, only if `owner` holds it
-/// (#585). Returns whether a row was removed.
+/// Clear a release, only at `version` when given and, for a machine, only if it already holds it
+/// (#585). The holder comes from `by` here, as in the update and swap writers, rather than from the
+/// caller: no route can reach the race this clause closes, so a call site that dropped it would go
+/// unnoticed. Returns whether a row was removed.
 pub async fn delete_release(
     pool: &PgPool,
     fca_id: &str,
     callsign: &str,
     version: Option<i64>,
-    owner: Option<&str>,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "delete from flow.fca_release \
@@ -605,7 +607,7 @@ pub async fn delete_release(
     .bind(fca_id)
     .bind(callsign)
     .bind(version)
-    .bind(owner)
+    .bind(by.machine_actor())
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
