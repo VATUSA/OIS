@@ -1285,7 +1285,7 @@ async fn a_machine_conditional_write_never_lands_on_a_persons_release(pool: PgPo
     .unwrap();
     assert_eq!(written, None, "refused in the write");
     assert!(
-        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), machine.machine_actor())
+        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), &machine)
             .await
             .unwrap(),
         "a machine's clear at the matching version does not remove a person's release"
@@ -1392,7 +1392,7 @@ async fn a_machine_conditional_write_still_reaches_its_own_release(pool: PgPool)
     .unwrap();
     assert_eq!(v2, Some(v + 1));
     assert!(
-        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), machine.machine_actor())
+        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), &machine)
             .await
             .unwrap()
     );
@@ -1423,7 +1423,7 @@ async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPo
         None
     );
     assert!(
-        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), machine.machine_actor())
+        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), &machine)
             .await
             .unwrap()
     );
@@ -1439,7 +1439,7 @@ async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPo
             .unwrap()
             .unwrap();
     assert!(
-        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), machine.machine_actor())
+        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), &machine)
             .await
             .unwrap()
     );

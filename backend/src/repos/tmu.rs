@@ -618,12 +618,14 @@ pub async fn get_issued_cfr(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Release (delete) a CFR, only at `version` when given (#585). Returns whether a row was removed.
+/// Release (delete) a CFR, only at `version` when given and, for a machine, only if it already
+/// holds it (#585). The holder comes from `by`, not the caller, for the reason `delete_release`
+/// gives. Returns whether a row was removed.
 pub async fn delete_issued_cfr(
     pool: &PgPool,
     callsign: &str,
     version: Option<i64>,
-    owner: Option<&str>,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "delete from tmu.issued_cfrs where callsign = $1 and ($2::bigint is null or version = $2) \
@@ -631,7 +633,7 @@ pub async fn delete_issued_cfr(
     )
     .bind(callsign)
     .bind(version)
-    .bind(owner)
+    .bind(by.machine_actor())
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
