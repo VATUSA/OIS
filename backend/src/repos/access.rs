@@ -87,7 +87,7 @@ pub async fn find_current_api_key_by_actor(
 ) -> Result<Option<CurrentApiKey>, ApiError> {
     sqlx::query_as::<_, CurrentApiKey>(
         r#"
-        select k.id, k.owner_user_id, k.prefix, k.name
+        select k.id, k.owner_user_id, k.prefix, k.name, k.rate_limit_per_min
         from access.actors a
         join access.api_keys k on k.id = a.api_key_id
         join identity.users u on u.id = k.owner_user_id
@@ -110,7 +110,7 @@ pub async fn find_current_service_account_by_actor(
 ) -> Result<Option<CurrentServiceAccount>, ApiError> {
     sqlx::query_as::<_, CurrentServiceAccount>(
         r#"
-        select sa.id, sa.key, sa.name
+        select sa.id, sa.key, sa.name, sa.rate_limit_per_min
         from access.actors a
         join access.service_accounts sa on sa.id = a.service_account_id
         where a.id = $1 and a.actor_type = 'service_account' and sa.status = 'active'
