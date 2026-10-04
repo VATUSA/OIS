@@ -56,6 +56,17 @@ pub async fn list_event_fcas(pool: &PgPool, event_id: i64) -> Result<Vec<FcaBody
     .map_err(|_| ApiError::Internal)
 }
 
+/// Whether the FCA `id` is soft-deleted. `false` for an id that doesn't exist, which the caller has
+/// already turned into a 404 through [`get_fca`].
+pub async fn fca_is_deleted(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    sqlx::query_scalar::<_, bool>("select deleted_at is not null from flow.fca where id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map(|deleted| deleted.unwrap_or(false))
+        .map_err(|_| ApiError::Internal)
+}
+
 pub async fn get_fca(pool: &PgPool, id: &str) -> Result<Option<FcaBody>, ApiError> {
     sqlx::query_as::<_, FcaBody>(&format!("{FCA_SELECT} where f.id = $1"))
         .bind(id)

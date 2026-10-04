@@ -136,7 +136,8 @@ pub struct ReportListQuery {
         ("page" = Option<i64>, Query, description = "1-based page (default 1)"),
         ("page_size" = Option<i64>, Query, description = "Page size (default 50, max 100)")
     ),
-    responses((status = 200, body = DiagnosticsReportPage), (status = 401))
+    responses((status = 200, body = DiagnosticsReportPage), (status = 401)),
+    security(("session" = ["diagnostics.reports.read"]), ("api_key" = ["diagnostics.reports.read"]), ("service_account" = ["diagnostics.reports.read"]))
 )]
 pub async fn list_reports(
     State(state): State<AppState>,
@@ -159,7 +160,8 @@ pub async fn list_reports(
     path = "/api/v1/admin/diagnostics/{id}",
     tag = "diagnostics",
     params(("id" = String, Path, description = "Report id")),
-    responses((status = 200, body = DiagnosticsReport), (status = 401), (status = 404))
+    responses((status = 200, body = DiagnosticsReport), (status = 401), (status = 404)),
+    security(("session" = ["diagnostics.reports.read"]), ("api_key" = ["diagnostics.reports.read"]), ("service_account" = ["diagnostics.reports.read"]))
 )]
 pub async fn get_report(
     State(state): State<AppState>,
@@ -183,7 +185,8 @@ pub async fn get_report(
         (status = 200, description = "The gzipped log files", content_type = "application/gzip", body = Vec<u8>),
         (status = 401),
         (status = 404)
-    )
+    ),
+    security(("session" = ["diagnostics.reports.read"]), ("api_key" = ["diagnostics.reports.read"]), ("service_account" = ["diagnostics.reports.read"]))
 )]
 pub async fn get_report_logs(
     State(state): State<AppState>,
@@ -211,7 +214,8 @@ pub async fn get_report_logs(
     path = "/api/v1/admin/diagnostics/{id}",
     tag = "diagnostics",
     params(("id" = String, Path, description = "Report id")),
-    responses((status = 204), (status = 401), (status = 404))
+    responses((status = 204), (status = 401), (status = 404)),
+    security(("session" = ["diagnostics.reports.delete"]), ("api_key" = ["diagnostics.reports.delete"]), ("service_account" = ["diagnostics.reports.delete"]))
 )]
 pub async fn delete_report(
     State(state): State<AppState>,

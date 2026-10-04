@@ -15,7 +15,8 @@ use crate::{
     responses(
         (status = 200, body = Vec<SectorVolumeBody>),
         (status = 401, description = "Not signed in, or without `flow.sectors.read`"),
-    )
+    ),
+    security(("session" = ["flow.sectors.read"]), ("api_key" = ["flow.sectors.read"]), ("service_account" = ["flow.sectors.read"]))
 )]
 pub async fn list_sectors(
     State(state): State<AppState>,

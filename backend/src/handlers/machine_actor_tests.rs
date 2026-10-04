@@ -3625,3 +3625,62 @@ async fn a_scoped_service_account_deletes_only_its_artccs_fcas(pool: PgPool) {
     let (status, _) = call(&state, http::Method::DELETE, &uri("ZDC"), &bearer, None).await;
     assert_eq!(status, http::StatusCode::NO_CONTENT);
 }
+
+// ---- #586: the public read surface, through the real router ----
+
+/// #587 review, carried past #607: the document offers a credential exactly where that credential
+/// is let through. `list_all_airport_configs` took `Principal::require` when this was written, so a
+/// service account was refused; #607 migrated it to `Actor`, so one holding the path's permission is
+/// now served — and the annotation says so. The pairing is the invariant, not either verdict.
+#[sqlx::test]
+async fn a_machine_credential_is_offered_exactly_where_it_is_let_through(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, bearer) = service_account(&pool, "events.plan.read", None).await;
+
+    let (status, _) = call(
+        &state,
+        http::Method::GET,
+        "/api/v1/airport-configs",
+        &bearer,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+
+    let spec =
+        serde_json::to_value(<crate::openapi::ApiDoc as utoipa::OpenApi>::openapi()).unwrap();
+    let offered = &spec["paths"]["/api/v1/airport-configs"]["get"]["security"];
+    assert!(
+        offered
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|alt| alt.get("service_account").is_some()),
+        "served a service account but does not offer one: {offered}"
+    );
+}
+
+/// The other direction: a handler that demands the session user before anything else refuses an API
+/// key, so the document must not offer one. Creating a group is such a handler — the group editor is
+/// user-only by design (#631), unlike the TMU writes #652 opened to machines.
+#[sqlx::test]
+async fn a_session_first_handler_neither_accepts_nor_offers_an_api_key(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, key) = api_key(&pool, "access.groups.update").await;
+    let (status, _) = call(
+        &state,
+        http::Method::POST,
+        "/api/v1/admin/groups",
+        &key,
+        Some(json!({"name": "TEST_GROUP", "reason": "ratchet"})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+
+    let spec =
+        serde_json::to_value(<crate::openapi::ApiDoc as utoipa::OpenApi>::openapi()).unwrap();
+    assert_eq!(
+        spec["paths"]["/api/v1/admin/groups"]["post"]["security"],
+        json!([{ "session": ["access.groups.update"] }]),
+    );
+}

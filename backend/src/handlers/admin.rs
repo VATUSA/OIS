@@ -19,6 +19,7 @@ use crate::{
     get,
     path = "/api/v1/admin/summary",
     tag = "system",
+    security(("session" = []), ("api_key" = []), ("service_account" = [])),
     responses((status = 200, body = AdminSummaryBody), (status = 401))
 )]
 pub async fn get_admin_summary(

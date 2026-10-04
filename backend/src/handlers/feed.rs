@@ -50,6 +50,7 @@ pub struct FeedStatusBody {
     get,
     path = "/api/v1/feed/status",
     tag = "feed",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     responses((status = 200, body = FeedStatusBody), (status = 401))
 )]
 pub async fn feed_status(
@@ -173,6 +174,7 @@ pub(crate) async fn flow_for(
     get,
     path = "/api/v1/tmu/flow/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("icao" = String, Path, description = "Arrival airport ICAO")),
     responses((status = 200, body = crate::feed::flow::Flow), (status = 401), (status = 503))
 )]
@@ -196,6 +198,7 @@ pub struct AadcQuery {
     get,
     path = "/api/v1/tmu/flow/{icao}/aadc",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(
         ("icao" = String, Path, description = "Arrival airport ICAO"),
         ("bucket_min" = Option<i32>, Query, description = "Bucket width in minutes: 15, 30, or 60"),
@@ -289,6 +292,7 @@ fn effective_aar(
     get,
     path = "/api/v1/tmu/demand",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     responses(
         (status = 200, body = Vec<crate::models::AirportDemandBody>),
         (status = 401),
@@ -470,6 +474,7 @@ pub async fn airport_demand(
     get,
     path = "/api/v1/tmu/taxi/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 200, body = crate::feed::taxi::TaxiField), (status = 401))
 )]
@@ -496,6 +501,7 @@ pub async fn taxi_stats(
     get,
     path = "/api/v1/tmu/departures/{dep}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("dep" = String, Path, description = "Departure field: airport, TRACON, or ARTCC")),
     responses((status = 200, body = crate::models::DeparturesResponse), (status = 401), (status = 503))
 )]
@@ -664,6 +670,7 @@ async fn require_cfr_scope(
     post,
     path = "/api/v1/tmu/cfr",
     tag = "tmu",
+    security(("session" = ["tmu.cfr.assign"]), ("api_key" = ["tmu.cfr.assign"]), ("service_account" = ["tmu.cfr.assign"])),
     params(
         ("If-Match" = Option<String>, Header, description = "Re-issue only this CFR version (#585)"),
         ("If-None-Match" = Option<String>, Header, description = "`*`: issue only if the flight holds no CFR (#585)")
@@ -784,6 +791,7 @@ pub async fn issue_cfr(
     delete,
     path = "/api/v1/tmu/cfr/{callsign}",
     tag = "tmu",
+    security(("session" = ["tmu.cfr.assign"]), ("api_key" = ["tmu.cfr.assign"]), ("service_account" = ["tmu.cfr.assign"])),
     params(
         ("callsign" = String, Path, description = "Flight callsign"),
         ("If-Match" = Option<String>, Header, description = "Release only this CFR version (#585)")

@@ -40,6 +40,17 @@ fn close_paren(src: &str, open: usize) -> usize {
         } else {
             match c {
                 b'"' => in_str = true,
+                // A char literal — `')'`, `'\\''` — must be skipped whole so its paren is not
+                // counted (`permissions.rs` has `.find(')')` since #586). A lifetime (`&'static str`)
+                // opens with the same byte and must NOT be skipped, so only advance past something
+                // that actually closes like a char literal.
+                b'\'' => {
+                    let esc = bytes.get(i + 1) == Some(&b'\\');
+                    let end = if esc { i + 3 } else { i + 2 };
+                    if bytes.get(end) == Some(&b'\'') {
+                        i = end;
+                    }
+                }
                 b'(' => depth += 1,
                 b')' => {
                     depth -= 1;
@@ -95,6 +106,10 @@ fn scan_routes(names: &BTreeMap<String, String>) -> Vec<Route> {
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .filter(|p| {
+            !p.file_stem()
+                .is_some_and(|s| s.to_string_lossy().ends_with("_tests"))
+        })
         .collect();
     files.sort();
     for file in files {

@@ -110,6 +110,7 @@ async fn refresh_gates_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<()
 
 #[utoipa::path(
     get, path = "/api/v1/airports/{icao}/surface", tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("icao" = String, Path)),
     responses((status = 200, body = AirportSurfaceBody), (status = 401))
 )]
@@ -151,6 +152,7 @@ pub async fn get_airport_surface(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/gates", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportGateRequest,
     responses((status = 200, body = AirportGateBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -175,6 +177,7 @@ pub async fn create_airport_gate(
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/gates/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportGateRequest,
     responses((status = 200, body = AirportGateBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -206,6 +209,7 @@ pub async fn update_airport_gate(
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/gates/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
@@ -231,6 +235,7 @@ pub async fn delete_airport_gate(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/ramp-areas", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportRampAreaRequest,
     responses((status = 200, body = AirportRampAreaBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -255,6 +260,7 @@ pub async fn create_airport_ramp_area(
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/ramp-areas/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportRampAreaRequest,
     responses((status = 200, body = AirportRampAreaBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -285,6 +291,7 @@ pub async fn update_airport_ramp_area(
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/ramp-areas/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
@@ -309,6 +316,7 @@ pub async fn delete_airport_ramp_area(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/taxiways", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportTaxiwayRequest,
     responses((status = 200, body = AirportTaxiwayBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -333,6 +341,7 @@ pub async fn create_airport_taxiway(
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/taxiways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportTaxiwayRequest,
     responses((status = 200, body = AirportTaxiwayBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -363,6 +372,7 @@ pub async fn update_airport_taxiway(
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/taxiways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
@@ -387,6 +397,7 @@ pub async fn delete_airport_taxiway(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/runways", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportRunwayRequest,
     responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -411,6 +422,7 @@ pub async fn create_airport_runway(
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportRunwayRequest,
     responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
@@ -441,6 +453,7 @@ pub async fn update_airport_runway(
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
@@ -465,6 +478,7 @@ pub async fn delete_airport_runway(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/surface/repull-faa", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)),
     responses(
         (status = 200, body = FaaRepullResult), (status = 401), (status = 403),

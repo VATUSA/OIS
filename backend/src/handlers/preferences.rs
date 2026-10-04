@@ -24,6 +24,7 @@ const MAX_PREF_BYTES: usize = 256 * 1024;
     get,
     path = "/api/v1/me/preferences/{namespace}",
     tag = "auth",
+    security(("session" = ["auth.profile.read"])),
     params(("namespace" = String, Path, description = "Preference namespace, e.g. \"dashboard\"")),
     responses((status = 200, body = serde_json::Value), (status = 401))
 )]
@@ -45,6 +46,7 @@ pub async fn get_preferences(
     put,
     path = "/api/v1/me/preferences/{namespace}",
     tag = "auth",
+    security(("session" = ["auth.profile.read"])),
     params(("namespace" = String, Path, description = "Preference namespace, e.g. \"dashboard\"")),
     request_body = serde_json::Value,
     responses((status = 200, body = serde_json::Value), (status = 400), (status = 401))

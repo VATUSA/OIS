@@ -54,7 +54,7 @@ type FacAction =
 export function AddWidgetMenu({ onAdd }: { onAdd: (widget: Widget) => void }) {
   const prompt = usePrompt();
   const [facAction, setFacAction] = useState<FacAction | null>(null);
-  // Menu curation, not a security boundary: `/api/v1/flow/atc` is readable by any signed-in user.
+  // Menu curation, not a security boundary: `/api/v1/flow/atc` is public (no credential, #586).
   // A facility controller simply has no use for a national board, so it isn't offered to them —
   // the same `tmu_national` test `lib/restriction-scope.ts:17` uses to pick a default audience.
   const me = useMe();

@@ -110,6 +110,7 @@ pub async fn get_config(
 
 #[utoipa::path(
     put, path = "/api/v1/facility-map/{id}/config", tag = "flow",
+    security(("session" = ["flow.facility_map.update"]), ("api_key" = ["flow.facility_map.update"]), ("service_account" = ["flow.facility_map.update"])),
     params(("id" = String, Path)), request_body = UpsertFacilityMapConfigRequest,
     responses((status = 200, body = FacilityMapConfigBody), (status = 400), (status = 401), (status = 403))
 )]

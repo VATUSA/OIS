@@ -16,12 +16,14 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
+        middleware::ensure_permission,
         permissions::{
-            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
+            EventsPlanRead, FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete,
+            FlowRouteUpdate, StatsRead,
         },
         principal::{Actor, Principal},
-        require_permission::RequirePermission,
+        require_permission::{Permission, RequirePermission},
     },
     errors::ApiError,
     feed::{
@@ -284,8 +286,9 @@ pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     get,
     path = "/api/v1/flow/fcas",
     tag = "flow",
-    responses((status = 200, body = Vec<FcaBody>), (status = 401))
+    responses((status = 200, body = Vec<FcaBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) lists FCAs signed out.
 pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     Ok(Json(flow_repo::list_fcas(pool).await?))
@@ -295,6 +298,7 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
     post,
     path = "/api/v1/flow/fcas",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403))
 )]
@@ -320,6 +324,7 @@ pub async fn create_fca(
     put,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403), (status = 404))
@@ -360,6 +365,7 @@ pub async fn update_fca(
     delete,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
+    security(("session" = ["flow.fca.delete"]), ("api_key" = ["flow.fca.delete"]), ("service_account" = ["flow.fca.delete"])),
     params(("id" = String, Path, description = "FCA id")),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
@@ -456,8 +462,9 @@ pub struct RoutesQuery {
     path = "/api/v1/flow/routes",
     tag = "flow",
     params(("artcc" = Option<String>, Query, description = "Scope to one ARTCC (+ global routes)")),
-    responses((status = 200, body = Vec<RouteBody>), (status = 401))
+    responses((status = 200, body = Vec<RouteBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw routes signed out.
 pub async fn list_routes(
     State(state): State<AppState>,
     Query(q): Query<RoutesQuery>,
@@ -494,6 +501,7 @@ async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, A
     post,
     path = "/api/v1/flow/routes",
     tag = "flow",
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"]), ("service_account" = ["flow.route.update"])),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401))
 )]
@@ -522,6 +530,7 @@ pub async fn create_route(
     put,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"]), ("service_account" = ["flow.route.update"])),
     params(("id" = String, Path, description = "Route id")),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401), (status = 404))
@@ -557,6 +566,7 @@ pub async fn update_route(
     delete,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
+    security(("session" = ["flow.route.delete"]), ("api_key" = ["flow.route.delete"]), ("service_account" = ["flow.route.delete"])),
     params(("id" = String, Path, description = "Route id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -588,8 +598,9 @@ pub async fn delete_route(
     get,
     path = "/api/v1/flow/counts",
     tag = "flow",
-    responses((status = 200, body = std::collections::HashMap<String, i64>), (status = 401))
+    responses((status = 200, body = std::collections::HashMap<String, i64>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows FCA counts signed out.
 pub async fn fca_counts(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, i64>>, ApiError> {
@@ -681,8 +692,9 @@ pub async fn fca_counts(
     path = "/api/v1/flow/aircraft/{callsign}/route",
     tag = "flow",
     params(("callsign" = String, Path, description = "Aircraft callsign")),
-    responses((status = 200, body = AircraftRoute), (status = 401), (status = 404))
+    responses((status = 200, body = AircraftRoute), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw a selected flight's route signed out.
 pub async fn aircraft_route(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
@@ -784,6 +796,7 @@ pub async fn aircraft_route(
     post,
     path = "/api/v1/flow/resolve-routes",
     tag = "flow",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     request_body = Vec<ResolveRouteRequest>,
     responses((status = 200, body = Vec<ResolvedRoute>), (status = 401))
 )]
@@ -842,8 +855,9 @@ fn build_data_status(state: &AppState) -> DataStatus {
     get,
     path = "/api/v1/flow/data-status",
     tag = "flow",
-    responses((status = 200, body = DataStatus), (status = 401))
+    responses((status = 200, body = DataStatus))
 )]
+/// Public by design, no credential (#586): the public FCA overview shows data freshness signed out.
 pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     Json(build_data_status(&state))
 }
@@ -1064,6 +1078,7 @@ pub(crate) async fn build_flight_advisory(
     get,
     path = "/api/v1/me/flight",
     tag = "public",
+    security(("session" = [])),
     responses((status = 200, body = FlightImpact), (status = 401))
 )]
 pub async fn my_flight(
@@ -1096,8 +1111,9 @@ pub async fn my_flight(
     get,
     path = "/api/v1/flow/route-coverage",
     tag = "flow",
-    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 401), (status = 503))
+    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 503))
 )]
+/// Public by design, no credential (#586): the public FCA overview's coverage panel renders signed out.
 pub async fn route_coverage(
     State(state): State<AppState>,
 ) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
@@ -1120,6 +1136,7 @@ pub struct ValidateFixesQuery {
 /// typos (e.g. `MLLETT` for `MLLET`) that would silently exclude matching traffic.
 #[utoipa::path(
     get, path = "/api/v1/flow/validate-fixes", tag = "flow",
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(("fixes" = Option<String>, Query, description = "Space/comma-separated fix tokens")),
     responses((status = 200, body = FixValidationBody), (status = 401))
 )]
@@ -1177,6 +1194,7 @@ impl Drop for DataRefreshClaim<'_> {
     post,
     path = "/api/v1/flow/data-refresh",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     responses((status = 200, body = DataStatus), (status = 401), (status = 409))
 )]
 pub async fn data_refresh(
@@ -1207,8 +1225,9 @@ pub async fn data_refresh(
     get,
     path = "/api/v1/flow/traffic",
     tag = "flow",
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>))
 )]
+/// Public by design, no credential (#586): live traffic on the public FCA overview, facility map and /pilot, signed out.
 pub async fn list_traffic(State(state): State<AppState>) -> Result<Response, ApiError> {
     let (snapshot, cache) = {
         let feed = state.feed.read().await;
@@ -1253,8 +1272,9 @@ pub struct ProjectQuery {
     path = "/api/v1/flow/traffic/projected",
     tag = "flow",
     params(("offset_sec" = i64, Query, description = "Seconds ahead to project (0-5400)")),
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400))
 )]
+/// Public by design, no credential (#586): the public FCA overview's time slider projects traffic signed out.
 pub async fn projected_traffic(
     State(state): State<AppState>,
     Query(q): Query<ProjectQuery>,
@@ -2187,10 +2207,19 @@ pub struct TrafficQuery {
         ("id" = String, Path, description = "FCA id"),
         ("debug" = Option<bool>, Query, description = "Include per-flight ETA/metering debug detail")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaFlight>), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
+///
+/// Public only for an FCA the public list shows. An unpublished event FCA is served to a planner
+/// (`events.plan.read`, the gate on `GET /events/{id}/fcas`, whose FCAs tab counts its crossings), and a
+/// deleted one to any signed-in caller (historical replay can still select it). Anyone else gets 404,
+/// not 403, so the route never confirms that a hidden FCA exists.
 pub async fn fca_traffic(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_service_account): Extension<Option<CurrentServiceAccount>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Query(q): Query<TrafficQuery>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
@@ -2198,6 +2227,26 @@ pub async fn fca_traffic(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let signed_in =
+        current_user.is_some() || current_service_account.is_some() || current_api_key.is_some();
+    if flow_repo::fca_is_deleted(pool, &id).await? && !signed_in {
+        return Err(ApiError::NotFound);
+    }
+    let unpublished_event =
+        fca.event_id.is_some() && fca.event_status.as_deref() != Some("published");
+    if unpublished_event
+        && ensure_permission(
+            &state,
+            current_user.as_ref(),
+            current_service_account.as_ref(),
+            current_api_key.as_ref(),
+            EventsPlanRead::path(),
+        )
+        .await
+        .is_err()
+    {
+        return Err(ApiError::NotFound);
+    }
     let releases = load_releases(pool, &id).await?;
     let holders = flow_repo::release_holders(pool, &id).await?;
     let now = Utc::now();
@@ -2227,6 +2276,7 @@ fn split_codes(s: &Option<String>) -> Vec<String> {
     get,
     path = "/api/v1/flow/idst",
     tag = "flow",
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(
         ("airports" = Option<String>, Query, description = "Comma-separated airport ICAOs"),
         ("tracons" = Option<String>, Query, description = "Comma-separated TRACON ids"),
@@ -2407,6 +2457,7 @@ pub async fn list_idst(
     post,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
         ("callsign" = String, Path, description = "Aircraft callsign"),
@@ -2511,6 +2562,7 @@ pub async fn mark_release(
     delete,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
         ("callsign" = String, Path, description = "Aircraft callsign"),
@@ -2614,6 +2666,7 @@ pub async fn clear_release(
     post,
     path = "/api/v1/flow/fcas/{id}/swap",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
     responses(
@@ -2718,6 +2771,7 @@ async fn same_departure_slot(
     put,
     path = "/api/v1/flow/fcas/{id}/order",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
     responses((status = 204), (status = 401), (status = 403), (status = 404))
@@ -5564,5 +5618,95 @@ mod fca_color_route_tests {
             format!("/api/v1/events/6980/fcas/{id}")
         })
         .await;
+    }
+}
+
+/// #586: `GET /flow/fcas/{id}/traffic` is public, but only for an FCA the public list shows. Hidden ones
+/// (an unpublished event FCA, a deleted FCA) are 404 to an anonymous caller, through the real router.
+#[cfg(test)]
+mod fca_traffic_visibility_tests {
+    use std::collections::HashMap;
+
+    use http::{Method, StatusCode};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    async fn seed(pool: &PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (586, 'Visibility event', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, enabled, deleted_at, event_id, event_status) values \
+               ('v-live',     'Live',            true, null,  null, null), \
+               ('v-pubevent', 'Published event', true, null,  586,  'published'), \
+               ('v-planned',  'Planned event',   true, null,  586,  'planned'), \
+               ('v-archived', 'Archived event',  true, null,  586,  'archived'), \
+               ('v-deleted',  'Soft-deleted',    true, now(), null, null)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn uri(id: &str) -> String {
+        format!("/api/v1/flow/fcas/{id}/traffic")
+    }
+
+    #[sqlx::test]
+    async fn an_anonymous_caller_sees_only_what_the_public_list_shows(pool: PgPool) {
+        seed(&pool).await;
+        let state = test_state(pool, HashMap::new());
+        for id in ["v-live", "v-pubevent"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::OK,
+                "{id} is on the public list, so its traffic is public"
+            );
+        }
+        for id in ["v-planned", "v-archived", "v-deleted"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::NOT_FOUND,
+                "{id} is hidden from the public list, so it doesn't exist to an anonymous caller"
+            );
+        }
+    }
+
+    /// The two signed-in readers the hidden FCAs still have: the event manager's FCAs tab counts a
+    /// planned FCA's crossings, and historical replay can still select a since-deleted FCA.
+    #[sqlx::test]
+    async fn planners_see_unpublished_event_fcas_and_signed_in_callers_see_deleted_ones(
+        pool: PgPool,
+    ) {
+        seed(&pool).await;
+        let planner = seed_user(&pool).await;
+        grant(&pool, &planner, "events.plan.read", None).await;
+        let planner = session_cookie(&pool, &planner).await;
+        let other = seed_user(&pool).await;
+        let other = session_cookie(&pool, &other).await;
+        let state = test_state(pool, HashMap::new());
+
+        for id in ["v-planned", "v-archived"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &planner, None).await,
+                StatusCode::OK,
+                "a planner reads {id}"
+            );
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &other, None).await,
+                StatusCode::NOT_FOUND,
+                "signed in without events.plan.read, {id} still doesn't exist"
+            );
+        }
+        assert_eq!(
+            send(&state, Method::GET, &uri("v-deleted"), &other, None).await,
+            StatusCode::OK,
+            "any signed-in caller reads a deleted FCA (historical replay)"
+        );
     }
 }

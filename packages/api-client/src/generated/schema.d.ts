@@ -1679,6 +1679,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): the public FCA overview and facility map draw a selected flight's route signed out. */
         get: operations["aircraft_route"];
         put?: never;
         post?: never;
@@ -1711,6 +1712,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): the ATC overlay on the public FCA overview and facility map renders signed out. */
         get: operations["list_atc"];
         put?: never;
         post?: never;
@@ -1727,6 +1729,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows FCA counts signed out. */
         get: operations["fca_counts"];
         put?: never;
         post?: never;
@@ -1766,7 +1769,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health of the runtime nav + winds data (cycle, source, counts, last-refresh times). */
+        /**
+         * Health of the runtime nav + winds data (cycle, source, counts, last-refresh times).
+         *     Public by design, no credential (#586): the public FCA overview shows data freshness signed out.
+         */
         get: operations["data_status"];
         put?: never;
         post?: never;
@@ -1786,6 +1792,7 @@ export interface paths {
         /**
          * The facility directory (ARTCCs + TRACONs and their member airports) for scoping dashboard widgets
          *     to a whole facility. Public read; served from the daily-refreshed `feed/facilities.rs` map.
+         *     Public by design, no credential (#586): the facility directory behind search and the facility map, signed out.
          */
         get: operations["list_flow_facilities"];
         put?: never;
@@ -1803,6 +1810,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): the public FCA overview (/advisories/fcas) lists FCAs signed out. */
         get: operations["list_fcas"];
         put?: never;
         post: operations["create_fca"];
@@ -1933,6 +1941,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /**
+         * Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
+         * @description Public only for an FCA the public list shows. An unpublished event FCA is served to a planner
+         *     (`events.plan.read`, the gate on `GET /events/{id}/fcas`, whose FCAs tab counts its crossings), and a
+         *     deleted one to any signed-in caller (historical replay can still select it). Anyone else gets 404,
+         *     not 403, so the route never confirms that a hidden FCA exists.
+         */
         get: operations["fca_traffic"];
         put?: never;
         post?: never;
@@ -2113,6 +2128,7 @@ export interface paths {
         /**
          * How much of the current live filed traffic the nav engine fully resolves, plus the most
          *     common tokens it still can't (surfaces real data-coverage gaps).
+         *     Public by design, no credential (#586): the public FCA overview's coverage panel renders signed out.
          */
         get: operations["route_coverage"];
         put?: never;
@@ -2133,6 +2149,7 @@ export interface paths {
         /**
          * Shared map routes, each resolved to a track. With `?artcc=ZDC`, only that ARTCC's routes plus the
          *     global (unassigned) ones — how the facility map scopes them. Public (anyone who can view the map).
+         *     Public by design, no credential (#586): the public FCA overview and facility map draw routes signed out.
          */
         get: operations["list_routes"];
         put?: never;
@@ -2222,6 +2239,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): live traffic on the public FCA overview, facility map and /pilot, signed out. */
         get: operations["list_traffic"];
         put?: never;
         post?: never;
@@ -2238,6 +2256,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Public by design, no credential (#586): the public FCA overview's time slider projects traffic signed out. */
         get: operations["projected_traffic"];
         put?: never;
         post?: never;
@@ -13742,12 +13761,6 @@ export interface operations {
                     "application/json": components["schemas"]["AircraftRoute"];
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -13847,12 +13860,6 @@ export interface operations {
                     };
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -13921,12 +13928,6 @@ export interface operations {
                     "application/json": components["schemas"]["DataStatus"];
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -13982,12 +13983,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["FcaBody"][];
                 };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
@@ -14608,12 +14603,6 @@ export interface operations {
                     "application/json": components["schemas"]["FcaFlight"][];
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -15111,12 +15100,6 @@ export interface operations {
                     "application/json": components["schemas"]["CoverageReport"];
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -15153,12 +15136,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["RouteBody"][];
                 };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
@@ -15555,12 +15532,6 @@ export interface operations {
                     "application/json": components["schemas"]["TrafficAircraft"][];
                 };
             };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -15593,12 +15564,6 @@ export interface operations {
                 };
             };
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };

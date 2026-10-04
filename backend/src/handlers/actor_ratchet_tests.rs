@@ -4,6 +4,11 @@
 //!
 //! - `UserOnly(reason)`: about a person by nature, and must stay that way. Every other handler takes
 //!   [`crate::auth::principal::Actor`], which admits a user, an API key or a service account (#607).
+//! - `AdmitsMachines(reason)`: reads `CurrentUser` only beside `CurrentServiceAccount` and
+//!   `CurrentApiKey`, so a machine is not refused. Checked: an entry missing either fails.
+//!
+//! The `Pending` tier #586 added is gone: #607 migrated every handler in it, which is the list
+//! shrinking to zero as intended.
 //!
 //! A handler that takes `CurrentUser` and is not listed fails this test, so a new machine-blocked
 //! write can't land by accident. So does a listed one that no longer does, so the list can't rot.
@@ -13,8 +18,9 @@ use std::collections::BTreeSet;
 #[derive(Debug)]
 enum Intent {
     UserOnly(&'static str),
+    AdmitsMachines(&'static str),
 }
-use Intent::UserOnly;
+use Intent::{AdmitsMachines, UserOnly};
 
 #[rustfmt::skip]
 const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
@@ -66,12 +72,18 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("service_accounts", "set_service_account_roles", UserOnly("a person's own authority caps the grant (#584)")),
     ("service_accounts", "grantable_service_account_permissions", UserOnly("a person's own authority caps the grant (#584)")),
     ("service_accounts", "set_service_account_permissions", UserOnly("a person's own authority caps the grant (#584)")),
+    ("flow", "fca_traffic", AdmitsMachines("public; it reads every credential kind only to show a planner or signed-in caller the FCAs hidden from the public list (#586)")),
 ];
 
 /// `(file stem, fn)` for every `pub async fn` in `handlers/*.rs` whose parameters take
 /// `Extension<Option<CurrentUser>>`. Read from disk, so a file not yet in `mod.rs` is scanned too.
 fn scan(dir: &std::path::Path) -> BTreeSet<(String, String)> {
-    let mut found = BTreeSet::new();
+    scan_params(dir).into_keys().collect()
+}
+
+/// Every `CurrentUser` handler, with its whitespace-stripped parameter list.
+fn scan_params(dir: &std::path::Path) -> std::collections::BTreeMap<(String, String), String> {
+    let mut found = std::collections::BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|e| e != "rs") {
@@ -104,7 +116,7 @@ fn scan(dir: &std::path::Path) -> BTreeSet<(String, String)> {
             }
             let params: String = rest[open..=close].split_whitespace().collect();
             if params.contains(&["Extension<Option<", "CurrentUser>>"].concat()) {
-                found.insert((stem.clone(), name));
+                found.insert((stem.clone(), name), params);
             }
         }
     }
@@ -143,11 +155,13 @@ fn every_current_user_handler_is_listed_with_its_intent() {
 
 #[test]
 fn every_user_only_entry_says_why() {
-    for (file, name, UserOnly(reason)) in CURRENT_USER_HANDLERS {
-        assert!(
-            !reason.trim().is_empty(),
-            "{file}::{name} is user-only with no reason"
-        );
+    for (file, name, intent) in CURRENT_USER_HANDLERS {
+        if let UserOnly(reason) = intent {
+            assert!(
+                !reason.trim().is_empty(),
+                "{file}::{name} is user-only with no reason"
+            );
+        }
     }
 }
 
@@ -167,5 +181,24 @@ fn the_release_path_is_not_on_the_list() {
                 .any(|(f, n, _)| *f == file && *n == name),
             "{file}::{name} is on the release path and must admit a machine"
         );
+    }
+}
+
+/// An `AdmitsMachines` entry is a claim about the signature, so check it: the handler must read a
+/// service account and an API key beside the user, or a machine is still refused and the entry lies.
+#[test]
+fn every_admits_machines_entry_reads_every_credential() {
+    let params = scan_params(&handlers_dir());
+    for (file, name, intent) in CURRENT_USER_HANDLERS {
+        if let AdmitsMachines(reason) = intent {
+            assert!(!reason.trim().is_empty(), "{file}::{name} needs a reason");
+            let p = &params[&(file.to_string(), name.to_string())];
+            for credential in ["CurrentServiceAccount>>", "CurrentApiKey>>"] {
+                assert!(
+                    p.contains(&["Extension<Option<", credential].concat()),
+                    "{file}::{name} is listed as AdmitsMachines but doesn't take {credential}"
+                );
+            }
+        }
     }
 }

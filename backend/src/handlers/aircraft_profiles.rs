@@ -74,6 +74,7 @@ async fn refresh_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiE
 
 #[utoipa::path(
     get, path = "/api/v1/flow/aircraft-profiles", tag = "flow",
+    security(("session" = ["flow.aircraft_profiles.read"]), ("api_key" = ["flow.aircraft_profiles.read"]), ("service_account" = ["flow.aircraft_profiles.read"])),
     responses((status = 200, body = Vec<AircraftProfileBody>), (status = 401))
 )]
 pub async fn list_profiles(
@@ -86,6 +87,7 @@ pub async fn list_profiles(
 
 #[utoipa::path(
     put, path = "/api/v1/flow/aircraft-profiles/{kind}/{key}", tag = "flow",
+    security(("session" = ["flow.aircraft_profiles.update"]), ("api_key" = ["flow.aircraft_profiles.update"]), ("service_account" = ["flow.aircraft_profiles.update"])),
     params(("kind" = String, Path), ("key" = String, Path)),
     request_body = UpsertAircraftProfileRequest,
     responses((status = 200, body = AircraftProfileBody), (status = 400), (status = 401))
@@ -114,6 +116,7 @@ pub async fn upsert_profile(
 
 #[utoipa::path(
     delete, path = "/api/v1/flow/aircraft-profiles/{kind}/{key}", tag = "flow",
+    security(("session" = ["flow.aircraft_profiles.update"]), ("api_key" = ["flow.aircraft_profiles.update"]), ("service_account" = ["flow.aircraft_profiles.update"])),
     params(("kind" = String, Path), ("key" = String, Path)),
     responses((status = 204), (status = 400), (status = 401), (status = 404))
 )]

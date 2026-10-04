@@ -83,7 +83,8 @@ async fn require_edit(
 #[utoipa::path(
     get, path = "/api/v1/flow/monitor/{artcc}", tag = "flow",
     params(("artcc" = String, Path)),
-    responses((status = 200, body = MonitorTableBody), (status = 401), (status = 503))
+    responses((status = 200, body = MonitorTableBody), (status = 401), (status = 503)),
+    security(("session" = ["flow.monitor.read"]), ("api_key" = ["flow.monitor.read"]), ("service_account" = ["flow.monitor.read"]))
 )]
 pub async fn monitor_table(
     State(state): State<AppState>,
@@ -191,7 +192,8 @@ pub async fn monitor_table(
 #[utoipa::path(
     get, path = "/api/v1/flow/monitor/{artcc}/neighbours", tag = "flow",
     params(("artcc" = String, Path)),
-    responses((status = 200, body = MonitorNeighboursBody), (status = 401), (status = 503))
+    responses((status = 200, body = MonitorNeighboursBody), (status = 401), (status = 503)),
+    security(("session" = ["flow.monitor.read"]), ("api_key" = ["flow.monitor.read"]), ("service_account" = ["flow.monitor.read"]))
 )]
 pub async fn monitor_neighbours(
     State(state): State<AppState>,
@@ -213,7 +215,8 @@ pub async fn monitor_neighbours(
 #[utoipa::path(
     get, path = "/api/v1/flow/monitor/{artcc}/maps", tag = "flow",
     params(("artcc" = String, Path)),
-    responses((status = 200, body = SectorMapsBody), (status = 401))
+    responses((status = 200, body = SectorMapsBody), (status = 401)),
+    security(("session" = ["flow.monitor.read"]), ("api_key" = ["flow.monitor.read"]), ("service_account" = ["flow.monitor.read"]))
 )]
 pub async fn list_sector_maps(
     State(state): State<AppState>,
@@ -255,7 +258,8 @@ pub async fn list_sector_maps(
         (status = 401),
         (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
         (status = 404, description = "No such sector in this ARTCC")
-    )
+    ),
+    security(("session" = ["flow.monitor.update"]), ("api_key" = ["flow.monitor.update"]), ("service_account" = ["flow.monitor.update"]))
 )]
 pub async fn set_sector_map(
     State(state): State<AppState>,
@@ -306,7 +310,8 @@ async fn refresh_consolidations(state: &AppState, pool: &sqlx::PgPool) -> Result
 #[utoipa::path(
     get, path = "/api/v1/flow/monitor/{artcc}/consolidations", tag = "flow",
     params(("artcc" = String, Path)),
-    responses((status = 200, body = SectorConsolidationsBody), (status = 401))
+    responses((status = 200, body = SectorConsolidationsBody), (status = 401)),
+    security(("session" = ["flow.monitor.read"]), ("api_key" = ["flow.monitor.read"]), ("service_account" = ["flow.monitor.read"]))
 )]
 pub async fn list_consolidations(
     State(state): State<AppState>,
@@ -347,7 +352,8 @@ pub async fn list_consolidations(
         (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
         (status = 404, description = "Either sector isn't one of this ARTCC's"),
         (status = 409, description = "The save would make a loop")
-    )
+    ),
+    security(("session" = ["flow.monitor.update"]), ("api_key" = ["flow.monitor.update"]), ("service_account" = ["flow.monitor.update"]))
 )]
 pub async fn consolidate_sector(
     State(state): State<AppState>,
@@ -384,7 +390,8 @@ pub async fn consolidate_sector(
         (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
         (status = 404, description = "The target isn't one of this ARTCC's sectors"),
         (status = 409, description = "`except_consolidated`, and the target is itself worked elsewhere")
-    )
+    ),
+    security(("session" = ["flow.monitor.update"]), ("api_key" = ["flow.monitor.update"]), ("service_account" = ["flow.monitor.update"]))
 )]
 pub async fn consolidate_all_sectors(
     State(state): State<AppState>,
@@ -428,7 +435,8 @@ pub async fn consolidate_all_sectors(
         (status = 204),
         (status = 401),
         (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC")
-    )
+    ),
+    security(("session" = ["flow.monitor.update"]), ("api_key" = ["flow.monitor.update"]), ("service_account" = ["flow.monitor.update"]))
 )]
 pub async fn release_sector(
     State(state): State<AppState>,

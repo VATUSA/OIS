@@ -39,7 +39,9 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route("/metrics", get(metrics_handler::metrics))
         .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
         // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
-        // hit the real endpoints and obey their auth (session cookie or bearer token).
+        // hit the real endpoints: they carry the same-origin session cookie, or an API-key or
+        // service-account token entered through Authorize (the spec's `api_key` / `service_account`
+        // schemes, offered only on paths that accept them, #587).
         .merge(SwaggerUi::new("/docs/swagger").url("/docs/swagger/openapi.json", ApiDoc::openapi()))
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))

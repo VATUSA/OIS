@@ -23,6 +23,7 @@ use crate::{
     tag = "flow",
     responses((status = 200, body = Vec<FlowFacility>))
 )]
+/// Public by design, no credential (#586): the facility directory behind search and the facility map, signed out.
 pub async fn list_flow_facilities(State(state): State<AppState>) -> Json<Vec<FlowFacility>> {
     let map = state.facilities.read().await;
     let mut out: Vec<FlowFacility> = map
@@ -138,6 +139,7 @@ fn kind_rank(kind: &str) -> u8 {
     tag = "flow",
     responses((status = 200, body = AtcBoard))
 )]
+/// Public by design, no credential (#586): the ATC overlay on the public FCA overview and facility map renders signed out.
 pub async fn list_atc(State(state): State<AppState>) -> Json<AtcBoard> {
     let (snapshot, airports, iata) = {
         let guard = state.feed.read().await;
