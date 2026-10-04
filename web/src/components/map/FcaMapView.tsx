@@ -39,7 +39,7 @@ import boundariesGeo from "@/assets/artcc-boundaries.json";
 import {TrafficMap} from "./TrafficMap";
 import {useMapCamera} from "./hooks/useMapCamera";
 import {usePersistedOrder} from "./hooks/usePersistedOrder";
-import {useFcaColors, useMapPalette, useRouteColors} from "./lib/colors";
+import {useFcaColors, useMapPalette, useRouteColors, swatchCss} from "./lib/colors";
 import {MAP_BUTTON, MAP_BUTTON_ON, MAP_PANEL} from "./lib/overlay";
 import {US_HOME} from "./lib/constants";
 import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
@@ -115,7 +115,7 @@ function FcaRow({
       </button>
       <span
         className="size-3 shrink-0 rounded-full"
-        style={{ background: fca.color }}
+        style={{ background: swatchCss(fca.color) }}
         title={fca.enabled ? "Enabled" : "Disabled"}
       />
       <button type="button" onClick={onSelect} className="flex-1 truncate text-left font-mono">

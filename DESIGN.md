@@ -46,9 +46,10 @@ headers. It should feel calm, precise, and obviously the same product on every s
 8. **Air in headers, density in tables.** Page headers and margins breathe; data tables are
    deliberately dense. Both are correct — don't pad a 500-row table like a marketing page.
 9. **Tokens only — never inline a value.** Every colour, radius, space, and font size comes from a
-   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The sole
-   exception is a page that physically cannot load the stylesheet — see § "Standalone pages outside
-   the app", which lists every one and the conditions they must meet.
+   token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The
+   exceptions are a page that physically cannot load the stylesheet — see § "Standalone pages outside
+   the app", which lists every one and the conditions they must meet — and a colour a **user** chose
+   and saved, which is data rather than chrome (§ "User-chosen domain colour").
 
 ---
 
@@ -183,6 +184,26 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
   only thing standing between the copy and silent drift. `--r-lg` comes from the token table above,
   which `globals.css` does not define, and the font stacks are system-fallback approximations.
 
+### User-chosen domain colour
+
+An FCA, a route and a facility-map rule each carry a colour a person picked so that theirs reads apart
+on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb` — on these conditions
+(#698):
+
+- **Offered from tokens first.** The picker is `ColorSwatches` (`@ois/ui`), fed the named palette in
+  `web/src/lib/palette.ts` (`--series-*` and `--ink-3`, each with its name). A custom pick is the
+  fallback, not the default.
+- **Validated on the server**, on every write path: lowercase `#rrggbb` only.
+- **Never invisible.** At least 3:1 contrast against the dark ground (`#08080a`). Every token swatch
+  clears it in both themes; black and near-black don't. `ColorSwatches` refuses a darker pick, and the
+  server refuses it too.
+- **One parser.** The map draws it through `hexToRgb`, and a list chip uses `swatchCss`, which is the
+  same parse, so a value can't look right in a list and grey on the map.
+- **A `style` colour is allowed only for such data** (a chip, a swatch), never for chrome.
+- **It is stored as a hex, so it drifts with theme.** A swatch picked in light mode stores the light
+  hex and shows that in dark mode too. That is known and accepted; storing a token name would fix it,
+  at the cost of an API change.
+
 ## Components (one each, tokens only)
 
 - **Nav item** — icon + label + right-aligned mono count. Active = `--panel-2` tile, icon shifts to
@@ -236,7 +257,7 @@ One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (
 
 Report each miss as `file:line — rule → fix`.
 
-- [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css`.
+- [ ] No hex, `rgb()`, or Tailwind palette class (`emerald-500`, `zinc-…`) outside `globals.css` — a saved user colour excepted (§ "User-chosen domain colour").
 - [ ] No gradient and no `shadow-*` at all — including on the shell.
 - [ ] No `font-medium` (500). Weights are 400 / 600 / 700.
 - [ ] Radii from the scale (`rounded-xs…xl`, `rounded-full` for pills); no arbitrary radius.

@@ -2242,6 +2242,8 @@ pub struct FcaBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertFcaRequest {
     pub name: String,
+    /// `#rrggbb`, stored lowercase; defaults to `#efc14d`. It must contrast at least 3:1 with the dark
+    /// ground (`#08080a`), so an FCA can't be drawn invisible; anything else is a 400.
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]

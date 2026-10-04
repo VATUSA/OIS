@@ -64,6 +64,66 @@ pub async fn get_fca(pool: &PgPool, id: &str) -> Result<Option<FcaBody>, ApiErro
         .map_err(|_| ApiError::Internal)
 }
 
+/// An FCA's colour when none is given: `--series-3` (Amber) in the dark theme, the canonical one. It was
+/// `#f59e0b`, which was no token and none of the offered swatches (#698).
+pub const DEFAULT_FCA_COLOR: &str = "#efc14d";
+
+/// The lowest contrast an FCA colour may have against the dark ground `#08080a` (WCAG 2.x ratio). Every
+/// `--series-*` and `--ink-3` value clears it in both themes (the lowest is 3.8); black and near-black
+/// don't, so an FCA can't be saved invisible on the dark map (#698).
+pub const MIN_GROUND_CONTRAST: f64 = 3.0;
+
+/// An FCA colour as stored: trimmed, lowercase, or the default when none is given.
+pub fn normalize_fca_color(raw: Option<&str>) -> String {
+    match raw.map(str::trim) {
+        Some(c) if !c.is_empty() => c.to_ascii_lowercase(),
+        _ => DEFAULT_FCA_COLOR.to_string(),
+    }
+}
+
+/// [`normalize_fca_color`], refused unless it is `#rrggbb` and clears [`MIN_GROUND_CONTRAST`]. The map
+/// parses exactly that shape, so anything else would draw grey on the map while its list chip showed the
+/// raw value (#698).
+pub fn fca_color(raw: Option<&str>) -> Result<String, ApiError> {
+    let c = normalize_fca_color(raw);
+    let rgb = srgb(&c).ok_or(ApiError::BadRequest)?;
+    let ground = srgb(DARK_GROUND).expect("a valid constant");
+    if contrast(luminance(rgb), luminance(ground)) < MIN_GROUND_CONTRAST {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(c)
+}
+
+/// The dark theme's `--ground`, the background an FCA must stay visible on.
+const DARK_GROUND: &str = "#08080a";
+
+/// `#rrggbb` as sRGB channels in `0..=1`; `None` for any other shape.
+fn srgb(hex: &str) -> Option<[f64; 3]> {
+    let h = hex
+        .strip_prefix('#')
+        .filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    let channel = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map(|v| f64::from(v) / 255.0);
+    Some([channel(0).ok()?, channel(2).ok()?, channel(4).ok()?])
+}
+
+/// WCAG relative luminance.
+fn luminance(rgb: [f64; 3]) -> f64 {
+    let lin = |c: f64| {
+        if c <= 0.039_28 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
+}
+
+/// WCAG contrast ratio between two luminances.
+fn contrast(a: f64, b: f64) -> f64 {
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// Bind every FCA column from a normalized request. Shared by insert + update.
 fn bind_fca<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
@@ -71,7 +131,7 @@ fn bind_fca<'q>(
     by: &'q Attribution,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     q.bind(req.name.trim())
-        .bind(req.color.as_deref().unwrap_or("#f59e0b"))
+        .bind(normalize_fca_color(req.color.as_deref()))
         .bind(req.artcc.trim().to_ascii_uppercase())
         .bind(sqlx::types::Json(&req.points))
         .bind(&req.dests)
@@ -623,4 +683,47 @@ pub async fn delete_release(
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod fca_color_tests {
+    use super::{DEFAULT_FCA_COLOR, fca_color};
+
+    #[test]
+    fn a_colour_is_stored_trimmed_and_lowercase_or_defaulted() {
+        assert_eq!(fca_color(Some(" #EFC14D ")).unwrap(), "#efc14d");
+        assert_eq!(fca_color(None).unwrap(), DEFAULT_FCA_COLOR);
+        assert_eq!(fca_color(Some("  ")).unwrap(), DEFAULT_FCA_COLOR);
+    }
+
+    /// Only the shape the map parses: `#abc` and `red` render as list chips but grey on the map.
+    #[test]
+    fn only_six_digit_hex_is_accepted() {
+        for bad in [
+            "red",
+            "#abc",
+            "efc14d",
+            "#efc14d00",
+            "#gggggg",
+            "rgb(1,2,3)",
+        ] {
+            assert!(fca_color(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    /// The contrast floor against the dark ground: black and the ground itself are refused; every token
+    /// swatch, in both themes, is not (the lowest is dark `--ink-3` at 3.8:1).
+    #[test]
+    fn an_invisible_colour_is_refused_and_every_token_passes() {
+        for dark in ["#000000", "#08080a", "#333333", "#454545"] {
+            assert!(fca_color(Some(dark)).is_err(), "{dark}");
+        }
+        for token in [
+            "#1b8fb0", "#1f9d63", "#b7791f", "#8e5bd0", "#d0556b", "#3565d6", "#c2621a", "#5f8f2a",
+            "#9898a2", "#5ec8e5", "#43d089", "#efc14d", "#c792ea", "#f07178", "#7b9dff", "#f5a83d",
+            "#a3d977", "#6b6b74",
+        ] {
+            assert!(fca_color(Some(token)).is_ok(), "{token}");
+        }
+    }
 }

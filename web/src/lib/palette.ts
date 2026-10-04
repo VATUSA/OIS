@@ -2,9 +2,10 @@ import {useMemo} from "react";
 import {parseColor, readToken, useTokens} from "@ois/ui";
 
 /**
- * The swatches offered for facility-map aircraft coloring: a fixed, named set drawn from the
- * `--series-*` tokens (plus a neutral grey), resolved to hex. Rules store the hex; the map/legend look
- * up the label, which also recognises the other theme's values and the pre-token palette.
+ * The named swatches offered wherever a user picks a persisted colour — facility-map rules and FCAs
+ * (#698): a fixed set drawn from the `--series-*` tokens (plus a neutral grey), resolved to hex. The
+ * row stores the hex; `colorLabel` names it again, recognising the other theme's values and the
+ * pre-token palette, and falls back to the hex for a custom pick.
  */
 
 export interface PaletteColor {
@@ -49,18 +50,18 @@ const build = (values: Record<string, string>): PaletteColor[] =>
   SWATCHES.map((s) => ({ hex: toHex(values[s.token]), label: s.label }));
 
 /** The rule swatches for the current theme, re-read on a theme switch. */
-export function useRulePalette(): PaletteColor[] {
+export function usePalette(): PaletteColor[] {
   const values = useTokens(TOKENS);
   return useMemo(() => build(values), [values]);
 }
 
 /** The rule swatches for the current theme, read now. */
-export function readRulePalette(): PaletteColor[] {
+export function readPalette(): PaletteColor[] {
   return build(Object.fromEntries(TOKENS.map((t) => [t, readToken(t)])));
 }
 
 /** The default swatch offered for a new rule. */
-export const defaultRuleColor = (palette: PaletteColor[] = readRulePalette()) => palette[0].hex;
+export const defaultRuleColor = (palette: PaletteColor[] = readPalette()) => palette[0].hex;
 
 /** Every theme's declared value of each swatch token (from the loaded stylesheets), hex → label. */
 function tokenLabelsAllThemes(): Map<string, string> {
@@ -95,5 +96,5 @@ let labels: Map<string, string> | null = null;
 export function colorLabel(hex: string): string {
   const key = hex.toLowerCase();
   if (!labels || labels.size === 0) labels = tokenLabelsAllThemes();
-  return labels.get(key) ?? LEGACY_LABELS[key] ?? readRulePalette().find((c) => c.hex === key)?.label ?? hex;
+  return labels.get(key) ?? LEGACY_LABELS[key] ?? readPalette().find((c) => c.hex === key)?.label ?? hex;
 }

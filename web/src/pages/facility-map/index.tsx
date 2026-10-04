@@ -11,7 +11,7 @@ import {useAircraftRoute, useAtc, useTraffic} from "@/lib/fca";
 import {useRoutes} from "@/lib/route";
 import {useFacilityMapConfig, type UpsertFacilityMapConfig} from "@/lib/facility-map";
 import {buildColorFn} from "@/lib/facility-map/rules";
-import {colorLabel} from "@/lib/facility-map/palette";
+import {colorLabel} from "@/lib/palette";
 import {RuleEditor} from "@/components/facility-map/RuleEditor";
 import {FacilityRoutesPanel} from "@/components/facility-map/RoutesPanel";
 import {

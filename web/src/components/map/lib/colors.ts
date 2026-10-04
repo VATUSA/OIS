@@ -1,6 +1,8 @@
 import {useMemo} from "react";
 import {parseColor, readToken, useTokens} from "@ois/ui";
 
+import {readPalette, usePalette} from "@/lib/palette";
+
 import type {Theme} from "./constants";
 import type {RGB, RGBA} from "./types";
 
@@ -113,16 +115,15 @@ export function rgbToHex([r, g, b]: RGB): string {
   return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/** Series order offered when creating FCAs / routes (each saves its own hex), so the two read apart. */
-const FCA_SERIES = [3, 5, 8, 7, 1, 4];
+/** Series order offered when creating routes (each saves its own hex). FCAs offer the shared named palette. */
 const ROUTE_SERIES = [1, 6, 2, 4, 5, 3];
 
 const seriesHex = (p: MapPalette, order: number[]) => order.map((n) => rgbToHex(p.series[n - 1]));
 
-/** FCA colour swatches (hex, from the series tokens) for the current theme. */
+/** FCA colour swatches for the current theme: the shared named palette (#698), as hex. */
 export function useFcaColors(): string[] {
-  const p = useMapPalette();
-  return useMemo(() => seriesHex(p, FCA_SERIES), [p]);
+  const palette = usePalette();
+  return useMemo(() => palette.map((c) => c.hex), [palette]);
 }
 
 /** Route colour swatches (hex, from the series tokens) for the current theme. */
@@ -131,7 +132,7 @@ export function useRouteColors(): string[] {
   return useMemo(() => seriesHex(p, ROUTE_SERIES), [p]);
 }
 
-export const readFcaColors = () => seriesHex(readMapPalette(), FCA_SERIES);
+export const readFcaColors = () => readPalette().map((c) => c.hex);
 export const readRouteColors = () => seriesHex(readMapPalette(), ROUTE_SERIES);
 
 /** Aircraft glyph colour (`--map-aircraft`), read now. The theme argument is kept for older callers. */
@@ -169,3 +170,9 @@ export function hexToRgb(hex: string): RGB {
   const n = parseInt(m[1], 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
+
+/**
+ * The CSS colour for a saved colour's list chip — exactly what the map draws for it, so a value the map
+ * can't parse is grey in the list too, rather than right in one place and grey in the other (#698).
+ */
+export const swatchCss = (hex: string): string => rgbToHex(hexToRgb(hex));
