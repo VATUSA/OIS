@@ -18,6 +18,7 @@ import {
   PlaneTakeoff,
   Radar,
   ScrollText,
+  Stethoscope,
   ShieldCheck,
   Split,
   Timer,
@@ -132,6 +133,12 @@ export const AREAS: readonly NavArea[] = [
           { label: "Access", to: "/admin/access", icon: ShieldCheck, permission: "access.users.read" },
       { label: "Groups", to: "/admin/groups", icon: Users, permission: "access.groups.read" },
           { label: "Audit", to: "/admin/audit", icon: ScrollText, permission: "audit.logs.read" },
+          {
+            label: "Diagnostics",
+            to: "/admin/diagnostics",
+            icon: Stethoscope,
+            permission: "diagnostics.reports.read",
+          },
           { label: "Jobs", to: "/admin/jobs", icon: Activity, permission: "system.jobs.read" },
           { label: "API Keys", to: "/admin/api-keys", icon: KeyRound, permission: "api_keys.key.read" },
       {

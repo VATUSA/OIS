@@ -492,6 +492,12 @@ mod tests {
         assert!(us("ZBW_CTR"));
         assert!(us("BOS_CTR"));
         assert!(us("ZAK_CTR"), "Oakland Oceanic is American with no polygon");
+        for cs in ["SF_CTR", "SFR_CTR", "SFRO_CTR"] {
+            assert!(
+                us(cs),
+                "San Francisco Oceanic is Oakland Oceanic (#580): {cs}"
+            );
+        }
         assert!(us("ZSU_CTR"), "San Juan is American with no polygon");
 
         assert!(!us("BDA_CTR"), "Bermuda is not a US controller");

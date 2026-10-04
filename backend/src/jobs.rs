@@ -10,6 +10,7 @@ use sqlx::PgPool;
 
 use serde_json::json;
 
+use crate::auth::principal::{Attribution, Principal};
 use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
@@ -73,6 +74,12 @@ const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
 /// `audit::derive` invents from the request path, which nothing centrally registers, so it would
 /// drift silently the first time a route was added.
 const AUDIT_RETAIN_DAYS: i64 = 180;
+
+/// How long desktop diagnostics reports are kept (#629).
+///
+/// Thirty days — far shorter than the audit log's: a report carries megabytes of a user's logs and is
+/// only useful while the bug it describes is being worked, so keeping it longer would only hold data.
+const DIAGNOSTICS_RETAIN_DAYS: i64 = 30;
 
 /// How often the departure-runway ladder runs (#511).
 ///
@@ -496,6 +503,34 @@ pub fn spawn_sector_maps_refresh(
                         let n = loaded.len();
                         maps.store(Arc::new(loaded));
                         Ok(format!("{n} overrides"))
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the sector consolidation cache current (#599). Writes force-reload it (`handlers::monitor`);
+/// this is the backstop, and what carries another replica's write. Fails safe.
+pub fn spawn_sector_consolidations_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    consolidations: Arc<ArcSwap<crate::feed::monitor::Consolidations>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "sector_consolidations_refresh",
+        "Reload sector consolidations from the DB",
+        SECTOR_MAPS_INTERVAL,
+        move || {
+            let (pool, consolidations) = (pool.clone(), consolidations.clone());
+            async move {
+                match crate::repos::sector_consolidations::load_all(&pool).await {
+                    Ok(loaded) => {
+                        let n = loaded.len();
+                        consolidations.store(Arc::new(loaded));
+                        Ok(format!("{n} consolidated sectors"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
@@ -1126,6 +1161,38 @@ pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
+/// Delete diagnostics reports past [`DIAGNOSTICS_RETAIN_DAYS`] (#629). Its own job, like
+/// `spawn_audit_log_prune`, so the retention policy is visible and runnable in the admin jobs view.
+pub fn spawn_diagnostics_report_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "diagnostics_report_prune",
+        "Delete desktop diagnostics reports past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                diagnostics_report_prune_once(&pool, Utc::now())
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// One pass of [`spawn_diagnostics_report_prune`] as of `now`, so a test can place the cutoff.
+pub(crate) async fn diagnostics_report_prune_once(
+    pool: &PgPool,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, crate::errors::ApiError> {
+    crate::repos::diagnostics::prune_reports(
+        pool,
+        now - chrono::Duration::days(DIAGNOSTICS_RETAIN_DAYS),
+    )
+    .await
+}
+
 /// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).
 ///
 /// Its own job rather than a pass inside the stats compaction, following `spawn_audit_log_prune`'s
@@ -1316,7 +1383,7 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
 
 /// Drive event TMI packages through their lifecycle: auto-activate draft + auto packages ~30 min
 /// before their event starts (materializing live TMU rows), and auto-deactivate (archive) activated
-/// ones when it ends. Acts as the package's `updated_by`. Nudges connected clients when anything
+/// ones when it ends. Acts as the package's `updated_by_actor`. Nudges connected clients when anything
 /// changed. Runs every minute.
 pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
     tokio::spawn(run_interval(
@@ -1333,15 +1400,36 @@ pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events
 
 /// One event-TMI-package lifecycle pass: auto-activate draft+auto packages entering the pre-event
 /// window and auto-archive activated ones whose event ended; nudges clients when anything changed.
-async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<String, String> {
+pub(crate) async fn event_package_lifecycle_once(
+    pool: &PgPool,
+    events: &Events,
+) -> Result<String, String> {
     let mut changed = 0u32;
 
     // Auto-activate: draft + auto packages entering the 30-min pre-event window.
     match events_repo::auto_due_packages(pool).await {
         Ok(due) => {
             for (package_id, event_id, actor) in due {
-                match crate::handlers::events::activate_package(pool, event_id, &package_id, &actor)
-                    .await
+                // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a
+                // disabled service account issues nothing, as its request would be refused.
+                let principal = match Principal::from_actor(pool, &actor).await {
+                    Ok(Some(principal)) => principal,
+                    Ok(None) => {
+                        tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(%package_id, "auto-activate: cannot load the armer");
+                        continue;
+                    }
+                };
+                match crate::handlers::events::activate_package(
+                    pool,
+                    event_id,
+                    &package_id,
+                    &principal,
+                )
+                .await
                 {
                     Ok(()) => changed += 1,
                     Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
@@ -1355,7 +1443,28 @@ async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<
     match events_repo::ended_activated_packages(pool).await {
         Ok(ended) => {
             for (package_id, _event_id, actor) in ended {
-                match crate::handlers::events::deactivate_package(pool, &package_id, &actor).await {
+                // Archiving only cancels what the package issued, so it runs even if the activator's
+                // credential has since been revoked — otherwise its TMIs would outlive the event. It is
+                // attributed to that actor either way.
+                let by = match Principal::from_actor(pool, &actor).await {
+                    Ok(Some(principal)) => principal.attribution_in(pool).await,
+                    Ok(None) => Ok(Attribution {
+                        user_id: None,
+                        actor_id: Some(actor.clone()),
+                    }),
+                    Err(e) => Err(e),
+                };
+                let by = match by {
+                    Ok(by) => by,
+                    Err(e) => {
+                        tracing::warn!(
+                            package_id,
+                            "auto-archive: cannot attribute the package: {e:?}"
+                        );
+                        continue;
+                    }
+                };
+                match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
                     Ok(()) => changed += 1,
                     Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
                 }
@@ -2107,9 +2216,17 @@ mod departure_runway_derive_tests {
     }
 
     async fn seed_config(pool: &PgPool, actor: &str, req: UpsertAirportConfigRequest) {
-        crate::repos::airport_configs::create(pool, "KJFK", &req, "ZNY", actor)
-            .await
-            .expect("the config should insert");
+        crate::repos::airport_configs::create(
+            pool,
+            "KJFK",
+            &req,
+            "ZNY",
+            &crate::auth::principal::Attribution::for_user_id(pool, actor)
+                .await
+                .unwrap(),
+        )
+        .await
+        .expect("the config should insert");
     }
 
     fn config_with(

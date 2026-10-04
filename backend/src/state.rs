@@ -11,12 +11,14 @@ use crate::feed::{
     self, FeedState,
     airspace::Boundaries,
     facilities::FacilityState,
+    monitor::Consolidations,
     nav::NavData,
     runway_db::RunwayDb,
     sectors::{SectorMaps, SectorTable},
     taxi_estimate,
     tracon::TraconState,
     trajectory::ProfileTable,
+    vnas::VnasState,
     winds::Winds,
 };
 use crate::models::AirportGateBody;
@@ -37,6 +39,9 @@ pub struct AppState {
     /// SimAware TRACON boundaries for the ATC layer. Starts empty, refreshed daily
     /// (`feed::tracon::spawn_refresh`); behind `ArcSwap` for lock-free reads.
     pub tracons: TraconState,
+    /// vNAS ERAM sector identities (daily) and live sector staffing (every 30 s), from the single
+    /// poller `feed::vnas::spawn_refresh` (#595). Behind `ArcSwap`s for lock-free reads.
+    pub vnas: VnasState,
     /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
     pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
@@ -54,6 +59,9 @@ pub struct AppState {
     /// Monitor Alert Parameter overrides (#598). Reloaded by `jobs::spawn_sector_maps_refresh` and
     /// force-reloaded by `handlers::monitor` after each write, so an edit applies on the next cycle.
     pub sector_maps: Arc<ArcSwap<SectorMaps>>,
+    /// Sector consolidations (#599). Reloaded by `jobs::spawn_sector_consolidations_refresh` and
+    /// force-reloaded by `handlers::monitor` after each write, so every viewer sees it at once.
+    pub sector_consolidations: Arc<ArcSwap<Consolidations>>,
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
@@ -81,6 +89,8 @@ pub struct AppState {
     pub data_refresh_in_flight: Arc<AtomicBool>,
     /// Per-airport METAR cache `(info, fetched_ms)` for the runway board (server-side fetch).
     pub metar_cache: Arc<Mutex<HashMap<String, (feed::metar::MetarInfo, i64)>>>,
+    /// Verified VATUSA webhook bodies seen recently, so a replayed delivery isn't acted on twice (#627).
+    pub webhook_replays: Arc<crate::handlers::webhooks::ReplayGuard>,
     /// Realtime push hub: mutation handlers publish a topic here; connected websockets fan it out to
     /// clients, which then refetch via REST (see `crate::realtime`).
     pub events: crate::realtime::Events,
@@ -111,6 +121,7 @@ impl AppState {
         let feed = feed::new_state();
         let facilities = feed::facilities::new_state();
         let tracons = feed::tracon::new_state();
+        let vnas = feed::vnas::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
@@ -118,6 +129,7 @@ impl AppState {
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let sector_maps = Arc::new(ArcSwap::from_pointee(SectorMaps::default()));
+        let sector_consolidations = Arc::new(ArcSwap::from_pointee(Consolidations::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
@@ -154,6 +166,7 @@ impl AppState {
                 feed,
                 facilities,
                 tracons,
+                vnas,
                 nav,
                 airspace,
                 runways,
@@ -161,6 +174,7 @@ impl AppState {
                 aircraft_profiles,
                 airspace_sectors,
                 sector_maps,
+                sector_consolidations,
                 gates,
                 flight_exclusions,
                 taxi_estimate_samples,
@@ -168,6 +182,7 @@ impl AppState {
                 winds_refreshed,
                 data_refresh_in_flight,
                 metar_cache,
+                webhook_replays: Arc::default(),
                 events,
                 jobs,
                 metrics: crate::metrics::handle(),
@@ -180,6 +195,7 @@ impl AppState {
             feed,
             facilities,
             tracons,
+            vnas,
             nav,
             airspace,
             runways,
@@ -187,6 +203,7 @@ impl AppState {
             aircraft_profiles,
             airspace_sectors,
             sector_maps,
+            sector_consolidations,
             gates,
             flight_exclusions,
             taxi_estimate_samples,
@@ -194,6 +211,7 @@ impl AppState {
             winds_refreshed,
             data_refresh_in_flight,
             metar_cache,
+            webhook_replays: Arc::default(),
             events,
             jobs,
             metrics: crate::metrics::handle(),
@@ -207,6 +225,7 @@ impl AppState {
             feed: feed::new_state(),
             facilities: feed::facilities::new_state(),
             tracons: feed::tracon::new_state(),
+            vnas: feed::vnas::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
@@ -214,6 +233,7 @@ impl AppState {
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             sector_maps: Arc::new(ArcSwap::from_pointee(SectorMaps::default())),
+            sector_consolidations: Arc::new(ArcSwap::from_pointee(Consolidations::default())),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
@@ -221,6 +241,7 @@ impl AppState {
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
+            webhook_replays: Arc::default(),
             events: broadcast::channel(256).0,
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
             metrics: crate::metrics::handle(),

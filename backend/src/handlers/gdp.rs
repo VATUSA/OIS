@@ -6,15 +6,15 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Duration, Utc};
 
 use crate::{
     auth::{
-        context::CurrentUser,
         permissions::{TmuGdpCreate, TmuGdpDelete, TmuGdpPublish, TmuGdpRead},
+        principal::{Actor, Attribution},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -380,10 +380,10 @@ pub async fn list_gdps(
 pub async fn create_gdp(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGdpCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<CreateGdpRequest>,
 ) -> Result<Json<GdpBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let airport: String = payload
@@ -415,7 +415,7 @@ pub async fn create_gdp(
         max_enroute,
         payload.exempt_airborne,
         &steps,
-        &user.id,
+        &by,
     )
     .await?;
     let mut gdp = gdp_repo::get_gdp(pool, &id)
@@ -439,11 +439,11 @@ pub async fn create_gdp(
 pub async fn revise_gdp(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGdpCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpdateGdpRequest>,
 ) -> Result<Json<GdpBoard>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     if !(1..=200).contains(&payload.aar) {
@@ -470,7 +470,7 @@ pub async fn revise_gdp(
         max_enroute,
         payload.exempt_airborne,
         &steps,
-        &user.id,
+        &by,
     )
     .await?
     {
@@ -507,7 +507,7 @@ pub async fn revise_gdp(
                 editorial: &editorial,
                 now,
             },
-            &user.id,
+            &by,
         )
         .await?;
         tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -549,11 +549,11 @@ pub async fn get_gdp_board(
 pub async fn publish_gdp(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGdpPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     editorial: Option<Json<PublishGdpRequest>>,
 ) -> Result<Json<GdpBoard>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
 
@@ -576,7 +576,7 @@ pub async fn publish_gdp(
     // One transaction for every write (#508): the publish, the frozen control times, and the generated
     // advisory. An advisory must not exist for a program that did not publish, or the reverse.
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    if !gdp_repo::publish_gdp(&mut *tx, &id, &user.id).await? {
+    if !gdp_repo::publish_gdp(&mut *tx, &id, &by).await? {
         return Err(ApiError::Conflict); // not a draft (or absent), or lost a race
     }
     let gdp = gdp_repo::get_gdp(&mut *tx, &id)
@@ -593,7 +593,7 @@ pub async fn publish_gdp(
             editorial: &editorial,
             now,
         },
-        &user.id,
+        &by,
     )
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -627,7 +627,7 @@ struct GdpDocInput<'a> {
 async fn generate_gdp_advisory(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: GdpDocInput<'_>,
-    author: &str,
+    author: &Attribution,
 ) -> Result<String, ApiError> {
     let GdpDocInput {
         iata,
@@ -864,7 +864,7 @@ mod tests {
                     aar: 25,
                 },
             ],
-            author,
+            &crate::auth::principal::Attribution::user_only(author),
         )
         .await
         .unwrap()
@@ -952,7 +952,15 @@ mod tests {
         let id = draft_gdp(&pool, &user).await;
 
         let mut tx = pool.begin().await.unwrap();
-        assert!(gdp_repo::publish_gdp(&mut *tx, &id, &user).await.unwrap());
+        assert!(
+            gdp_repo::publish_gdp(
+                &mut *tx,
+                &id,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
+        );
         // A *valid* document, derived the way the handler derives it. A stub payload would make
         // `advisory_body` reject it before the foreign key was ever reached, and the test would then
         // pass while proving something else entirely — which it did, until mutation testing showed it.
@@ -977,7 +985,7 @@ mod tests {
         let failed = tmu_repo::create_advisory_tx(
             &mut tx,
             &req,
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
             Some(tmu_repo::AdvisoryProgram::Gdp("no-such-program")),
         )
         .await;
@@ -1066,7 +1074,7 @@ mod tests {
             None,
             false,
             &[],
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
