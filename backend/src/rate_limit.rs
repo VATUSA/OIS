@@ -116,6 +116,9 @@ pub fn spawn_cleanup(limits: Arc<RateLimits>) {
     });
 }
 
+/// Inbound, HMAC-authenticated webhooks — never rate-limited (see [`enforce`]).
+const WEBHOOK_PREFIX: &str = "/api/v1/webhooks/";
+
 /// Middleware: charge the request to its caller's bucket, or refuse it with `429`.
 pub async fn enforce(
     State(limits): State<Arc<RateLimits>>,
@@ -124,6 +127,14 @@ pub async fn enforce(
 ) -> Response {
     // Health, metrics and the OpenAPI docs stay reachable whatever a caller has spent.
     if !request.uri().path().starts_with("/api/") {
+        return next.run(request).await;
+    }
+    // Inbound webhooks are not clients and cannot back off: VATUSA delivers each roster change once,
+    // with no retry (`feed/vatusa.rs`), and every facility's delivery arrives from the same servers.
+    // Charged to the anonymous IP bucket, a bulk roster change would lose deliveries silently — and
+    // after #548 those deliveries drive access. They are authenticated by the per-facility HMAC
+    // instead, which a flood of forged requests cannot pass (#588 review).
+    if request.uri().path().starts_with(WEBHOOK_PREFIX) {
         return next.run(request).await;
     }
     let (limiter, caller) = limits.bucket(&request);
@@ -496,6 +507,39 @@ mod tests {
     }
 
     /// Health checks, metrics scrapes and the docs must not fail because a caller is over its limit.
+    /// #588 review: a burst of VATUSA roster webhooks — every facility's, from one sender address —
+    /// is never refused for rate, because VATUSA does not retry a delivery. And the exemption spends
+    /// nothing: the same address's ordinary anonymous allowance is untouched by it.
+    #[tokio::test]
+    async fn inbound_webhooks_are_never_rate_limited_and_spend_no_allowance() {
+        let router = router(AppState::without_db());
+        let sender = "198.51.100.7";
+        for facility in ["ZDC", "ZNY", "ZBW", "ZOB", "ZAU"] {
+            let request = http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("/api/v1/webhooks/vatusa/{facility}"))
+                .header("x-forwarded-for", sender)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            assert_ne!(
+                response.status(),
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "a delivery for {facility} must not be refused for rate"
+            );
+            assert!(response.headers().get("ratelimit-limit").is_none());
+        }
+        let ip = [("x-forwarded-for", sender)];
+        let first = call(&router, TRAFFIC, &ip).await;
+        assert_eq!(first.status(), http::StatusCode::OK);
+        assert_eq!(
+            header(&first, "ratelimit-remaining"),
+            "1",
+            "nothing was spent by the webhooks"
+        );
+    }
+
     #[tokio::test]
     async fn paths_outside_the_api_are_never_limited() {
         let router = router(AppState::without_db());
