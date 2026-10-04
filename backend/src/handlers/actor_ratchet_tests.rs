@@ -77,6 +77,7 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("dashboards", "create_collection", UserOnly("personal dashboards, owned by a person")),
     ("dashboards", "rename_collection", UserOnly("personal dashboards, owned by a person")),
     ("dashboards", "delete_collection", UserOnly("personal dashboards, owned by a person")),
+    ("diagnostics", "upload_report", UserOnly("a person sends it from their own desktop app")),
     ("events", "update_event_dcc", Pending),
     ("events", "list_event_facilities", Pending),
     ("events", "upsert_event_facility", Pending),

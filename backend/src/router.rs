@@ -1,5 +1,7 @@
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use utoipa::OpenApi;
@@ -10,7 +12,7 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        api_keys, atc, audit, auth, dashboards, desktop, docs, events, facilities,
+        api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs, events, facilities,
         facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
         jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
@@ -611,6 +613,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Desktop diagnostics reports (#629): the desktop's own upload, capped per route (`Multipart`
+        // has no implicit limit), and the staff view.
+        .route(
+            "/api/v1/diagnostics/reports",
+            post(diagnostics::upload_report)
+                .layer(DefaultBodyLimit::max(diagnostics::MAX_UPLOAD_BYTES)),
+        )
+        .route("/api/v1/admin/diagnostics", get(diagnostics::list_reports))
+        .route(
+            "/api/v1/admin/diagnostics/{id}",
+            get(diagnostics::get_report).delete(diagnostics::delete_report),
+        )
+        .route(
+            "/api/v1/admin/diagnostics/{id}/logs",
+            get(diagnostics::get_report_logs),
+        )
         // Background-tasks viewer (job status + manual trigger)
         .route("/api/v1/admin/jobs", get(jobs_handler::list_jobs))
         .route("/api/v1/admin/jobs/{name}/run", post(jobs_handler::run_job))

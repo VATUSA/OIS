@@ -237,6 +237,10 @@ use utoipa::OpenApi;
         crate::handlers::ace::decide_request,
         crate::handlers::admin::get_admin_summary,
         crate::handlers::audit::list_audit_logs,
+        crate::handlers::diagnostics::list_reports,
+        crate::handlers::diagnostics::get_report,
+        crate::handlers::diagnostics::get_report_logs,
+        crate::handlers::diagnostics::delete_report,
         crate::handlers::jobs::list_jobs,
         crate::handlers::jobs::run_job,
         crate::handlers::service_accounts::list_service_accounts,
@@ -460,6 +464,9 @@ use utoipa::OpenApi;
         crate::models::Tier1GenerateResult,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
+        crate::models::DiagnosticsReportSummary,
+        crate::models::DiagnosticsReportPage,
+        crate::models::DiagnosticsReport,
         crate::models::AdminSummaryBody,
         crate::models::DailySeries,
         crate::models::DailyCount,
@@ -507,6 +514,7 @@ use utoipa::OpenApi;
         (name = "ace", description = "ACE support requests + team roster"),
         (name = "integration", description = "Discord integration — outbound jobs + config"),
         (name = "audit", description = "Audit log"),
+        (name = "diagnostics", description = "Desktop diagnostics reports (staff)"),
         (name = "service-accounts", description = "Machine client credentials"),
         (name = "api-keys", description = "User-owned API keys (personal access tokens)")
     )

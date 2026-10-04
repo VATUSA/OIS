@@ -32,6 +32,17 @@ export type UpdateStatus =
   /** The check or the download failed — including a signature that didn't verify. */
   | {state: "failed"};
 
+/** The most recent check's outcome, for diagnostics reports (#629); `null` before the first. */
+let lastCheck: {at: string; outcome: string} | null = null;
+
+export function lastUpdateCheck(): {at: string; outcome: string} | null {
+  return lastCheck;
+}
+
+function noteCheck(outcome: string) {
+  lastCheck = {at: new Date().toISOString(), outcome};
+}
+
 /**
  * Checks for an update and, if there is one, downloads and verifies it.
  *
@@ -53,9 +64,13 @@ export async function fetchUpdate(): Promise<UpdateStatus> {
     update = await check();
   } catch (error) {
     console.warn("[update] could not check for an update", error);
+    noteCheck("check failed");
     return {state: "failed"};
   }
-  if (!update) return {state: "idle"};
+  if (!update) {
+    noteCheck("up to date");
+    return {state: "idle"};
+  }
 
   try {
     // Downloads and verifies; throws if the signature doesn't match the configured public key.
@@ -65,11 +80,13 @@ export async function fetchUpdate(): Promise<UpdateStatus> {
       `[update] REJECTED update ${update.version}: download or signature verification failed`,
       error,
     );
+    noteCheck(`rejected ${update.version}`);
     return {state: "failed"};
   }
   // Hand back the very object we just verified. Re-`check()`ing at install time would download the
   // package a second time and apply whatever the feed serves *then* — not the thing the banner told
   // the user was verified.
+  noteCheck(`ready ${update.version}`);
   return {state: "ready", version: update.version, staged: update};
 }
 
