@@ -46,7 +46,7 @@ pub async fn run() -> color_eyre::Result<()> {
     // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
     metrics::spawn_upkeep(state.metrics.clone());
 
-    feed::spawn_poller(state.feed.clone());
+    feed::spawn_poller(state.feed.clone(), state.events.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
     // vNAS sector identities and live sector staffing for the Airspace Monitor (#595).
