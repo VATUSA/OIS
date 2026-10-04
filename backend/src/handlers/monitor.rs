@@ -397,9 +397,28 @@ mod tests {
         let zdc = tmu(&pool, "ZDC").await;
         let state = state(pool.clone());
         assert_eq!(put(&state, &zdc, "24", json!({"map": 14})).await, 204);
+        // Neighbours the reset must not touch: another sector in the same ARTCC, and the same sector
+        // id at another ARTCC (#706 review: each half of the delete's WHERE is otherwise unpinned).
+        sqlx::query(
+            "insert into flow.sector_map (artcc, sector_id, map) values ('ZDC', '25', 12), ('ZLA', '24', 13)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
 
-        assert!(stored(&pool).await.is_empty(), "the override row is gone");
+        assert_eq!(
+            stored(&pool).await,
+            [
+                ("ZDC".into(), "25".into(), 12),
+                ("ZLA".into(), "24".into(), 13)
+            ],
+            "only ZDC 24's override is gone"
+        );
+        sqlx::query("delete from flow.sector_map")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             crate::feed::sectors::map_for(&state.sector_maps.load(), "ZDC", "24"),
             10,
