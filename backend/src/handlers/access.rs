@@ -15,8 +15,9 @@ use serde::Deserialize;
 use crate::{
     auth::{
         acl::{
-            fetch_user_access, is_server_admin, normalize_permission_tree,
-            permission_tree_from_names,
+            apply_server_admin_catalog, fetch_user_access, is_server_admin,
+            normalize_permission_tree, permission_tree_from_names,
+            user_access_body as acl_user_access_body,
         },
         context::CurrentUser,
         permissions::{
@@ -28,7 +29,7 @@ use crate::{
     errors::ApiError,
     models::{
         AccessCatalogBody, AdminUserPage, CreateGroupRequest, GroupBody, GroupMemberBody,
-        GroupMemberPage, GroupMemberRequest, ScopeAccess, SelfAccessBody, UpdateGroupRequest,
+        GroupMemberPage, GroupMemberRequest, HeldGroupBody, SelfAccessBody, UpdateGroupRequest,
         UpdateUserAccessRequest, UserAccessBody,
     },
     repos::{access as access_repo, audit as audit_repo, org as org_repo, users as user_repo},
@@ -109,11 +110,42 @@ pub async fn get_self_access(
 ) -> Result<Json<SelfAccessBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let (roles, permissions) = fetch_user_access(state.db.as_ref(), &user.id).await?;
+    let groups = held_groups(state.db.as_ref(), &roles).await?;
     Ok(Json(SelfAccessBody {
         server_admin: is_server_admin(&roles),
         role_names: roles,
         permissions: crate::auth::acl::permission_tree_from_paths(&permissions),
+        groups,
     }))
+}
+
+/// The caller's groups with their permissions, for templating an API key (#550).
+///
+/// Reuses the one-query `fetch_all_group_permissions` the admin listing uses rather than asking per
+/// group, and filters to `roles` in Rust: the role set is small and the alternative is an N+1.
+/// A group that bundles nothing still appears, with an empty list, so the picker can show it rather
+/// than the caller wondering where a role they hold went.
+async fn held_groups(
+    pool: Option<&sqlx::PgPool>,
+    roles: &[String],
+) -> Result<Vec<HeldGroupBody>, ApiError> {
+    let Some(pool) = pool else {
+        return Ok(Vec::new());
+    };
+    let mut by_role: std::collections::BTreeMap<&str, Vec<String>> =
+        roles.iter().map(|r| (r.as_str(), Vec::new())).collect();
+    for (role, permission) in access_repo::fetch_all_group_permissions(pool).await? {
+        if let Some(list) = by_role.get_mut(role.as_str()) {
+            list.push(permission);
+        }
+    }
+    Ok(by_role
+        .into_iter()
+        .map(|(name, permissions)| HeldGroupBody {
+            name: name.to_string(),
+            permissions,
+        })
+        .collect())
 }
 
 #[utoipa::path(
@@ -134,7 +166,7 @@ pub async fn get_user_access(
         .ok_or(ApiError::NotFound)?;
     let grants = access_repo::fetch_user_direct_grants(pool, &target.id).await?;
     let roles = access_repo::fetch_user_role_grants(pool, &target.id).await?;
-    let mut body = build_user_access_body(&target.id, target.cid, grants, roles)?;
+    let mut body = acl_user_access_body(&target.id, target.cid, grants, roles)?;
     fill_server_admin_permissions(pool, &mut body).await?;
     Ok(Json(body))
 }
@@ -148,10 +180,7 @@ async fn fill_server_admin_permissions(
 ) -> Result<(), ApiError> {
     if body.server_admin {
         let all = access_repo::fetch_access_catalog_names(pool).await?;
-        let tree = permission_tree_from_names(&all)?;
-        if let Some(national) = body.scopes.iter_mut().find(|s| s.artcc_id.is_none()) {
-            national.permissions = tree;
-        }
+        apply_server_admin_catalog(body, &all)?;
     }
     Ok(())
 }
@@ -243,7 +272,7 @@ pub async fn update_user_access(
 
     let before_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
     let before_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
-    let before_body = build_user_access_body(
+    let before_body = acl_user_access_body(
         &target_user_id,
         target.cid,
         before_grants.clone(),
@@ -279,12 +308,14 @@ pub async fn update_user_access(
         if let Some(role_names) = scope.roles.as_ref() {
             for role_name in &assignable_roles {
                 let held = role_names.iter().any(|r| r == role_name);
-                access_repo::set_user_role_manual_scoped(
+                access_repo::set_user_role_scoped(
                     &mut tx,
                     &target_user_id,
                     role_name,
                     held,
                     scope.artcc.as_deref(),
+                    // The access editor is a human acting: a save never claims to be sync (#547).
+                    access_repo::GrantSource::Manual,
                 )
                 .await?;
             }
@@ -295,7 +326,7 @@ pub async fn update_user_access(
     let after_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
     let after_roles = access_repo::fetch_user_role_grants(pool, &target_user_id).await?;
     let mut response =
-        build_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
+        acl_user_access_body(&target_user_id, target.cid, after_grants, after_roles)?;
     fill_server_admin_permissions(pool, &mut response).await?;
 
     let actor_id = audit_repo::fetch_user_actor_id(pool, &user.id).await?;
@@ -340,9 +371,13 @@ fn scope_permission_names(tree: &serde_json::Value) -> Result<Vec<String>, ApiEr
     normalize_permission_tree(tree).ok_or(ApiError::BadRequest)
 }
 
-/// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants and
-/// roles they themselves hold, and only within the scopes they are editing. Diffs
+/// Self-scope guard: a non-SERVER_ADMIN actor may only add/remove direct grants they themselves
+/// hold **at that scope**, and roles they hold, and only within the scopes they are editing. Diffs
 /// against the target's current grants so untouched scopes/permissions aren't disturbed.
+///
+/// Denies need no modelling here because the editor cannot change them: the save replaces grants only
+/// (`replace_user_permissions_scoped`). The roles half is still name-only — the same scope-blindness,
+/// tracked separately (#559 follow-up).
 async fn enforce_actor_scope(
     state: &AppState,
     actor: &CurrentUser,
@@ -351,14 +386,15 @@ async fn enforce_actor_scope(
     before_roles: &[(Option<String>, String)],
     assignable_roles: &BTreeSet<String>,
 ) -> Result<(), ApiError> {
-    let (actor_roles, actor_permissions) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
+    let (actor_roles, _) = fetch_user_access(state.db.as_ref(), &actor.id).await?;
     if is_server_admin(&actor_roles) {
         return Ok(());
     }
-    let actor_perm_names: BTreeSet<String> = actor_permissions
-        .iter()
-        .map(|path| path.as_db_value())
-        .collect();
+    // The actor's authority **per permission, per scope, after denies** — from the unified resolver
+    // (#543), not from permission names (#559). Names alone made a ZDC-scoped editor read as national,
+    // and a permission they had been denied still read as theirs to delegate.
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let actor_authority = access_repo::fetch_effective_permissions(pool, &actor.id).await?;
 
     // Permissions: only scopes present in the payload are changed.
     let payload_scopes: BTreeSet<Option<String>> = norm_scopes
@@ -379,9 +415,18 @@ async fn enforce_actor_scope(
         .filter(|(artcc, _)| payload_scopes.contains(artcc))
         .cloned()
         .collect();
-    for (_, name) in requested_perms.symmetric_difference(&existing_perms) {
-        if !actor_perm_names.contains(name) {
-            return Err(ApiError::Unauthorized);
+    // Adding *or* removing a grant at a scope needs the actor to hold it there. `allows(None)` — a
+    // national grant — needs **unrestricted** national holding, so someone holding P "nationally except
+    // ZNY" cannot hand out a national P and leak ZNY through it.
+    //
+    // 401 when the actor holds the permission nowhere, 403 when they hold it but not at this scope: the
+    // codebase's split between "absent" and "wrong facility".
+    for (artcc, name) in requested_perms.symmetric_difference(&existing_perms) {
+        match actor_authority.get(name) {
+            None => return Err(ApiError::Unauthorized),
+            Some(scope) if scope.is_empty() => return Err(ApiError::Unauthorized),
+            Some(scope) if !scope.allows(artcc.as_deref()) => return Err(ApiError::Forbidden),
+            Some(_) => {}
         }
     }
 
@@ -431,46 +476,6 @@ async fn enforce_actor_scope(
     }
 
     Ok(())
-}
-
-/// Groups direct grants + role assignments into per-scope `ScopeAccess` (national first).
-fn build_user_access_body(
-    user_id: &str,
-    cid: i64,
-    grants: Vec<(Option<String>, String)>,
-    roles: Vec<(Option<String>, String)>,
-) -> Result<UserAccessBody, ApiError> {
-    let national_roles: Vec<String> = roles
-        .iter()
-        .filter(|(artcc, _)| artcc.is_none())
-        .map(|(_, role)| role.clone())
-        .collect();
-    let server_admin = is_server_admin(&national_roles);
-
-    let mut map: BTreeMap<Option<String>, (Vec<String>, Vec<String>)> = BTreeMap::new();
-    map.entry(None).or_default(); // national scope always present
-    for (artcc, role) in roles {
-        map.entry(artcc).or_default().0.push(role);
-    }
-    for (artcc, permission) in grants {
-        map.entry(artcc).or_default().1.push(permission);
-    }
-
-    let mut scopes = Vec::with_capacity(map.len());
-    for (artcc_id, (role_names, perm_names)) in map {
-        scopes.push(ScopeAccess {
-            artcc_id,
-            role_names,
-            permissions: permission_tree_from_names(&perm_names)?,
-        });
-    }
-
-    Ok(UserAccessBody {
-        id: user_id.to_string(),
-        cid,
-        server_admin,
-        scopes,
-    })
 }
 
 // ---- Group (role) management — VATUSA/OIS#545 ----
@@ -850,7 +855,7 @@ mod group_tests {
 
     async fn make_admin(pool: &PgPool, user_id: &str) {
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(user_id)
         .execute(pool)
@@ -875,7 +880,7 @@ mod group_tests {
         let user = seed_user(&pool).await;
         grant(&pool, &user, "access.groups.update", None).await;
         make_group(&pool, "TEST_GROUP").await;
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TEST_GROUP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TEST_GROUP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1008,7 +1013,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SRC_GRP')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'SRC_GRP', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1077,7 +1082,7 @@ mod group_tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'DENY_SRC')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'DENY_SRC', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await
@@ -1149,7 +1154,7 @@ mod group_tests {
     /// AC4: the user-side and group-side editors produce identical state for the same change, in
     /// both directions — and record it identically (AC6).
     ///
-    /// Driven through both real routes, not the shared writer: calling `set_user_role_manual_scoped`
+    /// Driven through both real routes, not the shared writer: calling `set_user_role_scoped`
     /// twice would pass whatever either handler did with the scope. An add and a remove fail
     /// differently — the user editor computes a symmetric diff over every assignable group, while the
     /// group side names one — so both are compared, and so is each audit entry, minus the holder's
@@ -1158,7 +1163,7 @@ mod group_tests {
     async fn both_sides_produce_the_same_membership(pool: PgPool) {
         let admin = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&admin)
         .execute(&pool)
@@ -1288,7 +1293,7 @@ mod group_tests {
         let actor_id = seed_user(&pool).await;
         grant(&pool, &actor_id, "access.groups.update", None).await;
         let target = holder(&pool, 9_990_301).await;
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'USER')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'system')")
             .bind(&target)
             .execute(&pool)
             .await
@@ -1334,7 +1339,7 @@ mod group_tests {
         }
         let admin = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&admin)
         .execute(&pool)
@@ -1383,12 +1388,26 @@ mod group_tests {
         make_group(&pool, "TWO_SCOPES").await;
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         assert_eq!(
             access_repo::fetch_user_role_grants(&pool, &user)
@@ -1399,9 +1418,16 @@ mod group_tests {
         );
 
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "TWO_SCOPES", false, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "TWO_SCOPES",
+            false,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(
@@ -1425,12 +1451,26 @@ mod group_tests {
             .unwrap();
         make_group(&pool, "MULTI").await;
         let mut tx = pool.begin().await.unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, None)
-            .await
-            .unwrap();
-        access_repo::set_user_role_manual_scoped(&mut tx, &user, "MULTI", true, Some("ZDC"))
-            .await
-            .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            None,
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &user,
+            "MULTI",
+            true,
+            Some("ZDC"),
+            access_repo::GrantSource::Manual,
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
 
         let members = access_repo::fetch_group_members(&pool, "MULTI", "", 25, 0)
@@ -1462,9 +1502,16 @@ mod group_tests {
                 .await
                 .unwrap();
             let mut tx = pool.begin().await.unwrap();
-            access_repo::set_user_role_manual_scoped(&mut tx, &id, "SEARCHABLE", true, None)
-                .await
-                .unwrap();
+            access_repo::set_user_role_scoped(
+                &mut tx,
+                &id,
+                "SEARCHABLE",
+                true,
+                None,
+                access_repo::GrantSource::Manual,
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
         }
 
@@ -1560,8 +1607,8 @@ mod group_tests {
                 .await
                 .unwrap();
                 sqlx::query(
-                    "insert into access.user_roles (user_id, role_name, artcc_id) \
-                     values ($1, 'SCOPED_GRP', $2)",
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, 'SCOPED_GRP', $2, 'manual')",
                 )
                 .bind(&id)
                 .bind(artcc)
@@ -1864,7 +1911,7 @@ async fn change_membership(
     // Audited exactly as the user editor audits (#546 AC6): a `USER_ACCESS` entry keyed on the
     // holder, with the full access snapshot either side, so one query finds a person's access history
     // whichever editor made the change.
-    let before = build_user_access_body(
+    let before = acl_user_access_body(
         &target,
         payload.cid,
         access_repo::fetch_user_direct_grants(pool, &target).await?,
@@ -1874,11 +1921,18 @@ async fn change_membership(
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     // The same writer the user-side editor calls, so the two sides cannot produce different state
     // (#546 AC4). Idempotent on add, keyed on the same scope on remove.
-    access_repo::set_user_role_manual_scoped(&mut tx, &target, name, held, artcc.as_deref())
-        .await?;
+    access_repo::set_user_role_scoped(
+        &mut tx,
+        &target,
+        name,
+        held,
+        artcc.as_deref(),
+        access_repo::GrantSource::Manual,
+    )
+    .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
-    let mut after = build_user_access_body(
+    let mut after = acl_user_access_body(
         &target,
         payload.cid,
         access_repo::fetch_user_direct_grants(pool, &target).await?,
@@ -1947,6 +2001,368 @@ pub async fn remove_group_member(
 }
 
 #[cfg(test)]
+mod held_group_tests {
+    //! AC4 of VATUSA/OIS#550: an API key is templated from the groups its creator holds, so
+    //! `access/self` has to list them — through the real router, not by calling the helper.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send_json, session_cookie, test_state};
+
+    async fn hold(pool: &PgPool, user_id: &str, role: &str, artcc: Option<&str>) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+             values ($1, $2, $3, 'manual')",
+        )
+        .bind(user_id)
+        .bind(role)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn group_permissions(pool: &PgPool, role: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = $1 order by 1",
+        )
+        .bind(role)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The groups held — at any scope — come back with exactly the permissions each grants.
+    #[sqlx::test]
+    async fn self_access_lists_the_callers_groups_with_their_permissions(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &user, "NTMO", Some("ZDC")).await;
+        hold(&pool, &user, "EVENTS_TEAM", None).await;
+
+        let (status, body) =
+            send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(status, http::StatusCode::OK);
+        let groups = body["groups"].as_array().expect("a groups array");
+        let by_name: HashMap<&str, Vec<String>> = groups
+            .iter()
+            .map(|g| {
+                let perms = g["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_string())
+                    .collect();
+                (g["name"].as_str().unwrap(), perms)
+            })
+            .collect();
+        assert_eq!(by_name.len(), 2, "exactly the two held groups: {by_name:?}");
+        assert_eq!(by_name["NTMO"], group_permissions(&pool, "NTMO").await);
+        assert_eq!(
+            by_name["EVENTS_TEAM"],
+            group_permissions(&pool, "EVENTS_TEAM").await
+        );
+        assert!(
+            !by_name["NTMO"].is_empty(),
+            "a facility-scoped membership still yields its template"
+        );
+    }
+
+    /// Only the caller's own groups: a key can only be templated from what its creator holds, and
+    /// listing someone else's — or every group — would be the admin listing this deliberately isn't.
+    #[sqlx::test]
+    async fn self_access_lists_no_group_the_caller_does_not_hold(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let other = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &other, "VATUSA_STAFF", None).await;
+
+        let (_, body) = send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(
+            body["groups"].as_array().map(|g| g.len()),
+            Some(0),
+            "another user's VATUSA_STAFF must not appear"
+        );
+    }
+
+    /// It needs only `access.self.read` — the whole reason this is on `access/self` and not the admin
+    /// listing, which needs `access.groups.read` and would have left most key creators without one.
+    #[sqlx::test]
+    async fn a_non_admin_can_read_their_own_groups(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        grant(&pool, &user, "access.self.read", None).await;
+        hold(&pool, &user, "NTMO", None).await;
+
+        let (status, body) =
+            send_json(&state, http::Method::GET, "/api/v1/access/self", &cookie).await;
+
+        assert_eq!(status, http::StatusCode::OK, "no access.groups.read needed");
+        assert_eq!(body["groups"][0]["name"], "NTMO");
+    }
+}
+
+#[cfg(test)]
+mod escalation_guard_tests {
+    //! VATUSA/OIS#559: `enforce_actor_scope` — the access editor's no-escalation gate — had no tests at
+    //! all. These drive the real route, `POST /api/v1/admin/users/{cid}/access`, adversarially: each one
+    //! is an attempt to grant what the actor does not hold, at a scope they do not hold it at.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{
+        deny_scoped, grant, seed_user, send, session_cookie, test_state,
+    };
+
+    /// The permission being fought over. A real catalog entry, so validation passes and the guard is
+    /// what decides.
+    const P: &str = "tmu.program.update";
+    const TARGET_CID: i64 = 9_000_559;
+
+    fn tree() -> Value {
+        json!({"tmu": {"program": ["update"]}})
+    }
+
+    struct World {
+        state: crate::state::AppState,
+        pool: PgPool,
+        actor: String,
+        cookie: String,
+        target: String,
+    }
+
+    /// An actor who may use the editor at all (`access.users.update`), and a target to edit.
+    async fn world(pool: PgPool) -> World {
+        let state = test_state(pool.clone(), HashMap::new());
+        let actor = seed_user(&pool).await;
+        grant(&pool, &actor, "access.users.update", None).await;
+        let cookie = session_cookie(&pool, &actor).await;
+        let target: String = sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) \
+             values ($1, 'Target', 'Target') returning id",
+        )
+        .bind(TARGET_CID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        World {
+            state,
+            pool,
+            actor,
+            cookie,
+            target,
+        }
+    }
+
+    /// Save one scope of the target's access: `artcc = None` is national.
+    async fn save(w: &World, artcc: Option<&str>, permissions: Value) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{TARGET_CID}/access"),
+            &w.cookie,
+            Some(json!({
+                "reason": "test",
+                "scopes": [{"artcc_id": artcc, "permissions": permissions}],
+            })),
+        )
+        .await
+    }
+
+    /// The target's direct rows for `P`, as `scope:grant|deny`.
+    async fn rows(w: &World) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(artcc_id, 'national') || ':' || \
+                    case when granted then 'grant' else 'deny' end \
+             from access.user_permissions where user_id = $1 and permission_name = $2 order by 1",
+        )
+        .bind(&w.target)
+        .bind(P)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    // ---- AC1: scope --------------------------------------------------------------------------------
+
+    /// The escalation itself. Names alone made a ZDC-scoped editor read as national.
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_grant_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(
+            save(&w, Some("ZNY"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(rows(&w).await.is_empty(), "a refused save writes nothing");
+    }
+
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_grant_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::FORBIDDEN);
+        assert!(rows(&w).await.is_empty());
+    }
+
+    /// The positive control: the gate narrows, it does not disable. Without this, a guard that refused
+    /// everything would pass the two tests above.
+    #[sqlx::test]
+    async fn a_zdc_editor_can_grant_at_zdc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    /// The diff is symmetric, so *taking* a grant away needs the same authority as giving it.
+    #[sqlx::test]
+    async fn a_zdc_editor_cannot_revoke_at_another_artcc(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        grant(&w.pool, &w.target, P, Some("ZNY")).await;
+
+        assert_eq!(
+            save(&w, Some("ZNY"), json!({})).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            rows(&w).await,
+            ["ZNY:grant"],
+            "the ZNY grant survives the refused save"
+        );
+    }
+
+    // ---- AC2: denies -------------------------------------------------------------------------------
+
+    /// A ZDC grant plus a **national** deny resolves to holding P nowhere — the deny wins. By name the
+    /// actor still "has" P, which is exactly what the old guard checked. 401, the "absent" answer.
+    /// (A grant and a deny at the *same* scope can't coexist — the unique index forbids it.)
+    #[sqlx::test]
+    async fn an_actor_denied_a_permission_cannot_grant_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        deny_scoped(&w.pool, &w.actor, P, None).await;
+
+        assert_eq!(
+            save(&w, Some("ZDC"), tree()).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        assert!(rows(&w).await.is_empty());
+    }
+
+    /// National except ZNY: a national grant to someone else would hand them ZNY, which the actor does
+    /// not hold. So it needs **unrestricted** national holding — while ZDC is fine.
+    #[sqlx::test]
+    async fn national_except_one_artcc_cannot_grant_nationally(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, None).await;
+        deny_scoped(&w.pool, &w.actor, P, Some("ZNY")).await;
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            save(&w, Some("ZNY"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    // ---- AC3: untouched scopes ---------------------------------------------------------------------
+
+    /// A ZDC-only save must leave the target's ZNY grant alone, even though the actor could never have
+    /// touched ZNY. The guard only weighs what the save changes.
+    #[sqlx::test]
+    async fn a_save_leaves_scopes_it_does_not_name_alone(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        grant(&w.pool, &w.target, P, Some("ZNY")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant", "ZNY:grant"]);
+    }
+
+    // ---- AC4: SERVER_ADMIN -------------------------------------------------------------------------
+
+    #[sqlx::test]
+    async fn a_server_admin_bypasses_the_guard(pool: PgPool) {
+        let w = world(pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'manual')",
+        )
+        .bind(&w.actor)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(save(&w, None, tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["national:grant"]);
+    }
+
+    // ---- the save no longer strips denies ----------------------------------------------------------
+
+    /// An unchanged save used to delete the target's deny in that scope — widening their access with no
+    /// guard involved, because the editor cannot express a deny and the diff never saw one.
+    #[sqlx::test]
+    async fn an_unchanged_save_keeps_the_targets_deny(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, None).await;
+        grant(&w.pool, &w.actor, "tmu.ntml.update", None).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        // Saves ZDC with a different permission; P is not mentioned.
+        let other = json!({"tmu": {"ntml": ["update"]}});
+        assert_eq!(save(&w, Some("ZDC"), other).await, http::StatusCode::OK);
+
+        assert_eq!(rows(&w).await, ["ZDC:deny"], "the deny survives the save");
+    }
+
+    /// An explicit grant over a deny replaces it — the editor deliberately granting — rather than
+    /// failing on the unique index. Gated like any grant: the actor holds P at ZDC.
+    #[sqlx::test]
+    async fn an_explicit_grant_over_a_deny_replaces_it(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZDC")).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        assert_eq!(save(&w, Some("ZDC"), tree()).await, http::StatusCode::OK);
+        assert_eq!(rows(&w).await, ["ZDC:grant"]);
+    }
+
+    /// ...and refused when the actor could not grant it there anyway, leaving the deny in place.
+    #[sqlx::test]
+    async fn a_grant_over_a_deny_is_still_gated(pool: PgPool) {
+        let w = world(pool).await;
+        grant(&w.pool, &w.actor, P, Some("ZNY")).await;
+        deny_scoped(&w.pool, &w.target, P, Some("ZDC")).await;
+
+        assert_eq!(
+            save(&w, Some("ZDC"), tree()).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(rows(&w).await, ["ZDC:deny"]);
+    }
+}
+
+#[cfg(test)]
 mod role_guard_tests {
     //! VATUSA/OIS#577: the access editor's **roles** half checked role names only, so an editor holding
     //! `EC` at ZDC could assign `EC` nationally. Driven through `POST /api/v1/admin/users/{cid}/access`.
@@ -1994,7 +2410,7 @@ mod role_guard_tests {
 
     async fn hold(pool: &PgPool, user: &str, role: &str, artcc: Option<&str>) {
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, $2, $3)",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) values ($1, $2, $3, 'manual')",
         )
         .bind(user)
         .bind(role)
@@ -2141,15 +2557,7 @@ mod role_guard_tests {
         .await
         .unwrap();
         assert!(bundled, "precondition: {ROLE} bundles {denied}");
-        sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, $2, false, 'ZDC')",
-        )
-        .bind(&w.actor)
-        .bind(denied)
-        .execute(&w.pool)
-        .await
-        .unwrap();
+        crate::scope_test_support::deny_scoped(&w.pool, &w.actor, denied, Some("ZDC")).await;
 
         assert_eq!(
             save_roles(&w, Some("ZDC"), &[ROLE]).await,

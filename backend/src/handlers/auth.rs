@@ -213,9 +213,10 @@ pub async fn vatsim_callback(
 
     ensure_user_login_access(pool, &user_id, profile.cid, was_new_user).await?;
 
-    // Enrich with VATUSA member details in the background (best-effort — login never waits on,
-    // nor fails because of, VATUSA availability). No-ops when VATUSA_API_KEY is unset.
-    crate::feed::vatusa::spawn_member_sync(pool.clone(), profile.cid);
+    // Sync VATUSA details and the access their roles map to *before* issuing the session, so a
+    // first-ever login is already correct (#548). Bounded and best-effort: a slow or failing VATUSA
+    // never fails the login. No-ops when VATUSA_API_KEY is unset.
+    crate::feed::vatusa::sync_member_on_login(pool, profile.cid).await;
 
     let session_token = Uuid::new_v4().to_string();
     auth_repo::insert_session(pool, &session_token, &user_id).await?;
@@ -498,7 +499,15 @@ async fn ensure_user_login_access(
         // wipe stays: a demotion must leave a former admin holding no national grants of their own,
         // and `replace_user_permissions` with an empty set is exactly that clearing.
         access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
-        access_repo::set_user_role_manual(&mut tx, user_id, BASELINE_ROLE, true).await?;
+        // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
+        access_repo::set_user_role(
+            &mut tx,
+            user_id,
+            BASELINE_ROLE,
+            true,
+            access_repo::GrantSource::System,
+        )
+        .await?;
     }
 
     tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -735,7 +744,7 @@ mod tests {
         let user = seed_user(&pool).await;
         grant(&pool, &user, "tmu.program.update", None).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
         )
         .bind(&user)
         .execute(&pool)
@@ -789,7 +798,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'TMU_TEST')")
+        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'TMU_TEST', 'manual')")
             .bind(&user)
             .execute(&pool)
             .await

@@ -18,7 +18,7 @@ use crate::{
         permissions::{
             FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
         },
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -450,7 +450,12 @@ pub async fn create_route(
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    let id = flow_repo::create_route(pool, &payload, principal.user_id()).await?;
+    let id = flow_repo::create_route(
+        pool,
+        &payload,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     route_response(&state, &id).await
 }
 
@@ -485,7 +490,14 @@ pub async fn update_route(
     if !scope.allows(existing.artcc.as_deref()) || !scope.allows(new_artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    if !flow_repo::update_route(pool, &id, &payload, principal.user_id()).await? {
+    if !flow_repo::update_route(
+        pool,
+        &id,
+        &payload,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    {
         return Err(ApiError::NotFound);
     }
     route_response(&state, &id).await
@@ -2310,11 +2322,10 @@ pub async fn list_idst(
 pub async fn mark_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
     Json(payload): Json<ReleaseRequest>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
@@ -2365,7 +2376,8 @@ pub async fn mark_release(
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
     let edct = cta - (eta_ms - now_ms);
-    flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &user.id).await?;
+    let by = principal.attribution(&state).await?;
+    flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by).await?;
     state.publish(crate::realtime::topic::RELEASE);
 
     // Reflect the new release and re-meter without another snapshot read.
@@ -2455,11 +2467,10 @@ pub async fn clear_release(
 pub async fn swap_releases(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<SwapReleaseRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let a = payload.a.trim().to_ascii_uppercase();
     let b = payload.b.trim().to_ascii_uppercase();
@@ -2470,7 +2481,8 @@ pub async fn swap_releases(
     }
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
-    if !flow_repo::swap_releases(pool, &id, &a, &b, &user.id).await? {
+    let by = principal.attribution(&state).await?;
+    if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::RELEASE);
@@ -4359,6 +4371,7 @@ mod release_swap_tests {
 
     use sqlx::PgPool;
 
+    use crate::auth::principal::Attribution;
     use crate::repos::flow as flow_repo;
     use crate::scope_test_support::{seed_user, send, session_cookie, test_state};
 
@@ -4388,15 +4401,29 @@ mod release_swap_tests {
     async fn two_releases_trade_their_times(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
 
         assert!(
-            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
                 .await
                 .unwrap()
         );
@@ -4416,12 +4443,12 @@ mod release_swap_tests {
             ("UAL2", 2_000, 1_900),
             ("DAL3", 3_000, 2_900),
         ] {
-            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &user)
+            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &Attribution::user_only(&user))
                 .await
                 .unwrap();
         }
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4438,14 +4465,28 @@ mod release_swap_tests {
     async fn neither_flight_ends_up_later_than_the_later_original(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4466,14 +4507,28 @@ mod release_swap_tests {
     async fn the_swap_does_not_touch_the_manual_order(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4498,12 +4553,19 @@ mod release_swap_tests {
     async fn a_swap_with_one_unreleased_flight_is_rejected_and_writes_nothing(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
 
         assert!(
-            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &user)
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &Attribution::user_only(&user))
                 .await
                 .unwrap()
         );
@@ -4526,12 +4588,19 @@ mod release_swap_tests {
     async fn the_repo_refuses_to_swap_a_flight_with_itself(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
 
         assert!(
-            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &user)
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &Attribution::user_only(&user))
                 .await
                 .unwrap(),
             "one matched row is not a swap"
@@ -4546,12 +4615,26 @@ mod release_swap_tests {
         let state = test_state(pool.clone(), HashMap::new());
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
         let cookie = session_cookie(&pool, &user).await;
 
         let status = send(
@@ -4575,9 +4658,16 @@ mod release_swap_tests {
         let user = seed_user(&pool).await;
         crate::scope_test_support::grant(&pool, &user, "flow.fca.update", None).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
         let cookie = session_cookie(&pool, &user).await;
 
         let status = send(

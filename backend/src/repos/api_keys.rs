@@ -128,8 +128,8 @@ mod validate_subset_tests {
 
     async fn deny(pool: &PgPool, user_id: &str, perm: &str) {
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             values ($1, $2, false)",
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             values ($1, $2, false, 'manual')",
         )
         .bind(user_id)
         .bind(perm)
@@ -139,12 +139,14 @@ mod validate_subset_tests {
     }
 
     async fn assign_role(pool: &PgPool, user_id: &str, role: &str) {
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, $2)")
-            .bind(user_id)
-            .bind(role)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, $2, 'manual')",
+        )
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[sqlx::test]
@@ -241,7 +243,7 @@ mod validate_subset_tests {
         const ROLE_PERM: &str = "ace.requests.decide";
         let user = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'ACE', 'ZDC')",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) values ($1, 'ACE', 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
