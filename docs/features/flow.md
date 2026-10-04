@@ -286,6 +286,9 @@ POST /api/v1/flow/fcas/F1/release/AAL123     If-Match: "1"      → 412, ETag: "
 **A committed time stands.** When an integration's credential is revoked or its account disabled,
 the releases it already issued stay frozen and in force (a pilot may already hold them); only its
 *future* writes fail, with 401 at authentication. A person can clear them as usual.
+Deleting the key or account outright doesn't change that (#659): its actor outlives the credential,
+so the release keeps its "via …" provenance and is still a machine's. A replacement credential is a
+different machine, so it gets `409 held_by_other_machine` on those releases; a person can clear them.
 
 ### Times
 

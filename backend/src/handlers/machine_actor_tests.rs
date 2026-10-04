@@ -1579,6 +1579,161 @@ async fn the_departures_list_carries_an_issued_cfrs_version(pool: PgPool) {
     assert_eq!(test1["cfr_version"], 2);
 }
 
+// ==== VATUSA/OIS#659: a machine's provenance outlives its credential ================================
+
+/// The owner of an API key made by [`api_key`], with what it takes to delete its own key.
+async fn key_owner_cookie(pool: &PgPool, key: &str) -> String {
+    let owner: String =
+        sqlx::query_scalar("select owner_user_id from access.api_keys where id = $1")
+            .bind(key)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    grant(pool, &owner, "api_keys.key.create", None).await;
+    session_cookie(pool, &owner).await
+}
+
+#[sqlx::test]
+async fn deleting_the_issuing_key_keeps_the_releases_machine_provenance(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (key, auth) = api_key(&pool, "flow.fca.update").await;
+    let uri = format!("/api/v1/flow/fcas/{fca_id}/release/TEST1");
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    let actor = actor_of(&pool, "api_key_id", &key)
+        .await
+        .expect("the key's actor");
+
+    // The owner deletes the key through the API, as anyone may.
+    let owner = key_owner_cookie(&pool, &key).await;
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/api-keys/{key}"),
+        &[&owner],
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    let key_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from access.api_keys where id = $1)")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!key_exists, "the key is gone");
+
+    // The actor — and so the release's holder — survives, unlinked from the deleted key.
+    let (api_key_id, name): (Option<String>, String) =
+        sqlx::query_as("select api_key_id, display_name from access.actors where id = $1")
+            .bind(&actor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(api_key_id, None);
+    assert_eq!(
+        release_attribution(&pool, &fca_id, "TEST1").await,
+        Some((None, Some(actor)))
+    );
+
+    // AC1: the IDST still says a tool released it.
+    let reader = seed_user(&pool).await;
+    grant(&pool, &reader, "flow.fca.read", None).await;
+    let reader_cookie = session_cookie(&pool, &reader).await;
+    let (_, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&reader_cookie],
+        None,
+    )
+    .await;
+    assert_eq!(idst["released"][0]["callsign"], "TEST1");
+    assert_eq!(idst["released"][0]["released_by_machine"], name.as_str());
+
+    // AC2: it is still a machine's release — another machine is told so, not "a person's".
+    let (_, other) = api_key(&pool, "flow.fca.update").await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&other, "If-Match: \"1\""],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::CONFLICT);
+    assert_eq!(body["error"], "held_by_other_machine");
+
+    // And a person can still clear it.
+    let person = seed_user(&pool).await;
+    grant(&pool, &person, "flow.fca.update", None).await;
+    let person_cookie = session_cookie(&pool, &person).await;
+    let (status, _, _) =
+        send_full(&state, http::Method::DELETE, &uri, &[&person_cookie], None).await;
+    assert_eq!(status, http::StatusCode::OK);
+}
+
+/// The same for a service account and its CFR. There is no delete endpoint for an account, so the row
+/// is deleted directly — which is exactly what the foreign key governs.
+#[sqlx::test]
+async fn deleting_the_issuing_service_account_keeps_its_cfrs_provenance(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (sa, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    let actor = actor_of(&pool, "service_account_id", &sa)
+        .await
+        .expect("the account's actor");
+
+    sqlx::query("delete from access.service_accounts where id = $1")
+        .bind(&sa)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        cfr_row(&pool, "AAL1").await.unwrap().2,
+        Some(actor.clone()),
+        "the CFR still names its issuer"
+    );
+    let still: Option<String> =
+        sqlx::query_scalar("select service_account_id from access.actors where id = $1")
+            .bind(&actor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(still, None, "the actor survives, unlinked");
+
+    let other = other_service_account(&pool, "tmu.cfr.assign").await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&other, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_other_machine"))
+    );
+}
+
 // ---- #626: release and CFR writes honour the caller's ARTCC scope ---------------------------------
 
 /// KDCA belongs to ZDC and KJFK to ZNY, so a CFR's airport resolves to an owning ARTCC.
