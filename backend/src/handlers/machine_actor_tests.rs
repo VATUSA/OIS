@@ -1755,3 +1755,75 @@ async fn a_national_holder_writes_in_any_artcc(pool: PgPool) {
     .await;
     assert_eq!(status, http::StatusCode::OK, "{body}");
 }
+
+/// #626 review: an FCA with no `artcc` — `UpsertFcaRequest.artcc` defaults to `''` — and a CFR at an
+/// airport no ARTCC claims are writable **only nationally**. Facility scope cannot cover a place no
+/// facility owns; a national holder is the positive control.
+#[sqlx::test]
+async fn an_unowned_fca_or_airport_is_writable_only_nationally(pool: PgPool) {
+    let state = with_facilities(crossing_state(pool.clone()).await).await;
+    let (_, scoped) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) \
+         values ($1, 'tmu.cfr.assign') on conflict do nothing",
+    )
+    .bind(ROLE)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let national = seed_user(&pool).await;
+    grant(&pool, &national, "flow.fca.update", None).await;
+    grant(&pool, &national, "tmu.cfr.assign", None).await;
+    let national = session_cookie(&pool, &national).await;
+
+    let unowned = fca_in(&pool, "").await;
+    let release = format!("/api/v1/flow/fcas/{unowned}/release/TEST1");
+    let (status, _) = call_with(
+        &state,
+        http::Method::POST,
+        &release,
+        &[&scoped, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "a ZDC holder on an FCA with no artcc"
+    );
+    assert_eq!(release_attribution(&pool, &unowned, "TEST1").await, None);
+    let (status, body) = call_with(
+        &state,
+        http::Method::POST,
+        &release,
+        &[&national],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "a national holder: {body}");
+
+    // KXYZ is in no facility's airport list, so its owning ARTCC does not resolve.
+    let (status, _) = call_with(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&scoped, "If-None-Match: *"],
+        Some(cfr_body("AAL9", "KXYZ")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "a ZDC holder at an unowned airport"
+    );
+    assert_eq!(cfr_airport(&pool, "AAL9").await, None);
+    let (status, body) = call_with(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&national],
+        Some(cfr_body("AAL9", "KXYZ")),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "a national holder: {body}");
+}
