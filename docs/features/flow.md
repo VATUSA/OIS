@@ -57,7 +57,7 @@ carry `updated_at` (via the shared `platform.touch_updated_at()` trigger) and re
 | --- | --- | --- |
 | `id` | text pk | `gen_random_uuid()` |
 | `name` | text | |
-| `color` | text | hex, default `#f59e0b` |
+| `color` | text | lowercase `#rrggbb`, ≥ 3:1 contrast on the dark ground; default `#efc14d` (Amber). A swatch stores the hex of the theme it was picked in (#698) |
 | `artcc` | text | owning facility (sidebar filter) |
 | `points` | jsonb | `[lat, lon]` vertices — an open polyline (≥ 2 pts) |
 | `dests` / `origins` / `fixes` | text[] | membership filters |

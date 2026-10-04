@@ -264,10 +264,13 @@ async fn require_fca_write_scope(
     }
 }
 
-fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
+/// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
+/// points check, so a bad `mode` or `color` reached the table through them.
+pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
+    flow_repo::fca_color(req.color.as_deref())?;
     if let Some(m) = &req.mode
         && m != "rate"
         && m != "mit"
@@ -5378,5 +5381,188 @@ mod fca_scope_tests {
             send(&state, Method::DELETE, &one(&global), &national, None).await,
             StatusCode::NO_CONTENT
         );
+    }
+}
+
+/// Every FCA write path validates and normalises the colour (#698): the two flow routes and the two
+/// event-FCA routes, which used to repeat only part of `validate_fca`.
+#[cfg(test)]
+mod fca_color_route_tests {
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
+    use crate::state::AppState;
+
+    async fn call(
+        state: &AppState,
+        method: http::Method,
+        uri: &str,
+        cookie: &str,
+        body: Value,
+    ) -> (http::StatusCode, Value) {
+        use tower::ServiceExt;
+        let request = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(http::header::COOKIE, cookie)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn fca(color: Option<&str>) -> Value {
+        let mut body = json!({ "name": "T698", "artcc": "ZDC",
+                               "points": [[38.0, -77.0], [39.0, -77.0], [39.0, -76.0]] });
+        if let Some(c) = color {
+            body["color"] = json!(c);
+        }
+        body
+    }
+
+    async fn stored(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select color from flow.fca order by created_at")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    const REFUSED: [&str; 4] = ["red", "#abc", "#000000", "#08080a"];
+
+    /// Runs one write path: a mixed-case colour is stored lowercase, no colour gets the default, and each
+    /// refused value is a 400 that stores nothing.
+    async fn exercise(
+        pool: &PgPool,
+        state: &AppState,
+        cookie: &str,
+        create: &str,
+        update: impl Fn(&str) -> String,
+    ) {
+        let (status, body) = call(
+            state,
+            http::Method::POST,
+            create,
+            cookie,
+            fca(Some("#EFC14D")),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{create}: {body}");
+        assert_eq!(stored(pool).await, ["#efc14d"]);
+        let id: String = sqlx::query_scalar("select id from flow.fca")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+        for bad in REFUSED {
+            let (status, _) = call(state, http::Method::POST, create, cookie, fca(Some(bad))).await;
+            assert_eq!(
+                status,
+                http::StatusCode::BAD_REQUEST,
+                "create {create} with {bad}"
+            );
+            let (status, _) = call(
+                state,
+                http::Method::PUT,
+                &update(&id),
+                cookie,
+                fca(Some(bad)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                http::StatusCode::BAD_REQUEST,
+                "update {create} with {bad}"
+            );
+        }
+        assert_eq!(
+            stored(pool).await,
+            ["#efc14d"],
+            "nothing refused was stored"
+        );
+
+        let (status, _) = call(
+            state,
+            http::Method::PUT,
+            &update(&id),
+            cookie,
+            fca(Some(" #5EC8E5 ")),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(stored(pool).await, ["#5ec8e5"]);
+        let (status, _) = call(state, http::Method::POST, create, cookie, fca(None)).await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(
+            stored(pool).await,
+            ["#5ec8e5", "#efc14d"],
+            "no colour gets the default"
+        );
+    }
+
+    /// Migration 0123 brings rows written before validation into the shape the map draws: trimmed and
+    /// lowercase, with anything still not `#rrggbb` reset to the default.
+    #[sqlx::test]
+    async fn legacy_colours_are_normalised_by_the_migration(pool: PgPool) {
+        for color in ["#EFC14D", " #5ec8e5 ", "red", "#fff"] {
+            sqlx::query(
+                "insert into flow.fca (name, color, artcc, points) values ('L', $1, 'ZDC', '[]'::jsonb)",
+            )
+            .bind(color)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let migration = include_str!("../../migrations/0123_fca_color_normalised.sql");
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        assert_eq!(
+            stored(&pool).await,
+            ["#efc14d", "#5ec8e5", "#efc14d", "#efc14d"]
+        );
+    }
+
+    #[sqlx::test]
+    async fn the_flow_fca_routes_validate_the_colour(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), HashMap::new());
+        exercise(&pool, &state, &cookie, "/api/v1/flow/fcas", |id| {
+            format!("/api/v1/flow/fcas/{id}")
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    async fn the_event_fca_routes_validate_the_colour(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values (6980, 'T698', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = test_state(pool.clone(), HashMap::new());
+        exercise(&pool, &state, &cookie, "/api/v1/events/6980/fcas", |id| {
+            format!("/api/v1/events/6980/fcas/{id}")
+        })
+        .await;
     }
 }

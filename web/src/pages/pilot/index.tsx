@@ -12,6 +12,7 @@ import {
 } from "@ois/ui";
 import {Clock, OctagonX, Plane, Split, Timer, TrafficCone, Waypoints} from "lucide-react";
 
+import {swatchCss} from "@/components/map/lib/colors";
 import {FlightSearch} from "@/components/flight-search";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
@@ -124,7 +125,7 @@ const constraintColumns: DataColumn<Constraint>[] = [
     cell: (c) => (
       <span className="flex items-center gap-2">
         {c.row.original.color && (
-          <span className="size-2.5 shrink-0 rounded-full" style={{ background: c.row.original.color }} />
+          <span className="size-2.5 shrink-0 rounded-full" style={{ background: swatchCss(c.row.original.color) }} />
         )}
         {c.row.original.where}
       </span>

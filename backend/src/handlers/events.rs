@@ -1613,9 +1613,7 @@ pub async fn create_event_fca(
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if payload.name.trim().is_empty() || payload.points.len() < 2 {
-        return Err(ApiError::BadRequest);
-    }
+    crate::handlers::flow::validate_fca(&payload)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -1643,9 +1641,7 @@ pub async fn update_event_fca(
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if payload.name.trim().is_empty() || payload.points.len() < 2 {
-        return Err(ApiError::BadRequest);
-    }
+    crate::handlers::flow::validate_fca(&payload)?;
     owned_event_fca(pool, id, &fca_id).await?;
     flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
