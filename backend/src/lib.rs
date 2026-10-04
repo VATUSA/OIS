@@ -131,7 +131,7 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA: register the division webhook, and pull the whole division daily (#605).
         feed::vatusa::spawn_register_webhook(pool.clone());
-        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool);
+        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool, state.events.clone());
     }
 
     let app = router::build_router(state);
