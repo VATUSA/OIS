@@ -85,6 +85,23 @@ fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
 /// they previously built this object separately. A corrected row must be assembled exactly like the
 /// original; the two drifting is how the channel ends up showing a line the row never had. The bot
 /// stays a dumb renderer: everything about NTML's shape is decided here (#436).
+/// The `tmi_cancel` job payload: the NTML cancellation line, stamped now.
+///
+/// Shared by the manual cancel and event-package deactivation (#568), so a TMI ended early reads the
+/// same in the NTML log whichever path ended it.
+pub(crate) fn tmi_cancel_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "tmi_id": tmi.id,
+        "ntml": crate::tmi::ntml_cancel_line(
+            chrono::Utc::now(),
+            &tmi.restriction,
+            Some(&tmi.requesting),
+            Some(&tmi.providing),
+        ),
+    })
+}
+
 pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
     json!({
         "channel_id": channel_id,
@@ -98,35 +115,6 @@ pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Va
             Some(&tmi.requesting),
             Some(&tmi.providing),
         ),
-    })
-}
-
-/// The `adv_publish` job payload: the rendered document plus what the bot needs to post it.
-///
-/// The document is the **stored** `body`, not a re-render. It is what was reviewed and published, and
-/// re-rendering here would let the post differ from the row — the same reason `tmi_publish_job`
-/// assembles the row in one place. The bot stays a dumb renderer: it fences and splits, and decides
-/// nothing about content (#436's invariant, VATUSA/OIS#459).
-pub(crate) fn advisory_publish_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": adv.body,
-    })
-}
-
-/// The `adv_cancel` job payload: a short correction, not a re-post of the document.
-pub(crate) fn advisory_cancel_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": crate::advisory::render_cancellation(&crate::advisory::AdvisoryIdent {
-            facility: adv.facility.clone(),
-            number: adv.number,
-            issued_day: adv.issued_day,
-            // Stamped now: this is the moment the cancellation is being logged.
-            signed_at: chrono::Utc::now(),
-        }),
     })
 }
 
@@ -372,16 +360,7 @@ pub async fn cancel_tmi(
         // A cancel is its own NTML row rather than an edit of the original (#436): the channel is a
         // chronological log, and the original entry did happen. Enqueued in the same tx as the
         // cancel, so the post can't exist for a TMI that is still live.
-        let job = json!({
-            "channel_id": channel_id,
-            "tmi_id": tmi.id,
-            "ntml": crate::tmi::ntml_cancel_line(
-                chrono::Utc::now(),
-                &tmi.restriction,
-                Some(&tmi.requesting),
-                Some(&tmi.providing),
-            ),
-        });
+        let job = tmi_cancel_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
             .await?;
     } else {
@@ -677,6 +656,12 @@ pub async fn publish_ground_stop(
         body: String::new(),
         structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
         decoded: None,
+        // No window (#537). A generated advisory's life is the program's life, and that is already
+        // enforced through `gdp_id`/`ground_stop_id`: the cleanup pass cancels it when the source
+        // expires. Setting `valid_to` here as well would be a second mechanism claiming the same
+        // expiry, which is the drift `ground_stop_until_ts` is used above to avoid.
+        valid_from: None,
+        valid_to: None,
     };
     tmu_repo::create_advisory_tx(
         &mut tx,
@@ -1059,6 +1044,8 @@ mod tests {
                 body: "vATCSCC ADVZY".into(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
             &author,
         )
@@ -2073,7 +2060,7 @@ pub async fn get_advisory(
 /// `tmu.adv.update` and `tmu.adv.publish` are graded separately everywhere else, but the *scope*
 /// question is the same one for both: is this principal allowed to act for this facility at all.
 /// Checking the permission the caller was already gated on keeps the two answers from diverging.
-async fn require_advisory_scope(
+pub(crate) async fn require_advisory_scope(
     state: &AppState,
     principal: &Principal,
     permission: &str,
@@ -2204,7 +2191,7 @@ pub async fn publish_advisory(
     if let Some(channel_id) = channel {
         // In the same tx as the publish: a post must not exist for an advisory that did not publish,
         // and an advisory must not go live with nothing queued to announce it.
-        let job = advisory_publish_job(&channel_id, &adv);
+        let job = crate::advisory::publish_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(
             &mut tx,
             "adv_publish",
@@ -2252,7 +2239,7 @@ pub async fn cancel_advisory(
         .await?
         .ok_or(ApiError::NotFound)?;
     if let Some(channel_id) = channel {
-        let job = advisory_cancel_job(&channel_id, &adv);
+        let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(&mut tx, "adv_cancel", &job, Some("advisory"), Some(&adv.id))
             .await?;
     } else {

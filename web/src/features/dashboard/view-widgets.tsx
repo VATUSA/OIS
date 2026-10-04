@@ -2,12 +2,22 @@ import {useMemo, useState} from "react";
 import {cn, EmptyState, Input} from "@ois/ui";
 import {Filter} from "lucide-react";
 
-import {AircraftView, DemandView, LadderView, SummaryView, summaryGateName} from "@/pages/airport";
+import {TguiLadder} from "@/components/ladder/TguiLadder";
+import {
+  AircraftView,
+  airportLadderItems,
+  airportTguiColumns,
+  DemandView,
+  LadderView,
+  SummaryView,
+  summaryGateName,
+} from "@/pages/airport";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
 import {type Flow, useAirportFlow} from "@/lib/feed";
 
 import type {LadderFilters, ViewId, ViewWidget} from "./types";
+import {useReportWidgetStatus} from "./widget-status";
 
 /** Views that need only an ICAO and self-fetch. */
 const AIRPORT_VIEWS = {
@@ -176,6 +186,7 @@ function LadderWidget({
   onChange: (id: string, patch: Record<string, unknown>) => void;
 }) {
   const flow = useAirportFlow(widget.icao);
+  useReportWidgetStatus(flow.isFetching, flow.dataUpdatedAt, flow.refetch);
   if (flow.isError) return <Notice>Couldn&apos;t load {widget.icao}.</Notice>;
   if (!flow.data) return <Notice>Loading {widget.icao}…</Notice>;
   const filters = widget.filters ?? {};
@@ -193,11 +204,51 @@ function LadderWidget({
   );
 }
 
+/**
+ * The TGUI ladder widget (#557): an airport's arrivals as one ETA/STA column per arrival gate. It is
+ * always TGUI — choosing this widget is the choice — whatever `ladder.style` says for the others.
+ * Shares the classic widget's filters and item builder, so the two never disagree on a sequence.
+ */
+function TguiWidget({
+  widget,
+  editing,
+  onChange,
+}: {
+  widget: ViewWidget;
+  editing: boolean;
+  onChange: (id: string, patch: Record<string, unknown>) => void;
+}) {
+  const flow = useAirportFlow(widget.icao);
+  useReportWidgetStatus(flow.isFetching, flow.dataUpdatedAt, flow.refetch);
+  if (flow.isError) return <Notice>Couldn&apos;t load {widget.icao}.</Notice>;
+  if (!flow.data) return <Notice>Loading {widget.icao}…</Notice>;
+  const filters = widget.filters ?? {};
+  const now = Date.now();
+  return (
+    <div className="flex flex-col gap-2">
+      {editing && (
+        <LadderFilterBar
+          flow={flow.data}
+          filters={filters}
+          onChange={(next) => onChange(widget.id, { filters: next })}
+        />
+      )}
+      <TguiLadder
+        columns={airportTguiColumns(airportLadderItems(flow.data, filters, now), now)}
+        now={now}
+        win={60}
+        emptyMessage="No ETAs in window"
+      />
+    </div>
+  );
+}
+
 /** Views available as widgets, and their labels for the add-widget menu. */
 export const VIEW_OPTIONS: { id: ViewId; label: string }[] = [
   { id: "airport-summary", label: "Airport — Summary" },
   { id: "airport-aircraft", label: "Airport — Aircraft list" },
   { id: "airport-ladder", label: "Airport — Arrival ladder" },
+  { id: "airport-tgui", label: "Airport — TGUI ladder" },
   { id: "airport-demand", label: "Airport — Demand vs AAR" },
   { id: "departures", label: "Departures" },
   { id: "taxi", label: "Taxi times" },
@@ -219,6 +270,8 @@ export function ViewWidgetView({
       return <TaxiView icao={widget.icao} />;
     case "airport-ladder":
       return <LadderWidget widget={widget} editing={editing} onChange={onChange} />;
+    case "airport-tgui":
+      return <TguiWidget widget={widget} editing={editing} onChange={onChange} />;
     default:
       return <AirportFlowView icao={widget.icao} view={widget.view} />;
   }

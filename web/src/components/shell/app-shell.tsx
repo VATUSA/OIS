@@ -15,7 +15,7 @@ import {PageMetaProvider, usePageHeaderOverride, usePageTitle, useRouteMeta, use
 import {recordVisit} from "./recent-pages";
 
 /** The signed-in user's own pages (the sidebar's User group). */
-const USER_PAGES = new Set(["/profile", "/settings", "/api-keys"]);
+const USER_PAGES = new Set(["/profile", "/settings", "/api-keys", "/download"]);
 
 function useCrumbs(title: string | undefined): Crumb[] {
   const { data: me } = useMe();

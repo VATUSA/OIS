@@ -14,6 +14,7 @@ import {
   Star,
   Settings as SettingsIcon,
   User as UserIcon,
+  Download as DownloadIcon,
   Wind,
 } from "lucide-react";
 
@@ -160,6 +161,7 @@ function Palette({ onClose }: { onClose: () => void }) {
           { label: "Profile", to: "/profile", icon: UserIcon },
           { label: "Settings", to: "/settings", icon: SettingsIcon },
           ...(hasPermission(me, "api_keys.key.create") ? [{ label: "API keys", to: "/api-keys", icon: KeyRound }] : []),
+          { label: "Desktop app", to: "/download", icon: DownloadIcon },
         ]
       : [];
     const areaPages = AREAS.flatMap((area) =>

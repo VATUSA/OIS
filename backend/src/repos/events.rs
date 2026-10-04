@@ -2,7 +2,7 @@
 //! sync job pulls in; per-event planning tables (added in later passes) reference it.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres};
 
 use serde_json::Value;
 
@@ -441,34 +441,47 @@ pub async fn delete_package_item(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn mark_package_activated(
-    pool: &PgPool,
+pub async fn mark_package_activated<'e, E>(
+    executor: E,
     package_id: &str,
     actor: &str,
-) -> Result<(), ApiError> {
-    sqlx::query(
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    // Only a draft. This flip is the guard against two activations that both saw `draft` — the
+    // auto-publish tick and an Activate click, or a double click — because the handler's status check
+    // runs outside the activation transaction. The loser blocks on this row until the winner commits,
+    // then updates nothing, and its `Conflict` rolls back every item it materialized (#537 review).
+    let result = sqlx::query(
         "update events.tmi_package set status = 'activated', activated_at = now(), \
-         updated_by = $2 where id = $1",
+         updated_by = $2 where id = $1 and status = 'draft'",
     )
     .bind(package_id)
     .bind(actor)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::Conflict);
+    }
     Ok(())
 }
 
 /// Record the live row an item materialized to (its tmu id, or ICAO for programs) so a later
 /// deactivation can cancel exactly what was created.
-pub async fn set_item_live_ref(
-    pool: &PgPool,
+pub async fn set_item_live_ref<'e, E>(
+    executor: E,
     item_id: &str,
     live_ref: &str,
-) -> Result<(), ApiError> {
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query("update events.tmi_package_item set live_ref = $2 where id = $1")
         .bind(item_id)
         .bind(live_ref)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(())
@@ -515,17 +528,23 @@ pub async fn mark_package_archived(
 }
 
 /// Toggle a package's auto-publish flag.
+/// Arm or disarm auto-publish, recording `actor` as `updated_by` — the user the lifecycle job then
+/// activates as (#537 review).
 pub async fn set_package_auto(
     pool: &PgPool,
     package_id: &str,
     auto: bool,
+    actor: &str,
 ) -> Result<bool, ApiError> {
-    let r = sqlx::query("update events.tmi_package set auto_publish = $2 where id = $1")
-        .bind(package_id)
-        .bind(auto)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let r = sqlx::query(
+        "update events.tmi_package set auto_publish = $2, updated_by = $3 where id = $1",
+    )
+    .bind(package_id)
+    .bind(auto)
+    .bind(actor)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(r.rows_affected() > 0)
 }
 
