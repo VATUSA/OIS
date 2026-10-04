@@ -12576,9 +12576,9 @@ export interface operations {
     };
     lease_jobs: {
         parameters: {
-            query: {
-                /** @description Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`. Declared by the caller, not bound to the credential (#656). */
-                consumer: string;
+            query?: {
+                /** @description Optional. The consumer is the calling service account's key (the Discord bot's is `discord`); if given, this must match it. */
+                consumer?: string;
                 /** @description Max jobs (default 10) */
                 limit?: number;
             };
@@ -12596,14 +12596,14 @@ export interface operations {
                     "application/json": components["schemas"]["OutboundJobBody"][];
                 };
             };
-            /** @description No `consumer` given */
-            400: {
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            401: {
+            /** @description Not a service account, or `consumer` names another consumer */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12613,9 +12613,9 @@ export interface operations {
     };
     ack_job: {
         parameters: {
-            query: {
-                /** @description The consumer that leased the job; an ack applies only to that consumer's job. Declared by the caller, not bound to the credential (#656). */
-                consumer: string;
+            query?: {
+                /** @description Optional. The consumer is the calling service account's key; if given, this must match it. An ack applies only to that consumer's job. */
+                consumer?: string;
             };
             header?: never;
             path: {
@@ -12635,14 +12635,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description No `consumer` given */
-            400: {
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            401: {
+            /** @description Not a service account, or `consumer` names another consumer */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
