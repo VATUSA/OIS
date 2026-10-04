@@ -268,9 +268,7 @@ async fn apply_and_tick(
     )
     .await
     {
-        let _ = events.send(crate::realtime::WsEvent {
-            topic: crate::realtime::topic::FEED_TICK.to_string(),
-        });
+        events.publish(crate::realtime::topic::FEED_TICK);
     }
 }
 
@@ -369,7 +367,8 @@ mod tests {
     #[tokio::test]
     async fn the_poller_publishes_one_tick_per_new_publish_after_installing_it() {
         let state = new_state();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
         let (mut last, mut stale) = (None, 0u32);
 
         apply_and_tick(

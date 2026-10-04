@@ -165,11 +165,7 @@ pub mod topic {
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-<<<<<<< HEAD
-    pub const ALL: [&str; 11] = [
-=======
-    pub const ALL: [&str; 13] = [
->>>>>>> origin/next
+    pub const ALL: [&str; 14] = [
         RELEASE,
         FCA,
         GDP,
@@ -181,12 +177,9 @@ pub mod topic {
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
         EVENT_REMINDER,
-<<<<<<< HEAD
-        FEED_TICK,
-=======
         ACE,
         RUNWAY,
->>>>>>> origin/next
+        FEED_TICK,
     ];
 }
 
