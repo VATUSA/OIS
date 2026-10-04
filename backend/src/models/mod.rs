@@ -3167,3 +3167,26 @@ pub struct SectorMapsBody {
 pub struct SetSectorMapRequest {
     pub map: i32,
 }
+
+/// A sector worked at another sector's position (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationBody {
+    pub sector_id: String,
+    pub target_sector_id: String,
+}
+
+/// An ARTCC's sector consolidations (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationsBody {
+    /// Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
+    /// or scoped).
+    pub editable: bool,
+    /// Sorted by sector.
+    pub consolidations: Vec<SectorConsolidationBody>,
+}
+
+/// Work a sector at another sector's position in the same ARTCC.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorRequest {
+    pub target_sector_id: String,
+}

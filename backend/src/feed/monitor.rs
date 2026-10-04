@@ -14,7 +14,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::feed::gdp::BIN_MIN;
-use crate::feed::sectors::SectorTable;
+use crate::feed::sectors::{SectorMaps, SectorTable, map_for};
+
+/// Sectors worked at another sector's position (#599): `(artcc, source) → target`, same ARTCC, already
+/// flattened (a target is never itself a source), as cached in `AppState::sector_consolidations`.
+pub type Consolidations = HashMap<(String, String), String>;
 
 /// Every sector is computed for the full six hours, whatever the UI shows.
 pub const HORIZON_MIN: i64 = 6 * 60;
@@ -57,29 +61,62 @@ pub struct BinPeak {
 }
 
 /// One sector's row: [`HORIZON_MIN`] / [`BIN_MIN`] bins, the first being the quarter-hour that
-/// contains `now`. A sector stored as several volumes is one row.
+/// contains `now`. A sector stored as several volumes is one row, and so is a target with the sectors
+/// consolidated into it (#599).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectorLoad {
     pub artcc: String,
     pub sector_id: String,
+    /// The sectors worked at this one, sorted; non-empty marks a combined row (`ZLA25+`).
+    pub consolidated: Vec<String>,
+    /// The row's Monitor Alert Parameter — the target's own, never a sum: one controller, one limit.
+    pub map: i32,
     pub bins: Vec<BinPeak>,
 }
 
-/// Peak occupancy for every sector in `table`, sectors sorted by `(artcc, sector_id)`. Bins are
-/// absolute Zulu quarter-hours: at 1407Z the first starts at 1400.
-pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<SectorLoad> {
+/// Peak occupancy for every row, sorted by `(artcc, sector_id)`. Bins are absolute Zulu
+/// quarter-hours: at 1407Z the first starts at 1400.
+///
+/// A consolidated sector has no row of its own: its volumes are filed under its target **before**
+/// counting, so the combined row counts distinct flights per minute across the union of the volumes
+/// (#599). A flight crossing from source to target inside one minute is one flight there; adding the
+/// rows' peaks would count it twice and add busiest minutes that fall at different times, so a
+/// combined row can correctly read lower than the sum of its parts.
+pub fn sector_loads(
+    table: &SectorTable,
+    consolidations: &Consolidations,
+    maps: &SectorMaps,
+    tracks: &[Track],
+    now_ms: i64,
+) -> Vec<SectorLoad> {
     let bin_ms = BIN_MIN * MINUTE_MS;
     let first_ms = now_ms - now_ms.rem_euclid(bin_ms);
     let end_ms = first_ms + HORIZON_MIN * MINUTE_MS;
 
-    let sectors: BTreeMap<(&str, &str), usize> = table
-        .volumes
-        .iter()
-        .map(|v| (v.artcc.as_str(), v.sector_id.as_str()))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+    // The row each volume counts under: its sector's target if consolidated, else its sector.
+    let row_key = |artcc: &str, sector: &str| -> (String, String) {
+        let row = consolidations
+            .get(&(artcc.to_string(), sector.to_string()))
+            .map_or(sector, String::as_str);
+        (artcc.to_string(), row.to_string())
+    };
+    let mut members: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for v in &table.volumes {
+        let key = row_key(&v.artcc, &v.sector_id);
+        let sources = members.entry(key.clone()).or_default();
+        if v.sector_id != key.1 && !sources.contains(&v.sector_id) {
+            sources.push(v.sector_id.clone());
+        }
+    }
+    let rows: BTreeMap<&(String, String), usize> = members
+        .keys()
         .enumerate()
         .map(|(i, key)| (key, i))
+        .collect();
+    let row_of_volume: Vec<usize> = table
+        .volumes
+        .iter()
+        .map(|v| rows[&row_key(&v.artcc, &v.sector_id)])
         .collect();
 
     // Who is inside each sector in each minute, by population. Keyed by sector (not volume) and by
@@ -94,8 +131,13 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
             .filter(|f| (first_ms..end_ms).contains(&f.t_ms))
         {
             let minute = (fix.t_ms - first_ms) / MINUTE_MS;
-            for v in table.containing(fix.lat, fix.lon, fix.alt_ft) {
-                let sector = sectors[&(v.artcc.as_str(), v.sector_id.as_str())];
+            let inside = table
+                .volumes
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.contains(fix.lat, fix.lon, fix.alt_ft));
+            for (i, _) in inside {
+                let sector = row_of_volume[i];
                 let (active, proposed) = occupied.entry((sector, minute)).or_default();
                 match track.population {
                     Population::Active => active.insert(track.id),
@@ -105,11 +147,18 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
         }
     }
 
-    sectors
-        .into_iter()
-        .map(|((artcc, sector_id), sector)| SectorLoad {
-            artcc: artcc.to_string(),
-            sector_id: sector_id.to_string(),
+    members
+        .iter()
+        .enumerate()
+        .map(|(sector, ((artcc, sector_id), sources))| SectorLoad {
+            artcc: artcc.clone(),
+            sector_id: sector_id.clone(),
+            consolidated: {
+                let mut sources = sources.clone();
+                sources.sort();
+                sources
+            },
+            map: map_for(maps, artcc, sector_id),
             bins: (0..HORIZON_MIN / BIN_MIN)
                 .map(|bin| {
                     let mut peak = BinPeak {
@@ -138,7 +187,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::feed::sectors::tests::volume;
+    use crate::feed::sectors::{SectorVolume, tests::volume};
 
     /// 1407Z on an arbitrary day; the first bin starts at 1400.
     fn now() -> i64 {
@@ -176,7 +225,14 @@ mod tests {
 
     /// The first bin of the only sector.
     fn first_bin(table: &SectorTable, tracks: &[Track]) -> BinPeak {
-        sector_loads(table, tracks, now())[0].bins[0]
+        sector_loads(
+            table,
+            &Default::default(),
+            &Default::default(),
+            tracks,
+            now(),
+        )[0]
+        .bins[0]
     }
 
     /// AC2: four flights each inside for a few minutes, one after another — the peak is 1, not 4.
@@ -250,7 +306,13 @@ mod tests {
             population: Population::Active,
             fixes: &fixes,
         };
-        let row = &sector_loads(&one_sector(), &[track], now())[0];
+        let row = &sector_loads(
+            &one_sector(),
+            &Default::default(),
+            &Default::default(),
+            &[track],
+            now(),
+        )[0];
         assert_eq!(row.bins.len(), 24);
         assert_eq!(row.bins[0].start_ms, at(14, 0, 0));
         assert_eq!(row.bins[1].start_ms, at(14, 15, 0));
@@ -273,7 +335,13 @@ mod tests {
             population: Population::Active,
             fixes: &fixes,
         };
-        let loads = sector_loads(&table, &[track], now());
+        let loads = sector_loads(
+            &table,
+            &Default::default(),
+            &Default::default(),
+            &[track],
+            now(),
+        );
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].bins[0].active, 1);
     }
@@ -294,8 +362,135 @@ mod tests {
             population: Population::Active,
             fixes: &fixes,
         };
-        let loads = sector_loads(&table, &[track], now());
+        let loads = sector_loads(
+            &table,
+            &Default::default(),
+            &Default::default(),
+            &[track],
+            now(),
+        );
         assert_eq!(loads.len(), 1);
         assert!(loads[0].bins.iter().all(|b| b.combined == 0));
+    }
+
+    /// Two adjacent sectors in ZLA: 18 west of 76.5W and 41 east of it, both 0–23,000 ft.
+    fn eighteen_and_forty_one() -> SectorTable {
+        let square = |sector: &str, west: f64, east: f64| SectorVolume {
+            sector_id: sector.into(),
+            rings: vec![vec![
+                [38.0, west],
+                [38.0, east],
+                [39.0, east],
+                [39.0, west],
+                [38.0, west],
+            ]],
+            ..volume("ZLA", &format!("{sector}0"))
+        };
+        SectorTable {
+            volumes: vec![square("18", -77.0, -76.5), square("41", -76.5, -76.0)],
+        }
+    }
+    fn in_18(t_ms: i64) -> Fix {
+        Fix {
+            lon: -76.75,
+            ..inside(t_ms)
+        }
+    }
+    fn in_41(t_ms: i64) -> Fix {
+        Fix {
+            lon: -76.25,
+            ..inside(t_ms)
+        }
+    }
+    fn eighteen_at_41() -> Consolidations {
+        [(("ZLA".to_string(), "18".to_string()), "41".to_string())].into()
+    }
+    fn active<'a>(id: &'a str, fixes: &'a [Fix]) -> Track<'a> {
+        Track {
+            id,
+            population: Population::Active,
+            fixes,
+        }
+    }
+
+    /// #599 AC2: a flight crossing from 18 into 41 inside one minute is **one** aircraft in the merged
+    /// row for that minute. Separately each row counts it, so summing their peaks would read 2.
+    #[test]
+    fn a_crossing_into_the_target_within_a_minute_counts_once() {
+        let table = eighteen_and_forty_one();
+        let fixes = [in_18(at(14, 1, 10)), in_41(at(14, 1, 40))];
+        let tracks = [active("X", &fixes)];
+
+        let apart = sector_loads(
+            &table,
+            &Default::default(),
+            &Default::default(),
+            &tracks,
+            now(),
+        );
+        let sum: usize = apart.iter().map(|r| r.bins[0].active).sum();
+        assert_eq!(sum, 2, "each sector alone sees the flight");
+
+        let merged = sector_loads(
+            &table,
+            &eighteen_at_41(),
+            &Default::default(),
+            &tracks,
+            now(),
+        );
+        assert_eq!(merged.len(), 1, "the source row disappears");
+        assert_eq!(merged[0].sector_id, "41");
+        assert_eq!(
+            merged[0].consolidated,
+            ["18"],
+            "and is marked on the target"
+        );
+        assert_eq!(
+            merged[0].bins[0].active, 1,
+            "the union counts the aircraft once"
+        );
+    }
+
+    /// #599 AC3: busiest minutes that fall at different times don't add up, so a combined row reads
+    /// lower than the sum of its parts — correctly.
+    #[test]
+    fn a_combined_row_can_read_lower_than_the_sum_of_its_parts() {
+        let table = eighteen_and_forty_one();
+        let (p, q) = ([in_18(at(14, 1, 30))], [in_41(at(14, 5, 30))]);
+        let tracks = [active("P", &p), active("Q", &q)];
+
+        let apart = sector_loads(
+            &table,
+            &Default::default(),
+            &Default::default(),
+            &tracks,
+            now(),
+        );
+        assert_eq!(apart.iter().map(|r| r.bins[0].active).sum::<usize>(), 2);
+        let merged = sector_loads(
+            &table,
+            &eighteen_at_41(),
+            &Default::default(),
+            &tracks,
+            now(),
+        );
+        assert_eq!(merged[0].bins[0].active, 1, "one aircraft at any minute");
+    }
+
+    /// #599 AC4: the combined row keeps the target's MAP — one controller, one workload limit — not
+    /// the sum of its parts' (which would make the busiest arrangement the hardest to alert).
+    #[test]
+    fn a_combined_row_uses_the_targets_map() {
+        let table = eighteen_and_forty_one();
+        let maps: SectorMaps = [
+            (("ZLA".to_string(), "18".to_string()), 30),
+            (("ZLA".to_string(), "41".to_string()), 12),
+        ]
+        .into();
+
+        let apart = sector_loads(&table, &Default::default(), &maps, &[], now());
+        assert_eq!(apart.iter().map(|r| r.map).collect::<Vec<_>>(), [30, 12]);
+        let merged = sector_loads(&table, &eighteen_at_41(), &maps, &[], now());
+        assert_eq!(merged[0].map, 12);
     }
 }

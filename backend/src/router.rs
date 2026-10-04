@@ -480,6 +480,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/monitor/{artcc}/maps/{sector_id}",
             put(monitor::set_sector_map),
         )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations",
+            get(monitor::list_consolidations),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
+            put(monitor::consolidate_sector).delete(monitor::release_sector),
+        )
         // Shared named map routes (polylines)
         .route(
             "/api/v1/flow/routes",
