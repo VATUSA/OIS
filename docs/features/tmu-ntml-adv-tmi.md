@@ -118,6 +118,20 @@ publish.
 `status` `draft → published → cancelled`. A published advisory is never edited — it is cancelled and
 reissued, which is deliberately the opposite of a TMI (#453 reposts an edited TMI).
 
+**Validity window and automatic removal (#537).** `valid_from`/`valid_to` (migration 0095) are the
+*enforceable* window, distinct from the period printed inside the document: they are set once at
+authoring from the same input and never re-parsed out of the document text, so the rendered period
+stays verbatim `DDHHMM` as the source writes it. `tmu_cleanup` cancels an advisory **30 minutes after
+`valid_to`**; the pass runs every 5 minutes, so removal actually lands in **[30, 35) minutes**.
+Cancelling rather than deleting or hiding it is what fires the `adv_cancel` job, so the standing
+Discord post is corrected rather than left asserting something that has lapsed.
+
+A `NULL` `valid_to` means *no window*, and such an advisory is never auto-cancelled — every advisory
+authored before #537 is in that state. A **generated** advisory (from a GDP or Ground Stop) also
+carries no window of its own: its life is its program's, and the same pass cancels it when the
+program reaches `expired` or `cancelled` via `gdp_id`/`ground_stop_id`. Before #537 nothing did that,
+so a program that simply timed out left its advisory `published` indefinitely.
+
 `kind` is free-form text with no check constraint, so a document type is claimed by rendering it, not
 by extending an enum. **Reroute (`reroute`) is the first**, added in #458: `backend/src/advisory.rs`
 renders `RerouteAdvisory` to the vATCSCC document, with `fixtures/reroute-reference.json` holding the
@@ -155,10 +169,14 @@ seeded by the migration that adds its table):
 | `tmu.gdp.publish` | publish | publish / cancel / compress / lock / unlock |
 | `tmu.gdp.delete` | delete | delete a GDP |
 
-**Unused catalog entries.** `tmu.ntml.{read,create,update,delete}`, `tmu.adv.*`, and
-`tmu.delays.read` are seeded (migration 0008 and `catalog.rs`) from the original spec but
-**no handler references them** — they correspond to the NTML/ADV/delay features that were
-not built.
+**Unused catalog entries.** `tmu.ntml.{read,create,update,delete}` and `tmu.delays.read` are seeded
+(migration 0008 and `catalog.rs`) from the original spec but **no handler references them** — they
+correspond to the NTML and delay features that were not built.
+
+`tmu.adv.*` **is** live: it gates the ADVZY handlers in `handlers/tmu.rs` (#457), and
+`tmu.adv.create` is additionally required — scoped to the issuing facility — to put an advisory in an
+event TMI package (#537), because `events.plan.update` alone would let a planner queue a numbered
+document in another facility's name.
 
 ## API
 
@@ -228,6 +246,7 @@ entered via the structured form.
 ## Not built
 
 - NTML entries as first-class records, the plain-language parser, and the public advisory/TMI API
-  from the original spec. ADVZY advisories became first-class records in #457, but there is still no
-  `adv_publish` Discord job (#459) and no advisory UI (#460); only TMIs post today.
+  from the original spec. ADVZY advisories became first-class records in #457; the `adv_publish`
+  Discord job (#459) and the advisory UI (#460) have since shipped, as have the generated GDP and
+  Ground Stop documents (#461, #508) and advisory items in an event TMI package (#537).
 - The average-delay page (`tmu.delays.read`).

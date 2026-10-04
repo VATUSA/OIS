@@ -12,6 +12,26 @@ export type UpdateGroupRequest = components["schemas"]["UpdateGroupRequest"];
 
 export const GROUPS = ["access-groups"] as const;
 
+export type HeldGroup = components["schemas"]["HeldGroupBody"];
+
+/**
+ * The groups the signed-in user holds, each with the permissions it grants (#550).
+ *
+ * The template source for an API key's permissions. Read from `access/self`, which needs only
+ * `access.self.read`, rather than from `useGroups` — that admin listing needs `access.groups.read`,
+ * which most people creating a key don't hold.
+ */
+export function useHeldGroups() {
+  return useQuery({
+    queryKey: ["access-self", "groups"] as const,
+    queryFn: async (): Promise<HeldGroup[]> => {
+      const {data, error} = await ois.GET("/api/v1/access/self");
+      if (error || !data) throw new Error("failed to load your groups");
+      return data.groups;
+    },
+  });
+}
+
 /** Every group with what it grants and how many principals hold it. */
 export function useGroups() {
   return useQuery({

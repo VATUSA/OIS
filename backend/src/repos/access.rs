@@ -182,6 +182,34 @@ pub async fn fetch_service_account_role_names(
     .map_err(|_| ApiError::Internal)
 }
 
+/// A service account's scope for `permission_name`, from its live roles (#583). National only for a
+/// role held with no ARTCC; otherwise the ARTCCs its roles name. The same "live" test as
+/// [`fetch_service_account_permission_names`], so the scope never covers a role the gate ignores.
+pub async fn service_account_permission_scope(
+    pool: &PgPool,
+    service_account_id: &str,
+    permission_name: &str,
+) -> Result<PermissionScope, ApiError> {
+    let artccs: Vec<Option<String>> = sqlx::query_scalar(
+        "select distinct sar.artcc_id
+         from access.service_account_roles sar
+         join access.role_permissions rp on rp.role_name = sar.role_name
+         where sar.service_account_id = $1 and rp.permission_name = $2
+           and (sar.ends_at is null or sar.ends_at > now())",
+    )
+    .bind(service_account_id)
+    .bind(permission_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    if artccs.iter().any(Option::is_none) {
+        return Ok(PermissionScope::national());
+    }
+    Ok(PermissionScope::Facilities(
+        artccs.into_iter().flatten().collect(),
+    ))
+}
+
 pub async fn fetch_service_account_permission_names(
     pool: &PgPool,
     service_account_id: &str,
@@ -908,13 +936,17 @@ pub async fn replace_user_permissions_scoped(
     artcc_id: Option<&str>,
     names: &[String],
 ) -> Result<(), ApiError> {
+    // Grants only. The access editor has no notion of a deny, so replacing a scope must never remove
+    // one: it used to delete every row here, which meant saving a user's ZDC scope *unchanged* silently
+    // stripped their ZDC denies and widened their access, with no guard ever seeing it (#559).
     sqlx::query(
         // **Only the manual rows.** Before #547 this deleted everything at the scope, so the first
         // admin save after a sync wiped every synced grant — the likeliest silent access-loss bug in
         // the epic. The accepted consequence: an admin cannot un-grant a synced role here; they
         // detach the user from sync (#549).
         "delete from access.user_permissions \
-         where user_id = $1 and artcc_id is not distinct from $2 and source = 'manual'",
+         where user_id = $1 and artcc_id is not distinct from $2 \
+            and source = 'manual' and granted is true",
     )
     .bind(user_id)
     .bind(artcc_id)
@@ -923,10 +955,17 @@ pub async fn replace_user_permissions_scoped(
     .map_err(|_| ApiError::Internal)?;
 
     for name in names {
+        // An explicit grant where a *manual* deny exists replaces it, rather than violating the unique
+        // index, which 0098 widened to `(user_id, permission_name, coalesce(artcc_id, ''), source)`.
+        // Keying the conflict on `source` too means this can only ever collide with the editor's own
+        // row: a synced grant at the same scope is a separate row and is left to the sync to reconcile.
+        // `enforce_actor_scope` has already required the actor to hold it at this scope.
         sqlx::query(
             "insert into access.user_permissions \
                  (user_id, permission_name, granted, artcc_id, source) \
-             values ($1, $2, true, $3, 'manual')",
+             values ($1, $2, true, $3, 'manual') \
+             on conflict (user_id, permission_name, coalesce(artcc_id, ''), source) \
+             do update set granted = true",
         )
         .bind(user_id)
         .bind(name)
@@ -1779,8 +1818,12 @@ mod tests {
 
     // ---- VATUSA/OIS#544: the seeded group defaults ----
 
-    /// The domain rules migration 0094 seeded, as `web/src/lib/presets.ts` defines them. `None` means
-    /// every permission in the catalogue.
+    /// The domain rules migration 0094 seeded, transcribed from the presets that used to define them.
+    /// `None` means every permission in the catalogue.
+    ///
+    /// `web/src/lib/presets.ts` was deleted in #550, so this list is now the only record of those
+    /// rules, and the seed is the source of truth. The test below still earns its place: it is what
+    /// notices when a group's permission set drifts from the domains it was seeded from.
     const SEEDED_ROLE_DOMAINS: &[(&str, Option<&[&str]>)] = &[
         ("VATUSA_STAFF", None),
         (
@@ -1921,13 +1964,15 @@ mod tests {
 
     /// Migration 0094's cleanup of the redundant baseline rows.
     ///
-    /// Like `permission_backfill_repoints_existing_events_config_update_grants` in
-    /// `handlers/airport_surface.rs`, this re-runs the migration's own `delete` directly: the
-    /// migration ran against whatever rows existed at migration time and cannot see rows a test
-    /// inserts afterwards, so the query logic is what there is to prove. Specifically that it is
-    /// **narrow** — only the five names the `USER` group now supplies, only at national scope, and
-    /// only for users who actually hold the role, so it cannot strip access from someone the grant
-    /// above missed.
+    /// The migration ran against whatever rows existed at migration time and cannot see rows a test
+    /// inserts afterwards, so this re-runs its `delete` against rows built here. It runs the statement
+    /// **read out of the migration file** ([`migration_0094`]) rather than a copy typed into the test:
+    /// a copy is what this test used to hold, and removing the `USER`-role guard from the real
+    /// migration left it green, because it was proving a string in the test file (#544 review).
+    ///
+    /// What it proves is that the deletion is **narrow** — only the five names the `USER` group now
+    /// supplies, only at national scope, only granted rows (never a deny), and only for users who
+    /// actually hold the role, so it cannot strip access from someone the grant above missed.
     #[sqlx::test]
     async fn the_baseline_cleanup_removes_only_what_the_group_now_supplies(pool: sqlx::PgPool) {
         let in_group: String = sqlx::query_scalar(
@@ -1943,12 +1988,35 @@ mod tests {
         .await
         .unwrap();
 
+        // In the group, with a national *deny* on a baseline name. The cleanup removes redundant
+        // grants; a deny is an admin's decision and must survive it.
+        let denied: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('C', 'C') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
         // The pre-#544 world: direct baseline rows on both users, but only one is in the group.
-        sqlx::query("insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'manual')")
-            .bind(&in_group)
+        for user in [&in_group, &denied] {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, source) \
+                 values ($1, 'USER', 'manual')",
+            )
+            .bind(user)
             .execute(&pool)
             .await
             .unwrap();
+        }
+        sqlx::query(
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, 'users.directory.read', false, null, 'manual')",
+        )
+        .bind(&denied)
+        .execute(&pool)
+        .await
+        .unwrap();
         for user in [&in_group, &orphan] {
             for name in [
                 "auth.profile.read",
@@ -1964,18 +2032,10 @@ mod tests {
             crate::scope_test_support::grant(&pool, user, "access.self.read", Some("ZDC")).await;
         }
 
-        sqlx::query(
-            "delete from access.user_permissions up \
-             where up.artcc_id is null and up.granted is true \
-               and up.permission_name in ('auth.profile.read', 'auth.profile.update', \
-                   'auth.sessions.delete', 'access.self.read', 'users.directory.read') \
-               and exists (select 1 from access.user_roles ur \
-                   where ur.user_id = up.user_id and ur.role_name = 'USER' \
-                     and ur.artcc_id is null)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query(&migration_0094("delete from access.user_permissions"))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let remaining = |user: &str| {
             let pool = pool.clone();
@@ -2008,6 +2068,257 @@ mod tests {
             7,
             "a user the USER grant missed must keep their own rows"
         );
+
+        // In the group, but denied: the deny is not a redundant grant, so it stays.
+        assert_eq!(
+            remaining(&denied).await,
+            vec!["users.directory.read".to_string()],
+            "the cleanup must never remove a deny"
+        );
+    }
+
+    /// Migration 0094, from the same file the migrator embeds.
+    const MIGRATION_0094: &str = include_str!("../../migrations/0094_seed_role_permissions.sql");
+
+    /// 0094's statements in order. Comments are stripped *before* splitting on `;`, because four of
+    /// the migration's comments contain one and a naive split would cut statements in half.
+    fn migration_0094_statements() -> Vec<String> {
+        MIGRATION_0094
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The one statement of 0094 that starts with `prefix` — so a test runs what production runs.
+    fn migration_0094(prefix: &str) -> String {
+        migration_0094_statements()
+            .into_iter()
+            .find(|statement| statement.starts_with(prefix))
+            .unwrap_or_else(|| panic!("migration 0094 has no statement starting `{prefix}`"))
+    }
+
+    /// The pre-deploy audit for 0094, whose blocks the test below runs verbatim.
+    const AUDIT_0094: &str = include_str!("../../audits/0094_role_seed_effect.sql");
+
+    /// The text between `-- BEGIN {name}` and `-- END {name}` in the audit.
+    fn audit_block(name: &str) -> &'static str {
+        let begin = format!("-- BEGIN {name}");
+        let end = format!("-- END {name}");
+        let from = AUDIT_0094
+            .find(&begin)
+            .unwrap_or_else(|| panic!("audit has no `{begin}`"))
+            + begin.len();
+        let to = AUDIT_0094[from..]
+            .find(&end)
+            .unwrap_or_else(|| panic!("audit has no `{end}`"))
+            + from;
+        AUDIT_0094[from..to].trim()
+    }
+
+    /// `backend/audits/0094_role_seed_effect.sql` reports exactly whose access 0094 changes.
+    ///
+    /// #544's AC4 says no user's effective permissions change, verified against real users — and they
+    /// do change for anyone holding EC, AEC, EVENTS_TEAM or VATUSA_STAFF whose grants an admin narrowed,
+    /// because the editor stores an unticked box as an absent row rather than a deny, and those roles
+    /// granted nothing until 0094. The audit is how the owner sees that population before deploying.
+    ///
+    /// This runs the audit's own snapshot and diff blocks inside a rolled-back transaction, exactly as
+    /// `psql -f` would, with 0094's statements in between. The pre-0094 world is rebuilt by emptying
+    /// the four roles 0094 seeds from nothing — they held no `role_permissions` before it (`0060`).
+    #[sqlx::test]
+    async fn the_0094_audit_reports_exactly_who_the_seed_would_change(pool: sqlx::PgPool) {
+        use sqlx::Row;
+
+        sqlx::query(
+            "delete from access.role_permissions \
+             where role_name in ('VATUSA_STAFF', 'EC', 'AEC', 'EVENTS_TEAM')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let user = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let role = |user: String, role: &'static str, artcc: Option<&'static str>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, $2, $3, 'manual')",
+                )
+                .bind(user)
+                .bind(role)
+                .bind(artcc)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+
+        // Every pre-#544 account carries the login baseline as five direct national rows, and holds no
+        // `USER` role — nothing granted one until 0094. Modelled here so the test users look like real
+        // ones; without it they would "gain" the baseline itself, which no real user does.
+        let login_baseline = |user: String| {
+            let pool = pool.clone();
+            async move {
+                for name in [
+                    "auth.profile.read",
+                    "auth.profile.update",
+                    "auth.sessions.delete",
+                    "access.self.read",
+                    "users.directory.read",
+                ] {
+                    crate::scope_test_support::grant(&pool, &user, name, None).await;
+                }
+            }
+        };
+
+        // An account with no role at all — the bulk of the real population.
+        let plain = user("plain").await;
+        login_baseline(plain.clone()).await;
+
+        // Exactly what the editor's save leaves behind for a narrowed holder: the role, plus granted
+        // rows for the ticked boxes only.
+        let staff = user("narrowed-staff").await;
+        login_baseline(staff.clone()).await;
+        role(staff.clone(), "VATUSA_STAFF", None).await;
+        crate::scope_test_support::grant(&pool, &staff, "stats.data.read", None).await;
+
+        let ec = user("narrowed-ec").await;
+        login_baseline(ec.clone()).await;
+        role(ec.clone(), "EC", Some("ZDC")).await;
+        crate::scope_test_support::grant(&pool, &ec, "events.plan.read", Some("ZDC")).await;
+
+        // An EC who already holds the whole seeded set directly: the seed adds nothing for them.
+        let full = user("full-ec").await;
+        login_baseline(full.clone()).await;
+        role(full.clone(), "EC", Some("ZDC")).await;
+        let operational: Vec<String> = sqlx::query_scalar(
+            "select name from access.permissions \
+             where split_part(name, '.', 1) in ('tmu', 'flow', 'events', 'ace', 'stats')",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for name in &operational {
+            crate::scope_test_support::grant(&pool, &full, name, Some("ZDC")).await;
+        }
+
+        // What the `USER` group carries beyond the old five-row login baseline. Granting the group to
+        // everyone hands every account these, which is a real change AC4 covers: `0047` put
+        // `ace.requests.create` on `USER`, but nothing ever granted the role, so it sat dormant.
+        let universal: std::collections::BTreeSet<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'USER' \
+             and permission_name not in ('auth.profile.read', 'auth.profile.update', \
+                 'auth.sessions.delete', 'access.self.read', 'users.directory.read')",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+        let mut tx = pool.begin().await.unwrap();
+        // 0094 predates `source` (0098), so its inserts do not name it — and 0098 drops the column's
+        // backfill default on purpose, so replaying 0094 against a fully-migrated schema violates
+        // `not null`. Restore the default for the replay only: the rollback below undoes it along with
+        // everything else, and 0094's statements stay byte-identical, which is what makes this test
+        // run what production ran.
+        for table in ["access.user_roles", "access.user_permissions"] {
+            sqlx::query(&format!(
+                "alter table {table} alter column source set default 'manual'"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        sqlx::query(audit_block("SNAPSHOT"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        for statement in migration_0094_statements() {
+            sqlx::query(&statement).execute(&mut *tx).await.unwrap();
+        }
+        let rows = sqlx::query(audit_block("DIFF"))
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        let changes: std::collections::BTreeSet<(String, String, String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<String, _>("change"),
+                    r.get::<String, _>("user_id"),
+                    r.get::<String, _>("permission_name"),
+                    r.get::<String, _>("scope"),
+                )
+            })
+            .collect();
+        let has = |change: &str, who: &str, permission: &str, scope: &str| {
+            changes.contains(&(
+                change.to_string(),
+                who.to_string(),
+                permission.to_string(),
+                scope.to_string(),
+            ))
+        };
+
+        assert!(
+            has("gained", &staff, "access.users.update", "NATIONAL"),
+            "the narrowed staff member regains the right to edit anyone's access"
+        );
+        assert!(
+            has("gained", &ec, "tmu.ntml.create", "ZDC"),
+            "the narrowed EC regains TMU at ZDC"
+        );
+        let gains_of = |who: &str| -> std::collections::BTreeSet<String> {
+            changes
+                .iter()
+                .filter(|(change, user, _, scope)| {
+                    change == "gained" && user == who && scope == "NATIONAL"
+                })
+                .map(|(_, _, permission, _)| permission.clone())
+                .collect()
+        };
+        assert_eq!(
+            gains_of(&plain),
+            universal,
+            "an account with no role gains exactly what USER carries beyond the login baseline"
+        );
+        assert!(
+            changes.iter().filter(|(_, who, _, _)| who == &full).all(
+                |(change, _, permission, scope)| change == "gained"
+                    && scope == "NATIONAL"
+                    && universal.contains(permission)
+            ),
+            "an EC who already held the whole set gains only what every account gains: {changes:?}"
+        );
+        assert!(
+            !has("gained", &ec, "tmu.ntml.create", "NATIONAL"),
+            "and the EC's regained access stays at ZDC rather than going national"
+        );
+        assert!(
+            !changes.iter().any(|(change, _, _, _)| change == "lost"),
+            "no one may lose anything: {changes:?}"
+        );
     }
 
     /// A facility-scoped membership narrows the whole group, which is the design's point: scope lives
@@ -2038,6 +2349,384 @@ mod tests {
         assert!(
             !scope.allows(Some("ZNY")),
             "a ZDC membership grants nothing at ZNY"
+        );
+    }
+
+    // ---- VATUSA/OIS#550: collapsing direct grants a group already gives ----
+
+    /// The migration, exactly as it ships. Loaded from the file rather than copied inline so editing
+    /// `0099` cannot leave this test green on a stale copy of the SQL.
+    const COLLAPSE_MIGRATION: &str =
+        include_str!("../../migrations/0099_collapse_redundant_direct_grants.sql");
+
+    /// A permission the seeded `NTMO` group grants, read rather than named so the test doesn't break
+    /// when the seed's contents move.
+    async fn an_ntmo_permission(pool: &sqlx::PgPool) -> String {
+        sqlx::query_scalar(
+            "select permission_name from access.role_permissions \
+             where role_name = 'NTMO' order by permission_name limit 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("the NTMO group grants something")
+    }
+
+    /// A permission the seeded `NTMO` group does not grant — a bespoke grant beside it.
+    async fn a_permission_ntmo_lacks(pool: &sqlx::PgPool) -> String {
+        sqlx::query_scalar(
+            "select name from access.permissions where name not in \
+             (select permission_name from access.role_permissions where role_name = 'NTMO') \
+             order by name limit 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("NTMO does not grant the whole catalogue")
+    }
+
+    async fn user(pool: &sqlx::PgPool, name: &str) -> String {
+        sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn hold(pool: &sqlx::PgPool, user_id: &str, role: &str, artcc: Option<&str>) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+             values ($1, $2, $3, 'manual')",
+        )
+        .bind(user_id)
+        .bind(role)
+        .bind(artcc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A user's effective access in a form that compares by value. `PermissionScope` is not
+    /// `PartialEq`, and an entry that covers nothing is the same as no entry at all.
+    async fn effective(
+        pool: &sqlx::PgPool,
+        user_id: &str,
+    ) -> std::collections::BTreeMap<String, (bool, std::collections::BTreeSet<String>)> {
+        super::fetch_effective_permissions(pool, user_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|(_, scope)| !scope.is_empty())
+            .map(|(name, scope)| {
+                let normal = match scope {
+                    super::PermissionScope::National { except } => {
+                        (true, except.into_iter().collect())
+                    }
+                    super::PermissionScope::Facilities(set) => (false, set.into_iter().collect()),
+                };
+                (name, normal)
+            })
+            .collect()
+    }
+
+    async fn direct_rows(pool: &sqlx::PgPool, user_id: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select permission_name || coalesce(':' || artcc_id, ':national') || \
+                    case when granted then '' else ':DENY' end \
+             from access.user_permissions where user_id = $1 order by 1",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC3, the property that matters: **nobody's effective access changes.** Asserted through the
+    /// real resolver — the one production enforces with — before and after the migration's own SQL,
+    /// over every shape the cleanup has to tell apart.
+    #[sqlx::test]
+    async fn the_cleanup_changes_no_one_s_effective_permissions(pool: sqlx::PgPool) {
+        let p = an_ntmo_permission(&pool).await;
+
+        // Redundant: a national grant under a national membership.
+        let national_under_national = user(&pool, "nat/nat").await;
+        hold(&pool, &national_under_national, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &national_under_national, &p, None).await;
+
+        // Redundant: a facility grant under a national membership, which already covers it.
+        let facility_under_national = user(&pool, "zdc/nat").await;
+        hold(&pool, &facility_under_national, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &facility_under_national, &p, Some("ZDC")).await;
+
+        // NOT redundant: a national grant under a facility-only membership grants more.
+        let national_under_facility = user(&pool, "nat/zdc").await;
+        hold(&pool, &national_under_facility, "NTMO", Some("ZDC")).await;
+        crate::scope_test_support::grant(&pool, &national_under_facility, &p, None).await;
+
+        // NOT redundant: bespoke — no group at all.
+        let bespoke = user(&pool, "bespoke").await;
+        crate::scope_test_support::grant(&pool, &bespoke, &p, None).await;
+
+        // The grant is redundant, the deny beside it is not — and must keep denying.
+        let with_deny = user(&pool, "deny").await;
+        hold(&pool, &with_deny, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &with_deny, &p, None).await;
+        crate::scope_test_support::deny_scoped(&pool, &with_deny, &p, Some("ZNY")).await;
+
+        // A group AND a grant it does not give — the commonest real shape, since 0094 puts everyone
+        // in `USER`. Only the covered row may go: a cleanup that stopped matching the permission
+        // would take the bespoke one with it.
+        let group_and_bespoke = user(&pool, "group+bespoke").await;
+        let other = a_permission_ntmo_lacks(&pool).await;
+        hold(&pool, &group_and_bespoke, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &group_and_bespoke, &p, None).await;
+        crate::scope_test_support::grant(&pool, &group_and_bespoke, &other, None).await;
+
+        // NOT redundant: a grant at a different facility from the membership's.
+        let other_facility = user(&pool, "zny/zdc").await;
+        hold(&pool, &other_facility, "NTMO", Some("ZDC")).await;
+        crate::scope_test_support::grant(&pool, &other_facility, &p, Some("ZNY")).await;
+
+        let everyone = [
+            &national_under_national,
+            &facility_under_national,
+            &national_under_facility,
+            &bespoke,
+            &with_deny,
+            &group_and_bespoke,
+            &other_facility,
+        ];
+        let mut before = Vec::new();
+        for u in everyone {
+            before.push(effective(&pool, u).await);
+        }
+
+        sqlx::raw_sql(COLLAPSE_MIGRATION)
+            .execute(&pool)
+            .await
+            .expect("the migration runs");
+
+        for (u, was) in everyone.iter().zip(&before) {
+            assert_eq!(
+                &effective(&pool, u).await,
+                was,
+                "effective access changed for {u}"
+            );
+        }
+
+        // ...and it actually did something, so the equality above is not a no-op passing vacuously.
+        assert!(
+            direct_rows(&pool, &national_under_national)
+                .await
+                .is_empty(),
+            "a national grant under a national membership is collapsed"
+        );
+        assert!(
+            direct_rows(&pool, &facility_under_national)
+                .await
+                .is_empty(),
+            "a facility grant under a national membership is collapsed"
+        );
+        assert_eq!(
+            direct_rows(&pool, &national_under_facility).await,
+            [format!("{p}:national")],
+            "a national grant under a facility-only membership grants more, so it stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &bespoke).await,
+            [format!("{p}:national")],
+            "a bespoke grant no group covers stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &with_deny).await,
+            [format!("{p}:ZNY:DENY")],
+            "the grant goes, the deny stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &group_and_bespoke).await,
+            [format!("{other}:national")],
+            "the covered grant goes, the one no held group gives stays"
+        );
+        assert_eq!(
+            direct_rows(&pool, &other_facility).await,
+            [format!("{p}:ZNY")],
+            "a membership at ZDC does not cover a grant at ZNY"
+        );
+    }
+
+    /// The deny case on its own terms: after the cleanup the deny must still *bite*, not merely
+    /// survive as a row. This is the case a careless `granted` filter would break, and it would widen
+    /// someone's access silently.
+    #[sqlx::test]
+    async fn a_deny_still_narrows_after_the_cleanup(pool: sqlx::PgPool) {
+        let p = an_ntmo_permission(&pool).await;
+        let u = user(&pool, "deny-bites").await;
+        hold(&pool, &u, "NTMO", None).await;
+        crate::scope_test_support::grant(&pool, &u, &p, None).await;
+        crate::scope_test_support::deny_scoped(&pool, &u, &p, Some("ZNY")).await;
+
+        sqlx::raw_sql(COLLAPSE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let scope = super::permission_scope(&pool, &u, &p).await.unwrap();
+        assert!(scope.allows(Some("ZDC")), "still held elsewhere");
+        assert!(!scope.allows(Some("ZNY")), "and still denied at ZNY");
+    }
+
+    /// `SERVER_ADMIN` is env-bootstrapped and removed automatically when the flag goes, so it must
+    /// never be treated as the group a direct grant collapses into — that grant would vanish with no
+    /// admin action. It has no `role_permissions` today, so this pins the explicit exclusion against
+    /// the day someone seeds it some.
+    #[sqlx::test]
+    async fn a_grant_is_never_collapsed_into_server_admin(pool: sqlx::PgPool) {
+        let p = an_ntmo_permission(&pool).await;
+        sqlx::query(
+            "insert into access.role_permissions (role_name, permission_name) values ('SERVER_ADMIN', $1)",
+        )
+        .bind(&p)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let u = user(&pool, "admin").await;
+        hold(&pool, &u, "SERVER_ADMIN", None).await;
+        crate::scope_test_support::grant(&pool, &u, &p, None).await;
+
+        sqlx::raw_sql(COLLAPSE_MIGRATION)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            direct_rows(&pool, &u).await,
+            [format!("{p}:national")],
+            "the direct grant survives losing SERVER_ADMIN later"
+        );
+    }
+
+    /// The AC3 audit run against real data before 0099 ships (`backend/audits/0099_collapse_effect.sql`).
+    const COLLAPSE_AUDIT: &str = include_str!("../../audits/0099_collapse_effect.sql");
+
+    /// The audit's text between `-- BEGIN {name}` and `-- END {name}`, so the tests run the file's
+    /// own SQL rather than a copy of it.
+    fn collapse_audit_block(name: &str) -> &'static str {
+        let begin = format!("-- BEGIN {name}\n");
+        let start = COLLAPSE_AUDIT.find(&begin).expect("the block opens") + begin.len();
+        let len = COLLAPSE_AUDIT[start..]
+            .find(&format!("-- END {name}"))
+            .expect("the block closes");
+        &COLLAPSE_AUDIT[start..start + len]
+    }
+
+    /// SETUP, then `migration`, then DIFF — what the audit does — in a transaction that rolls back.
+    /// Returns the diff as `change:name:permission:scope`.
+    async fn run_collapse_audit(pool: &sqlx::PgPool, migration: &str) -> Vec<String> {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(collapse_audit_block("SETUP"))
+            .execute(&mut *tx)
+            .await
+            .expect("the audit's setup runs");
+        sqlx::raw_sql(migration)
+            .execute(&mut *tx)
+            .await
+            .expect("the migration runs");
+        let rows: Vec<(String, String, String, String, String)> =
+            sqlx::query_as(collapse_audit_block("DIFF"))
+                .fetch_all(&mut *tx)
+                .await
+                .expect("the audit's diff runs");
+        tx.rollback().await.unwrap();
+        rows.into_iter()
+            .map(|(change, _, name, permission, scope)| {
+                format!("{change}:{name}:{permission}:{scope}")
+            })
+            .collect()
+    }
+
+    /// Everyone the cleanup touches or must not touch, in one population: a covered national grant, a
+    /// covered facility grant, a national grant under a facility membership, a grant at another
+    /// facility, a bespoke grant beside a group, and a grant beside a deny.
+    async fn collapse_population(pool: &sqlx::PgPool) -> (String, String) {
+        let p = an_ntmo_permission(pool).await;
+        let other = a_permission_ntmo_lacks(pool).await;
+        let u = user(pool, "population").await;
+        hold(pool, &u, "NTMO", None).await;
+        crate::scope_test_support::grant(pool, &u, &p, None).await;
+        crate::scope_test_support::grant(pool, &u, &other, None).await;
+        crate::scope_test_support::deny_scoped(pool, &u, &p, Some("ZNY")).await;
+        let v = user(pool, "facility").await;
+        hold(pool, &v, "NTMO", Some("ZDC")).await;
+        crate::scope_test_support::grant(pool, &v, &p, Some("ZDC")).await;
+        crate::scope_test_support::grant(pool, &v, &p, Some("ZNY")).await;
+        crate::scope_test_support::grant(pool, &v, &other, None).await;
+        (p, other)
+    }
+
+    /// The audit reports nothing for 0099 as it ships — and the migration did remove rows, so the
+    /// empty diff is not the trivial one.
+    #[sqlx::test]
+    async fn the_0099_audit_reports_no_change_for_the_shipped_migration(pool: sqlx::PgPool) {
+        collapse_population(&pool).await;
+        let before: i64 = sqlx::query_scalar("select count(*) from access.user_permissions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            run_collapse_audit(&pool, COLLAPSE_MIGRATION).await,
+            Vec::<String>::new()
+        );
+
+        // Rolled back, so the rows are all still here — and the migration itself does remove some.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(COLLAPSE_MIGRATION)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("select count(*) from access.user_permissions")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert!(
+            after < before,
+            "0099 removes the covered grants ({before} -> {after})"
+        );
+    }
+
+    /// The audit is not decoration: run against the two plausible mistakes the migration's own guards
+    /// exist to prevent, it names exactly who would lose what. Without this, an audit that always
+    /// returned nothing would pass the test above.
+    #[sqlx::test]
+    async fn the_0099_audit_catches_a_migration_that_drops_bespoke_grants(pool: sqlx::PgPool) {
+        let (p, other) = collapse_population(&pool).await;
+
+        let any_permission =
+            COLLAPSE_MIGRATION.replace("        and rp.permission_name = up.permission_name\n", "");
+        assert_ne!(any_permission, COLLAPSE_MIGRATION, "the mutation applies");
+        let mut lost = run_collapse_audit(&pool, &any_permission).await;
+        lost.sort();
+        // `population` holds NTMO nationally, so the mutated delete takes its bespoke grant and with
+        // it every scope. `facility`'s bespoke grant is national under a ZDC-only membership, which
+        // the scope clause still refuses to treat as covering — so it survives even this mutation.
+        let mut expected = vec![
+            format!("lost:population:{other}:NATIONAL"),
+            format!("lost:population:{other}:ZDC"),
+            format!("lost:population:{other}:ZNY"),
+        ];
+        expected.sort();
+        assert_eq!(lost, expected, "a cleanup that ignored the permission");
+
+        let any_facility = COLLAPSE_MIGRATION.replace(
+            "(ur.artcc_id is null or ur.artcc_id = up.artcc_id)",
+            "(ur.artcc_id is null or up.artcc_id is not null)",
+        );
+        assert_ne!(any_facility, COLLAPSE_MIGRATION, "the mutation applies");
+        assert_eq!(
+            run_collapse_audit(&pool, &any_facility).await,
+            [format!("lost:facility:{p}:ZNY")],
+            "a cleanup that let a ZDC membership cover a ZNY grant"
         );
     }
 }

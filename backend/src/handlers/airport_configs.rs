@@ -292,7 +292,7 @@ pub async fn create_airport_config(
         &icao,
         &req,
         artcc.as_deref().unwrap_or(""),
-        principal.user_id(),
+        principal.user_id().ok_or(ApiError::Forbidden)?,
     )
     .await?;
     row.editable = true;
@@ -335,9 +335,15 @@ pub async fn update_airport_config(
         }
     }
 
-    let mut row = config_repo::update(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = config_repo::update(
+        pool,
+        &id,
+        &icao,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
