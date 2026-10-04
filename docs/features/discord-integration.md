@@ -52,9 +52,14 @@ Job lifecycle:
    backend marks them `in_progress` and hands them over. Leasing is claim-and-lock so concurrent bot instances don't
    double-deliver.
 3. **Perform** — the bot executes the Discord action (create thread, post embed, edit embed, DM/ping).
-4. **Ack** — the bot calls back to mark the job `succeeded` (recording any Discord ids the backend must remember, e.g.
+4. **Ack** — the bot calls back (`POST /api/v1/integration/jobs/{id}/ack?consumer=discord`; an ack applies only to that
+   consumer's job) to mark the job `succeeded` (recording any Discord ids the backend must remember, e.g.
    the created message/thread id) or `failed` (with `error`). On failure the backend bumps `attempt_count` and pushes
    `next_attempt_at` out by a backoff; past a max attempt count the job is left `failed` for operator review.
+
+The `consumer` is **declared by the caller, not bound to its credential**, so it keeps cooperating consumers apart but
+does not stop a hostile one: grant `integration.jobs.update` only to trusted queue consumers until #656 derives the
+consumer from the service account.
 
 **Interaction callback (Discord → backend).** For user-initiated interactions (button clicks, select menus, modal
 submits — see [Interactions the bot calls back for](#interactions-the-bot-calls-back-for)) the bot does **not** mutate anything itself. It calls back into `/api/v1` as a **service account** (bearer token, matched by

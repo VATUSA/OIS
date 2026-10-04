@@ -34,9 +34,20 @@ fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::ServiceUnavailable)
 }
 
+/// The queue consumer a lease or ack names — required (#590): with no filter a second consumer leased
+/// the bot's jobs. It is **declared by the caller, not bound to the credential**, so it isolates
+/// cooperating consumers only; `integration.jobs.update` must go to trusted queue consumers alone until
+/// #656 derives it from the service account.
+fn required_consumer(consumer: Option<&str>) -> Result<&str, ApiError> {
+    consumer
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or(ApiError::BadRequest)
+}
+
 #[derive(Deserialize)]
 pub struct LeaseQuery {
-    /// Whose jobs to lease. Required (#590): with no filter a second consumer leased the bot's jobs.
+    /// Whose jobs to lease; see [`required_consumer`].
     consumer: Option<String>,
     /// Max jobs to lease (default 10, clamped 1–100).
     limit: Option<i64>,
@@ -45,7 +56,7 @@ pub struct LeaseQuery {
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/lease", tag = "integration",
     params(
-        ("consumer" = String, Query, description = "Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`."),
+        ("consumer" = String, Query, description = "Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`. Declared by the caller, not bound to the credential (#656)."),
         ("limit" = Option<i64>, Query, description = "Max jobs (default 10)")
     ),
     responses(
@@ -59,32 +70,42 @@ pub async fn lease_jobs(
     _permission: RequirePermission<IntegrationJobsUpdate>,
     Query(q): Query<LeaseQuery>,
 ) -> Result<Json<Vec<OutboundJobBody>>, ApiError> {
-    let consumer = q
-        .consumer
-        .as_deref()
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .ok_or(ApiError::BadRequest)?;
+    let consumer = required_consumer(q.consumer.as_deref())?;
     let limit = q.limit.unwrap_or(10);
     Ok(Json(
         integration_repo::lease_jobs(pool(&state)?, consumer, limit).await?,
     ))
 }
 
+#[derive(Deserialize)]
+pub struct AckQuery {
+    /// Whose job this is; see [`required_consumer`]. An ack applies only to that consumer's job.
+    consumer: Option<String>,
+}
+
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/{id}/ack", tag = "integration",
-    params(("id" = String, Path)), request_body = AckJobRequest,
-    responses((status = 204), (status = 401), (status = 404))
+    params(
+        ("id" = String, Path),
+        ("consumer" = String, Query, description = "The consumer that leased the job; an ack applies only to that consumer's job. Declared by the caller, not bound to the credential (#656).")
+    ),
+    request_body = AckJobRequest,
+    responses(
+        (status = 204), (status = 400, description = "No `consumer` given"), (status = 401), (status = 404)
+    )
 )]
 pub async fn ack_job(
     State(state): State<AppState>,
     _permission: RequirePermission<IntegrationJobsUpdate>,
     Path(id): Path<String>,
+    Query(q): Query<AckQuery>,
     Json(payload): Json<AckJobRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let consumer = required_consumer(q.consumer.as_deref())?;
     let ok = integration_repo::ack_job(
         pool(&state)?,
         &id,
+        consumer,
         payload.success,
         payload.result.as_ref(),
         payload.error.as_deref(),
@@ -103,7 +124,8 @@ pub async fn ack_job(
             job = %id,
             success = payload.success,
             attempt = ?payload.attempt,
-            "integration: ack did not apply — unknown job, or this worker no longer holds the lease"
+            consumer,
+            "integration: ack did not apply — unknown job, another consumer's job, or this worker no longer holds the lease"
         );
         Err(ApiError::NotFound)
     }
@@ -551,7 +573,7 @@ mod tests {
         grant(&pool, &user, "integration.jobs.update", None).await;
         let cookie = session_cookie(&pool, &user).await;
         let state = test_state(pool.clone(), Default::default());
-        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+        let uri = format!("/api/v1/integration/jobs/{id}/ack?consumer=discord");
 
         let stale = send(
             &state,
@@ -598,7 +620,7 @@ mod tests {
         let status = send(
             &state,
             http::Method::POST,
-            &format!("/api/v1/integration/jobs/{id}/ack"),
+            &format!("/api/v1/integration/jobs/{id}/ack?consumer=discord"),
             &cookie,
             Some(serde_json::json!({"success": true})),
         )
@@ -617,7 +639,7 @@ mod tests {
         let user = seed_user(&pool).await;
         let cookie = session_cookie(&pool, &user).await;
         let state = test_state(pool.clone(), Default::default());
-        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+        let uri = format!("/api/v1/integration/jobs/{id}/ack?consumer=discord");
         let body = serde_json::json!({"success": true, "attempt": 1});
 
         let refused = send(
@@ -712,5 +734,74 @@ mod tests {
             assert_eq!(refused, http::StatusCode::BAD_REQUEST, "{uri}");
         }
         assert_eq!(status_of(&pool, &discord).await, "pending");
+    }
+    /// #590 review: an ack applies only to the named consumer's job, so another consumer can't
+    /// complete (or fail) the bot's in-flight job by its id.
+    #[sqlx::test]
+    async fn an_ack_from_another_consumer_does_not_apply(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 1).await; // the bot's: consumer defaults to `discord`
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+        let body = serde_json::json!({"success": true, "attempt": 1});
+        let ack = |consumer: &str| format!("/api/v1/integration/jobs/{id}/ack?consumer={consumer}");
+
+        // Both branches are fenced: completing it, and failing it (which would re-queue or park it).
+        let fail = serde_json::json!({"success": false, "error": "not mine", "attempt": 1});
+        for b in [body.clone(), fail] {
+            let refused = send(
+                &state,
+                http::Method::POST,
+                &ack("webhook"),
+                &cookie,
+                Some(b),
+            )
+            .await;
+            assert_eq!(refused, http::StatusCode::NOT_FOUND);
+            assert_eq!(
+                status_of(&pool, &id).await,
+                "in_progress",
+                "the bot's job is untouched"
+            );
+        }
+
+        let applied = send(
+            &state,
+            http::Method::POST,
+            &ack("discord"),
+            &cookie,
+            Some(body),
+        )
+        .await;
+        assert_eq!(applied, http::StatusCode::NO_CONTENT);
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+
+    /// An ack that names no consumer is refused rather than applied to whichever job has the id.
+    #[sqlx::test]
+    async fn an_ack_without_a_consumer_is_refused(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 1).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+        let body = serde_json::json!({"success": true, "attempt": 1});
+
+        for uri in [
+            format!("/api/v1/integration/jobs/{id}/ack"),
+            format!("/api/v1/integration/jobs/{id}/ack?consumer=%20"),
+        ] {
+            let refused = send(
+                &state,
+                http::Method::POST,
+                &uri,
+                &cookie,
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(refused, http::StatusCode::BAD_REQUEST, "{uri}");
+        }
+        assert_eq!(status_of(&pool, &id).await, "in_progress");
     }
 }

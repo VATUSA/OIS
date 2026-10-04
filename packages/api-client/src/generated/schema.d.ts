@@ -12577,7 +12577,7 @@ export interface operations {
     lease_jobs: {
         parameters: {
             query: {
-                /** @description Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`. */
+                /** @description Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`. Declared by the caller, not bound to the credential (#656). */
                 consumer: string;
                 /** @description Max jobs (default 10) */
                 limit?: number;
@@ -12613,7 +12613,10 @@ export interface operations {
     };
     ack_job: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description The consumer that leased the job; an ack applies only to that consumer's job. Declared by the caller, not bound to the credential (#656). */
+                consumer: string;
+            };
             header?: never;
             path: {
                 id: string;
@@ -12627,6 +12630,13 @@ export interface operations {
         };
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No `consumer` given */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -194,6 +194,7 @@ impl OisClient {
     /// Acknowledge a leased job: success (with an optional result payload) or failure (with an error).
     pub async fn ack_job(
         &self,
+        consumer: &str,
         id: &str,
         success: bool,
         result: Option<Value>,
@@ -204,6 +205,7 @@ impl OisClient {
             .http
             .post(self.url(&format!("/api/v1/integration/jobs/{id}/ack")))
             .bearer_auth(&self.token)
+            .query(&ack_query(consumer))
             .json(&AckBody {
                 success,
                 result,
@@ -348,9 +350,20 @@ fn lease_query(consumer: &str, limit: u32) -> [(&'static str, String); 2] {
     ]
 }
 
+/// The ack's query string: the backend applies an ack only to the named consumer's job (#590).
+fn ack_query(consumer: &str) -> [(&'static str, &str); 1] {
+    [("consumer", consumer)]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AckBody, lease_query};
+    use super::{AckBody, ack_query, lease_query};
+
+    /// Pinned against `AckQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
+    #[test]
+    fn an_ack_names_its_consumer_on_the_wire() {
+        assert_eq!(ack_query("discord"), [("consumer", "discord")]);
+    }
 
     /// Pinned against `LeaseQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
     #[test]

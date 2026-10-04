@@ -116,11 +116,15 @@ pub async fn lease_jobs(
 /// That is deliberate: a required value would reject every ack from an old bot during the window
 /// between deploying the two halves.
 ///
-/// Returns false when nothing was updated: the id doesn't exist, or the ack is stale. The caller logs
-/// that rather than discarding it, because a stale ack means a worker ran past its lease.
+/// Only `consumer`'s job is touched (#590), so one consumer can't complete or fail another's.
+///
+/// Returns false when nothing was updated: the id doesn't exist, it is another consumer's, or the ack
+/// is stale. The caller logs that rather than discarding it, because a stale ack means a worker ran
+/// past its lease.
 pub async fn ack_job(
     pool: &PgPool,
     id: &str,
+    consumer: &str,
     success: bool,
     result: Option<&Value>,
     error: Option<&str>,
@@ -132,12 +136,13 @@ pub async fn ack_job(
         sqlx::query(
             "update integration.outbound_jobs \
              set status = 'succeeded', result = $2::jsonb, error = null \
-             where id = $1 and status = 'in_progress' \
+             where id = $1 and status = 'in_progress' and consumer = $4 \
                and ($3::int is null or attempt_count = $3)",
         )
         .bind(id)
         .bind(result)
         .bind(attempt)
+        .bind(consumer)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -147,13 +152,14 @@ pub async fn ack_job(
              set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
                  next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
                  error = $3 \
-             where id = $1 and status = 'in_progress' \
+             where id = $1 and status = 'in_progress' and consumer = $5 \
                and ($4::int is null or attempt_count = $4)",
         )
         .bind(id)
         .bind(MAX_ATTEMPTS)
         .bind(error)
         .bind(attempt)
+        .bind(consumer)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -1029,7 +1035,9 @@ mod tests {
         assert_eq!(status_of(&pool, &id).await, "pending");
 
         assert!(
-            !ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap(),
             "a stale success must not apply; the bool is what lets the handler log it"
         );
         assert_eq!(
@@ -1039,9 +1047,17 @@ mod tests {
         );
 
         assert!(
-            !ack_job(&pool, &id, false, None, Some("stale"), None)
-                .await
-                .unwrap()
+            !ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                false,
+                None,
+                Some("stale"),
+                None
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "pending");
 
@@ -1058,7 +1074,11 @@ mod tests {
                 .iter()
                 .any(|j| j.id == id)
         );
-        assert!(ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert!(
+            ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap()
+        );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
     }
 
@@ -1091,7 +1111,7 @@ mod tests {
         // A's success arrives late. Unfenced this marked the job delivered while B was mid-flight,
         // and B's own ack — carrying the real message id — was then refused.
         assert!(
-            !ack_job(&pool, &id, true, None, None, Some(1))
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, Some(1))
                 .await
                 .unwrap(),
             "a predecessor's success must not apply to its successor's lease"
@@ -1101,18 +1121,34 @@ mod tests {
         // A's failure is refused too: unfenced it returned a job B was holding to `pending`, so a
         // third worker could take it while B was still running.
         assert!(
-            !ack_job(&pool, &id, false, None, Some("stale"), Some(1))
-                .await
-                .unwrap()
+            !ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                false,
+                None,
+                Some("stale"),
+                Some(1)
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "in_progress");
 
         // B's ack still applies, and its result is the one recorded.
         let result = serde_json::json!({"message_id": "123"});
         assert!(
-            ack_job(&pool, &id, true, Some(&result), None, Some(2))
-                .await
-                .unwrap()
+            ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                true,
+                Some(&result),
+                None,
+                Some(2)
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
         let stored: Option<Value> =
@@ -1135,7 +1171,9 @@ mod tests {
         let id = stranded_job(&pool, 10, 1).await;
         assert_eq!(status_of(&pool, &id).await, "in_progress");
         assert!(
-            ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap(),
             "an old bot sends no attempt and must keep working"
         );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
@@ -1151,7 +1189,11 @@ mod tests {
             .unwrap();
         assert_eq!(status_of(&pool, &id).await, "failed");
 
-        assert!(!ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert!(
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap()
+        );
         assert_eq!(status_of(&pool, &id).await, "failed");
     }
 
