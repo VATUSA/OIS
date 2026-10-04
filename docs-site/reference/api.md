@@ -49,5 +49,5 @@ Every API example in these docs is checked against the real API in CI, so a rena
 leave a stale example behind.
 :::
 
-A fuller integrator guide is on its way: quickstart, the release workflow, errors and rate limits, and
-realtime updates.
+For a quickstart, choosing between an API key and a service account, the release workflow end to
+end, and errors, paging and rate limits, see [Integrating with OIS](./integrating.md).
