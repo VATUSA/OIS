@@ -19,8 +19,9 @@ use crate::{
 
 const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
     t.start_time, t.stop_time, t.status, t.published_at, t.created_at, \
-    u.display_name as author, t.structured, t.decoded \
-    from tmu.tmis t left join identity.users u on u.id = t.created_by";
+    coalesce(u.display_name, a.display_name) as author, t.structured, t.decoded \
+    from tmu.tmis t left join identity.users u on u.id = t.created_by \
+    left join access.actors a on a.id = t.created_by_actor";
 
 /// Optional filters for the TMI list. Every field `None` → every TMI.
 #[derive(Debug, Default)]
@@ -84,7 +85,7 @@ pub async fn list_tmis_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<TmiBod
 pub async fn create_tmi<'e, E>(
     executor: E,
     req: &CreateTmiRequest,
-    created_by: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -93,8 +94,8 @@ where
     let decoded = req.structured.as_ref().map(crate::tmi::render_english);
     sqlx::query_scalar::<_, String>(
         "insert into tmu.tmis \
-         (requesting, providing, restriction, structured, decoded, start_time, stop_time, created_by) \
-         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8) returning id",
+         (requesting, providing, restriction, structured, decoded, start_time, stop_time, created_by, created_by_actor) \
+         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9) returning id",
     )
     .bind(&req.requesting)
     .bind(&req.providing)
@@ -103,7 +104,9 @@ where
     .bind(decoded)
     .bind(req.start_time)
     .bind(req.stop_time)
-    .bind(created_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
@@ -222,14 +225,16 @@ async fn get_tmi_tx(
 pub async fn publish_tmi(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<Option<TmiBody>, ApiError> {
     let result = sqlx::query(
-        "update tmu.tmis set status = 'published', published_by = $2, published_at = now() \
+        "update tmu.tmis set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -308,8 +313,9 @@ pub(crate) async fn delete_or_retain(
 
 const PROGRAM_SELECT: &str = "select p.icao, p.aar, p.trail, p.mit, p.gates, \
     p.exclude_wake, p.exclude_types, p.jets_only, p.active_until, p.updated_at, \
-    u.display_name as updated_by \
-    from tmu.programs p left join identity.users u on u.id = p.updated_by";
+    coalesce(u.display_name, a.display_name) as updated_by \
+    from tmu.programs p left join identity.users u on u.id = p.updated_by \
+    left join access.actors a on a.id = p.updated_by_actor";
 
 pub async fn list_programs(pool: &PgPool) -> Result<Vec<ProgramBody>, ApiError> {
     sqlx::query_as::<_, ProgramBody>(&format!("{PROGRAM_SELECT} order by p.icao"))
@@ -332,20 +338,20 @@ pub async fn upsert_program<'e, E>(
     icao: &str,
     req: &UpsertProgramRequest,
     gates: &[GateRule],
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     sqlx::query(
         "insert into tmu.programs \
-         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) \
+         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by, created_by_actor, updated_by_actor) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $11) \
          on conflict (icao) do update set \
             aar = excluded.aar, trail = excluded.trail, mit = excluded.mit, \
             gates = excluded.gates, exclude_wake = excluded.exclude_wake, \
             exclude_types = excluded.exclude_types, jets_only = excluded.jets_only, \
-            active_until = excluded.active_until, updated_by = excluded.updated_by",
+            active_until = excluded.active_until, updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(icao)
     .bind(req.aar)
@@ -356,7 +362,9 @@ where
     .bind(&req.exclude_types)
     .bind(req.jets_only)
     .bind(req.active_until)
-    .bind(actor)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -375,8 +383,9 @@ pub async fn delete_program(pool: &PgPool, icao: &str) -> Result<bool, ApiError>
 // --- ground stops ---
 
 const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.status, \
-    g.published_at, g.updated_at, u.display_name as updated_by \
-    from tmu.ground_stops g left join identity.users u on u.id = g.updated_by";
+    g.published_at, g.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from tmu.ground_stops g left join identity.users u on u.id = g.updated_by \
+    left join access.actors a on a.id = g.updated_by_actor";
 
 pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, ApiError> {
     sqlx::query_as::<_, GroundStopBody>(&format!(
@@ -445,19 +454,21 @@ pub async fn create_ground_stop<'e, E>(
     req: &CreateGroundStopRequest,
     scope: &str,
     until: Option<&str>,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     sqlx::query_scalar::<_, String>(
-        "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by) \
-         values ($1, $2, $3, $4, $4) returning id",
+        "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by, created_by_actor, updated_by_actor) \
+         values ($1, $2, $3, $4, $4, $5, $5) returning id",
     )
     .bind(&req.airport)
     .bind(scope)
     .bind(until)
-    .bind(actor)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
@@ -467,17 +478,19 @@ where
 pub async fn publish_ground_stop<'e, E>(
     executor: E,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let result = sqlx::query(
-        "update tmu.ground_stops set status = 'published', published_by = $2, published_at = now() \
+        "update tmu.ground_stops set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -996,10 +1009,10 @@ fn advisory_body(
 pub async fn create_advisory(
     pool: &PgPool,
     req: &CreateAdvisoryRequest,
-    created_by: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let id = create_advisory_tx(&mut tx, req, created_by, None).await?;
+    let id = create_advisory_tx(&mut tx, req, by, None).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(id)
 }
@@ -1023,7 +1036,7 @@ pub(crate) enum AdvisoryProgram<'a> {
 pub(crate) async fn create_advisory_tx(
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateAdvisoryRequest,
-    created_by: &str,
+    by: &Attribution,
     program: Option<AdvisoryProgram<'_>>,
 ) -> Result<String, ApiError> {
     let facility = req.facility.trim().to_ascii_uppercase();
@@ -1050,9 +1063,9 @@ pub(crate) async fn create_advisory_tx(
     };
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
-         (facility, issued_day, number, kind, body, structured, decoded, created_by, \
+         (facility, issued_day, number, kind, body, structured, decoded, created_by, created_by_actor, \
           gdp_id, ground_stop_id, valid_from, valid_to) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning id",
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning id",
     )
     .bind(&facility)
     .bind(day)
@@ -1061,7 +1074,9 @@ pub(crate) async fn create_advisory_tx(
     .bind(&body)
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
-    .bind(created_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .bind(gdp_id)
     .bind(ground_stop_id)
     // Stored verbatim from the request, never derived from `body`. The printed period stays the
@@ -1234,15 +1249,17 @@ pub async fn update_advisory(
 pub async fn publish_advisory(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.advisories \
-         set status = 'published', published_by = $2, published_at = now() \
+         set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1329,7 +1346,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1378,7 +1395,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1423,7 +1440,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1495,7 +1512,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1611,7 +1628,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1806,7 +1823,13 @@ mod tests {
 
     async fn create(pool: &PgPool, req: CreateAdvisoryRequest) -> AdvisoryBody {
         let user = seed_user(pool).await;
-        let id = create_advisory(pool, &req, &user).await.unwrap();
+        let id = create_advisory(
+            pool,
+            &req,
+            &crate::auth::principal::Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
         get_advisory(pool, &id).await.unwrap().unwrap()
     }
 
@@ -1956,7 +1979,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await;
         assert!(matches!(err, Err(ApiError::BadRequest)), "{err:?}");
@@ -2091,7 +2114,12 @@ mod tests {
         for _ in 0..CONCURRENCY {
             let (pool, req, user) = (pool.clone(), request(), user.clone());
             tasks.push(tokio::spawn(async move {
-                create_advisory(&pool, &req, &user).await
+                create_advisory(
+                    &pool,
+                    &req,
+                    &crate::auth::principal::Attribution::user_only(&user),
+                )
+                .await
             }));
         }
 
@@ -2160,9 +2188,13 @@ mod tests {
         // Transactional since #459, so the Discord enqueue is atomic with the state change.
         let mut tx = pool.begin().await.unwrap();
         assert!(
-            publish_advisory(&mut tx, &published.id, &user)
-                .await
-                .unwrap()
+            publish_advisory(
+                &mut tx,
+                &published.id,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
         );
         tx.commit().await.unwrap();
 
@@ -2207,7 +2239,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2342,7 +2374,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2370,7 +2402,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2393,7 +2425,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            user,
+            &crate::auth::principal::Attribution::user_only(user),
         )
         .await
         .unwrap()
@@ -2569,7 +2601,7 @@ mod tests {
                 valid_from: Some(valid_to - chrono::Duration::hours(1)),
                 valid_to: Some(valid_to),
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap()
@@ -2681,7 +2713,7 @@ mod tests {
                 valid_from: None,
                 valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
             Some(AdvisoryProgram::GroundStop(&gs_id)),
         )
         .await
@@ -2724,7 +2756,15 @@ mod tests {
     async fn post_advisory(pool: &PgPool, adv_id: &str, channel: &str) {
         let user = crate::scope_test_support::seed_user(pool).await;
         let mut tx = pool.begin().await.unwrap();
-        assert!(publish_advisory(&mut tx, adv_id, &user).await.unwrap());
+        assert!(
+            publish_advisory(
+                &mut tx,
+                adv_id,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
+        );
         let adv = get_advisory_tx(&mut tx, adv_id).await.unwrap().unwrap();
         crate::repos::integration::enqueue_job(
             &mut tx,
@@ -2781,7 +2821,15 @@ mod tests {
         let unposted = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
         let user = crate::scope_test_support::seed_user(&pool).await;
         let mut tx = pool.begin().await.unwrap();
-        assert!(publish_advisory(&mut tx, &unposted, &user).await.unwrap());
+        assert!(
+            publish_advisory(
+                &mut tx,
+                &unposted,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
+        );
         tx.commit().await.unwrap();
 
         run_cleanup(&pool).await.unwrap();

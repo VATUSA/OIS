@@ -174,7 +174,7 @@ mod tests {
             },
             "",
             None,
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();

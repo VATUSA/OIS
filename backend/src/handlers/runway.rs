@@ -1,19 +1,19 @@
 //! Runway Balancer handlers — the shared per-airport board (arrivals assigned to landing
 //! runways + demand bins) and its config, computed live off the feed.
 
+use crate::auth::principal::Actor;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
 
 use crate::{
     auth::{
-        context::CurrentUser,
         permissions::{FlowRunwayRead, FlowRunwayUpdate},
         require_permission::RequirePermission,
     },
@@ -254,11 +254,11 @@ pub async fn get_runway(
 pub async fn put_runway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRunwayUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(body): Json<RunwayConfigRequest>,
 ) -> Result<Json<RunwayBoard>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = icao.to_ascii_uppercase();
     let window = body.window_min.map(|w| w.clamp(30, 240));
@@ -269,7 +269,7 @@ pub async fn put_runway(
         body.star_rules.as_ref(),
         body.overrides.as_ref(),
         window,
-        &user.id,
+        &by,
         body.custom_ends.as_ref(),
     )
     .await?;
@@ -317,11 +317,11 @@ pub async fn list_saved_configs(
 pub async fn save_config(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRunwayUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((icao, name)): Path<(String, String)>,
     Json(body): Json<SavedConfigRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let name = name.trim();
     if name.is_empty() {
@@ -335,7 +335,7 @@ pub async fn save_config(
             active_ends: body.active_ends,
             star_rules: body.star_rules,
         },
-        &user.id,
+        &by,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)

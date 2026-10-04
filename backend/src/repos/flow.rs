@@ -11,9 +11,11 @@ use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.manual_order, f.manual_seq, f.updated_at, u.display_name as updated_by, \
+    f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
+    coalesce(u.display_name, a.display_name) as updated_by, \
     f.event_id, f.event_status, f.auto_publish \
-    from flow.fca f left join identity.users u on u.id = f.updated_by";
+    from flow.fca f left join identity.users u on u.id = f.updated_by \
+    left join access.actors a on a.id = f.updated_by_actor";
 
 /// Event FCAs are hidden from every live map and the metering engine until they're `published`;
 /// planned + archived ones are only ever seen in their event's builder ([`list_event_fcas`]).
@@ -66,7 +68,7 @@ pub async fn get_fca(pool: &PgPool, id: &str) -> Result<Option<FcaBody>, ApiErro
 fn bind_fca<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     req: &'q UpsertFcaRequest,
-    actor: &'q str,
+    by: &'q Attribution,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     q.bind(req.name.trim())
         .bind(req.color.as_deref().unwrap_or("#f59e0b"))
@@ -83,24 +85,26 @@ fn bind_fca<'q>(
         .bind(req.rate.unwrap_or(30).clamp(0, 240))
         .bind(req.mit.unwrap_or(15).clamp(0, 200))
         .bind(req.enabled.unwrap_or(true))
-        .bind(actor)
+        .bind(&by.user_id)
+        .bind(&by.actor_id)
 }
 
 pub async fn create_fca(
     pool: &PgPool,
     req: &UpsertFcaRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     let q = sqlx::query(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
-              dir, mode, rate, mit, enabled, updated_by, created_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+              dir, mode, rate, mit, enabled, updated_by, created_by,
+              updated_by_actor, created_by_actor)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17)
          returning id",
     );
-    // bind_fca sets $1..$16 (the 16 shared columns, $16 = actor → updated_by);
-    // created_by reuses $16 in the SQL, so no extra bind is needed.
-    let row = bind_fca(q, req, actor)
+    // bind_fca sets $1..$17 (the 15 shared columns, then the user → `*_by` and the actor →
+    // `*_by_actor`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
+    let row = bind_fca(q, req, by)
         .fetch_one(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -115,16 +119,17 @@ pub async fn create_event_fca(
     pool: &PgPool,
     event_id: i64,
     req: &UpsertFcaRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     let q = sqlx::query(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
-              dir, mode, rate, mit, enabled, updated_by, created_by, event_id, event_status)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,'planned')
+              dir, mode, rate, mit, enabled, updated_by, created_by,
+              updated_by_actor, created_by_actor, event_id, event_status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,'planned')
          returning id",
     );
-    let row = bind_fca(q, req, actor)
+    let row = bind_fca(q, req, by)
         .bind(event_id)
         .fetch_one(pool)
         .await
@@ -138,16 +143,16 @@ pub async fn update_fca(
     pool: &PgPool,
     id: &str,
     req: &UpsertFcaRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let q = sqlx::query(
         "update flow.fca set
              name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
              fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
-             rate = $13, mit = $14, enabled = $15, updated_by = $16
-         where id = $17",
+             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17
+         where id = $18",
     );
-    let result = bind_fca(q, req, actor)
+    let result = bind_fca(q, req, by)
         .bind(id)
         .execute(pool)
         .await
@@ -267,8 +272,9 @@ pub struct RouteRow {
 }
 
 const ROUTE_SELECT: &str = "select r.id, r.name, r.color, r.route, r.dep, r.arr, r.artcc, \
-    r.updated_at, u.display_name as updated_by \
-    from flow.route r left join identity.users u on u.id = r.updated_by";
+    r.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from flow.route r left join identity.users u on u.id = r.updated_by \
+    left join access.actors a on a.id = r.updated_by_actor";
 
 /// All routes, or — when `artcc` is given — that ARTCC's routes plus the global (NULL) ones.
 pub async fn list_routes(pool: &PgPool, artcc: Option<&str>) -> Result<Vec<RouteRow>, ApiError> {
@@ -294,11 +300,12 @@ pub async fn get_route(pool: &PgPool, id: &str) -> Result<Option<RouteRow>, ApiE
 pub async fn create_route(
     pool: &PgPool,
     req: &UpsertRouteRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into flow.route (name, color, route, dep, arr, artcc, updated_by, created_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $7) returning id",
+        "insert into flow.route (name, color, route, dep, arr, artcc, updated_by, created_by, \
+             updated_by_actor, created_by_actor) \
+         values ($1, $2, $3, $4, $5, $6, $7, $7, $8, $8) returning id",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
@@ -306,7 +313,8 @@ pub async fn create_route(
     .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(norm_artcc(req.artcc.as_deref()))
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -316,11 +324,11 @@ pub async fn update_route(
     pool: &PgPool,
     id: &str,
     req: &UpsertRouteRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update flow.route set name = $1, color = $2, route = $3, dep = $4, arr = $5, \
-         artcc = $6, updated_by = $7 where id = $8",
+         artcc = $6, updated_by = $7, updated_by_actor = $8 where id = $9",
     )
     .bind(req.name.trim())
     .bind(req.color.as_deref().unwrap_or("#38bdf8"))
@@ -328,7 +336,8 @@ pub async fn update_route(
     .bind(req.dep.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(req.arr.as_deref().unwrap_or("").trim().to_ascii_uppercase())
     .bind(norm_artcc(req.artcc.as_deref()))
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .bind(id)
     .execute(pool)
     .await
@@ -357,15 +366,17 @@ pub async fn set_manual_order(
     id: &str,
     order: &[String],
     manual_seq: bool,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4 where id = $1",
+        "update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4, \
+             updated_by_actor = $5 where id = $1",
     )
     .bind(id)
     .bind(order)
     .bind(manual_seq)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

@@ -2,9 +2,8 @@
 //! `Extension<Option<CurrentUser>>` is listed here, with its intent. That extractor is session- and
 //! desktop-only, so a machine credential that clears `RequirePermission` is refused on the next line.
 //!
-//! - `UserOnly(reason)`: about a person by nature, and must stay that way.
-//! - `Pending`: should admit a machine (via [`crate::auth::principal::Actor`]) and does not yet.
-//!   Migrating these is tracked in a follow-up; the list only ever shrinks.
+//! - `UserOnly(reason)`: about a person by nature, and must stay that way. Every other handler takes
+//!   [`crate::auth::principal::Actor`], which admits a user, an API key or a service account (#607).
 //!
 //! A handler that takes `CurrentUser` and is not listed fails this test, so a new machine-blocked
 //! write can't land by accident. So does a listed one that no longer does, so the list can't rot.
@@ -14,9 +13,8 @@ use std::collections::BTreeSet;
 #[derive(Debug)]
 enum Intent {
     UserOnly(&'static str),
-    Pending,
 }
-use Intent::{Pending, UserOnly};
+use Intent::UserOnly;
 
 #[rustfmt::skip]
 const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
@@ -27,34 +25,12 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("access", "delete_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
     ("access", "add_group_member", UserOnly("granting group membership grants the group's access, like update_user_access; a machine here could grant access")),
     ("access", "remove_group_member", UserOnly("granting group membership grants the group's access, like update_user_access; a machine here could grant access")),
-    ("access", "create_vatusa_role_mapping", Pending),
-    ("access", "delete_vatusa_role_mapping", Pending),
+    ("access", "create_vatusa_role_mapping", UserOnly("mapping a VATUSA role to a group grants that group to every synced holder of the role, like group membership; a machine here could grant access")),
+    ("access", "delete_vatusa_role_mapping", UserOnly("mapping a VATUSA role to a group grants that group to every synced holder of the role, like group membership; a machine here could grant access")),
     ("ace", "my_ace_claims", UserOnly("a controller's own ACE claims")),
-    ("ace", "create_request", Pending),
+    ("ace", "create_request", UserOnly("an ACE request is a controller asking for support; its requester is a person, named in the UI and on Discord")),
     ("ace", "claim_request", UserOnly("a controller claims an ACE request for themselves")),
     ("ace", "release_claim", UserOnly("a controller gives back their own claim")),
-    ("ace", "decide_request", Pending),
-    ("admin", "get_admin_summary", Pending),
-    ("aircraft_profiles", "upsert_profile", Pending),
-    ("airport_configs", "list_all_airport_configs", Pending),
-    ("airport_configs", "list_airport_configs", Pending),
-    ("airport_configs", "create_airport_config", Pending),
-    ("airport_configs", "update_airport_config", Pending),
-    ("airport_configs", "delete_airport_config", Pending),
-    ("airport_surface", "get_airport_surface", Pending),
-    ("airport_surface", "create_airport_gate", Pending),
-    ("airport_surface", "update_airport_gate", Pending),
-    ("airport_surface", "delete_airport_gate", Pending),
-    ("airport_surface", "create_airport_ramp_area", Pending),
-    ("airport_surface", "update_airport_ramp_area", Pending),
-    ("airport_surface", "delete_airport_ramp_area", Pending),
-    ("airport_surface", "create_airport_taxiway", Pending),
-    ("airport_surface", "update_airport_taxiway", Pending),
-    ("airport_surface", "delete_airport_taxiway", Pending),
-    ("airport_surface", "create_airport_runway", Pending),
-    ("airport_surface", "update_airport_runway", Pending),
-    ("airport_surface", "delete_airport_runway", Pending),
-    ("airport_surface", "repull_faa_surface", Pending),
     ("api_keys", "list_my_keys", UserOnly("a person's own API keys; a key must never manage keys")),
     ("api_keys", "grantable_permissions", UserOnly("a person's own API keys; a key must never manage keys")),
     ("api_keys", "create_key", UserOnly("a person's own API keys; a key must never manage keys")),
@@ -64,8 +40,8 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("api_keys", "disable_my_key", UserOnly("a person's own API keys; a key must never manage keys")),
     ("api_keys", "delete_my_key", UserOnly("a person's own API keys; a key must never manage keys")),
     ("api_keys", "key_audit", UserOnly("a person's own API keys; a key must never manage keys")),
-    ("api_keys", "admin_disable_key", Pending),
-    ("api_keys", "admin_delete_key", Pending),
+    ("api_keys", "admin_disable_key", UserOnly("managing API keys is a human act; keys can never hold api_keys.*")),
+    ("api_keys", "admin_delete_key", UserOnly("managing API keys is a human act; keys can never hold api_keys.*")),
     ("auth", "me", UserOnly("the signed-in person")),
     ("dashboards", "list_dashboards", UserOnly("personal dashboards, owned by a person")),
     ("dashboards", "create_dashboard", UserOnly("personal dashboards, owned by a person")),
@@ -80,64 +56,15 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("dashboards", "rename_collection", UserOnly("personal dashboards, owned by a person")),
     ("dashboards", "delete_collection", UserOnly("personal dashboards, owned by a person")),
     ("diagnostics", "upload_report", UserOnly("a person sends it from their own desktop app")),
-    ("events", "update_event_dcc", Pending),
-    ("events", "list_event_facilities", Pending),
-    ("events", "upsert_event_facility", Pending),
-    ("events", "delete_event_facility", Pending),
-    ("events", "generate_tier1", Pending),
-    ("events", "list_event_rates", Pending),
-    ("events", "upsert_event_rate", Pending),
-    ("events", "delete_event_rate", Pending),
-    ("events", "create_event_package", Pending),
-    ("events", "add_event_package_item", Pending),
-    ("events", "activate_event_package", Pending),
-    ("events", "deactivate_event_package", Pending),
-    ("events", "set_event_package_auto", Pending),
-    ("events", "create_event_fca", Pending),
-    ("events", "update_event_fca", Pending),
-    ("events", "get_event_capture", Pending),
-    ("events", "update_event_capture", Pending),
-    ("events", "get_event_debrief", Pending),
-    ("events", "update_event_debrief", Pending),
-    ("facility_documents", "list_facility_documents", Pending),
-    ("facility_documents", "create_facility_document", Pending),
-    ("facility_documents", "update_facility_document", Pending),
-    ("facility_documents", "delete_facility_document", Pending),
-    ("facility_map", "get_config", Pending),
-    ("facility_map", "put_config", Pending),
-    ("flight_exclusions", "list_flight_exclusions", Pending),
-    ("flight_exclusions", "exclude_flight", Pending),
-    ("flight_exclusions", "restore_flight", Pending),
-    ("flow", "create_fca", Pending),
-    ("flow", "update_fca", Pending),
-    ("flow", "create_route", Pending),
-    ("flow", "update_route", Pending),
-    ("flow", "delete_route", Pending),
+    ("events", "generate_tier1", UserOnly("an ACE request is a controller asking for support; its requester is a person, named in the UI and on Discord")),
     ("flow", "my_flight", UserOnly("the signed-in pilot's own flight")),
-    ("flow", "reorder_fca", Pending),
-    ("gdp", "create_gdp", Pending),
-    ("gdp", "revise_gdp", Pending),
-    ("gdp", "publish_gdp", Pending),
     ("integration", "get_my_discord", UserOnly("the caller's own linked Discord account")),
     ("preferences", "get_preferences", UserOnly("per-person UI preferences")),
     ("preferences", "put_preferences", UserOnly("per-person UI preferences")),
-    ("runway", "put_runway", Pending),
-    ("runway", "save_config", Pending),
     ("service_accounts", "rotate_service_account", UserOnly("a person's own authority caps the grant (#584)")),
     ("service_accounts", "set_service_account_roles", UserOnly("a person's own authority caps the grant (#584)")),
     ("service_accounts", "grantable_service_account_permissions", UserOnly("a person's own authority caps the grant (#584)")),
     ("service_accounts", "set_service_account_permissions", UserOnly("a person's own authority caps the grant (#584)")),
-    ("stats", "save_capture", Pending),
-    ("tmu", "create_tmi", Pending),
-    ("tmu", "publish_tmi", Pending),
-    ("tmu", "upsert_program", Pending),
-    ("tmu", "create_ground_stop", Pending),
-    ("tmu", "publish_ground_stop", Pending),
-    ("tmu", "create_advisory", Pending),
-    ("tmu", "update_advisory", Pending),
-    ("tmu", "publish_advisory", Pending),
-    ("tmu", "cancel_advisory", Pending),
-    ("tmu", "delete_advisory", Pending),
 ];
 
 /// `(file stem, fn)` for every `pub async fn` in `handlers/*.rs` whose parameters take
@@ -215,13 +142,11 @@ fn every_current_user_handler_is_listed_with_its_intent() {
 
 #[test]
 fn every_user_only_entry_says_why() {
-    for (file, name, intent) in CURRENT_USER_HANDLERS {
-        if let UserOnly(reason) = intent {
-            assert!(
-                !reason.trim().is_empty(),
-                "{file}::{name} is user-only with no reason"
-            );
-        }
+    for (file, name, UserOnly(reason)) in CURRENT_USER_HANDLERS {
+        assert!(
+            !reason.trim().is_empty(),
+            "{file}::{name} is user-only with no reason"
+        );
     }
 }
 

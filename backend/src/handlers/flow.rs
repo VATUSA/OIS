@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::CurrentUser,
         permissions::{
             FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
         },
@@ -274,13 +274,13 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
 pub async fn create_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
-    let id = flow_repo::create_fca(pool, &payload, &user.id).await?;
+    let id = flow_repo::create_fca(pool, &payload, &by).await?;
     state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
         .await?
@@ -299,14 +299,14 @@ pub async fn create_fca(
 pub async fn update_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
-    if !flow_repo::update_fca(pool, &id, &payload, &user.id).await? {
+    if !flow_repo::update_fca(pool, &id, &payload, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
@@ -453,11 +453,9 @@ async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, A
 pub async fn create_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     // Facility scope: the caller must hold flow.route.update for the route's ARTCC (or nationally —
@@ -469,12 +467,7 @@ pub async fn create_route(
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    let id = flow_repo::create_route(
-        pool,
-        &payload,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
-    )
-    .await?;
+    let id = flow_repo::create_route(pool, &payload, &principal.attribution(&state).await?).await?;
     route_response(&state, &id).await
 }
 
@@ -489,12 +482,10 @@ pub async fn create_route(
 pub async fn update_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     let existing = flow_repo::get_route(pool, &id)
@@ -509,14 +500,7 @@ pub async fn update_route(
     if !scope.allows(existing.artcc.as_deref()) || !scope.allows(new_artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    if !flow_repo::update_route(
-        pool,
-        &id,
-        &payload,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
-    )
-    .await?
-    {
+    if !flow_repo::update_route(pool, &id, &payload, &principal.attribution(&state).await?).await? {
         return Err(ApiError::NotFound);
     }
     route_response(&state, &id).await
@@ -532,11 +516,9 @@ pub async fn update_route(
 pub async fn delete_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteDelete>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let existing = flow_repo::get_route(pool, &id)
         .await?
@@ -2625,15 +2607,15 @@ pub async fn swap_releases(
 pub async fn reorder_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<ReorderRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();
-    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &user.id).await? {
+    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
