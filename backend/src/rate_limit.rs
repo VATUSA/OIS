@@ -172,11 +172,11 @@ pub async fn enforce(
         return next.run(request).await;
     }
     // Inbound webhooks are not clients and cannot back off: VATUSA delivers each roster change once,
-    // with no retry (`feed/vatusa.rs`), and every facility's delivery arrives from the same servers.
+    // with no retry (`feed/vatusa.rs`), and every delivery arrives from the same servers.
     // Charged to the anonymous IP bucket, a bulk roster change would lose deliveries silently — and
     // after #548 those deliveries drive access. So a genuine delivery is never charged (#588 review).
     //
-    // A *failed* one is. The handler reads the facility's secret from the database before it can
+    // A *failed* one is. The handler reads the webhook's secret from the database before it can
     // verify anything, so an uncharged forged flood would be unlimited database load. Failures (a 4xx)
     // are charged to the sender's IP at the anonymous allowance, and once those are spent the sender is
     // refused here, before the handler, until they refill. A server-side 5xx is not the sender's fault
@@ -565,115 +565,90 @@ mod tests {
         );
     }
 
-    /// A webhook POST, signed with `secret` when given.
-    async fn deliver(
-        router: &Router,
-        facility: &str,
-        sender: &str,
-        secret: Option<&str>,
-    ) -> http::StatusCode {
-        use hmac::{Hmac, KeyInit, Mac};
-        let body = r#"{"type":"ping"}"#;
-        let signature = match secret {
-            Some(secret) => {
-                let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-                mac.update(body.as_bytes());
-                format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-            }
-            None => "sha256=00".to_string(),
-        };
+    /// A delivery to VATUSA's webhook (#605: one division-wide receiver), from `sender`, with a
+    /// signature nothing can verify.
+    async fn deliver(router: &Router, sender: &str) -> http::StatusCode {
         let request = http::Request::builder()
             .method(http::Method::POST)
-            .uri(format!("/api/v1/webhooks/vatusa/{facility}"))
+            .uri("/api/v1/webhooks/vatusa")
             .header("x-forwarded-for", sender)
             .header("content-type", "application/json")
-            .header("x-mithril-signature", signature)
-            .body(Body::from(body))
+            .header("x-mithril-signature", "sha256=00")
+            .body(Body::from(r#"{"type":"ping"}"#))
             .unwrap();
         router.clone().oneshot(request).await.unwrap().status()
     }
 
-    /// The exemption covers genuine deliveries only. The handler reads the facility's secret before it
-    /// can verify anything, so forged deliveries (bad signature, unknown facility) are charged to their
-    /// sender, and once that is spent they are refused before the handler and its database read.
+    /// The exemption covers deliveries the sender isn't at fault for. The handler reads the webhook's
+    /// secret from the database before it can verify anything, so a delivery it refuses with a 4xx —
+    /// here a 404, nothing registered — is charged to its sender, and once that is spent the sender is
+    /// refused before the handler and its database read. Other senders are unaffected.
     #[sqlx::test]
-    async fn forged_webhook_deliveries_are_limited_and_genuine_ones_never_are(pool: PgPool) {
+    async fn forged_webhook_deliveries_are_limited_per_sender(pool: PgPool) {
+        let router = router(test_state(pool, Default::default()));
+        let (vatusa, forger) = ("198.51.100.7", "203.0.113.66");
+
+        // A bucket of two: the third failure spends it, and from then on the forger is refused.
+        for attempt in 1..=3 {
+            assert_eq!(
+                deliver(&router, forger).await,
+                http::StatusCode::NOT_FOUND,
+                "failure {attempt} reaches the handler"
+            );
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                deliver(&router, forger).await,
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "a forger whose failures are spent is refused before the handler"
+            );
+        }
+        assert_eq!(
+            deliver(&router, vatusa).await,
+            http::StatusCode::NOT_FOUND,
+            "another sender is still heard"
+        );
+    }
+
+    /// #588 review: VATUSA does not retry a delivery, so one the sender isn't at fault for is never
+    /// charged — however many arrive — and spends nothing: the same address's first failure is still
+    /// heard, and its ordinary anonymous allowance is untouched. A registered webhook OIS can't open
+    /// (no usable `OIS_SECRET_KEY` here) answers 503: a server-side refusal, like a genuine delivery
+    /// in that the sender did nothing wrong.
+    #[sqlx::test]
+    async fn deliveries_the_sender_is_not_at_fault_for_are_never_charged(pool: PgPool) {
         sqlx::query(
-            "insert into identity.vatusa_webhooks (facility, webhook_id, secret, url) \
-             values ('ZDC', 1, 's3cret', 'https://example.invalid')",
+            "insert into identity.vatusa_webhook (url, secret_ciphertext, key_version) \
+             values ('https://example.invalid', '\\x00', 1)",
         )
         .execute(&pool)
         .await
         .unwrap();
-        let router = router(test_state(pool, Default::default()));
-        let (vatusa, forger) = ("198.51.100.7", "203.0.113.66");
+        let router = router(test_state(pool.clone(), Default::default()));
+        let sender = "198.51.100.7";
 
         for _ in 0..5 {
             assert_eq!(
-                deliver(&router, "ZDC", vatusa, Some("s3cret")).await,
-                http::StatusCode::OK,
-                "a genuine delivery is never charged, past any allowance"
+                deliver(&router, sender).await,
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                "never refused for rate, past any allowance"
             );
         }
+        sqlx::query("delete from identity.vatusa_webhook")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert_eq!(
-            deliver(&router, "ZDC", vatusa, None).await,
-            http::StatusCode::UNAUTHORIZED,
+            deliver(&router, sender).await,
+            http::StatusCode::NOT_FOUND,
             "and spent none: the sender's first failure is still heard, not refused"
         );
-
-        // A bucket of two: the third failure spends it, and from then on the forger is refused.
-        for (attempt, facility) in [(1, "ZDC"), (2, "ZXX"), (3, "ZDC")] {
-            assert_ne!(
-                deliver(&router, facility, forger, None).await,
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "failure {attempt} reaches the handler"
-            );
-        }
-        for facility in ["ZDC", "ZXX"] {
-            assert_eq!(
-                deliver(&router, facility, forger, None).await,
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "a forger whose failures are spent is refused before the handler ({facility})"
-            );
-        }
-
-        assert_eq!(
-            deliver(&router, "ZDC", vatusa, Some("s3cret")).await,
-            http::StatusCode::OK,
-            "and VATUSA's next genuine delivery still lands"
-        );
-    }
-
-    /// #588 review: a burst of VATUSA roster webhooks — every facility's, from one sender address —
-    /// is never refused for rate, because VATUSA does not retry a delivery. And the exemption spends
-    /// nothing: the same address's ordinary anonymous allowance is untouched by it.
-    #[tokio::test]
-    async fn inbound_webhooks_are_never_rate_limited_and_spend_no_allowance() {
-        let router = router(AppState::without_db());
-        let sender = "198.51.100.7";
-        for facility in ["ZDC", "ZNY", "ZBW", "ZOB", "ZAU"] {
-            let request = http::Request::builder()
-                .method(http::Method::POST)
-                .uri(format!("/api/v1/webhooks/vatusa/{facility}"))
-                .header("x-forwarded-for", sender)
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap();
-            let response = router.clone().oneshot(request).await.unwrap();
-            assert_ne!(
-                response.status(),
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "a delivery for {facility} must not be refused for rate"
-            );
-            assert!(response.headers().get("ratelimit-limit").is_none());
-        }
-        let ip = [("x-forwarded-for", sender)];
-        let first = call(&router, TRAFFIC, &ip).await;
+        let first = call(&router, TRAFFIC, &[("x-forwarded-for", sender)]).await;
         assert_eq!(first.status(), http::StatusCode::OK);
         assert_eq!(
             header(&first, "ratelimit-remaining"),
             "1",
-            "nothing was spent by the webhooks"
+            "nothing was spent from the ordinary allowance"
         );
     }
 
