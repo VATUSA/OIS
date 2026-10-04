@@ -10,7 +10,7 @@ Yes — the [facility map](/map/facility-map) is public. Open it for any ARTCC t
 
 ## Can I use the OIS API from my own tool?
 
-Yes — mint an [API key](/reference/api-keys) (you'll need the `api_keys.key.create` permission) and send it as a bearer token. The key acts as you and can never exceed your own access. The API is described at `/docs/api/v1/openapi.json`.
+Yes — mint an [API key](/reference/api-keys) (you'll need the `api_keys.key.create` permission) and send it as a bearer token. The key acts as you and can never exceed your own access. See [Using the API](/reference/api) for the spec (`/docs/api/v1/openapi.json`), the interactive [Swagger UI](/reference/api#swagger-ui) (`/docs/swagger`), and which [permissions](/reference/api-permissions) each endpoint needs.
 
 ## Do I need to refresh to see the latest?
 

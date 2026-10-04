@@ -2,6 +2,8 @@ pub mod advisory;
 pub mod audit;
 pub mod auth;
 pub mod config;
+#[cfg(test)]
+mod docs_tests;
 pub mod errors;
 pub mod feed;
 pub mod handlers;
