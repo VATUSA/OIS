@@ -677,6 +677,13 @@ async fn audit_count(pool: &PgPool) -> i64 {
 
 /// A second service account, holding `permission`, under a distinct key.
 async fn other_service_account(pool: &PgPool, permission: &str) -> String {
+    sqlx::query(
+        "insert into access.roles (name, is_system) values ($1, false) on conflict do nothing",
+    )
+    .bind(ROLE)
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, $2) on conflict do nothing")
         .bind(ROLE)
         .bind(permission)
@@ -1577,4 +1584,168 @@ async fn the_departures_list_carries_an_issued_cfrs_version(pool: PgPool) {
         .find(|d| d["callsign"] == "TEST1")
         .expect("TEST1 departs KJFK");
     assert_eq!(test1["cfr_version"], 2);
+}
+
+// ---- #659: a deleted credential's releases stay the machine's ---------------------------------------
+
+/// The name a release shows for its machine writer, straight from the actor row.
+async fn actor_name(pool: &PgPool, actor: &str) -> String {
+    sqlx::query_scalar("select display_name from access.actors where id = $1")
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The owner deletes the key that issued a release, through the real endpoint. The key's actor outlives
+/// it, so IDST still names the machine (AC1) and another machine is refused as
+/// `held_by_other_machine`, not `held_by_person` (AC2). Against a cascading actor, IDST shows no
+/// machine and the refusal is `held_by_person`.
+#[sqlx::test]
+async fn a_deleted_keys_release_keeps_its_machine_provenance(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (key, auth) = api_key(&pool, "flow.fca.update").await;
+    let uri = format!("/api/v1/flow/fcas/{fca_id}/release/TEST1");
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let actor = actor_of(&pool, "api_key_id", &key)
+        .await
+        .expect("the key's actor");
+    let name = actor_name(&pool, &actor).await;
+
+    let owner: String =
+        sqlx::query_scalar("select owner_user_id from access.api_keys where id = $1")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    grant(&pool, &owner, "api_keys.key.create", None).await;
+    grant(&pool, &owner, "flow.fca.read", None).await;
+    let cookie = session_cookie(&pool, &owner).await;
+    let (status, _, _) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/api-keys/{key}"),
+        &[&cookie],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::NO_CONTENT);
+    let keys: i64 = sqlx::query_scalar("select count(*) from access.api_keys where id = $1")
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(keys, 0, "the key is really gone");
+
+    let (_, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&cookie],
+        None,
+    )
+    .await;
+    assert_eq!(idst["released"][0]["callsign"], "TEST1");
+    assert_eq!(idst["released"][0]["released_by_machine"], name.as_str());
+
+    let other = other_service_account(&pool, "flow.fca.update").await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        &uri,
+        &[&other, "If-Match: \"1\""],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_other_machine"))
+    );
+    let version: i64 =
+        sqlx::query_scalar("select version from flow.fca_release where callsign = 'TEST1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(version, 1, "the deleted key's release is untouched");
+}
+
+/// The same for the other machine credential: deleting a service account leaves its release a machine's.
+#[sqlx::test]
+async fn a_deleted_service_accounts_release_stays_a_machines(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/TEST1"),
+        &[&auth, "If-None-Match: *"],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let actor = actor_of(&pool, "service_account_id", &sa)
+        .await
+        .expect("the account's actor");
+
+    sqlx::query("delete from access.service_accounts where id = $1")
+        .bind(&sa)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let holder = crate::repos::flow::release_holder(&pool, &fca_id, "TEST1")
+        .await
+        .unwrap()
+        .expect("still released");
+    assert_eq!(
+        holder.machine,
+        Some((actor.clone(), actor_name(&pool, &actor).await))
+    );
+}
+
+/// And for a CFR: once the issuing key is deleted, another machine is refused as another machine's.
+#[sqlx::test]
+async fn a_deleted_keys_cfr_stays_a_machines(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (key, auth) = api_key(&pool, "tmu.cfr.assign").await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&auth, "If-None-Match: *"],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+
+    sqlx::query("delete from access.api_keys where id = $1")
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let other = other_service_account(&pool, "tmu.cfr.assign").await;
+    let (status, _, body) = send_full(
+        &state,
+        http::Method::POST,
+        CFR,
+        &[&other, "If-Match: \"1\""],
+        Some(issue_body()),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (http::StatusCode::CONFLICT, Some("held_by_other_machine"))
+    );
+    assert_eq!(cfr_row(&pool, "AAL1").await.unwrap().1, 1);
 }
