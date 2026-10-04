@@ -17,7 +17,7 @@ use utoipa::ToSchema;
 use crate::{
     auth::{
         permissions::{TmuCfrAssign, TmuProgramRead},
-        principal::Actor,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -644,6 +644,22 @@ struct MeteredCfr {
     seq: Option<i64>,
 }
 
+/// Refuse a CFR write at an airport outside the caller's `tmu.cfr.assign` scope (#626). An airport
+/// with no known owning ARTCC is writable only nationally.
+async fn require_cfr_scope(
+    state: &AppState,
+    principal: &Principal,
+    airport: &str,
+) -> Result<(), ApiError> {
+    let artcc = facilities::artcc_for_airport(&*state.facilities.read().await, airport);
+    let scope = principal.permission_scope(state, "tmu.cfr.assign").await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/tmu/cfr",
@@ -656,6 +672,7 @@ struct MeteredCfr {
     responses(
         (status = 200, body = IssuedCfrBody, description = "Issued; `ETag` is the new version"),
         (status = 400), (status = 401),
+        (status = 403, description = "The airport's ARTCC is outside the caller's scope"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
@@ -674,6 +691,11 @@ pub async fn issue_cfr(
     let airport = payload.airport.trim().to_ascii_uppercase();
     if callsign.is_empty() || airport.len() < 3 {
         return Err(ApiError::BadRequest);
+    }
+    // In scope for the airport it is issued at and, on a re-issue, the one it is moved from (#626).
+    require_cfr_scope(&state, &principal, &airport).await?;
+    if let Some(existing) = tmu_repo::get_issued_cfr(pool, &callsign).await? {
+        require_cfr_scope(&state, &principal, &existing.airport).await?;
     }
     // Who may issue it, and on what condition, before any slot computation (#585).
     let expect = release_authority::precondition(&headers, &principal)?;
@@ -767,7 +789,9 @@ pub async fn issue_cfr(
         ("If-Match" = Option<String>, Header, description = "Release only this CFR version (#585)")
     ),
     responses(
-        (status = 204), (status = 400), (status = 401), (status = 404),
+        (status = 204), (status = 400), (status = 401),
+        (status = 403, description = "The airport's ARTCC is outside the caller's scope"),
+        (status = 404),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not release it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent no `If-Match`")
@@ -788,9 +812,13 @@ pub async fn release_cfr(
         Some(Expect::Version(v)) => Some(v),
         None => None,
     };
-    let Some(holder) = tmu_repo::cfr_holder(pool, &callsign).await? else {
+    let (Some(holder), Some(cfr)) = (
+        tmu_repo::cfr_holder(pool, &callsign).await?,
+        tmu_repo::get_issued_cfr(pool, &callsign).await?,
+    ) else {
         return Err(ApiError::NotFound);
     };
+    require_cfr_scope(&state, &principal, &cfr.airport).await?;
     let by = principal.attribution(&state).await?;
     release_authority::authorize(&principal, by.actor_id.as_deref(), Some(&holder))?;
     if !tmu_repo::delete_issued_cfr(pool, &callsign, version, &by).await? {
