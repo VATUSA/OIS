@@ -8,6 +8,7 @@ pub mod api_keys;
 pub mod audit;
 pub mod auth;
 pub mod availability;
+pub mod credential_usage;
 pub mod dashboards;
 pub mod departure_runway;
 pub mod events;

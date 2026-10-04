@@ -54,6 +54,7 @@ const account: ServiceAccount = {
   roles: [],
   status: "active",
   created_at: "2026-09-01T00:00:00Z",
+  usage: {requests_this_hour: 0, requests_last_day: 0, refused_last_day: 0},
   last_used_at: null,
 };
 

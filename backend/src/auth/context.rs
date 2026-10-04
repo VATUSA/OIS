@@ -17,6 +17,8 @@ pub struct CurrentServiceAccount {
     pub id: String,
     pub key: String,
     pub name: String,
+    /// This account's rate limit override (#611); `None` is the deployment default.
+    pub rate_limit_per_min: Option<i32>,
 }
 
 /// A resolved user-owned API key (personal access token), populated from an
@@ -28,6 +30,8 @@ pub struct CurrentApiKey {
     pub owner_user_id: String,
     pub prefix: String,
     pub name: String,
+    /// This key's rate limit override (#611); `None` is the deployment default.
+    pub rate_limit_per_min: Option<i32>,
 }
 
 /// Newtype wrapper for the session cookie value so it can live in request extensions

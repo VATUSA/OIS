@@ -24,7 +24,7 @@ use crate::{
     models::{
         ApiKeyBody, ApiKeyPermissionBody, ApiKeyPermissionInput, ApiKeyTokenBody, AuditLogPage,
         CreateApiKeyRequest, GrantablePermissionBody, RevokeApiKeyRequest,
-        SetApiKeyPermissionsRequest,
+        SetApiKeyPermissionsRequest, SetRateLimitRequest,
     },
     repos::{access as access_repo, api_keys as keys_repo, audit as audit_repo},
     state::AppState,
@@ -504,6 +504,37 @@ pub async fn admin_disable_key(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Set or clear one key's rate limit (#611): only this key gets it, on its next request, on every
+/// replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`. Gated by the admin key-management
+/// permission that disables and deletes keys — an owner can't raise their own.
+#[utoipa::path(
+    put, path = "/api/v1/admin/api-keys/{id}/rate-limit", tag = "api-keys",
+    params(("id" = String, Path)), request_body = SetRateLimitRequest,
+    responses(
+        (status = 200, body = ApiKeyBody),
+        (status = 400, description = "Not a positive whole number"),
+        (status = 401),
+        (status = 404)
+    )
+)]
+pub async fn admin_set_key_rate_limit(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ApiKeysKeyDelete>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetRateLimitRequest>,
+) -> Result<Json<ApiKeyBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let per_min = crate::rate_limit::validate_override(payload.rate_limit_per_min)?;
+    if !keys_repo::set_rate_limit(pool, &id, per_min).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(
+        keys_repo::get_key(pool, &id)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    ))
 }
 
 #[utoipa::path(

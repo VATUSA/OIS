@@ -438,6 +438,38 @@ pub fn spawn_aircraft_profiles_refresh(
     ));
 }
 
+/// Write each credential's request and 429 counts to `access.credential_usage` once a minute (#611),
+/// and drop hours older than a week. Counts live in this replica's memory until flushed, so a crash
+/// loses at most a minute; a failed write puts nothing back (usage is a guide, not a ledger).
+pub fn spawn_credential_usage_flush(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    limits: Arc<crate::rate_limit::RateLimits>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "credential_usage_flush",
+        "Record API key and service account request volume",
+        Duration::from_secs(60),
+        move || {
+            let (pool, limits) = (pool.clone(), limits.clone());
+            async move {
+                let counts = limits.take_usage();
+                crate::repos::credential_usage::add(&pool, &counts)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                let pruned = crate::repos::credential_usage::prune(&pool)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(format!(
+                    "{} credentials, {pruned} old hours pruned",
+                    counts.len()
+                ))
+            }
+        },
+    ));
+}
+
 /// Keep the airport surface gate cache current for the DB-less feed subsystem
 /// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
 /// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.

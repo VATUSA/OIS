@@ -132,6 +132,10 @@ pub async fn run() -> color_eyre::Result<()> {
 
     let limits = std::sync::Arc::new(rate_limit::RateLimits::from_env());
     rate_limit::spawn_cleanup(limits.clone());
+    // Per-credential request volume, shown where keys are managed (#611).
+    if let Some(pool) = state.db.clone() {
+        jobs::spawn_credential_usage_flush(state.jobs.clone(), pool, limits.clone());
+    }
     let app = router::build_router_with_limits(state, limits);
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")

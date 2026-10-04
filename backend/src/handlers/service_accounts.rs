@@ -21,7 +21,7 @@ use crate::{
     errors::ApiError,
     models::{
         CreateServiceAccountRequest, ServiceAccountBody, ServiceAccountTokenBody,
-        SetServiceAccountRolesRequest,
+        SetRateLimitRequest, SetServiceAccountRolesRequest,
     },
     repos::{access as access_repo, service_accounts as sa_repo},
     state::AppState,
@@ -181,6 +181,38 @@ pub async fn set_service_account_roles(
     }
 
     sa_repo::set_roles(pool, &id, &payload.role_names).await?;
+    let account = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(account))
+}
+
+/// Set or clear one account's rate limit (#611): only this account gets it, on its next request, on
+/// every replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`.
+#[utoipa::path(
+    put,
+    path = "/api/v1/admin/service-accounts/{id}/rate-limit",
+    tag = "service-accounts",
+    params(("id" = String, Path, description = "Service account id")),
+    request_body = SetRateLimitRequest,
+    responses(
+        (status = 200, body = ServiceAccountBody),
+        (status = 400, description = "Not a positive whole number"),
+        (status = 401),
+        (status = 404)
+    )
+)]
+pub async fn set_service_account_rate_limit(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ServiceAccountsUpdate>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetRateLimitRequest>,
+) -> Result<Json<ServiceAccountBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let per_min = crate::rate_limit::validate_override(payload.rate_limit_per_min)?;
+    if !sa_repo::set_rate_limit(pool, &id, per_min).await? {
+        return Err(ApiError::NotFound);
+    }
     let account = sa_repo::get_service_account(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
