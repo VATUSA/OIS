@@ -316,6 +316,7 @@ pub fn division_members(pulled: ControllersAndRoles) -> Vec<repo::DivisionMember
 pub async fn apply_division(
     pool: &PgPool,
     members: &[repo::DivisionMember],
+    events: &crate::realtime::Events,
 ) -> Result<String, String> {
     let known = repo::count_synced_members(pool)
         .await
@@ -350,6 +351,14 @@ pub async fn apply_division(
     let departed = repo::clear_departed(pool, &present)
         .await
         .map_err(|e| format!("clear departed members: {e}"))?;
+    // Every chunk has committed and the departed are cleared, so a browser refetching `/me` on this
+    // sees the new access (#644). Only when someone's roles — and so their mapped access — moved: a
+    // pull that changed nothing, or one refused above, tells no one.
+    if changed + departed > 0 {
+        let _ = events.send(crate::realtime::WsEvent {
+            topic: crate::realtime::topic::ACCESS_GRANTED.to_string(),
+        });
+    }
     Ok(format!(
         "{} controllers ({seeded} new); roles changed for {changed}; {departed} departed",
         members.len()
@@ -382,15 +391,15 @@ async fn fetch_division(api_key: &str) -> Result<ControllersAndRoles, String> {
 /// Pull the division daily (and on demand: from Background Tasks, or when a verified webhook delivery
 /// says the roster changed). Replaces the old 6-hourly reconcile, which refreshed ≤ 800 already-signed-in
 /// members a day over v2, one fetch each.
-pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool) {
+pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool, events: crate::realtime::Events) {
     let Some(api_key) = vatusa_api_key() else {
         return;
     };
     tokio::spawn(division_pull_job(reg, move || {
-        let (pool, api_key) = (pool.clone(), api_key.clone());
+        let (pool, api_key, events) = (pool.clone(), api_key.clone(), events.clone());
         async move {
             let pulled = fetch_division(&api_key).await?;
-            let summary = apply_division(&pool, &division_members(pulled)).await?;
+            let summary = apply_division(&pool, &division_members(pulled), &events).await?;
             // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
             // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
             match ensure_webhook(&pool, &api_key).await {
@@ -555,6 +564,11 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A realtime hub nothing listens on, for pulls whose nudge a test doesn't check.
+    fn hub() -> crate::realtime::Events {
+        tokio::sync::broadcast::channel(16).0
+    }
     use serde_json::json;
 
     #[test]
@@ -751,7 +765,7 @@ mod tests {
         with_visits[0]["visiting_facilities"] = json!(["zny"]);
         let members = pulled(with_visits, vec![role(1_605_001, "ZDC", "MTR")]);
 
-        let summary = apply_division(&pool, &members).await.unwrap();
+        let summary = apply_division(&pool, &members, &hub()).await.unwrap();
         assert!(
             summary.starts_with("1200 controllers (1200 new); roles changed for 1;"),
             "{summary}"
@@ -775,7 +789,7 @@ mod tests {
                 .unwrap();
         assert_eq!(visit, "ZNY");
 
-        let again = apply_division(&pool, &members).await.unwrap();
+        let again = apply_division(&pool, &members, &hub()).await.unwrap();
         assert!(
             again.starts_with("1200 controllers (0 new); roles changed for 0"),
             "{again}"
@@ -799,6 +813,7 @@ mod tests {
                 vec![controller(1_605_100, "ZHQ")],
                 vec![role(1_605_100, "*", "WM")],
             ),
+            &hub(),
         )
         .await
         .unwrap();
@@ -826,12 +841,13 @@ mod tests {
         apply_division(
             &pool,
             &pulled(present(), vec![role(1_605_200, "ZDC", "DATM")]),
+            &hub(),
         )
         .await
         .unwrap();
         assert_eq!(held(&pool, 1_605_200).await.len(), 1);
 
-        apply_division(&pool, &pulled(present(), vec![]))
+        apply_division(&pool, &pulled(present(), vec![]), &hub())
             .await
             .unwrap();
 
@@ -862,6 +878,7 @@ mod tests {
                 everyone.iter().map(|c| controller(*c, "ZDC")).collect(),
                 roles(&everyone),
             ),
+            &hub(),
         )
         .await
         .unwrap();
@@ -873,6 +890,7 @@ mod tests {
                 staying.iter().map(|c| controller(*c, "ZDC")).collect(),
                 roles(staying),
             ),
+            &hub(),
         )
         .await
         .unwrap();
@@ -905,9 +923,13 @@ mod tests {
         .await
         .unwrap();
 
-        apply_division(&pool, &pulled(vec![controller(1_605_400, "ZDC")], vec![]))
-            .await
-            .unwrap();
+        apply_division(
+            &pool,
+            &pulled(vec![controller(1_605_400, "ZDC")], vec![]),
+            &hub(),
+        )
+        .await
+        .unwrap();
 
         let link: Option<String> = sqlx::query_scalar(
             "select external_id from integration.external_sync_mappings \
@@ -948,6 +970,7 @@ mod tests {
                 vec![controller(1_605_450, "ZAE"), controller(1_605_451, "ZDC")],
                 vec![],
             ),
+            &hub(),
         )
         .await
         .unwrap();
@@ -973,6 +996,7 @@ mod tests {
                 everyone.iter().map(|c| controller(*c, "ZDC")).collect(),
                 everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect(),
             ),
+            &hub(),
         )
         .await
         .unwrap();
@@ -984,9 +1008,9 @@ mod tests {
                 .collect(),
             vec![],
         );
-        let refused = apply_division(&pool, &three).await;
+        let refused = apply_division(&pool, &three, &hub()).await;
         assert!(refused.is_err_and(|e| e.contains("looks truncated")));
-        assert!(apply_division(&pool, &[]).await.is_err());
+        assert!(apply_division(&pool, &[], &hub()).await.is_err());
 
         // Nothing was applied: everyone missing from the bad pull still holds their role.
         assert_eq!(
@@ -994,6 +1018,105 @@ mod tests {
             [("ZDC".into(), "MTR".into())]
         );
         assert_eq!(stored_roles(&pool, everyone[0]).await.len(), 1);
+    }
+
+    // ---- #644: a roster change tells signed-in browsers ---------------------------------------------
+
+    fn access_nudges(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::WsEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(e) = rx.try_recv() {
+            if e.topic == crate::realtime::topic::ACCESS_GRANTED {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// A pull that moves someone's mapped access tells browsers once — and by the time they hear it,
+    /// the access is already there to be read.
+    #[sqlx::test]
+    async fn a_pull_that_changes_access_tells_browsers_once_after_it_lands(pool: PgPool) {
+        map(&pool, "MTR", "EC").await;
+        let everyone: Vec<i64> = (1_644_600..1_644_610).collect();
+        let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+
+        apply_division(&pool, &pulled(roster(), vec![]), &events)
+            .await
+            .unwrap();
+        access_nudges(&mut rx); // the first sync of a fresh roster is not what this test is about
+
+        let roles = everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
+        apply_division(&pool, &pulled(roster(), roles), &events)
+            .await
+            .unwrap();
+        assert_eq!(access_nudges(&mut rx), 1, "one nudge for the whole pull");
+        assert_eq!(
+            held(&pool, everyone[0]).await.len(),
+            1,
+            "and the access it announces is already stored"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_pull_that_changes_nothing_tells_no_one(pool: PgPool) {
+        map(&pool, "MTR", "EC").await;
+        let everyone: Vec<i64> = (1_644_700..1_644_710).collect();
+        let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
+        let roles = || everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        apply_division(&pool, &pulled(roster(), roles()), &events)
+            .await
+            .unwrap();
+        access_nudges(&mut rx);
+
+        apply_division(&pool, &pulled(roster(), roles()), &events)
+            .await
+            .unwrap();
+        assert_eq!(access_nudges(&mut rx), 0);
+    }
+
+    /// Leaving the division removes mapped access, so it is a change worth announcing.
+    #[sqlx::test]
+    async fn a_departure_tells_browsers(pool: PgPool) {
+        map(&pool, "MTR", "EC").await;
+        let everyone: Vec<i64> = (1_644_800..1_644_810).collect();
+        let roster = |who: &[i64]| who.iter().map(|c| controller(*c, "ZDC")).collect();
+        let roles = |who: &[i64]| who.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        apply_division(&pool, &pulled(roster(&everyone), roles(&everyone)), &events)
+            .await
+            .unwrap();
+        access_nudges(&mut rx);
+
+        let stayed = &everyone[..9];
+        apply_division(&pool, &pulled(roster(stayed), roles(stayed)), &events)
+            .await
+            .unwrap();
+        assert_eq!(access_nudges(&mut rx), 1);
+        assert!(held(&pool, everyone[9]).await.is_empty());
+    }
+
+    /// A pull refused as truncated changes nothing, so it tells no one.
+    #[sqlx::test]
+    async fn a_refused_pull_tells_no_one(pool: PgPool) {
+        map(&pool, "MTR", "EC").await;
+        let everyone: Vec<i64> = (1_644_900..1_644_910).collect();
+        let roster = |who: &[i64]| who.iter().map(|c| controller(*c, "ZDC")).collect();
+        let roles = |who: &[i64]| who.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        apply_division(&pool, &pulled(roster(&everyone), roles(&everyone)), &events)
+            .await
+            .unwrap();
+        access_nudges(&mut rx);
+
+        let cut = &everyone[..2];
+        assert!(
+            apply_division(&pool, &pulled(roster(cut), roles(cut)), &events)
+                .await
+                .is_err()
+        );
+        assert_eq!(access_nudges(&mut rx), 0);
     }
 
     /// `roles` is its own array: a pull with every controller but a lost or cut-off role list passes
@@ -1004,7 +1127,7 @@ mod tests {
         let everyone: Vec<i64> = (1_605_600..1_605_610).collect();
         let roster = || everyone.iter().map(|c| controller(*c, "ZDC")).collect();
         let all_roles = || everyone.iter().map(|c| role(*c, "ZDC", "MTR")).collect();
-        apply_division(&pool, &pulled(roster(), all_roles()))
+        apply_division(&pool, &pulled(roster(), all_roles()), &hub())
             .await
             .unwrap();
 
@@ -1015,7 +1138,7 @@ mod tests {
                 .map(|c| role(*c, "ZDC", "MTR"))
                 .collect(),
         ] {
-            let refused = apply_division(&pool, &pulled(roster(), cut)).await;
+            let refused = apply_division(&pool, &pulled(roster(), cut), &hub()).await;
             assert!(refused.is_err_and(|e| e.contains("role list looks truncated")));
         }
         for cid in &everyone {
@@ -1027,7 +1150,7 @@ mod tests {
             .iter()
             .map(|c| role(*c, "ZDC", "MTR"))
             .collect();
-        apply_division(&pool, &pulled(roster(), most))
+        apply_division(&pool, &pulled(roster(), most), &hub())
             .await
             .unwrap();
         assert!(held(&pool, everyone[9]).await.is_empty());
