@@ -111,6 +111,13 @@ only source of the data. A nudge never says *what* changed or for whom.
 | `events.availability` | event availability responses (NTMO / DCC staff) |
 | `events.reminder` | ACE claim reminders |
 | `access.granted` | someone's access changed (re-check your own) |
+| `tmu.advisory` | advisories (created, edited, published, cancelled or deleted) |
+| `events.ace` | ACE support requests (created, claimed, released, decided or deleted) |
+| `flow.runway` | runway configurations |
+| `feed.tick` | the VATSIM feed ingested a new publish — refetch feed-derived views |
+
+`feed.tick` comes from the server you're connected to, so keep a slow fallback poll for live traffic rather
+than relying on the tick alone.
 
 **Choose your topics.** Until you say otherwise you receive every topic. Send a subscribe message to
 receive only some — it replaces your current set:
