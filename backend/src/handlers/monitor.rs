@@ -834,6 +834,31 @@ mod consolidation_tests {
         assert_eq!(cached(&state), expected, "and every viewer sees it at once");
     }
 
+    /// "All into N" gives N its own row back only in this ARTCC: another facility's sector with the same
+    /// id, worked elsewhere there, is left alone (#713 review: the delete's `artcc` was unpinned).
+    #[sqlx::test]
+    async fn all_into_n_leaves_another_artccs_consolidations_alone(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        sqlx::query(
+            "insert into flow.sector_consolidation (artcc, sector_id, target_sector_id) \
+             values ('ZDC', '040', '024')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(all_into(&state, &zla, "040", "all").await, 204);
+
+        let zdc: Vec<(String, String)> = sqlx::query_as(
+            "select sector_id, target_sector_id from flow.sector_consolidation where artcc = 'ZDC'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(zdc, pairs(&[("040", "024")]));
+    }
+
     /// AC2: "except consolidated" moves only free-standing sectors: one worked elsewhere (010) and the
     /// position it is worked at (020) both stay as they were.
     #[sqlx::test]
