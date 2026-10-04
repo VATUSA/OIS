@@ -35,6 +35,24 @@ export function useMonitorTable(artcc: string) {
   });
 }
 
+export const monitorNeighboursKey = (artcc: string) => ["monitor-neighbours", artcc] as const;
+
+/** An ARTCC's first-tier neighbours (#712), whose tables follow its own, view-only. They rarely change. */
+export function useMonitorNeighbours(artcc: string) {
+  return useQuery({
+    queryKey: monitorNeighboursKey(artcc),
+    enabled: artcc !== "",
+    staleTime: 60 * 60_000,
+    queryFn: async (): Promise<string[]> => {
+      const { data, error } = await ois.GET("/api/v1/flow/monitor/{artcc}/neighbours", {
+        params: { path: { artcc } },
+      });
+      if (error || !data) throw new Error("failed to load the neighbours");
+      return data.neighbours;
+    },
+  });
+}
+
 /** Work `sectorId` at `target`'s position (#599). */
 export function useConsolidate(artcc: string) {
   const qc = useQueryClient();
