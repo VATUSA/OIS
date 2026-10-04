@@ -1,16 +1,20 @@
 // @vitest-environment jsdom
-import type {QueryClient} from "@tanstack/react-query";
+import {QueryClient, QueryObserver} from "@tanstack/react-query";
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
 const token = vi.hoisted(() => ({value: undefined as string | undefined}));
 vi.mock("./desktop-token", () => ({getDesktopToken: async () => token.value}));
 vi.mock("./api", () => ({API_BASE: "https://ois.example"}));
 
-import {connectRealtime} from "./realtime";
+import {connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
 
 /** Records how each socket was opened, and lets a test push frames through it. */
 class FakeSocket {
+  static readonly OPEN = 1;
   static opened: FakeSocket[] = [];
+  readyState = FakeSocket.OPEN;
+  /** Frames the client sent — its subscribe frames (#648). */
+  sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((e: {data: string}) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -21,16 +25,25 @@ class FakeSocket {
   ) {
     FakeSocket.opened.push(this);
   }
+  send(frame: string) {
+    this.sent.push(frame);
+  }
   close() {}
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const invalidated: unknown[] = [];
-const qc = {invalidateQueries: (q: unknown) => invalidated.push(q)} as unknown as QueryClient;
+// A real client and cache — the subscription reads which queries are on screen from it.
+let qc: QueryClient;
 
 beforeEach(() => {
   FakeSocket.opened = [];
   invalidated.length = 0;
+  qc = new QueryClient();
+  vi.spyOn(qc, "invalidateQueries").mockImplementation((q) => {
+    invalidated.push(q);
+    return Promise.resolve();
+  });
   vi.stubGlobal("WebSocket", FakeSocket);
 });
 afterEach(() => {
@@ -66,5 +79,241 @@ describe("connectRealtime (VATUSA/OIS#348 review)", () => {
     FakeSocket.opened[0]?.onmessage?.({data: JSON.stringify({topic: "events.reminder"})});
     expect(invalidated).toEqual([{queryKey: ["my-ace-claims"]}]);
     dispose();
+  });
+});
+
+// ==== VATUSA/OIS#648: the feed tick ==================================================================
+
+const FEED = [
+  ["flow-traffic"],
+  ["flow-atc"],
+  ["taxi"],
+  ["fca-counts"],
+  ["flow"],
+  ["aadc"],
+  ["fca-traffic"],
+  ["feed-status"],
+  ["idst"],
+  ["departures"],
+];
+
+/** Open the socket the client created and return it. */
+async function opened() {
+  await flush();
+  const socket = FakeSocket.opened.at(-1)!;
+  socket.onopen?.();
+  return socket;
+}
+
+const subscribed = (socket: FakeSocket) =>
+  socket.sent.map((f) => (JSON.parse(f) as { subscribe: string[] }).subscribe);
+
+/** Put a feed-derived query on screen, the way a hook does — an observer on the real cache. */
+function mount(queryKey: string[]) {
+  const observer = new QueryObserver(qc, { queryKey, queryFn: async () => null, enabled: false });
+  return observer.subscribe(() => {});
+}
+
+describe("the feed tick (VATUSA/OIS#648)", () => {
+  it("refetches exactly the feed-derived queries", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    invalidated.length = 0; // drop the reconnect catch-up
+
+    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+
+    expect(invalidated.map((q) => (q as { queryKey: string[] }).queryKey)).toEqual(FEED);
+    dispose();
+  });
+
+  it("refetches a slower query only once its old poll interval has passed", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    invalidated.length = 0;
+    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+
+    const now = Date.now();
+    const gate = (prefix: string, ageMs: number) => {
+      const call = invalidated.find((q) => (q as { queryKey: string[] }).queryKey[0] === prefix) as {
+        predicate: (q: { state: { dataUpdatedAt: number } }) => boolean;
+      };
+      return call.predicate({ state: { dataUpdatedAt: now - ageMs } });
+    };
+    expect(gate("flow-traffic", 1_000), "a 15s query refetches on every tick").toBe(true);
+    expect(gate("departures", 45_000), "a 60s query waits out its interval").toBe(false);
+    expect(gate("departures", 61_000)).toBe(true);
+    expect(gate("idst", 16_000)).toBe(false);
+    expect(gate("idst", 31_000)).toBe(true);
+    dispose();
+  });
+
+  it("subscribes to the tick only while a feed-derived query is on screen", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    expect(subscribed(socket).at(-1)).not.toContain("feed.tick");
+    expect(subscribed(socket).at(-1)).toContain("flow.release"); // everything else, as before
+
+    const unmount = mount(["flow-traffic"]);
+    expect(subscribed(socket).at(-1)).toContain("feed.tick");
+
+    const sends = socket.sent.length;
+    const unmountSecond = mount(["idst", "ZDC"]); // already subscribed: no new frame
+    expect(socket.sent.length).toBe(sends);
+
+    unmount();
+    expect(socket.sent.length).toBe(sends); // still one feed query on screen
+    unmountSecond();
+    expect(subscribed(socket).at(-1)).not.toContain("feed.tick");
+    dispose();
+  });
+
+  it("is live only once the server accepts a subscription with the tick, and not after a drop", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    expect(isRealtimeLive()).toBe(false); // open, but not yet acknowledged
+
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick", "flow.release"] }) });
+    expect(isRealtimeLive()).toBe(true);
+
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["flow.release"] }) });
+    expect(isRealtimeLive()).toBe(false);
+
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    socket.onmessage?.({ data: JSON.stringify({ error: "unknown_topic", topics: ["feed.tick"] }) });
+    expect(isRealtimeLive()).toBe(false); // an older server: keep polling
+
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    socket.onclose?.();
+    expect(isRealtimeLive()).toBe(false); // dropped: polling resumes
+    dispose();
+  });
+
+  it("is never live once the socket is disposed (sign-out)", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    expect(isRealtimeLive()).toBe(true);
+    dispose();
+    expect(isRealtimeLive()).toBe(false);
+  });
+
+  it("polls only when ticks are not arriving", () => {
+    expect(pollUnlessLive(15_000, true)).toBe(false);
+    expect(pollUnlessLive(15_000, false)).toBe(15_000);
+  });
+});
+
+/**
+ * #648 AC3, measured on the real client over one simulated hour: a real `QueryObserver` (as a hook
+ * mounts) counts every fetch, once polling as today and once driven by ticks through the real
+ * socket handler and a real `invalidateQueries`. The feed publishes every 15s, 7s out of phase with
+ * the client's own clock.
+ */
+describe("requests and latency over an hour (VATUSA/OIS#648 AC3)", () => {
+  const HOUR = 3_600_000;
+  const PUBLISH = 15_000;
+  const PHASE = 7_000;
+
+  beforeEach(() => {
+    vi.mocked(qc.invalidateQueries).mockRestore(); // the real thing, so a tick really refetches
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "Date"] });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  /** Mount `queryKey` with `interval`, run an hour (calling `onPublish` at each publish), and return
+   *  when each fetch happened. */
+  async function run(interval: number | false, onPublish: () => void, queryKey = ["flow-traffic"]) {
+    const fetches: number[] = [];
+    const observer = new QueryObserver(qc, {
+      queryKey,
+      queryFn: async () => {
+        fetches.push(Date.now());
+        return null;
+      },
+      refetchInterval: interval,
+      staleTime: 0,
+    });
+    const unmount = observer.subscribe(() => {});
+    const start = Date.now();
+    for (let t = 0; t < HOUR; t += 1_000) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      if ((Date.now() - start - PHASE) % PUBLISH === 0) onPublish();
+    }
+    unmount();
+    return { fetches: fetches.map((f) => f - start), start };
+  }
+
+  const lagAfterPublishes = (fetches: number[]) => {
+    const publishes = Array.from({ length: HOUR / PUBLISH }, (_, i) => i * PUBLISH + PHASE);
+    return publishes
+      .map((p) => fetches.find((f) => f >= p))
+      .filter((f, i): f is number => f !== undefined && i < HOUR / PUBLISH - 1)
+      .map((f, i) => f - (i * PUBLISH + PHASE));
+  };
+
+  it("tick-driven: no more requests than polling, and each update lands at the publish", async () => {
+    const polling = await run(15_000, () => {});
+
+    qc.clear();
+    const dispose = connectRealtime(qc);
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    const ticking = await run(pollUnlessLive(15_000, isRealtimeLive()), () =>
+      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) }),
+    );
+    dispose();
+
+    // Requests per client-hour do not rise.
+    expect(ticking.fetches.length).toBeLessThanOrEqual(polling.fetches.length);
+    // Latency from publish to refetch: up to an interval under polling, immediate under the tick.
+    expect(Math.max(...lagAfterPublishes(polling.fetches))).toBeGreaterThanOrEqual(5_000);
+    expect(Math.max(...lagAfterPublishes(ticking.fetches))).toBe(0);
+  });
+});
+
+describe("a slower query over an hour (VATUSA/OIS#648 AC3)", () => {
+  beforeEach(() => {
+    vi.mocked(qc.invalidateQueries).mockRestore();
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "Date"] });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("departures (60s today) is not refetched more often than it polled", async () => {
+    const HOUR = 3_600_000;
+    const count = async (interval: number | false, onPublish: () => void) => {
+      let fetches = 0;
+      const observer = new QueryObserver(qc, {
+        queryKey: ["departures", "KIAD"],
+        queryFn: async () => {
+          fetches += 1;
+          return null;
+        },
+        refetchInterval: interval,
+      });
+      const unmount = observer.subscribe(() => {});
+      const start = Date.now();
+      for (let t = 0; t < HOUR; t += 1_000) {
+        await vi.advanceTimersByTimeAsync(1_000);
+        if ((Date.now() - start - 7_000) % 15_000 === 0) onPublish();
+      }
+      unmount();
+      return fetches;
+    };
+    const polling = await count(60_000, () => {});
+
+    qc.clear();
+    const dispose = connectRealtime(qc);
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    const ticking = await count(pollUnlessLive(60_000, isRealtimeLive()), () =>
+      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) }),
+    );
+    dispose();
+
+    expect(ticking).toBeLessThanOrEqual(polling);
   });
 });

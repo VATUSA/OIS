@@ -47,10 +47,12 @@ pub mod topic {
     /// An ACE claim reminder came due. Mirrors the Discord DM the scheduler already sends, so the
     /// desktop app is a second delivery channel for the same decision (#348).
     pub const EVENT_REMINDER: &str = "events.reminder";
+    /// The VATSIM feed ingested a new upstream publish (#648). Every feed-derived view refetches.
+    pub const FEED_TICK: &str = "feed.tick";
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 11] = [
         RELEASE,
         FCA,
         GDP,
@@ -61,6 +63,7 @@ pub mod topic {
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
         EVENT_REMINDER,
+        FEED_TICK,
     ];
 }
 
@@ -213,6 +216,21 @@ mod tests {
     fn a_new_connection_gets_every_topic() {
         let sub = super::Subscription::default();
         assert!(super::topic::ALL.iter().all(|t| sub.wants(t)));
+    }
+
+    #[test]
+    fn the_feed_tick_is_a_topic_a_client_can_subscribe_to() {
+        let mut sub = super::Subscription::default();
+        let ack = sub.apply(r#"{"subscribe":["feed.tick"]}"#);
+        assert!(
+            ack.contains("subscribed") && ack.contains("feed.tick"),
+            "{ack}"
+        );
+        assert!(sub.wants(super::topic::FEED_TICK));
+        assert!(
+            !sub.wants(super::topic::RELEASE),
+            "and only what it asked for"
+        );
     }
 
     #[test]

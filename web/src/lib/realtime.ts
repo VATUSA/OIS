@@ -1,3 +1,4 @@
+import {useSyncExternalStore} from "react";
 import type {QueryClient} from "@tanstack/react-query";
 
 import {API_BASE} from "./api";
@@ -9,7 +10,34 @@ import {getDesktopToken} from "./desktop-token";
  * waiting for their poll. Purely additive — if the socket never connects, polling still keeps
  * everything correct. Keep these topics in sync with `backend/src/realtime.rs` `topic`.
  */
+/** The feed ticks once per upstream VATSIM publish (#648). */
+const FEED_TICK = "feed.tick";
+
+/**
+ * Every query derived from the VATSIM feed, with the spacing it used to poll at. They refetch on
+ * {@link FEED_TICK} and — while the socket is live — stop polling on their own timers (see
+ * {@link pollUnlessLive}).
+ *
+ * A tick refetches a key only once its data is at least `minGapMs` old. The feed publishes about every
+ * 15s, so the 15s queries refetch on every tick, and a query that polled every 30s or 60s refetches
+ * on every second or fourth: never more often than it used to poll, and always right on a publish
+ * rather than up to a full interval after one (#648 AC3).
+ */
+const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
+  { key: ["flow-traffic"], minGapMs: 0 },
+  { key: ["flow-atc"], minGapMs: 0 },
+  { key: ["taxi"], minGapMs: 0 },
+  { key: ["fca-counts"], minGapMs: 0 },
+  { key: ["flow"], minGapMs: 20_000 },
+  { key: ["aadc"], minGapMs: 20_000 },
+  { key: ["fca-traffic"], minGapMs: 30_000 },
+  { key: ["feed-status"], minGapMs: 30_000 },
+  { key: ["idst"], minGapMs: 30_000 },
+  { key: ["departures"], minGapMs: 60_000 },
+];
+
 const TOPIC_KEYS: Record<string, string[][]> = {
+  [FEED_TICK]: FEED_KEYS.map(({ key }) => key),
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
@@ -38,6 +66,47 @@ const ALL_KEYS: string[][] = [
   ),
 ].map((s) => JSON.parse(s) as string[]);
 
+// ---- whether feed ticks are arriving (#648) ---------------------------------------------------------
+
+let live = false;
+const listeners = new Set<() => void>();
+
+function setLive(next: boolean) {
+  if (live === next) return;
+  live = next;
+  listeners.forEach((notify) => notify());
+}
+
+/**
+ * True while the realtime socket is open **and** the server has acknowledged a subscription that
+ * includes {@link FEED_TICK}. False when signed out (the socket only opens for signed-in users), while
+ * connecting, and after a drop — exactly the times a feed-derived screen must still poll.
+ */
+export function useRealtimeLive(): boolean {
+  return useSyncExternalStore(
+    (notify) => {
+      listeners.add(notify);
+      return () => listeners.delete(notify);
+    },
+    isRealtimeLive,
+    () => false,
+  );
+}
+
+/** The current value of {@link useRealtimeLive}, outside React. */
+export function isRealtimeLive(): boolean {
+  return live;
+}
+
+/**
+ * A feed-derived query's `refetchInterval`: off while feed ticks are arriving, `ms` otherwise. The
+ * ticks replace the timer rather than adding to it. One backend replica is assumed: with several, a
+ * client would miss ticks from the others until the hub is shared (#649).
+ */
+export function pollUnlessLive(ms: number, isLive: boolean): number | false {
+  return isLive ? false : ms;
+}
+
 function wsUrl(): string {
   // API_BASE is a full http(s) URL, or "" for a same-origin deployment.
   const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "");
@@ -55,6 +124,27 @@ export function connectRealtime(qc: QueryClient): () => void {
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
+
+  // Subscribe narrowly (#589's Subscription, #648): every topic as before, plus the feed tick only
+  // while some feed-derived query is on screen — so a page without one receives no ~15s ticks.
+  const isFeedQuery = (key: readonly unknown[]) => FEED_KEYS.some(({ key: [prefix] }) => key[0] === prefix);
+  const wantsFeed = () =>
+    qc
+      .getQueryCache()
+      .getAll()
+      .some((q) => isFeedQuery(q.queryKey) && q.getObserversCount() > 0);
+  let sentFeed: boolean | null = null;
+  const sendSubscription = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const feed = wantsFeed();
+    if (feed === sentFeed) return;
+    sentFeed = feed;
+    const topics = Object.keys(TOPIC_KEYS).filter((t) => t !== FEED_TICK || feed);
+    ws.send(JSON.stringify({ subscribe: topics }));
+  };
+  const stopWatchingCache = qc.getQueryCache().subscribe((event) => {
+    if (event.type === "observerAdded" || event.type === "observerRemoved") sendSubscription();
+  });
 
   const schedule = () => {
     if (closed || timer) return;
@@ -93,13 +183,33 @@ export function connectRealtime(qc: QueryClient): () => void {
     }
     ws.onopen = () => {
       retry = 0;
+      sentFeed = null;
+      sendSubscription();
       // Catch up on anything that changed while we were (re)connecting.
       ALL_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
     };
     ws.onmessage = (e) => {
       try {
-        const { topic } = JSON.parse(e.data as string) as { topic?: string };
-        (topic ? TOPIC_KEYS[topic] : undefined)?.forEach((queryKey) =>
+        const frame = JSON.parse(e.data as string) as {
+          topic?: string;
+          subscribed?: string[];
+          error?: string;
+        };
+        // The server's answer to a subscribe frame: ticks are live only once it has accepted ours.
+        // An error (an older server without `feed.tick`) changes nothing there, so keep polling.
+        if (frame.subscribed) setLive(frame.subscribed.includes(FEED_TICK));
+        if (frame.error) setLive(false);
+        if (frame.topic === FEED_TICK) {
+          const now = Date.now();
+          FEED_KEYS.forEach(({ key, minGapMs }) =>
+            qc.invalidateQueries({
+              queryKey: key,
+              predicate: (q) => now - q.state.dataUpdatedAt >= minGapMs,
+            }),
+          );
+          return;
+        }
+        (frame.topic ? TOPIC_KEYS[frame.topic] : undefined)?.forEach((queryKey) =>
           qc.invalidateQueries({ queryKey }),
         );
       } catch {
@@ -108,6 +218,8 @@ export function connectRealtime(qc: QueryClient): () => void {
     };
     ws.onclose = () => {
       ws = null;
+      setLive(false);
+      sentFeed = null;
       schedule();
     };
     ws.onerror = () => ws?.close();
@@ -116,6 +228,8 @@ export function connectRealtime(qc: QueryClient): () => void {
   void open();
   return () => {
     closed = true;
+    stopWatchingCache();
+    setLive(false);
     if (timer) clearTimeout(timer);
     ws?.close();
   };
