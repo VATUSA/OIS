@@ -571,6 +571,52 @@ mod consolidation_tests {
         rows
     }
 
+    /// Releasing is a write to another facility's Monitor too: a TMU at another ARTCC (and a viewer
+    /// with no update grant) is refused on the DELETE route, and the consolidation survives. The owning
+    /// ARTCC's TMU can release it.
+    #[sqlx::test]
+    async fn only_the_owning_artcc_can_release_a_consolidation(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let zdc = user(&pool, Some("ZDC")).await;
+        let viewer = user(&pool, None).await;
+        let state = state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "018", "041").await, 204);
+
+        let release = |cookie: String| {
+            let state = state.clone();
+            async move {
+                send(
+                    &state,
+                    http::Method::DELETE,
+                    "/api/v1/flow/monitor/ZLA/consolidations/018",
+                    &cookie,
+                    None,
+                )
+                .await
+                .as_u16()
+            }
+        };
+        assert_eq!(
+            release(zdc).await,
+            403,
+            "a TMU at another ARTCC can't release ZLA's"
+        );
+        assert_eq!(
+            release(viewer).await,
+            401,
+            "nor can a viewer without flow.monitor.update"
+        );
+        assert_eq!(
+            stored(&pool).await,
+            pairs(&[("018", "041")]),
+            "nothing was released"
+        );
+        assert_eq!(cached(&state), pairs(&[("018", "041")]));
+
+        assert_eq!(release(zla).await, 204, "ZLA's own TMU can");
+        assert!(stored(&pool).await.is_empty());
+    }
+
     /// AC1: a consolidation is server-side and every viewer sees it at once — the write reloads the
     /// cache the engine reads. Releasing it gives the sector its row back.
     #[sqlx::test]
