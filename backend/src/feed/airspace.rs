@@ -129,7 +129,7 @@ fn to_latlon(ring: Vec<[f64; 2]>) -> Ring {
 }
 
 /// Ray-casting point-in-polygon on a `[lat, lon]` ring.
-fn point_in_ring(ring: &[[f64; 2]], lat: f64, lon: f64) -> bool {
+pub(crate) fn point_in_ring(ring: &[[f64; 2]], lat: f64, lon: f64) -> bool {
     if ring.len() < 3 {
         return false;
     }

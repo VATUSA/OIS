@@ -1,8 +1,8 @@
 import {useEffect, useState} from "react";
-import {Button, cn, ConfirmButton, Input, Select, Switch} from "@ois/ui";
+import {Button, ColorSwatches, ConfirmButton, Input, Select, Switch} from "@ois/ui";
 import {ChevronDown, ChevronUp, Plus, Save, Trash2, X} from "lucide-react";
 
-import {colorLabel, defaultRuleColor, useRulePalette} from "@/lib/facility-map/palette";
+import {colorLabel, defaultRuleColor, usePalette} from "@/lib/palette";
 import {RULE_FIELDS, isNumericField, type ColorRule, type RuleCondition} from "@/lib/facility-map/rules";
 import {
   useSaveFacilityMapConfig,
@@ -41,33 +41,10 @@ function valueHint(op: string): string {
   return "KIAD, KBWI";
 }
 
-/** A small palette swatch row; clicking one sets the color. A saved colour outside the palette still shows. */
-function ColorSwatches({ value, onPick }: { value: string; onPick: (hex: string) => void }) {
-  const palette = useRulePalette();
-  const known = !value || palette.some((c) => c.hex === value.toLowerCase());
-  const swatches = known ? palette : [...palette, { hex: value, label: colorLabel(value) }];
-  return (
-    <div className="flex flex-wrap gap-1">
-      {swatches.map((c) => {
-        const on = value.toLowerCase() === c.hex.toLowerCase();
-        return (
-          <button
-            key={c.hex}
-            type="button"
-            title={c.label}
-            aria-label={c.label}
-            aria-pressed={on}
-            onClick={() => onPick(c.hex)}
-            className={cn(
-              "size-5 rounded-xs border border-line transition-transform hover:scale-110",
-              on && "ring-2 ring-ink ring-offset-1 ring-offset-panel",
-            )}
-            style={{ backgroundColor: c.hex }}
-          />
-        );
-      })}
-    </div>
-  );
+/** The rule palette as swatches; a saved colour outside it keeps its name where it has one. */
+function RuleSwatches({ value, onPick }: { value: string; onPick: (hex: string) => void }) {
+  const palette = usePalette();
+  return <ColorSwatches swatches={palette} value={value} onChange={onPick} labelFor={colorLabel} />;
 }
 
 function ConditionRow({
@@ -188,7 +165,7 @@ function RuleCard({
         </ConfirmButton>
       </div>
       <div className="mb-2">
-        <ColorSwatches value={rule.color} onPick={(hex) => onChange({ ...rule, color: hex })} />
+        <RuleSwatches value={rule.color} onPick={(hex) => onChange({ ...rule, color: hex })} />
       </div>
       <div className="flex flex-col gap-1.5">
         {rule.conditions.map((c, i) => (
@@ -229,7 +206,7 @@ export function RuleEditor({
   const [rules, setRules] = useState<ColorRule[]>(initial.rules);
   const [defaultColor, setDefaultColor] = useState(initial.default_color);
   const save = useSaveFacilityMapConfig(facilityId);
-  const palette = useRulePalette();
+  const palette = usePalette();
 
   // Stream the draft up for live preview.
   useEffect(() => {
@@ -260,7 +237,7 @@ export function RuleEditor({
       <div className="flex-1 overflow-y-auto p-3">
         <div className="mb-3 flex items-center justify-between gap-2 rounded-sm border border-line bg-panel-2 p-2.5">
           <div className="text-xs font-semibold">Default (unmatched)</div>
-          <ColorSwatches value={defaultColor} onPick={setDefaultColor} />
+          <RuleSwatches value={defaultColor} onPick={setDefaultColor} />
         </div>
 
         <div className="flex flex-col gap-2">

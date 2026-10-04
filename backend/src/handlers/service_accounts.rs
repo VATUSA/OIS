@@ -1,17 +1,22 @@
 //! Service-account management — the Discord bot's (and other machine clients')
-//! credentials + roles. The plaintext bearer token is shown once, on create/rotate.
+//! credentials, roles and direct grants. The plaintext bearer token is shown once, on create/rotate.
+//!
+//! A service account has no owner to cap it, so every grant is capped by the admin making it (#584):
+//! roles and permissions alike must be within that admin's own live authority, checked on each write.
 
 use std::collections::BTreeSet;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use crate::{
     auth::{
+        context::CurrentUser,
         permissions::{
             ServiceAccountsCreate, ServiceAccountsDelete, ServiceAccountsRead,
             ServiceAccountsUpdate,
@@ -19,13 +24,51 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    handlers::api_keys::{MAX_PERMISSIONS, to_pairs},
     models::{
-        CreateServiceAccountRequest, ServiceAccountBody, ServiceAccountTokenBody,
-        SetServiceAccountRolesRequest,
+        CreateServiceAccountRequest, GrantablePermissionBody, RotateServiceAccountRequest,
+        ServiceAccountBody, ServiceAccountTokenBody, SetRateLimitRequest,
+        SetServiceAccountPermissionsRequest, SetServiceAccountRolesRequest,
     },
-    repos::{access as access_repo, service_accounts as sa_repo},
+    repos::{access as access_repo, api_keys as keys_repo, service_accounts as sa_repo},
     state::AppState,
 };
+
+/// A credential's lifetime when the admin doesn't choose one, and the longest they may choose.
+const DEFAULT_EXPIRY_DAYS: u32 = 90;
+const MAX_EXPIRY_DAYS: u32 = 365;
+
+/// When a credential issued now with `requested` days of life expires. Zero or past the maximum is
+/// a 400 rather than a silent clamp, so the admin never gets a lifetime they didn't ask for.
+fn expiry_from(requested: Option<u32>, now: DateTime<Utc>) -> Result<DateTime<Utc>, ApiError> {
+    let days = requested.unwrap_or(DEFAULT_EXPIRY_DAYS);
+    if days == 0 || days > MAX_EXPIRY_DAYS {
+        return Err(ApiError::BadRequest);
+    }
+    Ok(now + Duration::days(i64::from(days)))
+}
+
+/// What a full replace of `current` with `requested` adds, and what it removes. Unchanged entries are
+/// in neither, so an admin can edit an account that also holds things beyond their own authority — and
+/// can't remove those things, any more than they could have granted them (#584, the #546 ruling).
+fn changes<T: Ord + Clone>(current: &[T], requested: &[T]) -> (Vec<T>, Vec<T>) {
+    let current: BTreeSet<&T> = current.iter().collect();
+    let requested: BTreeSet<&T> = requested.iter().collect();
+    let added = requested
+        .difference(&current)
+        .map(|t| (*t).clone())
+        .collect();
+    let removed = current
+        .difference(&requested)
+        .map(|t| (*t).clone())
+        .collect();
+    (added, removed)
+}
+
+/// Removing is checked like granting, except that a forbidden permission may always be removed.
+fn never_forbidden(_: &str) -> bool {
+    false
+}
 
 fn generate_token() -> String {
     format!(
@@ -73,12 +116,15 @@ pub async fn create_service_account(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let expires_at = expiry_from(payload.expires_in_days, Utc::now())?;
 
     let token = generate_token();
     let secret_hash = access_repo::sha256_hex(&token);
     let key = format!("sa_{}", Uuid::new_v4().simple());
 
-    let id = sa_repo::create_service_account(pool, &key, name, description, &secret_hash).await?;
+    let id =
+        sa_repo::create_service_account(pool, &key, name, description, &secret_hash, expires_at)
+            .await?;
     let account = sa_repo::get_service_account(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -89,18 +135,37 @@ pub async fn create_service_account(
     post,
     path = "/api/v1/admin/service-accounts/{id}/rotate",
     tag = "service-accounts",
-    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"])),
+    security(("session" = ["service_accounts.update"])),
     params(("id" = String, Path, description = "Service account id")),
-    responses((status = 200, description = "Rotated; new token shown once", body = ServiceAccountTokenBody), (status = 401), (status = 404))
+    request_body(content = Option<RotateServiceAccountRequest>, description = "Optional lifetime; default 90 days"),
+    responses((status = 200, description = "Rotated; new token shown once", body = ServiceAccountTokenBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
+/// Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+/// account's authority — so, like a grant, it is capped: the admin must hold everything the account
+/// holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
 pub async fn rotate_service_account(
     State(state): State<AppState>,
     _permission: RequirePermission<ServiceAccountsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<String>,
+    payload: Option<Json<RotateServiceAccountRequest>>,
 ) -> Result<Json<ServiceAccountTokenBody>, ApiError> {
+    let admin = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let Json(payload) = payload.unwrap_or_default();
+    let expires_at = expiry_from(payload.expires_in_days, Utc::now())?;
+
+    let held = access_repo::fetch_service_account_grants(pool, &id).await?;
+    keys_repo::validate_grants(
+        pool,
+        &admin.id,
+        &held,
+        keys_repo::is_forbidden_for_service_account,
+    )
+    .await?;
+
     let token = generate_token();
-    sa_repo::rotate_credential(pool, &id, &access_repo::sha256_hex(&token)).await?;
+    sa_repo::rotate_credential(pool, &id, &access_repo::sha256_hex(&token), expires_at).await?;
     let account = sa_repo::get_service_account(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -163,17 +228,19 @@ pub async fn list_service_account_roles(
     put,
     path = "/api/v1/admin/service-accounts/{id}/roles",
     tag = "service-accounts",
-    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"])),
+    security(("session" = ["service_accounts.update"])),
     params(("id" = String, Path, description = "Service account id")),
     request_body = SetServiceAccountRolesRequest,
-    responses((status = 200, body = ServiceAccountBody), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = ServiceAccountBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn set_service_account_roles(
     State(state): State<AppState>,
     _permission: RequirePermission<ServiceAccountsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path(id): Path<String>,
     Json(payload): Json<SetServiceAccountRolesRequest>,
 ) -> Result<Json<ServiceAccountBody>, ApiError> {
+    let admin = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Validated against the same list `list_service_account_roles` offers the picker, so the
@@ -186,7 +253,137 @@ pub async fn set_service_account_roles(
         return Err(ApiError::BadRequest);
     }
 
+    // No escalation through a role: a role is granted nationally, so the admin must hold every
+    // permission in it nationally. Without this, roles would bypass the per-permission cap below.
+    // Checked for the roles this replace adds **and** removes; roles left as they are pass through.
+    let current = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .roles;
+    let (added, removed) = changes(&current, &payload.role_names);
+    for (roles, forbidden) in [
+        (
+            added,
+            keys_repo::is_forbidden_for_service_account as fn(&str) -> bool,
+        ),
+        (removed, never_forbidden),
+    ] {
+        let role_grants: Vec<(String, Option<String>)> =
+            access_repo::fetch_role_permission_names(pool, &roles)
+                .await?
+                .into_iter()
+                .map(|name| (name, None))
+                .collect();
+        keys_repo::validate_grants(pool, &admin.id, &role_grants, forbidden).await?;
+    }
+
     sa_repo::set_roles(pool, &id, &payload.role_names).await?;
+    let account = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(account))
+}
+
+/// Set or clear one account's rate limit (#611): only this account gets it, on its next request, on
+/// every replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`.
+#[utoipa::path(
+    put,
+    path = "/api/v1/admin/service-accounts/{id}/rate-limit",
+    tag = "service-accounts",
+    params(("id" = String, Path, description = "Service account id")),
+    request_body = SetRateLimitRequest,
+    responses(
+        (status = 200, body = ServiceAccountBody),
+        (status = 400, description = "Not a positive whole number"),
+        (status = 401),
+        (status = 404)
+    ),
+    security(("session" = ["service_accounts.update"]), ("api_key" = ["service_accounts.update"]), ("service_account" = ["service_accounts.update"]))
+)]
+pub async fn set_service_account_rate_limit(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ServiceAccountsUpdate>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetRateLimitRequest>,
+) -> Result<Json<ServiceAccountBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let per_min = crate::rate_limit::validate_override(payload.rate_limit_per_min)?;
+    if !sa_repo::set_rate_limit(pool, &id, per_min).await? {
+        return Err(ApiError::NotFound);
+    }
+    let account = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(account))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/service-accounts/grantable-permissions",
+    tag = "service-accounts",
+    responses(
+        (status = 200, description = "What the caller may grant a service account, with the scope", body = Vec<GrantablePermissionBody>),
+        (status = 401)
+    ),
+    security(("session" = ["service_accounts.update"]))
+)]
+/// The permission picker's source: what the calling admin holds, minus what a service account may
+/// never hold — exactly what `set_service_account_permissions` will accept from them.
+pub async fn grantable_service_account_permissions(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ServiceAccountsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<GrantablePermissionBody>>, ApiError> {
+    let admin = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    Ok(Json(
+        keys_repo::grantable_for(pool, &admin.id, keys_repo::is_forbidden_for_service_account)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/admin/service-accounts/{id}/permissions",
+    tag = "service-accounts",
+    params(("id" = String, Path, description = "Service account id")),
+    request_body = SetServiceAccountPermissionsRequest,
+    responses((status = 200, body = ServiceAccountBody), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("session" = ["service_accounts.update"]))
+)]
+/// Replace an account's direct `(permission, ARTCC)` grants (#584). Each must be within the calling
+/// admin's own live authority (403 otherwise), and none may let a machine mint credentials (400).
+pub async fn set_service_account_permissions(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ServiceAccountsUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetServiceAccountPermissionsRequest>,
+) -> Result<Json<ServiceAccountBody>, ApiError> {
+    let admin = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    if payload.permissions.len() > MAX_PERMISSIONS {
+        return Err(ApiError::BadRequest);
+    }
+    let grants = to_pairs(&payload.permissions);
+    let current: Vec<(String, Option<String>)> = sa_repo::get_service_account(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .permissions
+        .into_iter()
+        .map(|p| (p.permission, p.artcc_id))
+        .collect();
+    let (added, removed) = changes(&current, &grants);
+    keys_repo::validate_grants(
+        pool,
+        &admin.id,
+        &added,
+        keys_repo::is_forbidden_for_service_account,
+    )
+    .await?;
+    keys_repo::validate_grants(pool, &admin.id, &removed, never_forbidden).await?;
+
+    sa_repo::set_permissions(pool, &id, &grants).await?;
     let account = sa_repo::get_service_account(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -197,7 +394,28 @@ pub async fn set_service_account_roles(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::first_unassignable;
+    use chrono::{Duration, TimeZone, Utc};
+
+    use super::{expiry_from, first_unassignable};
+    use crate::errors::ApiError;
+
+    #[test]
+    fn expiry_defaults_to_90_days_and_caps_at_365() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(expiry_from(None, now).unwrap(), now + Duration::days(90));
+        assert_eq!(
+            expiry_from(Some(365), now).unwrap(),
+            now + Duration::days(365)
+        );
+        assert!(matches!(
+            expiry_from(Some(366), now),
+            Err(ApiError::BadRequest)
+        ));
+        assert!(matches!(
+            expiry_from(Some(0), now),
+            Err(ApiError::BadRequest)
+        ));
+    }
 
     fn assignable(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|n| n.to_string()).collect()

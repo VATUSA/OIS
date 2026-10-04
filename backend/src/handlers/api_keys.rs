@@ -24,13 +24,13 @@ use crate::{
     models::{
         ApiKeyBody, ApiKeyPermissionBody, ApiKeyPermissionInput, ApiKeyTokenBody, AuditLogPage,
         CreateApiKeyRequest, GrantablePermissionBody, RevokeApiKeyRequest,
-        SetApiKeyPermissionsRequest,
+        SetApiKeyPermissionsRequest, SetRateLimitRequest,
     },
     repos::{access as access_repo, api_keys as keys_repo, audit as audit_repo},
     state::AppState,
 };
 
-const MAX_PERMISSIONS: usize = 200;
+pub(crate) const MAX_PERMISSIONS: usize = 200;
 
 /// Mint a token and its public display prefix (`ois_pat_` + 6 hex).
 fn generate_token() -> (String, String) {
@@ -44,7 +44,7 @@ fn generate_token() -> (String, String) {
 }
 
 /// Normalize the requested grants: trim permission names, upper-case ARTCC ids, drop blanks.
-fn to_pairs(permissions: &[ApiKeyPermissionInput]) -> Vec<(String, Option<String>)> {
+pub(crate) fn to_pairs(permissions: &[ApiKeyPermissionInput]) -> Vec<(String, Option<String>)> {
     permissions
         .iter()
         .map(|p| {
@@ -155,36 +155,9 @@ pub async fn grantable_permissions(
 
     // Everything the owner effectively holds, minus what a key may never hold, with the scope they
     // can delegate for each (national ⇒ any ARTCC; otherwise the specific set).
-    let names = access_repo::fetch_user_permission_names(pool, &user.id).await?;
-    let mut out = Vec::new();
-    for permission in names {
-        if keys_repo::is_forbidden_for_key(&permission) {
-            continue;
-        }
-        let (national, artccs) =
-            match access_repo::permission_scope(pool, &user.id, &permission).await? {
-                // `GrantablePermissionBody` has no way to say "national except ZDC", so a
-                // holder carrying a scoped deny is reported as non-national with no ARTCCs:
-                // it under-offers rather than inviting them to delegate where they are denied
-                // (VATUSA/OIS#543). Unreachable until something writes a deny.
-                access_repo::PermissionScope::National { except } if except.is_empty() => {
-                    (true, Vec::new())
-                }
-                access_repo::PermissionScope::National { .. } => (false, Vec::new()),
-                access_repo::PermissionScope::Facilities(set) => {
-                    let mut v: Vec<String> = set.into_iter().collect();
-                    v.sort();
-                    (false, v)
-                }
-            };
-        out.push(GrantablePermissionBody {
-            permission,
-            national,
-            artccs,
-        });
-    }
-    out.sort_by(|a, b| a.permission.cmp(&b.permission));
-    Ok(Json(out))
+    Ok(Json(
+        keys_repo::grantable_for(pool, &user.id, keys_repo::is_forbidden_for_key).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -515,6 +488,38 @@ pub async fn admin_disable_key(
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Set or clear one key's rate limit (#611): only this key gets it, on its next request, on every
+/// replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`. Gated by the admin key-management
+/// permission that disables and deletes keys — an owner can't raise their own.
+#[utoipa::path(
+    put, path = "/api/v1/admin/api-keys/{id}/rate-limit", tag = "api-keys",
+    params(("id" = String, Path)), request_body = SetRateLimitRequest,
+    responses(
+        (status = 200, body = ApiKeyBody),
+        (status = 400, description = "Not a positive whole number"),
+        (status = 401),
+        (status = 404)
+    ),
+    security(("session" = ["api_keys.key.delete"]), ("api_key" = ["api_keys.key.delete"]), ("service_account" = ["api_keys.key.delete"]))
+)]
+pub async fn admin_set_key_rate_limit(
+    State(state): State<AppState>,
+    _permission: RequirePermission<ApiKeysKeyDelete>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetRateLimitRequest>,
+) -> Result<Json<ApiKeyBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let per_min = crate::rate_limit::validate_override(payload.rate_limit_per_min)?;
+    if !keys_repo::set_rate_limit(pool, &id, per_min).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(
+        keys_repo::get_key(pool, &id)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    ))
 }
 
 #[utoipa::path(

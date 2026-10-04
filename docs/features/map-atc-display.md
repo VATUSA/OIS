@@ -178,7 +178,9 @@ otherwise indistinguishable from correct data.
 repeated interior vertex, coordinates in range, outer rings wound consistently (the asset is
 clockwise throughout), `properties.id` unique, and **the two copies byte-identical**. There is no
 regeneration script and no owner for this data (`source: "squawk-airspace-data"`), so that last
-assertion is the only thing stopping the copies drifting.
+assertion is the only thing stopping the copies drifting. (This is the ARTCC/TRACON *boundary* asset only.
+The altitude-bounded *sector* volumes are a different dataset, with an owner and an importer:
+`airspace-sector-importer`, see [`monitor.md`](monitor.md#the-sector-dataset).)
 
 `ZAN` is one feature with two parts because its airspace crosses the antimeridian — that split is
 correct GeoJSON and must not be "fixed". `ZAK` (Oakland Oceanic) and `ZSU` (San Juan) have **no
@@ -215,12 +217,19 @@ polygon in the asset**, so a controller on either shades nothing.
 
 ## Data model, Permissions, API, Discord
 
-**None of its own.** This is client-side rendering:
+**The ATC overlay has none of its own.** It is client-side rendering:
 
-- **Data model** — reads `tmu`/`flow`/`feed` state and the bundled boundary asset; owns no table.
+- **Data model** — reads `tmu`/`flow`/`feed` state and the bundled boundary asset; the overlay owns no
+  table.
 - **Permissions** — none. The facility map is public; the ATC overlay is a client toggle.
 - **API** — consumes the ATC and TRACON feed endpoints; adds none.
 - **Discord** — none.
+
+**ATC _sector_ data is not part of this pipeline, and does have all three.** Altitude-bounded sector
+volumes live in `flow.airspace_sector`, with Monitor Alert Parameters and consolidations beside them, and
+are gated by `flow.monitor.read` / `flow.monitor.update`. See [`monitor.md`](monitor.md). Drawing those
+sectors on a map is #602, which adds a map layer and its own permission (`flow.sectors.read`); this
+section will need its sector half rewritten when that lands.
 
 ## Open questions
 

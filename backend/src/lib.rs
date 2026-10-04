@@ -2,6 +2,9 @@ pub mod advisory;
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod deprecation;
+#[cfg(test)]
+mod docs_tests;
 pub mod errors;
 pub mod feed;
 pub mod handlers;
@@ -10,6 +13,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod models;
 pub mod openapi;
+pub mod rate_limit;
 pub mod realtime;
 pub mod repos;
 pub mod reqlog;
@@ -43,9 +47,11 @@ pub async fn run() -> color_eyre::Result<()> {
     // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
     metrics::spawn_upkeep(state.metrics.clone());
 
-    feed::spawn_poller(state.feed.clone());
+    feed::spawn_poller(state.feed.clone(), state.events.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
+    // vNAS sector identities and live sector staffing for the Airspace Monitor (#595).
+    feed::vnas::spawn_refresh(state.vnas.clone());
     // Airport coordinate database: fetched at startup and retried periodically (#216) — a failed
     // boot fetch no longer permanently strands the feed's airport map empty.
     jobs::spawn_airports_refresh(state.jobs.clone(), state.feed.clone());
@@ -62,11 +68,17 @@ pub async fn run() -> color_eyre::Result<()> {
         state.db.clone(),
     );
     if let Some(pool) = state.db.clone() {
+        // Realtime nudges from the other replicas (#649). A failure here only costs cross-replica
+        // nudges — clients still poll — so it is logged, not fatal.
+        if let Err(e) = state.events.start_listener().await {
+            tracing::warn!(error = %e, "realtime: cross-replica listener did not start");
+        }
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
         jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_diagnostics_report_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_departure_runway_prune(state.jobs.clone(), pool.clone());
         // Predict a departure runway for pending departures (#511). After the gates refresh above, so
         // the first pass has a catalog to match stands against.
@@ -81,6 +93,24 @@ pub async fn run() -> color_eyre::Result<()> {
             state.jobs.clone(),
             pool.clone(),
             state.aircraft_profiles.clone(),
+        );
+        // ATC sector volumes for the Airspace Monitor (#594), imported offline.
+        jobs::spawn_airspace_sectors_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.airspace_sectors.clone(),
+        );
+        // Monitor Alert Parameter overrides, for the Airspace Monitor (#598).
+        jobs::spawn_sector_maps_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.sector_maps.clone(),
+        );
+        // Sector consolidations, for the Airspace Monitor (#599).
+        jobs::spawn_sector_consolidations_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.sector_consolidations.clone(),
         );
         // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
@@ -126,10 +156,16 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA: register the division webhook, and pull the whole division daily (#605).
         feed::vatusa::spawn_register_webhook(pool.clone());
-        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool);
+        feed::vatusa::spawn_division_pull(state.jobs.clone(), pool, state.events.clone());
     }
 
-    let app = router::build_router(state);
+    let limits = std::sync::Arc::new(rate_limit::RateLimits::from_env());
+    rate_limit::spawn_cleanup(limits.clone());
+    // Per-credential request volume, shown where keys are managed (#611).
+    if let Some(pool) = state.db.clone() {
+        jobs::spawn_credential_usage_flush(state.jobs.clone(), pool, limits.clone());
+    }
+    let app = router::build_router_with_limits(state, limits);
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())

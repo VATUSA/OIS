@@ -51,7 +51,6 @@ impl Modify for CredentialSchemes {
 // published spec names the build it describes.
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&CredentialSchemes),
     info(
         title = "OIS API",
         description = "VATUSA Event Operational Information System API"
@@ -96,6 +95,8 @@ impl Modify for CredentialSchemes {
         crate::handlers::access::list_users,
         crate::handlers::access::get_user_access,
         crate::handlers::access::update_user_access,
+        crate::handlers::access::get_user_vatusa,
+        crate::handlers::access::resync_user_vatusa,
         crate::handlers::access::list_groups,
         crate::handlers::access::create_group,
         crate::handlers::access::update_group,
@@ -211,6 +212,7 @@ impl Modify for CredentialSchemes {
         crate::handlers::aircraft_profiles::list_profiles,
         crate::handlers::aircraft_profiles::upsert_profile,
         crate::handlers::aircraft_profiles::delete_profile,
+        crate::handlers::airspace_sectors::list_sectors,
         crate::handlers::flow::list_fcas,
         crate::handlers::flow::create_fca,
         crate::handlers::flow::update_fca,
@@ -221,6 +223,14 @@ impl Modify for CredentialSchemes {
         crate::handlers::flight_exclusions::list_flight_exclusions,
         crate::handlers::flight_exclusions::exclude_flight,
         crate::handlers::flight_exclusions::restore_flight,
+        crate::handlers::monitor::monitor_table,
+        crate::handlers::monitor::monitor_neighbours,
+        crate::handlers::monitor::list_sector_maps,
+        crate::handlers::monitor::set_sector_map,
+        crate::handlers::monitor::list_consolidations,
+        crate::handlers::monitor::consolidate_sector,
+        crate::handlers::monitor::consolidate_all_sectors,
+        crate::handlers::monitor::release_sector,
         crate::handlers::flow::clear_release,
         crate::handlers::flow::reorder_fca,
         crate::handlers::flow::fca_counts,
@@ -286,6 +296,10 @@ impl Modify for CredentialSchemes {
         crate::handlers::ace::decide_request,
         crate::handlers::admin::get_admin_summary,
         crate::handlers::audit::list_audit_logs,
+        crate::handlers::diagnostics::list_reports,
+        crate::handlers::diagnostics::get_report,
+        crate::handlers::diagnostics::get_report_logs,
+        crate::handlers::diagnostics::delete_report,
         crate::handlers::jobs::list_jobs,
         crate::handlers::jobs::run_job,
         crate::handlers::service_accounts::list_service_accounts,
@@ -294,6 +308,9 @@ impl Modify for CredentialSchemes {
         crate::handlers::service_accounts::disable_service_account,
         crate::handlers::service_accounts::list_service_account_roles,
         crate::handlers::service_accounts::set_service_account_roles,
+        crate::handlers::service_accounts::set_service_account_rate_limit,
+        crate::handlers::service_accounts::grantable_service_account_permissions,
+        crate::handlers::service_accounts::set_service_account_permissions,
         crate::handlers::api_keys::list_my_keys,
         crate::handlers::api_keys::grantable_permissions,
         crate::handlers::api_keys::create_key,
@@ -305,6 +322,7 @@ impl Modify for CredentialSchemes {
         crate::handlers::api_keys::key_audit,
         crate::handlers::api_keys::admin_list_keys,
         crate::handlers::api_keys::admin_disable_key,
+        crate::handlers::api_keys::admin_set_key_rate_limit,
         crate::handlers::api_keys::admin_delete_key,
     ),
     components(schemas(
@@ -334,6 +352,9 @@ impl Modify for CredentialSchemes {
         crate::models::SelfAccessBody,
         crate::models::HeldGroupBody,
         crate::models::UserAccessBody,
+        crate::models::UserVatusaBody,
+        crate::models::VatusaGrantChange,
+        crate::models::VatusaResyncRequest,
         crate::models::ScopeAccess,
         crate::models::UpdateUserAccessRequest,
         crate::models::ScopeUpdate,
@@ -388,6 +409,19 @@ impl Modify for CredentialSchemes {
         crate::models::AirportConfigBody,
         crate::models::FlightExclusionBody,
         crate::models::FlightExclusionsBody,
+        crate::models::SectorMapBody,
+        crate::models::SectorMapsBody,
+        crate::models::MonitorTableBody,
+        crate::models::MonitorNeighboursBody,
+        crate::models::MonitorRowBody,
+        crate::models::MonitorBinBody,
+        crate::feed::monitor_alert::SectorAlert,
+        crate::models::SetSectorMapRequest,
+        crate::models::SectorConsolidationBody,
+        crate::models::SectorConsolidationsBody,
+        crate::models::ConsolidateSectorRequest,
+        crate::models::BulkConsolidateRequest,
+        crate::models::BulkConsolidateMode,
         crate::models::ExcludeFlightRequest,
         crate::models::UpsertAirportConfigRequest,
         crate::models::AirportGateBody,
@@ -401,6 +435,7 @@ impl Modify for CredentialSchemes {
         crate::models::AirportSurfaceBody,
         crate::models::FaaRepullResult,
         crate::models::AircraftProfileBody,
+        crate::models::SectorVolumeBody,
         crate::models::UpsertAircraftProfileRequest,
         crate::models::AirportForecastBody,
         crate::models::TmiPackageBody,
@@ -512,6 +547,9 @@ impl Modify for CredentialSchemes {
         crate::models::Tier1GenerateResult,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
+        crate::models::DiagnosticsReportSummary,
+        crate::models::DiagnosticsReportPage,
+        crate::models::DiagnosticsReport,
         crate::models::AdminSummaryBody,
         crate::models::DailySeries,
         crate::models::DailyCount,
@@ -523,6 +561,10 @@ impl Modify for CredentialSchemes {
         crate::job_registry::JobStatus,
         crate::models::CreateServiceAccountRequest,
         crate::models::SetServiceAccountRolesRequest,
+        crate::models::SetRateLimitRequest,
+        crate::models::CredentialUsageBody,
+        crate::models::SetServiceAccountPermissionsRequest,
+        crate::models::RotateServiceAccountRequest,
         crate::models::ServiceAccountBody,
         crate::models::ServiceAccountTokenBody,
         crate::models::ApiKeyPermissionInput,
@@ -559,11 +601,54 @@ impl Modify for CredentialSchemes {
         (name = "ace", description = "ACE support requests + team roster"),
         (name = "integration", description = "Discord integration — outbound jobs + config"),
         (name = "audit", description = "Audit log"),
+        (name = "diagnostics", description = "Desktop diagnostics reports (staff)"),
         (name = "service-accounts", description = "Machine client credentials"),
         (name = "api-keys", description = "User-owned API keys (personal access tokens)")
-    )
+    ),
+    modifiers(&CredentialSchemes, &RateLimited)
 )]
 pub struct ApiDoc;
+
+/// Every `/api/` operation can answer `429` once the caller's allowance is spent (`rate_limit`,
+/// #588). Added here rather than on each `#[utoipa::path]` so a new endpoint cannot leave it out.
+struct RateLimited;
+
+impl utoipa::Modify for RateLimited {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{ResponseBuilder, header::HeaderBuilder};
+
+        let retry_after = HeaderBuilder::new()
+            .description(Some("Seconds until the next request will be accepted."))
+            .build();
+        let response = ResponseBuilder::new()
+            .description(
+                "Rate limit exceeded: back off for `Retry-After` seconds. Every limited response \
+                 carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.",
+            )
+            .header("Retry-After", retry_after)
+            .build();
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !path.starts_with("/api/") {
+                continue;
+            }
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                operation
+                    .responses
+                    .responses
+                    .insert("429".to_string(), response.clone().into());
+            }
+        }
+    }
+}
 
 /// A CI utility, not a real test: dumps the current OpenAPI document to a file so the
 /// client-drift check (`.github/workflows/ci.yml`'s `client-drift` job) can regenerate

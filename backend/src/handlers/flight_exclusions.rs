@@ -11,14 +11,13 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
 };
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{FlowFcaRead, FlowFcaUpdate},
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -88,25 +87,21 @@ async fn may_edit_artcc(
 
 #[utoipa::path(
     get, path = "/api/v1/flow/fcas/{id}/exclusions", tag = "flow",
-    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"])),
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = FlightExclusionsBody), (status = 401), (status = 404))
 )]
 pub async fn list_flight_exclusions(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<FlightExclusionsBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let artcc = fca_artcc(pool, &id).await?;
     // Read is gated on `flow.fca.read`, so a viewer without any write grant still gets the list —
     // they just get `editable: false` with it.
-    let editable = match Principal::require(current_user.as_ref(), current_api_key.as_ref()) {
-        Ok(principal) => may_edit_artcc(&state, &principal, &artcc).await?,
-        Err(_) => false,
-    };
+    let editable = may_edit_artcc(&state, &principal, &artcc).await?;
     Ok(Json(FlightExclusionsBody {
         editable,
         exclusions: exclusions_repo::list_by_artcc(pool, &artcc).await?,
@@ -115,7 +110,7 @@ pub async fn list_flight_exclusions(
 
 #[utoipa::path(
     post, path = "/api/v1/flow/fcas/{id}/exclusions/{callsign}", tag = "flow",
-    security(("session" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path), ("callsign" = String, Path)),
     request_body = ExcludeFlightRequest,
     responses((status = 200, body = FlightExclusionBody), (status = 401), (status = 403), (status = 404))
@@ -123,13 +118,11 @@ pub async fn list_flight_exclusions(
 pub async fn exclude_flight(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
     Json(req): Json<ExcludeFlightRequest>,
 ) -> Result<Json<FlightExclusionBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let callsign = callsign.trim().to_ascii_uppercase();
     if callsign.is_empty() {
@@ -143,7 +136,7 @@ pub async fn exclude_flight(
         &callsign,
         req.reason.trim(),
         EXCLUSION_TTL_HOURS,
-        &user.id,
+        &by,
     )
     .await?;
     refresh_exclusions_cache(&state, pool).await?;
@@ -153,18 +146,16 @@ pub async fn exclude_flight(
 
 #[utoipa::path(
     delete, path = "/api/v1/flow/fcas/{id}/exclusions/{callsign}", tag = "flow",
-    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path), ("callsign" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn restore_flight(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let callsign = callsign.trim().to_ascii_uppercase();
     let artcc = fca_artcc(pool, &id).await?;

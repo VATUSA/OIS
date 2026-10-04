@@ -1,12 +1,13 @@
 //! Read API over the persisted VATSIM stats (`/api/v1/stats/*`). Ported from the standalone stats
 //! system's API, gated on `stats.read`. Historical lookups only — "now" is served by the live feed.
 
+use crate::auth::principal::Actor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -15,7 +16,6 @@ use serde_json::{Value, json};
 
 use crate::{
     auth::{
-        context::CurrentUser,
         permissions::{StatsCaptureDelete, StatsCaptureUpdate, StatsRead, SystemJobsRead},
         require_permission::RequirePermission,
     },
@@ -395,14 +395,14 @@ pub async fn delete_capture(
     post,
     path = "/api/v1/stats/captures",
     tag = "stats",
-    security(("session" = ["stats.capture.update"])),
+    security(("session" = ["stats.capture.update"]), ("api_key" = ["stats.capture.update"]), ("service_account" = ["stats.capture.update"])),
     request_body = SaveCaptureRequest,
     responses((status = 200, body = CaptureSummaryBody), (status = 400), (status = 401), (status = 404))
 )]
 pub async fn save_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<StatsCaptureUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<SaveCaptureRequest>,
 ) -> Result<Json<CaptureSummaryBody>, ApiError> {
     let p = pool(&state)?;
@@ -424,9 +424,8 @@ pub async fn save_capture(
         // Nothing left to keep — the window has already aged past what compaction retains.
         return Err(ApiError::BadRequest);
     }
-    let created_by = current_user.as_ref().map(|u| u.id.as_str());
-    let id =
-        stats_repo::save_capture_window(p, payload.event_id, label, from, to, created_by).await?;
+    let by = principal.attribution(&state).await?;
+    let id = stats_repo::save_capture_window(p, payload.event_id, label, from, to, &by).await?;
     let saved = stats_repo::capture_summary_get(p, &id)
         .await?
         .ok_or(ApiError::NotFound)?;

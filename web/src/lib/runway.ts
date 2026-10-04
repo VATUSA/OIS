@@ -25,7 +25,9 @@ export function useRunway(icao: string | null) {
       return data;
     },
     enabled: !!icao,
-    refetchInterval: 15_000,
+    // The realtime topic is the fast path (#645/#646); this poll is the fallback for a signed-out
+    // viewer, a dropped socket, or a second replica (#649), so it is relaxed from 15s, not removed.
+    refetchInterval: 60_000,
   });
 }
 

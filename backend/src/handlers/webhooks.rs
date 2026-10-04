@@ -1,17 +1,52 @@
 //! Inbound webhook receivers. Currently just VATUSA's division webhook (the "mithril" v3 outbound
 //! webhook), verified by HMAC and used to bring the division pull forward.
 
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
 use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::{config::ois_secret_key, feed::vatusa, repos::vatusa as repo, state::AppState};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// How long a verified delivery's body is remembered, so the same body can't be acted on twice.
+const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// Replay protection for verified deliveries (#627). The HMAC proves who sent a body but not when,
+/// and v3 signs no timestamp, so a captured delivery would verify forever. Remembering each verified
+/// body's SHA-256 until [`REPLAY_WINDOW`] passes without it being seen means a re-sent copy is
+/// acknowledged but not acted on.
+///
+/// In memory and per process: a restart forgets it and each replica guards alone. That is enough
+/// because acting on a delivery only brings the idempotent, coalesced division pull forward. The
+/// cost is that an identical body VATUSA itself re-sends inside the window is skipped too, which
+/// is harmless for the same reason. Only verified bodies are recorded, so an unauthenticated caller
+/// can't grow the set.
+#[derive(Default)]
+pub struct ReplayGuard {
+    seen: Mutex<HashMap<[u8; 32], Instant>>,
+}
+
+impl ReplayGuard {
+    /// Records `body` and reports whether it is new within the window. Forgets expired bodies first,
+    /// so the set never holds more than one window's deliveries.
+    pub fn first_seen(&self, body: &[u8], now: Instant) -> bool {
+        let digest: [u8; 32] = Sha256::digest(body).into();
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        seen.retain(|_, at| now.duration_since(*at) < REPLAY_WINDOW);
+        seen.insert(digest, now).is_none()
+    }
+}
 
 /// `POST /api/v1/webhooks/vatusa` — a delivery for the division webhook (#605). Public (no session);
 /// authenticated instead by the `X-Mithril-Signature` HMAC over the raw body, keyed with the secret
@@ -29,15 +64,23 @@ pub async fn vatusa_webhook(
     let Some(pool) = state.db.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE;
     };
-    let secret = match receiver_secret(pool, ois_secret_key()).await {
-        Ok(secret) => secret,
-        Err(status) => return status,
-    };
-    if !signature_is_valid(&secret, &headers, &body) {
+    match receiver_secret(pool, ois_secret_key()).await {
+        Ok(secret) => handle_delivery(&state, &secret, &headers, &body),
+        Err(status) => status,
+    }
+}
+
+/// A delivery once the secret is in hand: verify, refuse a replay, then act.
+fn handle_delivery(state: &AppState, secret: &str, headers: &HeaderMap, body: &[u8]) -> StatusCode {
+    if !signature_is_valid(secret, headers, body) {
         return StatusCode::UNAUTHORIZED;
     }
+    if !state.webhook_replays.first_seen(body, Instant::now()) {
+        tracing::info!("VATUSA webhook delivery is a replay of one already accepted; ignored");
+        return StatusCode::OK;
+    }
 
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
         return StatusCode::BAD_REQUEST;
     };
     if payload.get("type").and_then(|v| v.as_str()) == Some("roster_change") {
@@ -185,5 +228,98 @@ mod tests {
             legacy == http::StatusCode::NOT_FOUND || legacy == http::StatusCode::METHOD_NOT_ALLOWED,
             "{legacy}"
         );
+    }
+
+    mod replay {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+        use crate::handlers::webhooks::ReplayGuard;
+
+        const BODY: &[u8] = br#"{"type":"roster_change","data":{"cid":1}}"#;
+
+        /// Absolute offsets either side of ten minutes, not derived from `REPLAY_WINDOW`, so changing
+        /// the constant breaks this test rather than moving with it.
+        #[test]
+        fn a_body_is_refused_inside_the_window_and_accepted_after_it() {
+            let t0 = Instant::now();
+            let guard = ReplayGuard::default();
+            assert!(guard.first_seen(BODY, t0));
+            assert!(!guard.first_seen(BODY, t0 + Duration::from_secs(1)));
+            assert!(guard.first_seen(b"another body", t0 + Duration::from_secs(1)));
+
+            let fresh = ReplayGuard::default();
+            assert!(fresh.first_seen(BODY, t0));
+            assert!(!fresh.first_seen(BODY, t0 + Duration::from_secs(599)));
+            // 599 s re-armed it: a replay storm stays suppressed until it goes quiet for the window.
+            assert!(!fresh.first_seen(BODY, t0 + Duration::from_secs(1_100)));
+            assert!(fresh.first_seen(BODY, t0 + Duration::from_secs(1_701)));
+        }
+
+        #[test]
+        fn expired_bodies_are_forgotten() {
+            let t0 = Instant::now();
+            let guard = ReplayGuard::default();
+            for i in 0..50u8 {
+                guard.first_seen(&[i], t0);
+            }
+            guard.first_seen(b"later", t0 + Duration::from_secs(601));
+            assert_eq!(guard.seen.lock().unwrap().len(), 1);
+        }
+
+        /// The pull's trigger handle, so a test can see whether a delivery was acted on.
+        fn pull_trigger(state: &AppState) -> std::sync::Arc<tokio::sync::Notify> {
+            state
+                .jobs
+                .register(vatusa::PULL_JOB, "division pull", None, true)
+        }
+
+        async fn triggered(notify: &tokio::sync::Notify) -> bool {
+            tokio::time::timeout(Duration::from_millis(100), notify.notified())
+                .await
+                .is_ok()
+        }
+
+        /// AC1 + AC2 through the handler's own path: a verified delivery triggers the pull once, the
+        /// same delivery re-sent is acked but not acted on, and a new delivery still triggers.
+        #[tokio::test]
+        async fn a_replayed_delivery_is_acked_but_not_acted_on_again() {
+            let state = AppState::without_db();
+            let pull = pull_trigger(&state);
+            let deliver =
+                |body: &[u8]| handle_delivery(&state, SECRET, &signed(SECRET, body), body);
+
+            assert_eq!(deliver(BODY), StatusCode::OK);
+            assert!(triggered(&pull).await, "a new delivery triggers the pull");
+
+            assert_eq!(deliver(BODY), StatusCode::OK);
+            assert!(!triggered(&pull).await, "the replay was acted on");
+
+            let next = br#"{"type":"roster_change","data":{"cid":2}}"#;
+            assert_eq!(deliver(next), StatusCode::OK);
+            assert!(
+                triggered(&pull).await,
+                "a different delivery is not a replay"
+            );
+        }
+
+        /// The guard only ever sees verified bodies: a forged copy is refused without being recorded,
+        /// so it can neither fill the set nor pre-empt the genuine delivery.
+        #[tokio::test]
+        async fn a_forged_delivery_is_refused_and_not_remembered() {
+            let state = AppState::without_db();
+            let pull = pull_trigger(&state);
+
+            let forged = handle_delivery(&state, SECRET, &signed("not-the-secret", BODY), BODY);
+            assert_eq!(forged, StatusCode::UNAUTHORIZED);
+            assert!(!triggered(&pull).await);
+
+            let genuine = handle_delivery(&state, SECRET, &signed(SECRET, BODY), BODY);
+            assert_eq!(genuine, StatusCode::OK);
+            assert!(
+                triggered(&pull).await,
+                "the forgery pre-empted the real delivery"
+            );
+        }
     }
 }

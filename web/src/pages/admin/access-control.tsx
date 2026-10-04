@@ -15,6 +15,7 @@ import {
   useUserAccess,
 } from "@/lib/access";
 import {usePageHeader} from "@/components/shell/page-meta";
+import {VatusaDetachedPill, VatusaSyncSection} from "./vatusa-sync-section";
 import {
   PermissionScopeTree,
   ScopeChips,
@@ -198,7 +199,13 @@ export function AdminAccessControl() {
         accessorKey: "display_name",
         header: "Name",
         icon: User,
-        cell: (c) => <span className="whitespace-nowrap font-semibold">{c.getValue<string>()}</span>,
+        cell: (c) => (
+          <span className="flex items-center gap-2 whitespace-nowrap">
+            <span className="font-semibold">{c.getValue<string>()}</span>
+            {/* Hand-managed: off VATUSA role sync until a Resync (#549). */}
+            {c.row.original.vatusa_detached_at && <StatusPill tone="warn">Not synced</StatusPill>}
+          </span>
+        ),
       },
       { accessorKey: "cid", header: "CID", icon: Hash, mono: true },
       {
@@ -296,7 +303,10 @@ export function AdminAccessControl() {
             <h2 className="text-xl font-bold">{selected?.name ?? `CID ${access.data.cid}`}</h2>
             <span className="font-mono text-sm text-ink-3">{access.data.cid}</span>
             {access.data.server_admin && <StatusPill tone="good">Server admin</StatusPill>}
+            <VatusaDetachedPill cid={access.data.cid} />
           </div>
+
+          <VatusaSyncSection cid={access.data.cid} />
 
           {/* Groups are assigned below and on the group's own page (#546). The preset bar that used
               to sit here is gone (#550); "Remove all" was the one part of it that wasn't a preset. */}

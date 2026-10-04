@@ -32,6 +32,7 @@ const PUBLIC: &[(&str, &str, &str)] = &[
     ("auth", "desktop_exchange", "trades a one-time desktop code for a session; the code is the credential"),
     ("desktop", "download", "the desktop installer redirect on the public download page"),
     ("facilities", "list_facilities", "public facility metadata (the facility map)"),
+    ("facility_map", "get_config", "the rules and colours the public facility map renders with; the optional identity only sets `editable`"),
     ("facilities", "get_facility", "public facility metadata (the facility map)"),
     ("flow", "list_fcas", "the public FCA overview (/advisories/fcas)"),
     ("flow", "fca_traffic", "the public FCA overview (/advisories/fcas)"),
@@ -53,6 +54,8 @@ const PUBLIC: &[(&str, &str, &str)] = &[
 const PUBLIC_WITH_OPTIONAL_IDENTITY: &[(&str, &str)] = &[
     // Hidden (unpublished-event or deleted) FCAs are served to planners / signed-in callers only (#586).
     ("flow", "fca_traffic"),
+    // Serves the same config to everyone; the identity only decides the `editable` hint (#586).
+    ("facility_map", "get_config"),
 ];
 
 /// Handlers that advertise 401 without an auth extractor, because they reject a bad credential they
@@ -68,6 +71,7 @@ const AUTH_EXTRACTORS: &[&str] = &[
     "CurrentServiceAccount",
     "SessionToken",
     ":Actor",
+    "Option<Actor>",
 ];
 
 struct Handler {
@@ -321,8 +325,10 @@ fn every_gated_handler_declares_the_credentials_and_permission_it_requires() {
         "a gated path must declare exactly the credentials its handler accepts, scoped to the \
          permission it checks: {wrong:#?}"
     );
-    // The three tiers all occur, so the rule is exercised rather than collapsing to one answer.
-    for tier in [3, 2, 1] {
+    // Both surviving tiers occur, so the rule is exercised rather than collapsing to one answer.
+    // The two-kind tier (`Principal::require`) is empty since #607 migrated its handlers to
+    // `Actor`; `expected_schemes` keeps the arm, so it returns if such a handler reappears.
+    for tier in [3, 1] {
         assert!(
             handlers
                 .iter()
@@ -332,19 +338,11 @@ fn every_gated_handler_declares_the_credentials_and_permission_it_requires() {
     }
 }
 
-/// The review's own case (#587): a service account holding `events.plan.read` gets 401 on
-/// `GET /api/v1/airport-configs`, because the handler uses `Principal::require` — so the document
-/// must not offer `service_account` there.
-#[test]
-fn a_principal_require_path_does_not_offer_service_accounts() {
-    let handler = scan()
-        .into_iter()
-        .find(|h| h.file == "airport_configs" && h.name == "list_all_airport_configs")
-        .expect("the handler exists");
-    let security = handler.security.expect("it is gated");
-    assert!(security.contains(r#"("api_key"="#), "{security}");
-    assert!(!security.contains("service_account"), "{security}");
-}
+// #587's `a_principal_require_path_does_not_offer_service_accounts` lived here. #607 migrated every
+// handler off `Principal::require` — `airport_configs::list_all_airport_configs` among them — so the
+// test pinned a premise with no instances, and its assertion would now force the document to
+// under-report what an `Actor` handler accepts. `expected_schemes` keeps the `Principal::require`
+// arm, so the rule still applies if such a handler reappears.
 
 /// A public handler that reads an optional identity (#586) is still public: it declares no security,
 /// or Swagger would ask for a credential the route doesn't need.

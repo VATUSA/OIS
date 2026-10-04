@@ -7,15 +7,14 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{FlowAircraftProfilesRead, FlowAircraftProfilesUpdate},
-        principal::Principal,
+        principal::Actor,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -88,7 +87,7 @@ pub async fn list_profiles(
 
 #[utoipa::path(
     put, path = "/api/v1/flow/aircraft-profiles/{kind}/{key}", tag = "flow",
-    security(("session" = ["flow.aircraft_profiles.update"]), ("api_key" = ["flow.aircraft_profiles.update"])),
+    security(("session" = ["flow.aircraft_profiles.update"]), ("api_key" = ["flow.aircraft_profiles.update"]), ("service_account" = ["flow.aircraft_profiles.update"])),
     params(("kind" = String, Path), ("key" = String, Path)),
     request_body = UpsertAircraftProfileRequest,
     responses((status = 200, body = AircraftProfileBody), (status = 400), (status = 401))
@@ -96,12 +95,10 @@ pub async fn list_profiles(
 pub async fn upsert_profile(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowAircraftProfilesUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((kind, key)): Path<(String, String)>,
     Json(req): Json<UpsertAircraftProfileRequest>,
 ) -> Result<Json<AircraftProfileBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let (kind, key) = normalize(&kind, &key)?;
     validate(&req)?;
@@ -110,7 +107,7 @@ pub async fn upsert_profile(
         &kind,
         &key,
         &req,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
+        &principal.attribution(&state).await?,
     )
     .await?;
     refresh_cache(&state, pool).await?;

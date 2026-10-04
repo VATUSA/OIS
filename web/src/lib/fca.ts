@@ -1,3 +1,4 @@
+import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
@@ -5,6 +6,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
 import {fetchHistTraffic} from "./historical";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Fca = components["schemas"]["FcaBody"];
 export type UpsertFca = components["schemas"]["UpsertFcaRequest"];
@@ -173,6 +175,8 @@ export function useFcas(eventId?: number) {
       if (error || !data) throw new Error("failed to load FCAs");
       return data;
     },
+    // Live sets poll as the socket's fallback (#649); a historical snapshot never changes.
+    refetchInterval: eventId != null || at == null ? SOCKET_FALLBACK_MS : false,
     staleTime: eventId != null || at == null ? undefined : Infinity,
     placeholderData: eventId == null && at != null ? keepPreviousData : undefined,
   });
@@ -332,8 +336,9 @@ export function useAircraftRoute(callsign: string | null) {
   });
 }
 
-/** Matched-aircraft counts per FCA (all FCAs), refreshed every 15s. */
+/** Matched-aircraft counts per FCA (all FCAs), refreshed on each feed tick — or every 15s without one. */
 export function useFcaCounts() {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: ["fca-counts"],
     queryFn: async () => {
@@ -341,13 +346,15 @@ export function useFcaCounts() {
       if (error || !data) throw new Error("failed to load counts");
       return data as Record<string, number>;
     },
-    refetchInterval: 15_000,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: pollUnlessLive(15_000, live),
   });
 }
 
 /** VATSIM traffic for the map. Live (15s poll) by default; inside a `HistoricalProvider` it
  * reconstructs the network at the scrubber instant, so the embedded map widget replays. */
 export function useTraffic() {
+  const live = useRealtimeLive();
   const at = useHistoricalAt();
   return useQuery({
     queryKey: at == null ? ["flow-traffic"] : ["hist-traffic", at],
@@ -357,7 +364,8 @@ export function useTraffic() {
       if (error || !data) throw new Error("failed to load traffic");
       return data;
     },
-    refetchInterval: at == null ? 15_000 : false,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: at == null ? pollUnlessLive(15_000, live) : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
@@ -375,6 +383,7 @@ async function fetchHistAtc(at: number) {
  * is enabled; matches the traffic layer's 15s cadence so logon/logoff appears promptly. Inside a
  * `HistoricalProvider` it reconstructs the online ATC at the scrubber instant. */
 export function useAtc(enabled: boolean) {
+  const live = useRealtimeLive();
   const at = useHistoricalAt();
   return useQuery({
     queryKey: at == null ? ["flow-atc"] : ["hist-atc", at],
@@ -385,7 +394,8 @@ export function useAtc(enabled: boolean) {
       return data;
     },
     enabled,
-    refetchInterval: at == null ? 15_000 : false,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: at == null ? pollUnlessLive(15_000, live) : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
@@ -397,6 +407,7 @@ export function useFcaTraffic(
   debug = false,
   { background = false }: { background?: boolean } = {},
 ) {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: ["fca-traffic", id, debug],
     queryFn: async () => {
@@ -409,7 +420,8 @@ export function useFcaTraffic(
     enabled: !!id,
     // Releases sync instantly over the websocket; the poll refreshes live crossing ETAs (and is the
     // fallback if the socket drops).
-    refetchInterval: 30_000,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: pollUnlessLive(30_000, live),
     // TanStack skips a `refetchInterval` tick whenever `document.visibilityState === "hidden"`, so
     // for a caller that exists to notice things while the window is hidden — the desktop notifiers
     // — that fallback would be dead exactly when it is needed. The foreground UI keeps the default.
@@ -420,6 +432,7 @@ export function useFcaTraffic(
 /** Matched/sequenced traffic for several FCAs at once (the ARTCC overview). Each query shares its
  *  cache key with {@link useFcaTraffic}, so opening one FCA's detail reuses the fetched data. */
 export function useFcaTrafficMany(ids: string[]) {
+  const live = useRealtimeLive();
   return useQueries({
     queries: ids.map((id) => ({
       queryKey: ["fca-traffic", id],
@@ -430,7 +443,8 @@ export function useFcaTrafficMany(ids: string[]) {
         if (error || !data) throw new Error("failed to load FCA traffic");
         return data;
       },
-      refetchInterval: 30_000,
+      // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+      refetchInterval: pollUnlessLive(30_000, live),
     })),
   });
 }
@@ -483,6 +497,43 @@ export function useClearRelease(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
     onError: () => toast.error("Couldn’t clear the release"),
+  });
+}
+
+/** Why the server refused a swap (#56, #585), in words a controller can act on. */
+const SWAP_REFUSALS: Record<string, string> = {
+  different_runway: "They depart different runways",
+  different_departure: "They depart different airports",
+  runway_unassigned: "One of them has no departure runway assigned",
+  departure_unknown: "One of them is no longer in the feed",
+  held_by_person: "A person holds one of these releases",
+  held_by_other_machine: "Another tool holds one of these releases",
+};
+
+/**
+ * Trade two released flights' times (#514). The server allows it only within one FCA, off the same
+ * airport and runway (#56), and moves no third flight, so there is no re-metered list to cache: refetch.
+ */
+export function useSwapReleases(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ a, b }: { a: string; b: string }) => {
+      const { error, response } = await ois.POST("/api/v1/flow/fcas/{id}/swap", {
+        params: { path: { id: fcaId } },
+        body: { a, b },
+      });
+      if (!response.ok) {
+        const code = (error as { error?: string } | undefined)?.error;
+        throw new Error((code && SWAP_REFUSALS[code]) ?? "Couldn’t swap the releases");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["idst"] });
+      queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Couldn’t swap the releases"),
   });
 }
 

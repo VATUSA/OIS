@@ -5,6 +5,8 @@ import {LayoutGrid, List, Rows3} from "lucide-react";
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
 import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
+import {RouteErrorScreen} from "@/components/error-boundary";
+import {SendDiagnosticsButton} from "@/components/send-diagnostics";
 import type {RouteMeta} from "@/components/shell/page-meta";
 import {RestrictionAlerts} from "@/components/restriction-alerts";
 import {PrimaryWindowFeatures} from "@/components/primary-window-features";
@@ -35,7 +37,10 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
+import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
+import {SectorsPage} from "@/pages/flow/sectors";
+import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
@@ -54,6 +59,7 @@ import {AdminOverview} from "@/pages/admin/overview";
 import {AdminAccessControl} from "@/pages/admin/access-control";
 import {AdminGroups} from "@/pages/admin/groups";
 import {AdminAudit} from "@/pages/admin/audit";
+import {AdminDiagnostics} from "@/pages/admin/diagnostics";
 import {AdminJobs} from "@/pages/admin/jobs";
 import {AdminApiKeys} from "@/pages/admin/api-keys";
 import {AdminServiceAccounts} from "@/pages/admin/service-accounts";
@@ -85,9 +91,13 @@ function RootLayout() {
           The server isn’t responding right now. This page keeps trying and will reconnect
           automatically.
         </p>
-        <Button variant="secondary" onClick={() => me.refetch()}>
-          Retry now
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => me.refetch()}>
+            Retry now
+          </Button>
+          {/* The desktop's report goes from Rust, so it may still get through when this doesn't. */}
+          <SendDiagnosticsButton />
+        </div>
       </div>
     );
   }
@@ -128,7 +138,8 @@ function RootLayout() {
   );
 }
 
-const rootRoute = createRootRoute({ component: RootLayout });
+// Route errors are caught by the router's own boundary, so it logs them too (#629).
+const rootRoute = createRootRoute({ component: RootLayout, errorComponent: RouteErrorScreen });
 
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -385,6 +396,29 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
+// --- Flow (sector loading, and the sector data behind it) ---
+
+const adminFlowRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "flow",
+  component: Outlet,
+  staticData: { layout: "wide" },
+});
+
+const adminFlowSectorsRoute = createRoute({
+  getParentRoute: () => adminFlowRoute,
+  path: "sectors",
+  staticData: { title: "Sectors" },
+  component: SectorsPage,
+});
+
+const adminFlowMonitorRoute = createRoute({
+  getParentRoute: () => adminFlowRoute,
+  path: "monitor",
+  staticData: { title: "Airspace Monitor" },
+  component: MonitorPage,
+});
+
 // --- Planning (pre-event) ---
 
 const planningRoute = createRoute({
@@ -443,6 +477,13 @@ const planningAircraftProfilesRoute = createRoute({
   path: "aircraft-profiles",
   staticData: { title: "Aircraft profiles" },
   component: AircraftProfilesPage,
+});
+
+const planningSectorMapsRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "sector-maps",
+  staticData: { title: "Monitor alert parameters" },
+  component: SectorMapsPage,
 });
 
 const planningEventRoute = createRoute({
@@ -564,6 +605,13 @@ const adminAuditRoute = createRoute({
   component: AdminAudit,
 });
 
+const adminDiagnosticsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "diagnostics",
+  staticData: { title: "Diagnostics" },
+  component: AdminDiagnostics,
+});
+
 const adminJobsRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "jobs",
@@ -656,10 +704,12 @@ const routeTree = rootRoute.addChildren([
     adminAccessRoute,
     adminGroupsRoute,
     adminAuditRoute,
+    adminDiagnosticsRoute,
     adminJobsRoute,
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
+    adminFlowRoute.addChildren([adminFlowMonitorRoute, adminFlowSectorsRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,
@@ -667,6 +717,7 @@ const routeTree = rootRoute.addChildren([
       planningFacilityDocumentsRoute,
       planningAirportSurfaceRoute,
       planningAircraftProfilesRoute,
+      planningSectorMapsRoute,
       planningEventRoute,
       planningEventFcasRoute,
     ]),

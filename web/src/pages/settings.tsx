@@ -2,12 +2,14 @@ import type * as React from "react";
 import {Card, EmptyState, HotkeyInput, QueryState, Select, Switch} from "@ois/ui";
 import {LogIn} from "lucide-react";
 
+import {SendDiagnosticsButton} from "@/components/send-diagnostics";
 import {SoundPreviewButton} from "@/components/settings/sound-preview";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {resumeHotkeys, suspendHotkeys} from "@/lib/hotkeys";
 import {useMe} from "@/lib/auth";
 import {SETTINGS, type SettingDef} from "@/lib/settings";
 import {useSetting} from "@/lib/settings";
+import {can} from "@/lib/platform";
 import {useLoginItem} from "@/lib/tray";
 
 /** One settings row — its own component so the `useSetting` hook is called once per setting. */
@@ -112,6 +114,18 @@ export function SettingsPage() {
           </div>
         </Card>
       ))}
+      {can("diagnostics") && (
+        <Card className="flex flex-col gap-3 p-5">
+          <h2 className="text-xl font-bold text-ink">Diagnostics</h2>
+          <p className="text-sm text-ink-2">
+            If something isn’t working, send this app’s recent logs to OIS staff so they can look into
+            it. Nothing is sent unless you choose to.
+          </p>
+          <div>
+            <SendDiagnosticsButton />
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

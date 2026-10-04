@@ -3,6 +3,7 @@ import {Link, useParams} from "@tanstack/react-router";
 import {Button, buttonVariants, ConfirmButton, type DataColumn, DataTable, EmptyState, StatusPill, Switch} from "@ois/ui";
 import {Activity, Building2, CircleDot, Gauge, Map as MapIcon, Plus, Type} from "lucide-react";
 
+import {swatchCss} from "@/components/map/lib/colors";
 import {FcaMapView} from "@/components/map/FcaMapView";
 import {
   useArchiveEventFca,
@@ -61,7 +62,7 @@ export function EventFcasSection({ eventId }: { eventId: number }) {
         cell: (c) => (
           <span className="flex items-center gap-2 whitespace-nowrap">
             {/* The FCA's colour is user data. */}
-            <span className="size-3 shrink-0 rounded-full" style={{ background: c.row.original.color }} />
+            <span className="size-3 shrink-0 rounded-full" style={{ background: swatchCss(c.row.original.color) }} />
             <span className="font-mono font-semibold">{c.row.original.name || "Untitled"}</span>
           </span>
         ),

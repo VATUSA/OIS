@@ -16,6 +16,7 @@ pub const DOMAINS: &[&str] = &[
     "api_keys",
     "audit",
     "auth",
+    "diagnostics",
     "discord",
     "emails",
     "events",
@@ -150,6 +151,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.surface_data.update", // manage an airport's gates/ramp areas/taxiways (facility-scoped)
         "flow.aircraft_profiles.read", // view aircraft performance profiles
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
+        "flow.sectors.read",        // view ATC sector volumes on the admin sector map
+        "flow.monitor.read",        // view Airspace Monitor sectors and their alert parameters
+        "flow.monitor.update",      // set a sector's Monitor Alert Parameter (facility-scoped)
         // --- system: background-jobs viewer (read status; update = trigger a run) ---
         "system.jobs.read",
         "system.jobs.update",
@@ -157,6 +161,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "stats.data.read",
         "stats.capture.update",
         "stats.capture.delete",
+        // --- diagnostics: desktop "Send diagnostics" reports (#629) ---
+        "diagnostics.reports.read",
+        "diagnostics.reports.delete",
         // --- discord / integration: outbound-job queue (the bot) + guild config mapping ---
         "discord.config.read",
         "discord.config.update",

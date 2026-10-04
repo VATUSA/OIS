@@ -18,10 +18,14 @@ use dm::send_claim_dm;
 use thread::create_event_thread;
 use tmi::post_tmi;
 
+/// The bot's name on the job queue: it leases only jobs enqueued for `discord` (#590), which the
+/// backend's `integration::DISCORD_CONSUMER` stamps on everything it enqueues.
+const CONSUMER: &str = "discord";
+
 /// Poll → perform → ack, forever. One job's failure never stops the loop.
 pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
     loop {
-        match api.lease_jobs(10).await {
+        match api.lease_jobs(CONSUMER, 10).await {
             Ok(jobs) => {
                 for job in jobs {
                     let id = job.id.clone();
@@ -31,14 +35,18 @@ pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
                     let attempt = Some(job.attempt_count);
                     match perform_job(&api, &http, &job).await {
                         Ok(result) => {
-                            if let Err(e) = api.ack_job(&id, true, result, None, attempt).await {
+                            if let Err(e) = api
+                                .ack_job(CONSUMER, &id, true, result, None, attempt)
+                                .await
+                            {
                                 tracing::error!(error = %e, job = %id, "ack(success) failed");
                             }
                         }
                         Err(reason) => {
                             tracing::warn!(job = %id, reason, "job failed; nacking for retry");
-                            if let Err(e) =
-                                api.ack_job(&id, false, None, Some(&reason), attempt).await
+                            if let Err(e) = api
+                                .ack_job(CONSUMER, &id, false, None, Some(&reason), attempt)
+                                .await
                             {
                                 tracing::error!(error = %e, job = %id, "ack(failure) failed");
                             }
