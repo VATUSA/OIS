@@ -22,6 +22,7 @@ surface, and its Discord touchpoints.
 | [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
 | [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — no data model, permissions, API or Discord of its own) |
+| [diagnostics.md](diagnostics.md)                 | diagnostics          | built |
 
 Every spec above is built. The "diverged from original spec" ones have live migrations,
 handlers, and routes, but the shipped shape differs from the original design — each doc

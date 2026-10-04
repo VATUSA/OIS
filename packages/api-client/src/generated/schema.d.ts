@@ -100,6 +100,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_report"];
+        put?: never;
+        post?: never;
+        /** Deletes a report — e.g. when its sender asks for their data to be erased. */
+        delete: operations["delete_report"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The report's logs, as the gzip file the desktop sent. */
+        get: operations["get_report_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/groups": {
         parameters: {
             query?: never;
@@ -4348,6 +4398,68 @@ export interface components {
             expires_at: string;
             token: string;
         };
+        /** @description One report in full, apart from the logs (downloaded separately as gzip). */
+        DiagnosticsReport: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: int32 */
+            logs_bytes: number;
+            /**
+             * @description Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+             *     webview's log tail, WebGL2 availability, updater status.
+             */
+            meta: Record<string, never>;
+            note: string;
+            os: string;
+            os_version: string;
+            route: string;
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            webview_version: string;
+            window_label: string;
+        };
+        /** @description A page of diagnostics reports, newest first. */
+        DiagnosticsReportPage: {
+            items: components["schemas"]["DiagnosticsReportSummary"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+         *     the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+         */
+        DiagnosticsReportSummary: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            has_note: boolean;
+            id: string;
+            /**
+             * Format: int32
+             * @description Size of the gzipped logs.
+             */
+            logs_bytes: number;
+            os: string;
+            os_version: string;
+            route: string;
+            /** @description The sender's VATUSA home facility, when synced. */
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            /** @description `main`, a route window (`window-…`) or a pop-out (`popout-…`). */
+            window_label: string;
+        };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
          *     resolves the Discord id to the linked OIS user and claims a slot on their behalf. `start_hhmm` /
@@ -7097,6 +7209,137 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_reports: {
+        parameters: {
+            query?: {
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReportPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report_logs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The gzipped log files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": number[];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -67,6 +67,7 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
         jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_diagnostics_report_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_departure_runway_prune(state.jobs.clone(), pool.clone());
         // Predict a departure runway for pending departures (#511). After the gates refresh above, so
         // the first pass has a catalog to match stands against.
