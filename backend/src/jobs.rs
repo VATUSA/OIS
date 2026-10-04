@@ -15,6 +15,7 @@ use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
+use crate::feed::sectors::SectorTable;
 use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::job_registry::{JobRegistry, run_interval};
@@ -23,6 +24,7 @@ use crate::realtime::{Events, WsEvent, topic};
 use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::airport_surface as airport_surface_repo;
+use crate::repos::airspace_sectors as airspace_sectors_repo;
 use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
@@ -124,6 +126,13 @@ const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How often to reload aircraft performance profiles from the DB (staff edits are rare, and the
 /// handler force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often to reload ATC sector volumes from the DB. Their only writer is the offline importer,
+/// a separate process the server can't hear, so this tick is how an import goes live.
+const AIRSPACE_SECTORS_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often the Monitor Alert Parameter cache reloads (#598). A write reloads only its own replica,
+/// so this bounds how long another replica shows the old value. The table is tiny, so poll often.
+const SECTOR_MAPS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
@@ -437,6 +446,91 @@ pub fn spawn_aircraft_profiles_refresh(
                     Ok(table) => {
                         profiles.store(Arc::new(table));
                         Ok("reloaded".to_string())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the ATC sector volume cache current for the DB-less feed (#594): load at startup, then
+/// reload periodically so an offline import goes live. Fails safe — a failed load keeps the
+/// current table (initially empty).
+pub fn spawn_airspace_sectors_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    sectors: Arc<ArcSwap<SectorTable>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "airspace_sectors_refresh",
+        "Reload ATC sector volumes from the DB",
+        AIRSPACE_SECTORS_INTERVAL,
+        move || {
+            let (pool, sectors) = (pool.clone(), sectors.clone());
+            async move {
+                match airspace_sectors_repo::load_all(&pool).await {
+                    Ok(table) => {
+                        let n = table.volumes.len();
+                        sectors.store(Arc::new(table));
+                        Ok(format!("{n} volumes"))
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the Monitor Alert Parameter cache current (#598). Writes force-reload it
+/// (`handlers::monitor`); this is the backstop. Fails safe — a failed load keeps the current map.
+pub fn spawn_sector_maps_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    maps: Arc<ArcSwap<crate::feed::sectors::SectorMaps>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "sector_maps_refresh",
+        "Reload Monitor Alert Parameters from the DB",
+        SECTOR_MAPS_INTERVAL,
+        move || {
+            let (pool, maps) = (pool.clone(), maps.clone());
+            async move {
+                match crate::repos::sector_maps::load_all(&pool).await {
+                    Ok(loaded) => {
+                        let n = loaded.len();
+                        maps.store(Arc::new(loaded));
+                        Ok(format!("{n} overrides"))
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the sector consolidation cache current (#599). Writes force-reload it (`handlers::monitor`);
+/// this is the backstop, and what carries another replica's write. Fails safe.
+pub fn spawn_sector_consolidations_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    consolidations: Arc<ArcSwap<crate::feed::monitor::Consolidations>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "sector_consolidations_refresh",
+        "Reload sector consolidations from the DB",
+        SECTOR_MAPS_INTERVAL,
+        move || {
+            let (pool, consolidations) = (pool.clone(), consolidations.clone());
+            async move {
+                match crate::repos::sector_consolidations::load_all(&pool).await {
+                    Ok(loaded) => {
+                        let n = loaded.len();
+                        consolidations.store(Arc::new(loaded));
+                        Ok(format!("{n} consolidated sectors"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
@@ -1948,6 +2042,42 @@ mod outbound_job_reaper_tests {
     #[sqlx::test]
     async fn an_empty_queue_is_not_an_error(pool: PgPool) {
         assert_eq!(outbound_job_reaper_once(&pool).await.unwrap(), "0 requeued");
+    }
+}
+
+#[cfg(test)]
+mod airspace_sectors_refresh_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use sqlx::PgPool;
+
+    use super::spawn_airspace_sectors_refresh;
+    use crate::{
+        feed::sectors::{SectorTable, tests::volume},
+        job_registry::JobRegistry,
+        repos::airspace_sectors,
+    };
+
+    /// The importer writes from another process, so this job is the only way an import reaches the
+    /// feed's cache: its first tick must load what is in the table.
+    #[sqlx::test]
+    async fn the_job_loads_imported_volumes_into_the_cache(pool: PgPool) {
+        let vols = [volume("ZDC", "01001")];
+        airspace_sectors::replace_artcc(&pool, "ZDC", &vols, "s", "1")
+            .await
+            .unwrap();
+        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+
+        spawn_airspace_sectors_refresh(Arc::new(JobRegistry::new()), pool, cache.clone());
+
+        for _ in 0..100 {
+            if !cache.load().volumes.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(cache.load().volumes, vols);
     }
 }
 

@@ -14,7 +14,7 @@ use crate::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
         api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs, events, facilities,
         facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
-        jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
+        jobs as jobs_handler, metrics as metrics_handler, monitor, preferences, public, runway,
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
@@ -479,6 +479,22 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps",
+            get(monitor::list_sector_maps),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps/{sector_id}",
+            put(monitor::set_sector_map),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations",
+            get(monitor::list_consolidations),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
+            put(monitor::consolidate_sector).delete(monitor::release_sector),
         )
         // Shared named map routes (polylines)
         .route(
