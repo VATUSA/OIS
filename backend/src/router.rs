@@ -126,10 +126,7 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             get(flow::flight_advisory),
         )
         // Inbound VATUSA roster-change webhook — no session; verified by HMAC signature.
-        .route(
-            "/api/v1/webhooks/vatusa/{facility}",
-            post(webhooks::vatusa_webhook),
-        )
+        .route("/api/v1/webhooks/vatusa", post(webhooks::vatusa_webhook))
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))
@@ -152,6 +149,15 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             get(access::list_group_members)
                 .post(access::add_group_member)
                 .delete(access::remove_group_member),
+        )
+        // VATUSA role → group mappings — #548
+        .route(
+            "/api/v1/admin/vatusa-role-mappings",
+            get(access::list_vatusa_role_mappings).post(access::create_vatusa_role_mapping),
+        )
+        .route(
+            "/api/v1/admin/vatusa-role-mappings/{id}",
+            delete(access::delete_vatusa_role_mapping),
         )
         // TMU — Traffic Management Initiatives
         .route(

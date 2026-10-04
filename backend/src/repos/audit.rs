@@ -142,7 +142,12 @@ pub async fn resolve_service_account_actor_id(
     .await
 }
 
-pub async fn record_audit(pool: &PgPool, entry: AuditEntry) -> Result<(), ApiError> {
+/// Takes any executor so a caller can audit inside its own transaction — the VATUSA reconciler does,
+/// so a grant and its audit row commit or roll back together (#548). A `&PgPool` still works.
+pub async fn record_audit<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    entry: AuditEntry,
+) -> Result<(), ApiError> {
     // before/after are serialized to text and cast to jsonb so we don't need sqlx's
     // `json` feature. ip is cast to inet (null-safe).
     let before = entry
@@ -171,7 +176,7 @@ pub async fn record_audit(pool: &PgPool, entry: AuditEntry) -> Result<(), ApiErr
     .bind(before)
     .bind(after)
     .bind(entry.ip_address)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
 

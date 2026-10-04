@@ -312,6 +312,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/vatusa-role-mappings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_vatusa_role_mappings"];
+        put?: never;
+        post: operations["create_vatusa_role_mapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/vatusa-role-mappings/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_vatusa_role_mapping"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/airport-configs": {
         parameters: {
             query?: never;
@@ -4100,6 +4132,16 @@ export interface components {
             stop_time?: string | null;
             structured?: null | components["schemas"]["NtmlRestriction"];
         };
+        /**
+         * @description Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+         *     required and audited.
+         */
+        CreateVatusaRoleMappingRequest: {
+            facility?: string | null;
+            reason: string;
+            role_name: string;
+            vatusa_role: string;
+        };
         /** @description A manually-added runway end (for fields the bundled dataset lacks). */
         CustomEnd: {
             /** Format: int32 */
@@ -6844,6 +6886,27 @@ export interface components {
             facility: string;
             role: string;
         };
+        /**
+         * @description One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+         *     any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+         */
+        VatusaRoleMappingBody: {
+            /** Format: date-time */
+            created_at: string;
+            facility?: string | null;
+            /** Format: int64 */
+            id: number;
+            role_name: string;
+            vatusa_role: string;
+        };
+        /**
+         * @description Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+         *     rather than free text, so a role name that would never match can't be entered.
+         */
+        VatusaRoleMappingList: {
+            known_vatusa_roles: string[];
+            mappings: components["schemas"]["VatusaRoleMappingBody"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -7960,6 +8023,128 @@ export interface operations {
                 headers: {
                     /** @description Seconds until the next request will be accepted. */
                     "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_vatusa_role_mappings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVatusaRoleMappingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mapping id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content?: never;

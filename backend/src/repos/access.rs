@@ -307,9 +307,11 @@ pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
 ];
 
 /// All permission names in the catalog (the assignable set for the editor).
-pub async fn fetch_access_catalog_names(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+pub async fn fetch_access_catalog_names<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+) -> Result<Vec<String>, ApiError> {
     sqlx::query_scalar::<_, String>("select name from access.permissions order by name")
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .map_err(|_| ApiError::Internal)
 }
@@ -714,8 +716,8 @@ pub async fn revoke_server_admin(
 
 /// All direct permission grants (granted = true), as `(artcc_id, permission_name)`.
 /// `artcc_id = None` is national. Ordered national-first then by name.
-pub async fn fetch_user_direct_grants(
-    pool: &PgPool,
+pub async fn fetch_user_direct_grants<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
@@ -725,7 +727,7 @@ pub async fn fetch_user_direct_grants(
          order by artcc_id nulls first, permission_name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -908,8 +910,8 @@ pub async fn permission_scope(
 }
 
 /// All role grants, as `(artcc_id, role_name)`. `artcc_id = None` is national.
-pub async fn fetch_user_role_grants(
-    pool: &PgPool,
+pub async fn fetch_user_role_grants<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     user_id: &str,
 ) -> Result<Vec<(Option<String>, String)>, ApiError> {
     sqlx::query_as::<_, (Option<String>, String)>(
@@ -919,7 +921,7 @@ pub async fn fetch_user_role_grants(
          where user_id = $1 order by artcc_id nulls first, role_name",
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
