@@ -307,7 +307,7 @@ export function FcaDetail({
                 </Button>
               )}
             </div>
-            <Ladder flights={list} now={now} />
+            <Ladder flights={list} now={now} name={fca.name} />
           </div>
 
           <DndContext

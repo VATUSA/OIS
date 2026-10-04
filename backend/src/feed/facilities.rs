@@ -211,7 +211,9 @@ fn parse_vatspy(dat: &str) -> (HashMap<String, Vec<String>>, HashMap<String, Str
 fn normalize_artcc(fir: &str) -> Option<String> {
     match fir.trim().to_ascii_uppercase().as_str() {
         "PAZA" => Some("ZAN".into()),
-        "PHZH" => Some("ZHN".into()),
+        // `HCF`, not `ZHN`: Honolulu's OIS id (#556). Keying Hawaii's airports under `ZHN` put them
+        // out of reach of every grant and TMU scope, which all use `HCF`.
+        "PHZH" => Some("HCF".into()),
         "TJZS" => Some("ZSU".into()),
         f => {
             let b = f.as_bytes();
@@ -367,6 +369,23 @@ mod tests {
         assert_eq!(
             tr.get("N90"),
             Some(&vec!["KEWR".to_string(), "KJFK".to_string()])
+        );
+    }
+
+    /// VATUSA/OIS#556: Hawaii's airports were keyed `ZHN`, out of reach of every grant and TMU scope,
+    /// which use `HCF`.
+    #[test]
+    fn the_honolulu_fir_maps_to_hcf() {
+        assert_eq!(normalize_artcc("PHZH").as_deref(), Some("HCF"));
+        assert_eq!(
+            normalize_artcc("phzh").as_deref(),
+            Some("HCF"),
+            "case-insensitive"
+        );
+        assert_eq!(
+            normalize_artcc("KZNY").as_deref(),
+            Some("ZNY"),
+            "the K-prefix rule is untouched"
         );
     }
 }

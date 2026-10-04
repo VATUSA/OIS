@@ -25,7 +25,9 @@ pub async fn list_users(
 ) -> Result<Vec<AdminUserRow>, ApiError> {
     sqlx::query_as::<_, AdminUserRow>(&format!(
         "select u.cid, u.display_name, u.rating, \
-            coalesce(array_agg(distinct ur.role_name) filter (where ur.role_name is not null), '{{}}') as roles \
+            coalesce(array_agg(distinct ur.role_name) filter (where ur.role_name is not null), '{{}}') as roles, \
+            coalesce(array_agg(distinct ur.role_name || coalesce(':' || ur.artcc_id, '')) \
+                filter (where ur.role_name is not null), '{{}}') as scoped_roles \
          from identity.users u \
          left join access.user_roles ur on ur.user_id = u.id \
          where {USER_FILTER} \

@@ -402,6 +402,47 @@ pub fn render_cancellation(id: &AdvisoryIdent) -> String {
     .join("\n")
 }
 
+// ---- Discord job payloads ----------------------------------------------------------------------
+//
+// Moved here from `handlers::tmu` (#537 review) so the cleanup pass in `repos::tmu` can enqueue an
+// `adv_cancel` in the same transaction as the cancellation it reports. They are pure functions of the
+// stored row, which is why they sit beside the renderer rather than in a handler.
+
+/// The `adv_publish` job payload: the rendered document plus what the bot needs to post it.
+///
+/// The document is the **stored** `body`, not a re-render. It is what was reviewed and published, and
+/// re-rendering here would let the post differ from the row — the same reason `tmi_publish_job`
+/// assembles the row in one place. The bot stays a dumb renderer: it fences and splits, and decides
+/// nothing about content (#436's invariant, VATUSA/OIS#459).
+pub(crate) fn publish_job_payload(
+    channel_id: &str,
+    adv: &crate::models::AdvisoryBody,
+) -> serde_json::Value {
+    serde_json::json!({
+        "channel_id": channel_id,
+        "advisory_id": adv.id,
+        "document": adv.body,
+    })
+}
+
+/// The `adv_cancel` job payload: a short correction, not a re-post of the document.
+pub(crate) fn cancel_job_payload(
+    channel_id: &str,
+    adv: &crate::models::AdvisoryBody,
+) -> serde_json::Value {
+    serde_json::json!({
+        "channel_id": channel_id,
+        "advisory_id": adv.id,
+        "document": render_cancellation(&AdvisoryIdent {
+            facility: adv.facility.clone(),
+            number: adv.number,
+            issued_day: adv.issued_day,
+            // Stamped now: this is the moment the cancellation is being logged.
+            signed_at: chrono::Utc::now(),
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

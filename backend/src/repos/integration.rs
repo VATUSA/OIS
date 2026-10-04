@@ -244,17 +244,46 @@ pub async fn role_id(
     resolve_scoped_id(pool, "discord_roles", "role_id", name, facility).await
 }
 
+/// The group whose holders get pinged as a facility's EC(s).
+///
+/// A literal, and now a load-bearing one: since #545 an admin can create and delete groups, so this
+/// name is a dependency on runtime data rather than on a migration. `group_exists_ec` logs when it is
+/// missing, because the alternative is indistinguishable from "nobody assigned" — see below.
+const EC_ROLE: &str = "EC";
+
 /// Discord user ids of a facility's EC(s): OIS users holding the `EC` role scoped to that ARTCC (set
 /// via Access Control) who have a VATUSA-linked Discord. Empty if none assigned or none linked.
+///
+/// **An empty result used to be silent and ambiguous** (#545 AC7). The single caller
+/// (`handlers/events.rs`) publishes the event thread with no EC ping and no warning, so a renamed or
+/// deleted `EC` group looked exactly like a facility that simply has no EC assigned — a coordination
+/// failure discovered only when nobody turns up. The group's absence is now logged distinctly.
 pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>, ApiError> {
+    let role_exists =
+        sqlx::query_scalar::<_, bool>("select exists(select 1 from access.roles where name = $1)")
+            .bind(EC_ROLE)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    if !role_exists {
+        tracing::warn!(
+            role = EC_ROLE,
+            facility,
+            "the EC group does not exist, so no facility EC can be notified — was it renamed or \
+             deleted? (VATUSA/OIS#545)"
+        );
+        return Ok(Vec::new());
+    }
+
     sqlx::query_scalar::<_, String>(
         "select m.external_id \
          from access.user_roles ur \
          join integration.external_sync_mappings m \
            on m.system_code = 'discord' and m.entity_type = 'user' and m.local_id = ur.user_id \
-         where ur.role_name = 'EC' and ur.artcc_id = $1",
+         where ur.role_name = $2 and ur.artcc_id = $1",
     )
     .bind(facility)
+    .bind(EC_ROLE)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)

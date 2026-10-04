@@ -161,7 +161,14 @@ pub async fn grantable_permissions(
         }
         let (national, artccs) =
             match access_repo::permission_scope(pool, &user.id, &permission).await? {
-                access_repo::PermissionScope::National => (true, Vec::new()),
+                // `GrantablePermissionBody` has no way to say "national except ZDC", so a
+                // holder carrying a scoped deny is reported as non-national with no ARTCCs:
+                // it under-offers rather than inviting them to delegate where they are denied
+                // (VATUSA/OIS#543). Unreachable until something writes a deny.
+                access_repo::PermissionScope::National { except } if except.is_empty() => {
+                    (true, Vec::new())
+                }
+                access_repo::PermissionScope::National { .. } => (false, Vec::new()),
                 access_repo::PermissionScope::Facilities(set) => {
                     let mut v: Vec<String> = set.into_iter().collect();
                     v.sort();

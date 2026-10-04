@@ -46,13 +46,21 @@ function programIcaos(pkg: TmiPackage): Set<string> {
   );
 }
 
-type Kind = "program" | "restriction" | "ground_stop";
+type Kind = "program" | "restriction" | "ground_stop" | "advisory";
 
 const KINDS: { value: Kind; label: string }[] = [
   { value: "program", label: "Program" },
   { value: "restriction", label: "Restriction" },
   { value: "ground_stop", label: "Ground stop" },
+  { value: "advisory", label: "Advisory" },
 ];
+
+/** ADVZY document types an advisory item can be. Mirrors the backend's rendered kinds. */
+const ADVISORY_KINDS = [
+  { value: "reroute", label: "Reroute" },
+  { value: "gdp", label: "Ground delay program" },
+  { value: "ground_stop", label: "Ground stop" },
+] as const;
 
 const ENTRY_MODES = [
   { value: "free", label: "Free text" },
@@ -61,8 +69,8 @@ const ENTRY_MODES = [
 
 const kindLabel = (k: string) => KINDS.find((x) => x.value === k)?.label ?? k;
 
-/** One-line summary of an item from its kind + payload. */
-function itemSummary(item: TmiPackageItem): string {
+/** One-line summary of an item from its kind + payload. Exported for tests. */
+export function itemSummary(item: TmiPackageItem): string {
   const p = item.payload as unknown as Record<string, unknown>;
   const s = (k: string) => (p[k] == null ? "" : String(p[k]));
   if (item.kind === "program") {
@@ -73,6 +81,13 @@ function itemSummary(item: TmiPackageItem): string {
   }
   if (item.kind === "restriction") {
     return `${s("requesting")} → ${s("providing")} · ${s("restriction")}`;
+  }
+  if (item.kind === "advisory") {
+    const window = [p.valid_from, p.valid_to]
+      .map((t) => (typeof t === "string" ? formatZulu(t) : ""))
+      .filter(Boolean)
+      .join(" – ");
+    return `${s("facility")} · ${s("kind")}${window ? ` · ${window}` : ""}`;
   }
   return `${s("airport")} · ${s("scope") || "all"} · ${s("until") ? `${s("until")}z` : "UFN"}`;
 }
@@ -108,14 +123,31 @@ function AddItemForm({ eventId, packageId }: { eventId: number; packageId: strin
         start_time: parseZulu(f.start ?? "") ?? undefined,
         stop_time: parseZulu(f.stop ?? "") ?? undefined,
       };
-    } else {
+    } else if (kind === "ground_stop") {
       if (!f.airport) return;
       payload = {
         airport: f.airport,
         scope: f.scope || undefined,
         until: f.until || undefined,
       };
+    } else if (kind === "advisory") {
+      // The window is required, unlike a restriction's optional start/stop: an advisory with no
+      // window is never auto-removed, and the backend rejects one for that reason.
+      const from = parseZulu(f.validFrom ?? "");
+      const to = parseZulu(f.validTo ?? "");
+      if (!f.facility || !f.advKind || !f.body || !from || !to) return;
+      if (new Date(to) <= new Date(from)) return;
+      payload = {
+        facility: f.facility,
+        kind: f.advKind,
+        body: f.body,
+        valid_from: from,
+        valid_to: to,
+      };
     }
+    // The ground-stop branch used to be a bare `else`, so any kind added to the union above
+    // silently became a ground stop. Each kind now claims itself and `payload` stays null otherwise.
+    if (!payload) return;
     add.mutate(
       { packageId, kind, payload },
       {
@@ -210,6 +242,27 @@ function AddItemForm({ eventId, packageId }: { eventId: number; packageId: strin
             {field("scope", "scope (blank=all)", "w-36 uppercase")}
             {field("until", "until HHMM", "w-24 font-mono")}
           </>
+        )}
+        {kind === "advisory" && (
+          <div className="flex w-full flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {field("facility", "facility", "w-24 font-mono uppercase", "Issuing facility, e.g. DCC")}
+              <SegmentedControl
+                aria-label="Advisory type"
+                size="sm"
+                value={f.advKind ?? ""}
+                onChange={(v) => set("advKind", v)}
+                options={ADVISORY_KINDS as unknown as { value: string; label: string }[]}
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Required, unlike a restriction's optional start/stop: with no window the advisory
+                  would never be removed, which is half of what this feature is for. */}
+              {field("validFrom", "valid from DD/HHMMz", "w-40 font-mono")}
+              {field("validTo", "valid to DD/HHMMz", "w-40 font-mono")}
+            </div>
+            {field("body", "advisory text", "w-full")}
+          </div>
         )}
         <Button size="sm" onClick={submit} disabled={add.isPending}>
           <Plus />
