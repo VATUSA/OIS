@@ -52,13 +52,14 @@ pub mod topic {
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 11] = [
         RELEASE,
         FCA,
         GDP,
         TMI,
         GROUND_STOP,
         PROGRAM,
+        ADVISORY,
         CFR,
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
@@ -325,6 +326,8 @@ mod handshake_tests {
             "WS bot",
             None,
             &sha(SERVICE_ACCOUNT),
+            // #584 gave a credential an expiry; this fixture only needs it live for the test.
+            chrono::Utc::now() + chrono::Duration::days(1),
         )
         .await
         .unwrap();
