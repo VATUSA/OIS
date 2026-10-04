@@ -34,6 +34,20 @@ pub struct Attribution {
     pub actor_id: Option<String>,
 }
 
+impl Attribution {
+    /// For a machine's write (no user — a service account or a key), the actor that must already hold
+    /// the row for a conditional write to touch it (#585). People win, so a machine may only ever
+    /// replace, swap or clear its **own** release, and that has to be part of the write itself rather
+    /// than a read before it. `None` for a person, whose writes are unconditional. A machine with no
+    /// resolved actor gets `""`, which matches no row: fail closed.
+    pub fn machine_actor(&self) -> Option<&str> {
+        match self.user_id {
+            Some(_) => None,
+            None => Some(self.actor_id.as_deref().unwrap_or("")),
+        }
+    }
+}
+
 #[cfg(test)]
 impl Attribution {
     /// A user's attribution without resolving an actor — for repo-level tests only. Production code

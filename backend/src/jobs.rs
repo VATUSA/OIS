@@ -72,6 +72,12 @@ const OUTBOUND_JOB_LEASE_TIMEOUT_MINS: i64 = 5;
 /// drift silently the first time a route was added.
 const AUDIT_RETAIN_DAYS: i64 = 180;
 
+/// How long desktop diagnostics reports are kept (#629).
+///
+/// Thirty days — far shorter than the audit log's: a report carries megabytes of a user's logs and is
+/// only useful while the bug it describes is being worked, so keeping it longer would only hold data.
+const DIAGNOSTICS_RETAIN_DAYS: i64 = 30;
+
 /// How often the departure-runway ladder runs (#511).
 ///
 /// A minute, matching `FLIGHT_EXCLUSIONS_INTERVAL`: an assignment only has to be in place before a
@@ -1058,6 +1064,38 @@ pub fn spawn_audit_log_prune(reg: Arc<JobRegistry>, pool: PgPool) {
             }
         },
     ));
+}
+
+/// Delete diagnostics reports past [`DIAGNOSTICS_RETAIN_DAYS`] (#629). Its own job, like
+/// `spawn_audit_log_prune`, so the retention policy is visible and runnable in the admin jobs view.
+pub fn spawn_diagnostics_report_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "diagnostics_report_prune",
+        "Delete desktop diagnostics reports past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move {
+                diagnostics_report_prune_once(&pool, Utc::now())
+                    .await
+                    .map(|n| format!("{n} deleted"))
+                    .map_err(|_| "prune failed".to_string())
+            }
+        },
+    ));
+}
+
+/// One pass of [`spawn_diagnostics_report_prune`] as of `now`, so a test can place the cutoff.
+pub(crate) async fn diagnostics_report_prune_once(
+    pool: &PgPool,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, crate::errors::ApiError> {
+    crate::repos::diagnostics::prune_reports(
+        pool,
+        now - chrono::Duration::days(DIAGNOSTICS_RETAIN_DAYS),
+    )
+    .await
 }
 
 /// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).

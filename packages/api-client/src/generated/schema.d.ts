@@ -100,6 +100,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_report"];
+        put?: never;
+        post?: never;
+        /** Deletes a report — e.g. when its sender asks for their data to be erased. */
+        delete: operations["delete_report"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The report's logs, as the gzip file the desktop sent. */
+        get: operations["get_report_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/groups": {
         parameters: {
             query?: never;
@@ -127,6 +177,22 @@ export interface paths {
         put: operations["update_group"];
         post?: never;
         delete: operations["delete_group"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/groups/{name}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_group_members"];
+        put?: never;
+        post: operations["add_group_member"];
+        delete: operations["remove_group_member"];
         options?: never;
         head?: never;
         patch?: never;
@@ -180,6 +246,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/grantable-permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The permission picker's source: what the calling admin holds, minus what a service account may
+         *     never hold — exactly what `set_service_account_permissions` will accept from them.
+         */
+        get: operations["grantable_service_account_permissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/roles": {
         parameters: {
             query?: never;
@@ -216,6 +302,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace an account's direct `(permission, ARTCC)` grants (#584). Each must be within the calling
+         *     admin's own live authority (403 otherwise), and none may let a machine mint credentials (400).
+         */
+        put: operations["set_service_account_permissions"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/{id}/roles": {
         parameters: {
             query?: never;
@@ -241,6 +347,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+         *     account's authority — so, like a grant, it is capped: the admin must hold everything the account
+         *     holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
+         */
         post: operations["rotate_service_account"];
         delete?: never;
         options?: never;
@@ -291,6 +402,38 @@ export interface paths {
         put?: never;
         post: operations["update_user_access"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/vatusa-role-mappings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_vatusa_role_mappings"];
+        put?: never;
+        post: operations["create_vatusa_role_mapping"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/vatusa-role-mappings/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_vatusa_role_mapping"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3418,7 +3561,16 @@ export interface components {
             cid: number;
             display_name: string;
             rating?: string | null;
+            /** @description Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks. */
             roles: string[];
+            /**
+             * @description The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+             *
+             *     Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+             *     render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+             *     have broken any consumer without the schema type moving to warn them.
+             */
+            scoped_roles: string[];
         };
         /**
          * @description One advisory. `number` is its identity within `facility` on `issued_day` — see
@@ -4059,6 +4211,11 @@ export interface components {
         };
         CreateServiceAccountRequest: {
             description?: string | null;
+            /**
+             * Format: int32
+             * @description Credential lifetime in days: default 90, at most 365.
+             */
+            expires_in_days?: number | null;
             name: string;
         };
         CreateTmiRequest: {
@@ -4074,6 +4231,16 @@ export interface components {
             /** Format: date-time */
             stop_time?: string | null;
             structured?: null | components["schemas"]["NtmlRestriction"];
+        };
+        /**
+         * @description Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+         *     required and audited.
+         */
+        CreateVatusaRoleMappingRequest: {
+            facility?: string | null;
+            reason: string;
+            role_name: string;
+            vatusa_role: string;
         };
         /** @description A manually-added runway end (for fields the bundled dataset lacks). */
         CustomEnd: {
@@ -4235,6 +4402,12 @@ export interface components {
             /** Format: date-time */
             cfr?: string | null;
             cfr_issued: boolean;
+            /**
+             * Format: int64
+             * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+             *     is issued for this callsign.
+             */
+            cfr_version?: number | null;
             /** Format: int64 */
             delay_min: number;
             /** @description Origin airport ICAO (a facility query spans several). */
@@ -4280,6 +4453,68 @@ export interface components {
             /** Format: date-time */
             expires_at: string;
             token: string;
+        };
+        /** @description One report in full, apart from the logs (downloaded separately as gzip). */
+        DiagnosticsReport: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: int32 */
+            logs_bytes: number;
+            /**
+             * @description Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+             *     webview's log tail, WebGL2 availability, updater status.
+             */
+            meta: Record<string, never>;
+            note: string;
+            os: string;
+            os_version: string;
+            route: string;
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            webview_version: string;
+            window_label: string;
+        };
+        /** @description A page of diagnostics reports, newest first. */
+        DiagnosticsReportPage: {
+            items: components["schemas"]["DiagnosticsReportSummary"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+         *     the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+         */
+        DiagnosticsReportSummary: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            has_note: boolean;
+            id: string;
+            /**
+             * Format: int32
+             * @description Size of the gzipped logs.
+             */
+            logs_bytes: number;
+            os: string;
+            os_version: string;
+            route: string;
+            /** @description The sender's VATUSA home facility, when synced. */
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            /** @description `main`, a route window (`window-…`) or a pop-out (`popout-…`). */
+            window_label: string;
         };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
@@ -4711,6 +4946,11 @@ export interface components {
              *     drawing the aircraft's full path across the FCA.
              */
             path: number[][];
+            /**
+             * Format: int64
+             * @description The release's version, for `If-Match` (#585); null when not released.
+             */
+            release_version?: number | null;
             /** @description True when this aircraft has a frozen (issued) CFR release. */
             released: boolean;
             /**
@@ -5348,6 +5588,47 @@ export interface components {
             /** Format: int64 */
             user_count: number;
         };
+        /** @description One holder of a group, at one scope. `artcc_id` null is national. */
+        GroupMemberBody: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            display_name: string;
+            rating?: string | null;
+        };
+        /** @description A page of a group's holders. */
+        GroupMemberPage: {
+            items: components["schemas"]["GroupMemberBody"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description Add or remove one membership, at one scope.
+         *
+         *     `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+         *     nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+         */
+        GroupMemberRequest: {
+            artcc_id?: string | null;
+            /** Format: int64 */
+            cid: number;
+            reason: string;
+        };
+        /**
+         * @description One group the caller holds, as a template for an API key's permissions (#550).
+         *
+         *     No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+         *     its owner's live access when it is created, so expanding a template cannot grant more than its
+         *     owner holds.
+         */
+        HeldGroupBody: {
+            name: string;
+            permissions: string[];
+        };
         /**
          * @description One FCA-metered ground departure in the IDST console. One row per metering FCA — a flight metered
          *     by several FCAs appears once per FCA, each with its own release.
@@ -5373,6 +5654,11 @@ export interface components {
             fca_id: string;
             fca_name: string;
             released: boolean;
+            /**
+             * @description The display name of the service account or API key that issued this release, or null when a
+             *     person did (or it is not released) — so a controller can see a time came from a tool (#585).
+             */
+            released_by_machine?: string | null;
             /**
              * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
              *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
@@ -5919,6 +6205,11 @@ export interface components {
         RevokeApiKeyRequest: {
             reason?: string | null;
         };
+        /** @description Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365). */
+        RotateServiceAccountRequest: {
+            /** Format: int32 */
+            expires_in_days?: number | null;
+        };
         /**
          * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
          *     track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
@@ -6117,21 +6408,38 @@ export interface components {
         };
         /** @description The acting user's own effective access (staff debug view). */
         SelfAccessBody: {
+            /**
+             * @description The groups the caller holds, each with the permissions it grants (#550).
+             *
+             *     This is what an API key is templated from now that presets are gone. It lists only the
+             *     caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+             *     listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+             *     path at all.
+             */
+            groups: components["schemas"]["HeldGroupBody"][];
             permissions: Record<string, never>;
             role_names: string[];
             server_admin: boolean;
         };
-        /** @description A service account as listed (no secret). `roles` are its granted role names. */
+        /**
+         * @description A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+         *     direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+         *     been used (or, if never used, issued) in 30 days.
+         */
         ServiceAccountBody: {
             /** Format: date-time */
             created_at: string;
             description?: string | null;
+            /** Format: date-time */
+            expires_at?: string | null;
             id: string;
             key: string;
             /** Format: date-time */
             last_used_at?: string | null;
             name: string;
+            permissions: components["schemas"]["ApiKeyPermissionBody"][];
             roles: string[];
+            stale: boolean;
             status: string;
         };
         /**
@@ -6149,6 +6457,10 @@ export interface components {
         /** @description Toggle an event FCA's auto-publish flag (publish 30 min before the event starts). */
         SetFcaAutoRequest: {
             auto_publish: boolean;
+        };
+        /** @description A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national. */
+        SetServiceAccountPermissionsRequest: {
+            permissions: components["schemas"]["ApiKeyPermissionInput"][];
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
@@ -6769,6 +7081,27 @@ export interface components {
             facility: string;
             role: string;
         };
+        /**
+         * @description One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+         *     any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+         */
+        VatusaRoleMappingBody: {
+            /** Format: date-time */
+            created_at: string;
+            facility?: string | null;
+            /** Format: int64 */
+            id: number;
+            role_name: string;
+            vatusa_role: string;
+        };
+        /**
+         * @description Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+         *     rather than free text, so a role name that would never match can't be entered.
+         */
+        VatusaRoleMappingList: {
+            known_vatusa_roles: string[];
+            mappings: components["schemas"]["VatusaRoleMappingBody"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -6966,6 +7299,137 @@ export interface operations {
             };
         };
     };
+    list_reports: {
+        parameters: {
+            query?: {
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReportPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report_logs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The gzipped log files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": number[];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_groups: {
         parameters: {
             query?: never;
@@ -7132,6 +7596,143 @@ export interface operations {
             };
         };
     };
+    list_group_members: {
+        parameters: {
+            query?: {
+                /** @description Name substring or CID prefix */
+                q?: string;
+                /** @description 1-based page */
+                page?: number;
+                /** @description Rows per page (default 25, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupMemberPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_group_member: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Group name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupMemberRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_jobs: {
         parameters: {
             query?: never;
@@ -7250,6 +7851,32 @@ export interface operations {
             };
         };
     };
+    grantable_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the caller may grant a service account, with the scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantablePermissionBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_service_account_roles: {
         parameters: {
             query?: never;
@@ -7309,6 +7936,56 @@ export interface operations {
             };
         };
     };
+    set_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Service account id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetServiceAccountPermissionsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_service_account_roles: {
         parameters: {
             query?: never;
@@ -7345,6 +8022,12 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -7363,7 +8046,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional lifetime; default 90 days */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["RotateServiceAccountRequest"];
+            };
+        };
         responses: {
             /** @description Rotated; new token shown once */
             200: {
@@ -7374,7 +8062,19 @@ export interface operations {
                     "application/json": components["schemas"]["ServiceAccountTokenBody"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7504,6 +8204,128 @@ export interface operations {
                 };
             };
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_vatusa_role_mappings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVatusaRoleMappingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VatusaRoleMappingBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_vatusa_role_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Mapping id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11529,7 +12351,12 @@ export interface operations {
     mark_release: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Replace only this release version (#585) */
+                "If-Match"?: string | null;
+                /** @description `*`: create only if the flight holds no release (#585) */
+                "If-None-Match"?: string | null;
+            };
             path: {
                 /** @description FCA id */
                 id: string;
@@ -11543,6 +12370,73 @@ export interface operations {
                 "application/json": components["schemas"]["ReleaseRequest"];
             };
         };
+        responses: {
+            /** @description Released; `ETag` is the new version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FcaFlight"][];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not replace it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent neither `If-Match` nor `If-None-Match` */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    clear_release: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Clear only this release version (#585) */
+                "If-Match"?: string | null;
+            };
+            path: {
+                /** @description FCA id */
+                id: string;
+                /** @description Aircraft callsign */
+                callsign: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             200: {
                 headers: {
@@ -11570,37 +12464,22 @@ export interface operations {
                 };
                 content?: never;
             };
-        };
-    };
-    clear_release: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description FCA id */
-                id: string;
-                /** @description Aircraft callsign */
-                callsign: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["FcaFlight"][];
-                };
-            };
-            401: {
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not clear it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            404: {
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent no `If-Match` */
+            428: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11643,6 +12522,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14201,7 +15087,12 @@ export interface operations {
     issue_cfr: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Re-issue only this CFR version (#585) */
+                "If-Match"?: string | null;
+                /** @description `*`: issue only if the flight holds no CFR (#585) */
+                "If-None-Match"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -14211,6 +15102,7 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Issued; `ETag` is the new version */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -14231,12 +15123,36 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not replace it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent neither `If-Match` nor `If-None-Match` */
+            428: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     release_cfr: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Release only this CFR version (#585) */
+                "If-Match"?: string | null;
+            };
             path: {
                 /** @description Flight callsign */
                 callsign: string;
@@ -14251,6 +15167,12 @@ export interface operations {
                 };
                 content?: never;
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -14258,6 +15180,27 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not release it */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The precondition failed; `ETag` is the current version */
+            412: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A machine sent no `If-Match` */
+            428: {
                 headers: {
                     [name: string]: unknown;
                 };

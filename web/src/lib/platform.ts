@@ -68,7 +68,8 @@ export type Capability =
   | "globalHotkeys"
   | "audioAlerts"
   | "windowControls"
-  | "fileDialogs";
+  | "fileDialogs"
+  | "diagnostics";
 
 // What is implemented lives in `platform-flags.ts`, so a test can turn a flag on (VATUSA/OIS#345).
 

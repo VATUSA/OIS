@@ -29,4 +29,12 @@ An **issued** release doesn't change on its own — see [Release times](/tmu/rel
 Yes — see [Custom boards](/dashboard/boards). You can pin the specific stats, tables, and charts you
 check every session, arrange them yourself, and optionally share the board as a read-only link.
 
+## The desktop app isn't working right. How do I report it?
+
+Open **Settings** and use **Send diagnostics…** in the Diagnostics card (it's also on the "Something
+went wrong" and "Can't reach OIS" screens). Add a note about what you were doing and send it: OIS
+staff get the app's recent logs, its version, your operating system and the page you were on. Sign-in
+tokens are removed before anything is sent, nothing is sent unless you choose to, and reports are
+deleted after 30 days.
+
 > More questions will be added here as they come up.

@@ -117,6 +117,25 @@ pub fn ois_public_url() -> Option<String> {
     trimmed_env("OIS_PUBLIC_URL")
 }
 
+/// The key that encrypts stored secrets OIS must read back (today only the VATUSA webhook secret,
+/// #605): 32 bytes, base64-encoded, in `OIS_SECRET_KEY`. `None` when unset or malformed — callers
+/// treat that as "feature off" and log it, never panic, matching how `vatusa_api_key()` disables sync.
+pub fn ois_secret_key() -> Option<[u8; 32]> {
+    use base64::Engine;
+    let raw = trimmed_env("OIS_SECRET_KEY")?;
+    match base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    {
+        Some(key) => Some(key),
+        None => {
+            tracing::warn!("OIS_SECRET_KEY is set but is not 32 base64-encoded bytes; ignoring it");
+            None
+        }
+    }
+}
+
 pub fn build_cors_layer() -> CorsLayer {
     let layer = CorsLayer::new()
         .allow_credentials(true)
