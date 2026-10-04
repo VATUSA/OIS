@@ -81,6 +81,13 @@ impl Events {
         });
     }
 
+    /// Nudges this process's sockets only. For a signal every replica raises for itself — the feed
+    /// tick (#648): each replica polls VATSIM and installs its own snapshot, so fanning its tick out
+    /// would tell every client N times, and before the other replicas had the data.
+    pub fn publish_local(&self, topic: &str) {
+        self.deliver(topic);
+    }
+
     fn deliver(&self, topic: &str) {
         // An error only means nobody on this process is listening right now.
         let _ = self.local.send(WsEvent {
@@ -165,11 +172,7 @@ pub mod topic {
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-<<<<<<< HEAD
-    pub const ALL: [&str; 11] = [
-=======
-    pub const ALL: [&str; 13] = [
->>>>>>> origin/next
+    pub const ALL: [&str; 14] = [
         RELEASE,
         FCA,
         GDP,
@@ -181,12 +184,9 @@ pub mod topic {
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
         EVENT_REMINDER,
-<<<<<<< HEAD
         FEED_TICK,
-=======
         ACE,
         RUNWAY,
->>>>>>> origin/next
     ];
 }
 

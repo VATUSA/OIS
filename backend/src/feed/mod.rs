@@ -248,7 +248,7 @@ async fn apply_fetch(
 /// Apply a successful fetch, then tell live clients if it was a new publish (#648). The tick is sent
 /// only once [`apply_fetch`] has returned, with the snapshot installed and the lock released, so a
 /// client refetching on it reads the new data. `apply_fetch` holds no sender, so it can't tick early
-/// (#648 review). One in-process hub: a second replica would need #649 first.
+/// (#648 review). Local to this replica: every replica polls and ticks for itself (#649).
 async fn apply_and_tick(
     state: &FeedState,
     events: &crate::realtime::Events,
@@ -268,9 +268,7 @@ async fn apply_and_tick(
     )
     .await
     {
-        let _ = events.send(crate::realtime::WsEvent {
-            topic: crate::realtime::topic::FEED_TICK.to_string(),
-        });
+        events.publish_local(crate::realtime::topic::FEED_TICK);
     }
 }
 
@@ -369,7 +367,8 @@ mod tests {
     #[tokio::test]
     async fn the_poller_publishes_one_tick_per_new_publish_after_installing_it() {
         let state = new_state();
-        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let events = crate::realtime::Events::new(None);
+        let mut rx = events.subscribe();
         let (mut last, mut stale) = (None, 0u32);
 
         apply_and_tick(
