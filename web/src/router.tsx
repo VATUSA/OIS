@@ -36,6 +36,7 @@ import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
+import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
@@ -445,6 +446,13 @@ const planningAircraftProfilesRoute = createRoute({
   component: AircraftProfilesPage,
 });
 
+const planningSectorMapsRoute = createRoute({
+  getParentRoute: () => planningRoute,
+  path: "sector-maps",
+  staticData: { title: "Monitor alert parameters" },
+  component: SectorMapsPage,
+});
+
 const planningEventRoute = createRoute({
   getParentRoute: () => planningRoute,
   path: "events/$eventId",
@@ -667,6 +675,7 @@ const routeTree = rootRoute.addChildren([
       planningFacilityDocumentsRoute,
       planningAirportSurfaceRoute,
       planningAircraftProfilesRoute,
+      planningSectorMapsRoute,
       planningEventRoute,
       planningEventFcasRoute,
     ]),
