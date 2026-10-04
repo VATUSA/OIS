@@ -255,7 +255,7 @@ just test-js       # pnpm test
 just desktop-build # bundle the Tauri app for the host platform
 
 # the full local gate (run before calling anything done)
-just ci            # fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
+just ci            # migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
 ```
 
 First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`. `.env` is read
@@ -308,10 +308,15 @@ idempotent-friendly and numbered sequentially).
   ```
 
   A gap in the sequence is harmless; a repeat is fatal. If your unmerged PR collides, renumber it
-  *upward* past every open claim — not into a gap someone else may also take. The
-  `migration_versions_are_unique` test (`backend/src/lib.rs`) names the colliding files once both are
-  in one tree, but it cannot see across branches and nothing protects `next` from merging the second,
-  so a red push-to-`next` CI run is the signal.
+  *upward* past every open claim — not into a gap someone else may also take.
+
+  Three guards catch a duplicate, and they fail at different moments. The
+  `migration_versions_are_unique` test (`backend/src/lib.rs`) names the colliding files as soon as
+  both are in one tree, needing no database. `just check-migrations` (part of `just ci`) and the
+  `migrations` CI job run the same check against the PR's merge ref, so GitHub's "merge into base"
+  view catches a collision the branch alone cannot see. The image build then `needs: migrations`, so
+  a duplicate that slipped in behind a later merge can never be tagged and deployed. None of them can
+  see across two open branches, so the number you pick is still yours to get right.
 - **Config that must reach the feed** (aircraft profiles, e.g.) is cached in `AppState` behind
   `ArcSwap` and refreshed by a `jobs.rs` worker; the write handler also force-reloads the cache so
   edits apply immediately. Mirror that pattern for any new feed-visible config.
