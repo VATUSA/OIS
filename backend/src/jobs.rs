@@ -1327,7 +1327,19 @@ async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<
     match events_repo::ended_activated_packages(pool).await {
         Ok(ended) => {
             for (package_id, _event_id, actor) in ended {
-                match crate::handlers::events::deactivate_package(pool, &package_id, &actor).await {
+                // The person who last touched the package, as before; their actor too (#607).
+                let by = match crate::auth::principal::Attribution::for_user_id(pool, &actor).await
+                {
+                    Ok(by) => by,
+                    Err(e) => {
+                        tracing::warn!(
+                            package_id,
+                            "auto-archive: cannot attribute the package's person: {e:?}"
+                        );
+                        continue;
+                    }
+                };
+                match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
                     Ok(()) => changed += 1,
                     Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
                 }

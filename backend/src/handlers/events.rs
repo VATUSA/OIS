@@ -18,7 +18,7 @@ use crate::{
             EventsDebriefCreate, EventsDiscordPublish, EventsPlanRead, EventsPlanUpdate,
             EventsRateUpdate, EventsSupportUpdate, StatsCaptureUpdate,
         },
-        principal::Principal,
+        principal::{Actor, Attribution, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -33,9 +33,9 @@ use crate::{
         UpsertFcaRequest, UpsertProgramRequest,
     },
     repos::{
-        access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, flow as flow_repo, integration as integration_repo, org as org_repo,
-        stats as stats_repo, tmu as tmu_repo,
+        ace as ace_repo, availability as availability_repo, events as events_repo,
+        flow as flow_repo, integration as integration_repo, org as org_repo, stats as stats_repo,
+        tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -518,11 +518,11 @@ pub async fn get_event_dcc(
 pub async fn update_event_dcc(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateDccRequest>,
 ) -> Result<Json<DccRequestBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     if !DCC_STATUSES.contains(&payload.status.as_str()) {
@@ -533,7 +533,7 @@ pub async fn update_event_dcc(
     }
 
     let notes = payload.notes.unwrap_or_default();
-    events_repo::upsert_dcc(pool, id, &payload.status, notes.trim(), &user.id).await?;
+    events_repo::upsert_dcc(pool, id, &payload.status, notes.trim(), &by).await?;
     Ok(Json(
         events_repo::get_dcc(pool, id)
             .await?
@@ -551,8 +551,7 @@ pub async fn update_event_dcc(
 pub async fn list_event_facilities(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<FacilitySupportBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
@@ -600,11 +599,9 @@ pub async fn list_event_facilities(
     }
 
     // Editability is facility-scoped on events.support.update.
-    let principal = Principal::optional(current_user.as_ref(), current_api_key.as_ref());
-    let scope = match principal.as_ref() {
-        Some(p) => Some(p.permission_scope(&state, SUPPORT_PERMISSION).await?),
-        None => None,
-    };
+    let scope = principal
+        .permission_scope(&state, SUPPORT_PERMISSION)
+        .await?;
 
     let rows: Vec<FacilitySupportBody> = ids
         .into_iter()
@@ -616,10 +613,7 @@ pub async fn list_event_facilities(
                 .unwrap_or_default();
             airports.sort();
             let has_staffing = staffing.contains(&facility);
-            let editable = scope
-                .as_ref()
-                .map(|s| s.allows(Some(facility.as_str())))
-                .unwrap_or(false);
+            let editable = scope.allows(Some(facility.as_str()));
 
             match stored.get(&facility) {
                 Some(row) => FacilitySupportBody {
@@ -668,12 +662,10 @@ pub async fn list_event_facilities(
 pub async fn upsert_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, facility)): Path<(i64, String)>,
     Json(payload): Json<UpsertFacilitySupportRequest>,
 ) -> Result<Json<FacilitySupportBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
@@ -699,7 +691,7 @@ pub async fn upsert_event_facility(
         &facility,
         &payload.level,
         notes.trim(),
-        principal.user_id().ok_or(ApiError::Forbidden)?,
+        &principal.attribution(&state).await?,
     )
     .await?;
     let mut row = events_repo::get_facility_support(pool, id, &facility)
@@ -723,11 +715,9 @@ pub async fn upsert_event_facility(
 pub async fn delete_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, facility)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
 
@@ -844,20 +834,17 @@ pub async fn generate_tier1(
 pub async fn list_event_rates(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<AirportRateBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let mut rates = events_repo::list_airport_rates(pool, id).await?;
 
     // Mark each row editable per the caller's ARTCC scope for events.rate.update.
-    if let Some(principal) = Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
-        let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
-        for r in rates.iter_mut() {
-            let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
-            r.editable = scope.allows(artcc);
-        }
+    let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
+    for r in rates.iter_mut() {
+        let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
+        r.editable = scope.allows(artcc);
     }
     Ok(Json(rates))
 }
@@ -876,12 +863,10 @@ pub async fn list_event_rates(
 pub async fn upsert_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, icao)): Path<(i64, String)>,
     Json(payload): Json<UpsertAirportRateRequest>,
 ) -> Result<Json<AirportRateBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -913,7 +898,7 @@ pub async fn upsert_event_rate(
         artcc.as_deref().unwrap_or(""),
         payload.config_id.as_deref(),
         source,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
+        &principal.attribution(&state).await?,
     )
     .await?;
     let mut row = events_repo::get_airport_rate(pool, id, &icao)
@@ -936,11 +921,9 @@ pub async fn upsert_event_rate(
 pub async fn delete_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, icao)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -1003,11 +986,11 @@ pub async fn list_event_packages(
 pub async fn create_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<CreatePackageRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let name = payload.name.trim();
     if name.is_empty() {
@@ -1016,7 +999,7 @@ pub async fn create_event_package(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    events_repo::create_package(pool, id, name, &user.id).await?;
+    events_repo::create_package(pool, id, name, &by).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -1055,8 +1038,7 @@ pub async fn delete_event_package(
 pub async fn add_event_package_item(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<AddPackageItemRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
@@ -1074,7 +1056,6 @@ pub async fn add_event_package_item(
     // to exist. `auto_publish` activates a package from a 60-second job with no user at all, so an
     // activation-time check cannot be the only gate without leaving auto-publish ungated.
     if let Some(facility) = advisory_item_facility(&payload.kind, &canonical) {
-        let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
         // `create`, not `publish`: adding an item drafts a document, it does not issue one. Issuing
         // happens at activation, which checks `ADVISORY_ISSUE` (#537 review).
         require_advisory_authority(&state, &principal, &facility, "tmu.adv.create").await?;
@@ -1407,7 +1388,7 @@ pub(crate) async fn activate_package(
         events_repo::set_item_live_ref(&mut *tx, &item_id, &live_ref).await?;
     }
 
-    events_repo::mark_package_activated(&mut *tx, package_id, actor).await?;
+    events_repo::mark_package_activated(&mut *tx, package_id, &by).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
@@ -1425,15 +1406,15 @@ pub(crate) async fn activate_package(
 pub async fn deactivate_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if package_status(pool, id, &package_id).await? != "activated" {
         return Err(ApiError::Conflict); // only an activated package can be deactivated
     }
-    deactivate_package(pool, &package_id, &user.id).await?;
+    deactivate_package(pool, &package_id, &by).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -1443,7 +1424,7 @@ pub async fn deactivate_event_package(
 pub(crate) async fn deactivate_package(
     pool: &sqlx::PgPool,
     package_id: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     for item in events_repo::list_package_item_refs(pool, package_id).await? {
         let Some(reference) = item.live_ref.as_deref() else {
@@ -1513,7 +1494,7 @@ pub(crate) async fn deactivate_package(
             _ => {}
         }
     }
-    events_repo::mark_package_archived(pool, package_id, actor).await?;
+    events_repo::mark_package_archived(pool, package_id, by).await?;
     Ok(())
 }
 
@@ -1555,7 +1536,9 @@ pub async fn set_event_package_auto(
         pool,
         &package_id,
         payload.auto_publish,
-        principal.user_id().ok_or(ApiError::Forbidden)?,
+        // Still a person (arming stays user-only until the job can act as a machine, #607); their
+        // actor is recorded too, so the package's pair of attribution columns never disagrees.
+        &Attribution::for_user_id(pool, principal.user_id().ok_or(ApiError::Forbidden)?).await?,
     )
     .await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
@@ -1632,11 +1615,11 @@ pub async fn list_event_fcas(
 pub async fn create_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if payload.name.trim().is_empty() || payload.points.len() < 2 {
         return Err(ApiError::BadRequest);
@@ -1644,9 +1627,6 @@ pub async fn create_event_fca(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    // The events handlers still take a session user until #607's events PR; attribute them the way a
-    // migrated handler does, so a person's write fills both columns.
-    let by = Principal::User(user.clone()).attribution(&state).await?;
     flow_repo::create_event_fca(pool, id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1665,17 +1645,16 @@ pub async fn create_event_fca(
 pub async fn update_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if payload.name.trim().is_empty() || payload.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
     owned_event_fca(pool, id, &fca_id).await?;
-    let by = Principal::User(user.clone()).attribution(&state).await?;
     flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1784,21 +1763,17 @@ pub async fn set_event_fca_auto(
 pub async fn get_event_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<EventCaptureBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let can_edit = match Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
-        Some(principal) => !principal
-            .permission_scope(&state, CAPTURE_PERMISSION)
-            .await?
-            .is_empty(),
-        None => false,
-    };
+    let can_edit = !principal
+        .permission_scope(&state, CAPTURE_PERMISSION)
+        .await?
+        .is_empty();
     Ok(Json(capture_body(pool, id, can_edit).await?))
 }
 
@@ -1813,18 +1788,18 @@ pub async fn get_event_capture(
 pub async fn update_event_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<StatsCaptureUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateEventCaptureRequest>,
 ) -> Result<Json<EventCaptureBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
     let pre = payload.pre_minutes.unwrap_or(30).clamp(0, 720);
     let post = payload.post_minutes.unwrap_or(30).clamp(0, 720);
-    stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &user.id).await?;
+    stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &by).await?;
     Ok(Json(capture_body(pool, id, true).await?))
 }
 
@@ -2004,17 +1979,14 @@ async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, Api
 pub async fn get_event_debrief(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<EventDebriefBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let editable = match current_user.as_ref() {
-        Some(u) => access_repo::fetch_user_permission_names(pool, &u.id)
-            .await?
-            .iter()
-            .any(|p| p == "events.debrief.create"),
-        None => false,
-    };
+    let editable = !principal
+        .permission_scope(&state, "events.debrief.create")
+        .await?
+        .is_empty();
     let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
         Some((n, by, at)) => (n, by, Some(at)),
         None => (String::new(), None, None),
@@ -2038,11 +2010,11 @@ pub async fn get_event_debrief(
 pub async fn update_event_debrief(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsDebriefCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateEventDebriefRequest>,
 ) -> Result<Json<EventDebriefBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if payload.notes.len() > 20_000 {
         return Err(ApiError::BadRequest);
@@ -2050,7 +2022,7 @@ pub async fn update_event_debrief(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    events_repo::upsert_debrief(pool, id, &payload.notes, &user.id).await?;
+    events_repo::upsert_debrief(pool, id, &payload.notes, &by).await?;
     let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
         Some((n, by, at)) => (n, by, Some(at)),
         None => (payload.notes, None, None),
@@ -2531,9 +2503,14 @@ mod advisory_package_tests {
     }
 
     async fn package_with(pool: &PgPool, actor: &str, items: &[serde_json::Value]) -> String {
-        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         for it in items {
             let canonical = normalize_item("advisory", it.clone()).unwrap();
             events_repo::add_package_item(pool, &pkg, "advisory", &canonical)
@@ -2627,7 +2604,13 @@ mod advisory_package_tests {
         let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
         activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(advisories(&pool).await[0].2, "cancelled");
     }
@@ -2639,7 +2622,13 @@ mod advisory_package_tests {
         let pkg = package_with(&pool, &actor, &[item("DCC", 1), item("DCC", 2)]).await;
         activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         let rows = advisories(&pool).await;
         assert_eq!(rows.len(), 2);
@@ -2751,9 +2740,16 @@ mod advisory_permission_tests {
         .execute(pool)
         .await
         .unwrap();
-        let pkg = crate::repos::events::create_package(pool, EVENT, "Plan", &user)
-            .await
-            .unwrap();
+        let pkg = crate::repos::events::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &crate::auth::principal::Attribution::for_user_id(pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         (user, cookie, pkg)
     }
 
@@ -3188,9 +3184,14 @@ mod atomic_activation_tests {
     #[sqlx::test]
     async fn a_failed_activation_leaves_nothing_and_a_retry_publishes_each_item_once(pool: PgPool) {
         let actor = seed(&pool).await;
-        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
         add(&pool, &pkg, "advisory", advisory(BOOM)).await;
         arm_the_failure(&pool).await;
@@ -3257,9 +3258,14 @@ mod atomic_activation_tests {
     #[sqlx::test]
     async fn two_concurrent_activations_publish_once(pool: PgPool) {
         let actor = seed(&pool).await;
-        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
 
         let (a, b) = tokio::join!(
@@ -3297,9 +3303,14 @@ mod atomic_activation_tests {
     #[sqlx::test]
     async fn activating_an_active_package_again_changes_nothing(pool: PgPool) {
         let actor = seed(&pool).await;
-        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
         activate_package(&pool, EVENT, &pkg, &actor).await.unwrap();
 
@@ -3316,9 +3327,14 @@ mod atomic_activation_tests {
     #[sqlx::test]
     async fn a_failure_marking_the_package_rolls_back_its_items(pool: PgPool) {
         let actor = seed(&pool).await;
-        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
         sqlx::raw_sql(
             "create function t537_mark() returns trigger language plpgsql as $$ \
@@ -3341,9 +3357,14 @@ mod atomic_activation_tests {
     #[sqlx::test]
     async fn a_late_failure_rolls_back_every_kind_of_item(pool: PgPool) {
         let actor = seed(&pool).await;
-        let pkg = events_repo::create_package(&pool, EVENT, "Plan", &actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         let now = Utc::now();
         add(&pool, &pkg, "program", json!({"icao": "KDCA", "aar": 30})).await;
         add(
@@ -3433,9 +3454,14 @@ mod deactivation_correction_tests {
 
     /// A package with one restriction and one advisory, activated.
     async fn activated(pool: &PgPool, actor: &str) -> String {
-        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         let now = Utc::now();
         let restriction = normalize_item(
             "restriction",
@@ -3484,7 +3510,13 @@ mod deactivation_correction_tests {
             "nothing corrected before deactivation"
         );
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             corrections(&pool).await,
@@ -3502,7 +3534,13 @@ mod deactivation_correction_tests {
         let actor = seed(&pool, true).await;
         let pkg = activated(&pool, &actor).await;
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         let ntml: String = sqlx::query_scalar(
             "select payload->>'ntml' from integration.outbound_jobs where job_type = 'tmi_cancel'",
@@ -3527,7 +3565,13 @@ mod deactivation_correction_tests {
         let actor = seed(&pool, false).await;
         let pkg = activated(&pool, &actor).await;
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(corrections(&pool).await.is_empty());
     }
@@ -3539,9 +3583,14 @@ mod deactivation_correction_tests {
         start: chrono::DateTime<Utc>,
         stop: Option<chrono::DateTime<Utc>>,
     ) -> String {
-        let pkg = events_repo::create_package(pool, EVENT, "Plan", actor)
-            .await
-            .unwrap();
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
         let restriction = normalize_item(
             "restriction",
             json!({
@@ -3577,7 +3626,13 @@ mod deactivation_correction_tests {
             .unwrap();
         assert_eq!(status, "published", "the cleanup has not expired it yet");
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(corrections(&pool).await.is_empty());
     }
@@ -3588,7 +3643,13 @@ mod deactivation_correction_tests {
         let actor = seed(&pool, true).await;
         let pkg = activated_restriction(&pool, &actor, Utc::now(), None).await;
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             corrections(&pool).await,
@@ -3611,7 +3672,13 @@ mod deactivation_correction_tests {
             .await
             .unwrap();
 
-        deactivate_package(&pool, &pkg, &actor).await.unwrap();
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert!(corrections(&pool).await.is_empty());
     }

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
+use crate::auth::principal::Attribution;
 use crate::errors::ApiError;
 use crate::feed::winds::Winds;
 use crate::models::{
@@ -1063,8 +1064,9 @@ pub async fn get_event_capture(
 ) -> Result<Option<EventCaptureRow>, ApiError> {
     sqlx::query_as::<_, EventCaptureRow>(
         "select ec.event_id, ec.enabled, ec.pre_minutes, ec.post_minutes, ec.updated_at, \
-            u.display_name as updated_by \
+            coalesce(u.display_name, a.display_name) as updated_by \
          from stats.event_capture ec left join identity.users u on u.id = ec.updated_by \
+         left join access.actors a on a.id = ec.updated_by_actor \
          where ec.event_id = $1",
     )
     .bind(event_id)
@@ -1079,22 +1081,23 @@ pub async fn upsert_event_capture(
     enabled: bool,
     pre_minutes: i32,
     post_minutes: i32,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes, updated_by)
-         values ($1, $2, $3, $4, $5)
+        "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes, updated_by, updated_by_actor)
+         values ($1, $2, $3, $4, $5, $6)
          on conflict (event_id) do update set
              enabled = excluded.enabled,
              pre_minutes = excluded.pre_minutes,
              post_minutes = excluded.post_minutes,
-             updated_by = excluded.updated_by",
+             updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(event_id)
     .bind(enabled)
     .bind(pre_minutes)
     .bind(post_minutes)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(db)?;

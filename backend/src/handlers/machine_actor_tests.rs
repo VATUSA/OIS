@@ -2098,3 +2098,294 @@ async fn the_lifecycle_jobs_attribution_names_the_person_in_both_columns(pool: P
             .is_err()
     );
 }
+
+// ---- #607 PR 2: the events planning writes ----
+//
+// Arming and activating a package, and generating Tier-1 ACE requests, stay user-only (see the
+// ratchet): the lifecycle job acts later as the person in `tmi_package.updated_by`.
+
+const EVENT: i64 = 6072;
+
+async fn seed_event(pool: &PgPool) {
+    sqlx::query(
+        "insert into events.event (id, title, start_time, end_time, facility) \
+         values ($1, 'T607', now(), now() + interval '2 hours', 'ZDC')",
+    )
+    .bind(EVENT)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// `(updated_by, updated_by_actor)` of a row keyed by `where`.
+async fn updated(pool: &PgPool, table: &str, filter: &str) -> (Option<String>, Option<String>) {
+    sqlx::query_as(&format!(
+        "select updated_by, updated_by_actor from {table} where {filter}"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// AC3, events: a service account writes DCC, facility support, an airport rate, capture, a debrief
+/// and an event FCA — each 401 before — and every row names the machine, never a person.
+#[sqlx::test]
+async fn a_machine_drives_the_event_planning_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &[
+            "events.plan.update",
+            "events.plan.read",
+            "events.support.update",
+            "events.rate.update",
+            "stats.capture.update",
+            "events.debrief.create",
+        ],
+    )
+    .await;
+    seed_event(&pool).await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let base = format!("/api/v1/events/{EVENT}");
+    let put = |path: &str, body: Value| {
+        let (state, auth, uri) = (state.clone(), auth.clone(), format!("{base}{path}"));
+        async move { call(&state, http::Method::PUT, &uri, &auth, Some(body)).await }
+    };
+
+    let (status, body) = put("/dcc", json!({ "status": "requested" })).await;
+    assert_eq!(status, http::StatusCode::OK, "dcc: {body}");
+    let actor = machine_actor(&pool).await;
+    let machine_row = (None, Some(actor.clone()));
+    let at_event = format!("event_id = {EVENT}");
+    assert_eq!(
+        updated(&pool, "events.dcc_request", &at_event).await,
+        machine_row
+    );
+    assert_eq!(body["updated_by"], "vTBFM", "the read names the machine");
+
+    let (status, body) = put("/facilities/ZDC", json!({ "level": "required" })).await;
+    assert_eq!(status, http::StatusCode::OK, "facility: {body}");
+    assert_eq!(
+        updated(&pool, "events.facility_support", &at_event).await,
+        machine_row
+    );
+
+    let (status, body) = put("/rates/KIAD", json!({ "aar": 40, "adr": 40 })).await;
+    assert_eq!(status, http::StatusCode::OK, "rate: {body}");
+    assert_eq!(
+        updated(&pool, "events.airport_rate", &at_event).await,
+        machine_row
+    );
+
+    let (status, body) = put("/capture", json!({ "enabled": true })).await;
+    assert_eq!(status, http::StatusCode::OK, "capture: {body}");
+    assert_eq!(
+        updated(&pool, "stats.event_capture", &at_event).await,
+        machine_row
+    );
+
+    let (status, body) = put("/debrief", json!({ "notes": "went fine" })).await;
+    assert_eq!(status, http::StatusCode::OK, "debrief: {body}");
+    assert_eq!(
+        updated(&pool, "events.event_debrief", &at_event).await,
+        machine_row
+    );
+    let (status, body) = call(
+        &state,
+        http::Method::GET,
+        &format!("{base}/debrief"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert_eq!(body["updated_by"], "vTBFM");
+    assert_eq!(
+        body["editable"], true,
+        "the machine holds events.debrief.create"
+    );
+
+    let fca = json!({ "name": "E607", "artcc": "ZDC",
+                      "points": [[38.0, -77.0], [39.0, -77.0], [39.0, -76.0]] });
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("{base}/fcas"),
+        &auth,
+        Some(fca.clone()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "event fca: {body}");
+    let id = body[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        attributed(&pool, "flow.fca", "created_by", "id", &id).await,
+        machine_row
+    );
+    let (status, _) = put(&format!("/fcas/{id}"), fca).await;
+    assert_eq!(status, http::StatusCode::OK, "update event fca");
+    assert_eq!(
+        attributed(&pool, "flow.fca", "updated_by", "id", &id).await,
+        machine_row
+    );
+
+    for (path, flag) in [("/facilities", "editable"), ("/rates", "editable")] {
+        let (status, body) = call(
+            &state,
+            http::Method::GET,
+            &format!("{base}{path}"),
+            &auth,
+            None,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{path}");
+        assert!(
+            body.as_array().unwrap().iter().any(|r| r[flag] == true),
+            "{path}: the machine's national scope marks its rows editable: {body}"
+        );
+    }
+    let (_, body) = call(
+        &state,
+        http::Method::GET,
+        &format!("{base}/capture"),
+        &auth,
+        None,
+    )
+    .await;
+    assert_eq!(body["can_edit"], true);
+
+    for path in ["/facilities/ZDC", "/rates/KIAD"] {
+        let (status, _) = call(
+            &state,
+            http::Method::DELETE,
+            &format!("{base}{path}"),
+            &auth,
+            None,
+        )
+        .await;
+        assert!(status.is_success(), "delete {path}: {status}");
+    }
+}
+
+/// AC3, packages: a machine creates a package, adds an item and deactivates it, named each time.
+/// Then the pair stays consistent when a person arms it — both columns name the person, so the
+/// lifecycle job (which acts as `updated_by`) never meets a machine-only row it would silently skip.
+#[sqlx::test]
+async fn a_machine_builds_a_package_and_a_person_arms_it(pool: PgPool) {
+    let auth = machine(&pool, &["events.plan.update"]).await;
+    seed_event(&pool).await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let base = format!("/api/v1/events/{EVENT}/packages");
+
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &base,
+        &auth,
+        Some(json!({ "name": "Plan" })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create: {body}");
+    let pkg = body[0]["id"].as_str().unwrap().to_string();
+    let at_pkg = format!("id = '{pkg}'");
+    let actor = machine_actor(&pool).await;
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &at_pkg).await,
+        (None, Some(actor.clone()))
+    );
+    let item = json!({ "kind": "restriction",
+                       "payload": { "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT" } });
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("{base}/{pkg}/items"),
+        &auth,
+        Some(item),
+    )
+    .await;
+    assert!(status.is_success(), "add item: {status} {body}");
+
+    let person = seed_user(&pool).await;
+    grant(&pool, &person, "events.plan.update", None).await;
+    let cookie = session_cookie(&pool, &person).await;
+    let (status, body) = call(
+        &state,
+        http::Method::PUT,
+        &format!("{base}/{pkg}/auto"),
+        &cookie,
+        Some(json!({ "auto_publish": true })),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "arm: {body}");
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &at_pkg).await,
+        (
+            Some(person.clone()),
+            actor_of(&pool, "user_id", &person).await
+        ),
+        "arming names the person in both columns, replacing the machine"
+    );
+    let due = crate::repos::events::auto_due_packages(&pool)
+        .await
+        .unwrap();
+    assert!(
+        due.iter().any(|p| p.0 == pkg),
+        "the job picks the armed package up"
+    );
+
+    // Activation stays a person's act; the machine then stands the package down.
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("{base}/{pkg}/activate"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "activate: {status} {body}");
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &at_pkg).await,
+        (
+            Some(person.clone()),
+            actor_of(&pool, "user_id", &person).await
+        ),
+        "activating names the person in both columns too"
+    );
+    let (status, body) = call(
+        &state,
+        http::Method::POST,
+        &format!("{base}/{pkg}/deactivate"),
+        &auth,
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "deactivate: {status} {body}");
+    assert_eq!(
+        updated(&pool, "events.tmi_package", &at_pkg).await,
+        (None, Some(actor))
+    );
+}
+
+/// AC4, events: a ZDC-scoped machine is refused support at ZNY, as a ZDC-scoped person is.
+#[sqlx::test]
+async fn a_scoped_machine_is_refused_another_facilitys_support(pool: PgPool) {
+    let (_, auth) = service_account(&pool, "events.support.update", Some("ZDC")).await;
+    seed_event(&pool).await;
+    let state = test_state(pool.clone(), HashMap::new());
+    let uri = |f: &str| format!("/api/v1/events/{EVENT}/facilities/{f}");
+    let body = json!({ "level": "required" });
+
+    let (status, _) = call(
+        &state,
+        http::Method::PUT,
+        &uri("ZNY"),
+        &auth,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        http::StatusCode::FORBIDDEN,
+        "outside the machine's ARTCC"
+    );
+    let (status, _) = call(&state, http::Method::PUT, &uri("ZDC"), &auth, Some(body)).await;
+    assert_eq!(status, http::StatusCode::OK, "inside it");
+}

@@ -73,6 +73,9 @@ the machine, never a person and never nobody (an API key's owner stays reachable
 Reads coalesce the two names. Scope is unchanged: a key is capped by its owner's live scope, and a
 service account is scoped by its roles' ARTCCs.
 
-Machine-capable today: the release path (#583) and the TMU, flow and GDP writes (#607). The rest still
+Machine-capable today: the release path (#583), the TMU, flow and GDP writes, and the events planning
+writes — DCC, facility support, airport rates, capture, debriefs, event FCAs, and building and standing
+down a TMI package (#607). Arming and activating a package stay a person's act: the lifecycle job later
+publishes and archives it as the person in `events.tmi_package.updated_by`. The rest still
 take `CurrentUser`; `backend/src/handlers/actor_ratchet_tests.rs` lists every one as `Pending` or
 `UserOnly("why")`, and is the source of truth — it fails if a new handler blocks machines unlisted.
