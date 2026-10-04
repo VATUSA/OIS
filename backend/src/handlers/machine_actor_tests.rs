@@ -2389,3 +2389,168 @@ async fn a_scoped_machine_is_refused_another_facilitys_support(pool: PgPool) {
     let (status, _) = call(&state, http::Method::PUT, &uri("ZDC"), &auth, Some(body)).await;
     assert_eq!(status, http::StatusCode::OK, "inside it");
 }
+
+// ---- #607 PR 3: airport configurations and surface data ----
+
+/// KIAD under ZDC and KJFK under ZNY, so writes have an owning ARTCC to be scoped against.
+fn airport_state(pool: &PgPool) -> AppState {
+    use crate::scope_test_support::artcc;
+    test_state(
+        pool.clone(),
+        HashMap::from([
+            ("ZDC".to_string(), artcc(&["KIAD"])),
+            ("ZNY".to_string(), artcc(&["KJFK"])),
+        ]),
+    )
+}
+
+fn config_body() -> Value {
+    json!({ "name": "South flow", "aar": 60, "adr": 60, "wind_from_deg": 150, "wind_to_deg": 250 })
+}
+
+fn ring() -> Value {
+    json!([[[38.94, -77.46], [38.95, -77.46], [38.95, -77.45]]])
+}
+
+/// AC3, airport data: a service account writes a configuration and every kind of surface feature —
+/// each refused before #607 — and every row names the machine, never a person. The reads mark the
+/// rows editable per the machine's own scope.
+#[sqlx::test]
+async fn a_machine_drives_the_airport_config_and_surface_writes(pool: PgPool) {
+    let auth = machine(
+        &pool,
+        &[
+            "events.config.update",
+            "flow.surface_data.update",
+            "events.plan.read",
+        ],
+    )
+    .await;
+    let state = airport_state(&pool);
+    let send = |method: http::Method, path: String, body: Option<Value>| {
+        let (state, auth) = (state.clone(), auth.clone());
+        async move { call(&state, method, &format!("/api/v1{path}"), &auth, body).await }
+    };
+
+    let (status, body) = send(
+        http::Method::POST,
+        "/airport-configs/KIAD".into(),
+        Some(config_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "create config: {body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let actor = machine_actor(&pool).await;
+    let machine_row = (None, Some(actor));
+    assert_eq!(
+        attributed(&pool, "flow.airport_config", "updated_by", "id", &id).await,
+        machine_row
+    );
+    assert_eq!(body["updated_by"], "vTBFM", "the read names the machine");
+    let (status, _) = send(
+        http::Method::PUT,
+        format!("/airport-configs/KIAD/{id}"),
+        Some(config_body()),
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "update config");
+    assert_eq!(
+        attributed(&pool, "flow.airport_config", "updated_by", "id", &id).await,
+        machine_row,
+        "the edit names the machine too"
+    );
+    let (_, list) = send(http::Method::GET, "/airport-configs/KIAD".into(), None).await;
+    assert_eq!(list[0]["editable"], true, "{list}");
+    let (status, _) = send(
+        http::Method::DELETE,
+        format!("/airport-configs/KIAD/{id}"),
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "delete config: {status}");
+
+    for (kind, table, feature) in [
+        (
+            "gates",
+            "flow.airport_gate",
+            json!({ "name": "A1", "lat": 38.95, "lon": -77.45 }),
+        ),
+        (
+            "ramp-areas",
+            "flow.airport_ramp_area",
+            json!({ "name": "R1", "kind": "ramp", "rings": ring() }),
+        ),
+        (
+            "taxiways",
+            "flow.airport_taxiway",
+            json!({ "name": "A", "rings": ring() }),
+        ),
+        (
+            "runways",
+            "flow.airport_runway",
+            json!({ "name": "01/19", "rings": ring() }),
+        ),
+    ] {
+        let base = format!("/airports/KIAD/{kind}");
+        let (status, body) = send(http::Method::POST, base.clone(), Some(feature.clone())).await;
+        assert_eq!(status, http::StatusCode::OK, "create {kind}: {body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            attributed(&pool, table, "updated_by", "id", &id).await,
+            machine_row,
+            "{kind}"
+        );
+        let (status, _) = send(http::Method::PUT, format!("{base}/{id}"), Some(feature)).await;
+        assert_eq!(status, http::StatusCode::OK, "update {kind}");
+        assert_eq!(
+            attributed(&pool, table, "updated_by", "id", &id).await,
+            machine_row,
+            "{kind}"
+        );
+        let (_, surface) = send(http::Method::GET, "/airports/KIAD/surface".into(), None).await;
+        let list = surface[kind.replace('-', "_")].as_array().unwrap().clone();
+        assert!(
+            list.iter().all(|f| f["editable"] == true),
+            "{kind}: {surface}"
+        );
+        let (status, _) = send(http::Method::DELETE, format!("{base}/{id}"), None).await;
+        assert!(status.is_success(), "delete {kind}: {status}");
+    }
+
+    let (status, body) = send(
+        http::Method::POST,
+        "/airports/KIAD/surface/repull-faa".into(),
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "repull: {body}");
+}
+
+/// AC4, airport data: a ZDC-scoped machine may edit KIAD (ZDC's) but not KJFK (ZNY's) — the scope check
+/// these handlers already ran now sees the machine's roles.
+#[sqlx::test]
+async fn a_scoped_machine_is_refused_another_artccs_airport(pool: PgPool) {
+    let (_, auth) = service_account(&pool, "events.config.update", Some("ZDC")).await;
+    allow(&pool, "flow.surface_data.update").await;
+    let state = airport_state(&pool);
+    let gate = json!({ "name": "A1", "lat": 40.64, "lon": -73.78 });
+
+    for (path, body) in [
+        ("/api/v1/airport-configs/KJFK", config_body()),
+        ("/api/v1/airports/KJFK/gates", gate.clone()),
+    ] {
+        let (status, _) = call(&state, http::Method::POST, path, &auth, Some(body)).await;
+        assert_eq!(
+            status,
+            http::StatusCode::FORBIDDEN,
+            "{path}: outside the machine's ARTCC"
+        );
+    }
+    for (path, body) in [
+        ("/api/v1/airport-configs/KIAD", config_body()),
+        ("/api/v1/airports/KIAD/gates", gate),
+    ] {
+        let (status, _) = call(&state, http::Method::POST, path, &auth, Some(body)).await;
+        assert_eq!(status, http::StatusCode::OK, "{path}: inside it");
+    }
+}

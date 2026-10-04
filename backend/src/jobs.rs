@@ -2055,9 +2055,17 @@ mod departure_runway_derive_tests {
     }
 
     async fn seed_config(pool: &PgPool, actor: &str, req: UpsertAirportConfigRequest) {
-        crate::repos::airport_configs::create(pool, "KJFK", &req, "ZNY", actor)
-            .await
-            .expect("the config should insert");
+        crate::repos::airport_configs::create(
+            pool,
+            "KJFK",
+            &req,
+            "ZNY",
+            &crate::auth::principal::Attribution::for_user_id(pool, actor)
+                .await
+                .unwrap(),
+        )
+        .await
+        .expect("the config should insert");
     }
 
     fn config_with(
