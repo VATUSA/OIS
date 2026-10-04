@@ -472,6 +472,24 @@ pub fn spawn_register_webhook(pool: PgPool) {
     });
 }
 
+/// The longest stretch of an error response kept in a log line: VATUSA's errors are short JSON, and the
+/// cap keeps a proxy's HTML error page from flooding the log.
+const ERROR_BODY_MAX: usize = 500;
+
+/// `resp` if it succeeded; otherwise an error naming the call, the status **and VATUSA's response
+/// body** (#688). `error_for_status` keeps only the status, so a `400` said nothing about what VATUSA
+/// objected to.
+async fn ok_or_body(resp: reqwest::Response, what: &str) -> Result<reqwest::Response, String> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let body = body.trim();
+    let body: String = body.chars().take(ERROR_BODY_MAX).collect();
+    Err(format!("{what}: {status}: {body}"))
+}
+
 /// Make sure exactly one usable division webhook exists, ours.
 ///
 /// Usable means: stored, decryptable with today's key, pointing at today's URL, and still listed by
@@ -493,12 +511,14 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
     let base = format!("{}/v3/webhooks", vatusa_api_base());
 
     let list = |http: reqwest::Client, base: String| async move {
-        http.get(&base)
+        let resp = http
+            .get(&base)
             .header("x-api-key", api_key)
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| format!("list webhooks: {e}"))?
+            .map_err(|e| format!("list webhooks: {e}"))?;
+        ok_or_body(resp, "list webhooks")
+            .await?
             .json::<Vec<WebhookInfo>>()
             .await
             .map_err(|e| format!("list webhooks: {e}"))
@@ -516,6 +536,12 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
             .vatusa_id
             .is_some_and(|id| listed.iter().any(|w| w.id == id))
     {
+        // Said positively, so a deploy check can look for registration rather than for the absence
+        // of a warning — which a run that never reached VATUSA also produces (#688).
+        tracing::info!(
+            vatusa_id = row.vatusa_id,
+            "VATUSA division webhook already registered"
+        );
         return Ok(());
     }
 
@@ -524,12 +550,15 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
         .iter()
         .filter(|w| w.url.starts_with(&receiver_prefix))
     {
-        let deleted = http
+        let deleted = match http
             .delete(format!("{base}/{}", stale.id))
             .header("x-api-key", api_key)
             .send()
             .await
-            .and_then(reqwest::Response::error_for_status);
+        {
+            Ok(resp) => ok_or_body(resp, "delete").await.map(drop),
+            Err(e) => Err(e.to_string()),
+        };
         if let Err(e) = deleted {
             tracing::warn!(
                 id = stale.id,
@@ -539,14 +568,15 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
         }
     }
 
-    let created: CreateWebhookResponse = http
+    let created = http
         .post(&base)
         .header("x-api-key", api_key)
         .json(&serde_json::json!({ "url": target }))
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| format!("create webhook: {e}"))?
+        .map_err(|e| format!("create webhook: {e}"))?;
+    let created: CreateWebhookResponse = ok_or_body(created, "create webhook")
+        .await?
         .json()
         .await
         .map_err(|e| format!("create webhook: {e}"))?;
@@ -576,6 +606,56 @@ async fn ensure_webhook(pool: &PgPool, api_key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answer one HTTP request with `status` and `body`, from a local socket; returns its URL.
+    async fn serve_once(status: &'static str, body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}/v3/webhooks")
+    }
+
+    /// #688 AC5: a refused call says what VATUSA said, not only the status — a `400` from a bad key
+    /// or a bad body is now diagnosable from the log line.
+    #[tokio::test]
+    async fn a_refused_call_carries_vatusas_response_body() {
+        let url = serve_once("400 Bad Request", r#"{"message":"Invalid API key"}"#.into()).await;
+        let resp = client().post(&url).send().await.unwrap();
+        let err = ok_or_body(resp, "create webhook").await.unwrap_err();
+        assert_eq!(
+            err,
+            r#"create webhook: 400 Bad Request: {"message":"Invalid API key"}"#
+        );
+    }
+
+    /// A long error page is cut, so a proxy's HTML can't flood the log.
+    #[tokio::test]
+    async fn a_long_error_body_is_truncated() {
+        let url = serve_once("503 Service Unavailable", "x".repeat(5_000)).await;
+        let resp = client().get(&url).send().await.unwrap();
+        let err = ok_or_body(resp, "list webhooks").await.unwrap_err();
+        let body = err.rsplit(": ").next().unwrap();
+        assert_eq!(body.len(), ERROR_BODY_MAX);
+    }
+
+    /// Success passes through untouched, body and all.
+    #[tokio::test]
+    async fn a_successful_call_passes_through() {
+        let url = serve_once("200 OK", "[]".into()).await;
+        let resp = client().get(&url).send().await.unwrap();
+        let ok = ok_or_body(resp, "list webhooks").await.unwrap();
+        assert_eq!(ok.json::<Vec<WebhookInfo>>().await.unwrap().len(), 0);
+    }
 
     /// [`apply_division`] reports whether access moved and holds no sender, so it cannot announce
     /// anything before its own writes have committed — [`apply_and_announce`] does that after it
