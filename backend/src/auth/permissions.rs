@@ -13,6 +13,8 @@ permission!(AccessSelfRead, ["access", "self"], Read);
 permission!(AccessCatalogRead, ["access", "catalog"], Read);
 permission!(AccessUsersRead, ["access", "users"], Read);
 permission!(AccessUsersUpdate, ["access", "users"], Update);
+permission!(AccessGroupsRead, ["access", "groups"], Read);
+permission!(AccessGroupsUpdate, ["access", "groups"], Update);
 
 // users directory
 permission!(UsersDirectoryRead, ["users", "directory"], Read);

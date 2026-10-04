@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 /// handler means adding it here — a decision, not an accident.
 #[rustfmt::skip]
 const PUBLIC: &[(&str, &str, &str)] = &[
+    ("airports", "get_airport", "an airport's published position under /public/, from the public airport dataset"),
     ("atc", "list_atc", "the ATC overlay on the public FCA overview and facility map"),
     ("atc", "list_flow_facilities", "the facility directory behind public search and the facility map"),
     ("auth", "vatsim_login", "starts sign-in, so there is no credential yet"),
