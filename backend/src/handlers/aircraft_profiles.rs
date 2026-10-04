@@ -103,7 +103,14 @@ pub async fn upsert_profile(
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let (kind, key) = normalize(&kind, &key)?;
     validate(&req)?;
-    let row = profiles_repo::upsert(pool, &kind, &key, &req, principal.user_id()).await?;
+    let row = profiles_repo::upsert(
+        pool,
+        &kind,
+        &key,
+        &req,
+        principal.user_id().ok_or(ApiError::Forbidden)?,
+    )
+    .await?;
     refresh_cache(&state, pool).await?;
     Ok(Json(row))
 }

@@ -157,6 +157,24 @@ pub struct SelfAccessBody {
     pub role_names: Vec<String>,
     #[schema(value_type = Object)]
     pub permissions: Value,
+    /// The groups the caller holds, each with the permissions it grants (#550).
+    ///
+    /// This is what an API key is templated from now that presets are gone. It lists only the
+    /// caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+    /// listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+    /// path at all.
+    pub groups: Vec<HeldGroupBody>,
+}
+
+/// One group the caller holds, as a template for an API key's permissions (#550).
+///
+/// No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+/// its owner's live access when it is created, so expanding a template cannot grant more than its
+/// owner holds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeldGroupBody {
+    pub name: String,
+    pub permissions: Vec<String>,
 }
 
 /// A target user's editable access: direct permission grants + role assignments,
@@ -780,6 +798,14 @@ pub struct AdvisoryBody {
     pub structured: Option<sqlx::types::Json<Value>>,
     pub decoded: Option<String>,
     pub status: String,
+    /// The enforceable validity window (#537).
+    ///
+    /// Distinct from the period printed inside the document: this is set once at authoring from the
+    /// same input and is never re-derived by parsing the document text, which is why the rendered
+    /// period can stay verbatim `DDHHMM` as it always has. `None` for advisories authored before
+    /// #537 and for any kind with no window, and such an advisory is never auto-cancelled.
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -860,6 +886,12 @@ pub struct CreateAdvisoryRequest {
     pub structured: Option<Value>,
     #[serde(default)]
     pub decoded: Option<String>,
+    /// The enforceable window (#537). Optional, so every existing caller is unaffected: an advisory
+    /// without one simply never auto-cancels, which is the behaviour before #537.
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1255,6 +1287,20 @@ pub struct AirportGateBody {
     /// X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
     /// hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
     pub kind: Option<String>,
+    /// Stand heading, degrees true, normalised into `[0, 360)`. `None` for hand-entered stands and
+    /// for imported ones whose pack predates VATUSA/OIS#541. Read-only, like the rest of the X-Plane
+    /// detail below: these describe the source's data, not an operator's intent.
+    pub heading: Option<f64>,
+    /// ICAO aerodrome reference code letter (`A`..`F`) — the widest aircraft the stand takes.
+    pub size_code: Option<String>,
+    /// How the stand is operated, e.g. `airline`, `cargo`, `general_aviation`. Community-contributed
+    /// free text, so treat an unfamiliar value as information rather than an error.
+    pub operation_type: Option<String>,
+    /// Aircraft classes the stand accepts, e.g. `["heavy", "jets"]`. `None` where the source recorded
+    /// no restriction — which is not the same as accepting nothing.
+    pub aircraft_classes: Option<Vec<String>>,
+    /// Airline codes associated with the stand, e.g. `["aal", "dal"]`.
+    pub airline_codes: Option<Vec<String>>,
     pub updated_at: DateTime<Utc>,
     /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
     #[sqlx(default)]
@@ -1436,7 +1482,7 @@ pub struct AirportForecastBody {
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TmiPackageItemBody {
     pub id: String,
-    /// program | restriction | ground_stop
+    /// program | restriction | ground_stop | advisory
     pub kind: String,
     #[schema(value_type = Object)]
     pub payload: sqlx::types::Json<Value>,

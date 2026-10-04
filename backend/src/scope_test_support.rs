@@ -183,3 +183,33 @@ pub(crate) async fn send(
         .unwrap()
         .status()
 }
+
+/// [`send`], but also returning the decoded JSON body (`Null` when there isn't one).
+///
+/// For a test that has to check *what* a handler returned, not only that it answered — the wiring,
+/// rather than a helper called directly.
+pub(crate) async fn send_json(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    cookie: &str,
+) -> (http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let request = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
