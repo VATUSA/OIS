@@ -1749,6 +1749,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/monitor/{artcc}/maps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_sector_maps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/monitor/{artcc}/maps/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set one sector's MAP. Only a positive whole number that differs from the current value is
+         *     written: zero or negative is refused (400) and leaves any override in place, and the current value
+         *     is a no-op (204, nothing written). There is no delete — typing the default is the reset.
+         */
+        put: operations["set_sector_map"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/resolve-routes": {
         parameters: {
             query?: never;
@@ -6197,6 +6234,29 @@ export interface components {
             permissions: Record<string, never>;
             role_names?: string[] | null;
         };
+        /** @description One Airspace Monitor sector and the alert parameter its count is coloured against (#598). */
+        SectorMapBody: {
+            /**
+             * Format: int32
+             * @description The sector's Monitor Alert Parameter: its override, or the default.
+             */
+            map: number;
+            name?: string | null;
+            /** @description Whether `map` is a stored override rather than the default. */
+            overridden: boolean;
+            sector_id: string;
+        };
+        /** @description An ARTCC's sectors with their Monitor Alert Parameters (#598). */
+        SectorMapsBody: {
+            /**
+             * Format: int32
+             * @description What a sector reads until overridden.
+             */
+            default_map: number;
+            /** @description Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped). */
+            editable: boolean;
+            sectors: components["schemas"]["SectorMapBody"][];
+        };
         /**
          * @description One ATC sector volume as the admin sector map draws it (#602): a stored row of
          *     `flow.airspace_sector` (#594), straight from the in-memory cache.
@@ -6259,6 +6319,11 @@ export interface components {
         /** @description Toggle an event FCA's auto-publish flag (publish 30 min before the event starts). */
         SetFcaAutoRequest: {
             auto_publish: boolean;
+        };
+        /** @description Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset. */
+        SetSectorMapRequest: {
+            /** Format: int32 */
+            map: number;
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
@@ -11985,6 +12050,84 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sector_maps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorMapsBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_sector_map: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSectorMapRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `map` is not a positive whole number */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such sector in this ARTCC */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

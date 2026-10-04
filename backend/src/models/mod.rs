@@ -3158,3 +3158,30 @@ pub struct ExcludeFlightRequest {
     #[serde(default)]
     pub reason: String,
 }
+
+/// One Airspace Monitor sector and the alert parameter its count is coloured against (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    /// The sector's Monitor Alert Parameter: its override, or the default.
+    pub map: i32,
+    /// Whether `map` is a stored override rather than the default.
+    pub overridden: bool,
+}
+
+/// An ARTCC's sectors with their Monitor Alert Parameters (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapsBody {
+    /// Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped).
+    pub editable: bool,
+    /// What a sector reads until overridden.
+    pub default_map: i32,
+    pub sectors: Vec<SectorMapBody>,
+}
+
+/// Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetSectorMapRequest {
+    pub map: i32,
+}

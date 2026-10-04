@@ -116,6 +116,10 @@ permission!(
 // ATC sector volumes (#594), viewed on the admin sector map (#602). Internal monitoring data, never
 // shown on a public map, so it has its own permission rather than riding on a planning one.
 permission!(FlowSectorsRead, ["flow", "sectors"], Read);
+// Airspace Monitor (#593): read sectors and their alert parameters; set a sector's MAP
+// (facility-scoped, checked in `handlers::monitor`).
+permission!(FlowMonitorRead, ["flow", "monitor"], Read);
+permission!(FlowMonitorUpdate, ["flow", "monitor"], Update);
 
 // tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
 // 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).
