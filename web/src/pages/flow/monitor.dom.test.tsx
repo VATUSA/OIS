@@ -97,6 +97,22 @@ describe("Airspace Monitor page (#601)", () => {
     expect(host.textContent).toContain("No sector data yet");
   });
 
+  /**
+   * AC4, where it is wired: the filter judges a row on all six hours, not on the Time Range's slice.
+   * Only a filter wider than the table tells the two apart — a 2-hour table filtering on the next 3
+   * hours must keep a sector that goes red at +2.5 h, a bin the table doesn't draw (#601 review).
+   */
+  it("keeps a row whose alert is past the Time Range but inside the filter", async () => {
+    localStorage.setItem("ois.monitor.ZDC.range", JSON.stringify(2));
+    localStorage.setItem("ois.monitor.ZDC.alert", JSON.stringify(3));
+    const later = row("02", "green");
+    later.bins[10] = {...later.bins[10], combined: 12, alert: "red"}; // 16:30Z, 2h23m after as_of
+    const host = await mount(table(false, [later, row("03", "green")]));
+    const shown = [...host.querySelectorAll("tbody tr")].map((tr) => tr.textContent);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toContain("02");
+  });
+
   it("says when the alert filter hides every row", async () => {
     const host = await mount(table(false, [row("02", "green")]));
     expect(host.textContent).toContain("Nothing alerting");
