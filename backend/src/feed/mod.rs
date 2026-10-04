@@ -30,6 +30,7 @@ pub mod tracon;
 pub mod trajectory;
 pub mod vatsim;
 pub mod vatusa;
+pub mod vnas;
 pub mod winds;
 
 use std::collections::HashMap;

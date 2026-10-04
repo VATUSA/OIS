@@ -35,6 +35,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         feed: feed::new_state(),
         facilities: Arc::new(RwLock::new(facilities)),
         tracons: feed::tracon::new_state(),
+        vnas: feed::vnas::new_state(),
         nav: Arc::new(ArcSwap::from_pointee(NavData::load())),
         airspace: Arc::new(Boundaries::load()),
         runways: Arc::new(RunwayDb::load()),

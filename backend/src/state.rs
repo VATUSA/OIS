@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
     runway_db::RunwayDb, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
-    winds::Winds,
+    vnas::VnasState, winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -30,6 +30,9 @@ pub struct AppState {
     /// SimAware TRACON boundaries for the ATC layer. Starts empty, refreshed daily
     /// (`feed::tracon::spawn_refresh`); behind `ArcSwap` for lock-free reads.
     pub tracons: TraconState,
+    /// vNAS ERAM sector identities (daily) and live sector staffing (every 30 s), from the single
+    /// poller `feed::vnas::spawn_refresh` (#595). Behind `ArcSwap`s for lock-free reads.
+    pub vnas: VnasState,
     /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
     pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
@@ -98,6 +101,7 @@ impl AppState {
         let feed = feed::new_state();
         let facilities = feed::facilities::new_state();
         let tracons = feed::tracon::new_state();
+        let vnas = feed::vnas::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
@@ -139,6 +143,7 @@ impl AppState {
                 feed,
                 facilities,
                 tracons,
+                vnas,
                 nav,
                 airspace,
                 runways,
@@ -164,6 +169,7 @@ impl AppState {
             feed,
             facilities,
             tracons,
+            vnas,
             nav,
             airspace,
             runways,
@@ -190,6 +196,7 @@ impl AppState {
             feed: feed::new_state(),
             facilities: feed::facilities::new_state(),
             tracons: feed::tracon::new_state(),
+            vnas: feed::vnas::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),

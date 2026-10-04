@@ -48,6 +48,8 @@ pub async fn run() -> color_eyre::Result<()> {
     feed::spawn_poller(state.feed.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
+    // vNAS sector identities and live sector staffing for the Airspace Monitor (#595).
+    feed::vnas::spawn_refresh(state.vnas.clone());
     // Airport coordinate database: fetched at startup and retried periodically (#216) — a failed
     // boot fetch no longer permanently strands the feed's airport map empty.
     jobs::spawn_airports_refresh(state.jobs.clone(), state.feed.clone());
