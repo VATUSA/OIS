@@ -239,6 +239,27 @@ fn altitude_matches(
     }
 }
 
+/// Refuse an FCA write unless the caller holds `permission` for every ARTCC in `artccs` (#636) — the
+/// same gate the shared-route writes use. An empty `artcc` normalises to none, so an FCA with no ARTCC is
+/// writable only nationally, like a global route. Before this, the FCA's `artcc` was only a sidebar
+/// filter: any holder could create, edit, reorder or delete another facility's FCA.
+async fn require_fca_write_scope(
+    state: &AppState,
+    principal: &Principal,
+    permission: &str,
+    artccs: &[&str],
+) -> Result<(), ApiError> {
+    let scope = principal.permission_scope(state, permission).await?;
+    if artccs
+        .iter()
+        .all(|artcc| scope.allows(flow_repo::norm_artcc(Some(artcc)).as_deref()))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
@@ -268,7 +289,7 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
     path = "/api/v1/flow/fcas",
     tag = "flow",
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = FcaBody), (status = 400), (status = 401))
+    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_fca(
     State(state): State<AppState>,
@@ -279,6 +300,13 @@ pub async fn create_fca(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
+    require_fca_write_scope(
+        &state,
+        &Principal::User(user.clone()),
+        "flow.fca.update",
+        &[&payload.artcc],
+    )
+    .await?;
     let id = flow_repo::create_fca(pool, &payload, &user.id).await?;
     state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
@@ -293,7 +321,7 @@ pub async fn create_fca(
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_fca(
     State(state): State<AppState>,
@@ -305,6 +333,18 @@ pub async fn update_fca(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // As it is AND where it's headed — so an FCA can't be taken from, or moved into, an ARTCC the
+    // caller doesn't hold (relabelling a ZNY FCA as ZDC would otherwise open its releases, #626).
+    require_fca_write_scope(
+        &state,
+        &Principal::User(user.clone()),
+        "flow.fca.update",
+        &[&existing.artcc, &payload.artcc],
+    )
+    .await?;
     if !flow_repo::update_fca(pool, &id, &payload, &user.id).await? {
         return Err(ApiError::NotFound);
     }
@@ -320,14 +360,21 @@ pub async fn update_fca(
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
-    responses((status = 204), (status = 401), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaDelete>,
+    // Any credential holding the permission could delete before #636, so this takes the `Actor` rather
+    // than narrowing it to a person.
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_write_scope(&state, &principal, "flow.fca.delete", &[&existing.artcc]).await?;
     if flow_repo::delete_fca(pool, &id).await? {
         state.publish(crate::realtime::topic::FCA);
         Ok(StatusCode::NO_CONTENT)
@@ -2495,7 +2542,7 @@ pub async fn swap_releases(
     tag = "flow",
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
-    responses((status = 204), (status = 401), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn reorder_fca(
     State(state): State<AppState>,
@@ -2506,6 +2553,16 @@ pub async fn reorder_fca(
 ) -> Result<StatusCode, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_write_scope(
+        &state,
+        &Principal::User(user.clone()),
+        "flow.fca.update",
+        &[&existing.artcc],
+    )
+    .await?;
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();
     if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &user.id).await? {
@@ -4684,5 +4741,203 @@ mod release_swap_tests {
             "case-insensitively the same flight"
         );
         assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+}
+
+/// #636: FCA writes are gated on the FCA's ARTCC, through the real router.
+#[cfg(test)]
+mod fca_scope_tests {
+    use http::{Method, StatusCode};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::repos::flow as flow_repo;
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    fn fca(artcc: &str) -> serde_json::Value {
+        json!({ "name": format!("{artcc} FCA"), "artcc": artcc, "points": [[0.0, 0.0], [1.0, 1.0]] })
+    }
+
+    async fn seed_fca(pool: &PgPool, owner: &str, artcc: &str) -> String {
+        let req = serde_json::from_value(fca(artcc)).unwrap();
+        flow_repo::create_fca(pool, &req, owner).await.unwrap()
+    }
+
+    async fn artcc_of(pool: &PgPool, id: &str) -> Option<String> {
+        flow_repo::get_fca(pool, id).await.unwrap().map(|f| f.artcc)
+    }
+
+    /// A holder of both FCA permissions at `artcc` (or nationally for `None`), as a session cookie.
+    async fn holder(pool: &PgPool, artcc: Option<&str>) -> String {
+        let user = seed_user(pool).await;
+        grant(pool, &user, "flow.fca.update", artcc).await;
+        grant(pool, &user, "flow.fca.delete", artcc).await;
+        session_cookie(pool, &user).await
+    }
+
+    /// AC1 + AC4: create.
+    #[sqlx::test]
+    async fn a_scoped_holder_creates_fcas_only_in_its_artcc(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let uri = "/api/v1/flow/fcas";
+
+        assert_eq!(
+            send(&state, Method::POST, uri, &zdc, Some(fca("ZNY"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::POST, uri, &zdc, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+        let count: i64 = sqlx::query_scalar("select count(*) from flow.fca")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the refused FCA was not created");
+    }
+
+    /// AC1 + AC2 + AC4: edit checks the FCA as it is and as it would become.
+    #[sqlx::test]
+    async fn a_scoped_holder_can_neither_edit_nor_relabel_across_artccs(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let put = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        // Taking a ZNY FCA by relabelling it ZDC — the #626 bypass.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zny_fca), &zdc, Some(fca("ZDC"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(artcc_of(&pool, &zny_fca).await.as_deref(), Some("ZNY"));
+        // Pushing a ZDC FCA out to ZNY.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zdc_fca), &zdc, Some(fca("ZNY"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(artcc_of(&pool, &zdc_fca).await.as_deref(), Some("ZDC"));
+        // Its own FCA, staying put.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zdc_fca), &zdc, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+    }
+
+    /// AC1 + AC4: reorder.
+    #[sqlx::test]
+    async fn a_scoped_holder_reorders_only_its_artccs_fcas(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let order = Some(json!({ "order": ["AAL1", "DAL2"] }));
+        let uri = |id: &str| format!("/api/v1/flow/fcas/{id}/order");
+
+        assert_eq!(
+            send(&state, Method::PUT, &uri(&zny_fca), &zdc, order.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &uri(&zdc_fca), &zdc, order).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// AC1 + AC4: delete.
+    #[sqlx::test]
+    async fn a_scoped_holder_deletes_only_its_artccs_fcas(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let uri = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        assert_eq!(
+            send(&state, Method::DELETE, &uri(&zny_fca), &zdc, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            artcc_of(&pool, &zny_fca).await.is_some(),
+            "the refused FCA still exists"
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &uri(&zdc_fca), &zdc, None).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// AC3: a national holder may do all of it, anywhere; an FCA with no ARTCC is national-only.
+    #[sqlx::test]
+    async fn a_national_holder_is_unaffected_and_an_unscoped_fca_is_national_only(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let national = holder(&pool, None).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let global = seed_fca(&pool, &owner, "").await;
+        let one = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &zdc,
+                Some(fca(""))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &one(&global), &zdc, Some(fca(""))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &one(&global), &zdc, None).await,
+            StatusCode::FORBIDDEN
+        );
+
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &national,
+                Some(fca(""))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &one(&zny_fca),
+                &national,
+                Some(fca("ZDC"))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &format!("{}/order", one(&zny_fca)),
+                &national,
+                Some(json!({ "order": [] }))
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &one(&global), &national, None).await,
+            StatusCode::NO_CONTENT
+        );
     }
 }

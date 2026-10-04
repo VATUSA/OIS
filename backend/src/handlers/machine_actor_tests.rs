@@ -559,3 +559,31 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         .unwrap();
     assert!(matches!(national, PermissionScope::National { .. }));
 }
+
+/// #636: deleting an FCA stays open to a machine credential, as it was before the ARTCC gate — and the
+/// gate applies to it too. A ZDC-scoped service account deletes a ZDC FCA, not a ZNY one.
+#[sqlx::test]
+async fn a_scoped_service_account_deletes_only_its_artccs_fcas(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, bearer) = service_account(&pool, "flow.fca.delete", Some("ZDC")).await;
+    let owner = seed_user(&pool).await;
+    let mut ids = HashMap::new();
+    for artcc in ["ZDC", "ZNY"] {
+        let req = serde_json::from_value(
+            json!({ "name": artcc, "artcc": artcc, "points": [[0.0, 0.0], [1.0, 1.0]] }),
+        )
+        .unwrap();
+        ids.insert(
+            artcc,
+            crate::repos::flow::create_fca(&pool, &req, &owner)
+                .await
+                .unwrap(),
+        );
+    }
+    let uri = |artcc: &str| format!("/api/v1/flow/fcas/{}", ids[artcc]);
+
+    let (status, _) = call(&state, http::Method::DELETE, &uri("ZNY"), &bearer, None).await;
+    assert_eq!(status, http::StatusCode::FORBIDDEN);
+    let (status, _) = call(&state, http::Method::DELETE, &uri("ZDC"), &bearer, None).await;
+    assert_eq!(status, http::StatusCode::NO_CONTENT);
+}
