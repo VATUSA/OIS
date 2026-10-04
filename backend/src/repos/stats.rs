@@ -898,17 +898,18 @@ pub async fn save_capture_window(
     label: &str,
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
-    created_by: Option<&str>,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     sqlx::query_scalar::<_, String>(
-        "insert into stats.capture (event_id, label, start_time, end_time, status, relax_scope, created_by)
-         values ($1, $2, $3, $4, 'saved', false, $5) returning id",
+        "insert into stats.capture (event_id, label, start_time, end_time, status, relax_scope, created_by, created_by_actor)
+         values ($1, $2, $3, $4, 'saved', false, $5, $6) returning id",
     )
     .bind(event_id)
     .bind(label)
     .bind(start_time)
     .bind(end_time)
-    .bind(created_by)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(db)
