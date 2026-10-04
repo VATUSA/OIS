@@ -78,9 +78,18 @@ function setLive(next: boolean) {
 }
 
 /**
- * True while the realtime socket is open **and** the server has acknowledged a subscription that
- * includes {@link FEED_TICK}. False when signed out (the socket only opens for signed-in users), while
- * connecting, and after a drop — exactly the times a feed-derived screen must still poll.
+ * How long without a {@link FEED_TICK} before the socket is treated as gone (#648 review): about twice
+ * the feed's ~15 s cadence. A half-open socket — the network dropped and the browser hasn't noticed —
+ * can stay "open" for minutes with nothing arriving; without this, every feed screen would stop polling
+ * and freeze for that long. When the feed itself is quiet this only resumes polling, which is harmless.
+ */
+export const TICK_SILENCE_MS = 45_000;
+
+/**
+ * True while the realtime socket is open, the server has acknowledged a subscription that includes
+ * {@link FEED_TICK}, **and** a tick has arrived within {@link TICK_SILENCE_MS}. False when signed out
+ * (the socket only opens for signed-in users), while connecting, after a drop, and when ticks have gone
+ * quiet — exactly the times a feed-derived screen must still poll.
  */
 export function useRealtimeLive(): boolean {
   return useSyncExternalStore(
@@ -124,6 +133,28 @@ export function connectRealtime(qc: QueryClient): () => void {
   let retry = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
+
+  // Tick-silence watchdog (#648 review): live only while ticks keep arriving, not merely while the
+  // socket claims to be open.
+  let tickSubscribed = false;
+  let silence: ReturnType<typeof setTimeout> | null = null;
+  const quiet = () => {
+    if (silence) clearTimeout(silence);
+    silence = null;
+  };
+  const heard = () => {
+    quiet();
+    setLive(true);
+    silence = setTimeout(() => {
+      silence = null;
+      setLive(false);
+    }, TICK_SILENCE_MS);
+  };
+  const notLive = () => {
+    tickSubscribed = false;
+    quiet();
+    setLive(false);
+  };
 
   // Subscribe narrowly (#589's Subscription, #648): every topic as before, plus the feed tick only
   // while some feed-derived query is on screen — so a page without one receives no ~15s ticks.
@@ -197,9 +228,17 @@ export function connectRealtime(qc: QueryClient): () => void {
         };
         // The server's answer to a subscribe frame: ticks are live only once it has accepted ours.
         // An error (an older server without `feed.tick`) changes nothing there, so keep polling.
-        if (frame.subscribed) setLive(frame.subscribed.includes(FEED_TICK));
-        if (frame.error) setLive(false);
+        if (frame.subscribed) {
+          if (frame.subscribed.includes(FEED_TICK)) {
+            tickSubscribed = true;
+            heard();
+          } else {
+            notLive();
+          }
+        }
+        if (frame.error) notLive();
         if (frame.topic === FEED_TICK) {
+          if (tickSubscribed) heard();
           const now = Date.now();
           FEED_KEYS.forEach(({ key, minGapMs }) =>
             qc.invalidateQueries({
@@ -218,7 +257,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     };
     ws.onclose = () => {
       ws = null;
-      setLive(false);
+      notLive();
       sentFeed = null;
       schedule();
     };
@@ -229,7 +268,7 @@ export function connectRealtime(qc: QueryClient): () => void {
   return () => {
     closed = true;
     stopWatchingCache();
-    setLive(false);
+    notLive();
     if (timer) clearTimeout(timer);
     ws?.close();
   };
