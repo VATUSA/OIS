@@ -1,3 +1,4 @@
+import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient,} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
@@ -28,6 +29,7 @@ export type DeparturesResponse = components["schemas"]["DeparturesResponse"];
 /** Pending departures out of a field. Live (20s poll) by default; inside a `HistoricalProvider` it
  * reconstructs the field at the scrubber instant instead. */
 export function useDepartures(dep: string) {
+  const live = useRealtimeLive();
   const at = useHistoricalAt();
   return useQuery({
     queryKey: at == null ? ["departures", dep] : ["hist-departures", dep, at],
@@ -35,7 +37,8 @@ export function useDepartures(dep: string) {
     enabled: !!dep,
     // CFR/release/GDP changes push over the websocket; departures is mostly discrete, so a slow poll
     // is a sufficient fallback + status refresh.
-    refetchInterval: at == null ? 60_000 : false,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: at == null ? pollUnlessLive(60_000, live) : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
@@ -43,11 +46,13 @@ export function useDepartures(dep: string) {
 
 /** One departures query per field, for the personal multi-field dashboard. */
 export function useMultiDepartures(fields: string[]) {
+  const live = useRealtimeLive();
   return useQueries({
     queries: fields.map((dep) => ({
       queryKey: ["departures", dep],
       queryFn: () => fetchDepartures(dep),
-      refetchInterval: 60_000,
+      // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+      refetchInterval: pollUnlessLive(60_000, live),
     })),
   });
 }

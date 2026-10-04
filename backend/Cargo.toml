@@ -19,6 +19,10 @@ path = "src/bin/faa_surface_importer.rs"
 name = "xplane-gate-importer"
 path = "src/bin/xplane_gate_importer.rs"
 
+[[bin]]
+name = "airspace-sector-importer"
+path = "src/bin/airspace_sector_importer.rs"
+
 [dependencies]
 ois-core.workspace = true
 
@@ -73,3 +77,8 @@ tower = { version = "0.5", features = ["util"] }
 # its 60s timer instantly instead of the test sleeping for it. Test-only feature on the tokio the
 # crate already depends on.
 tokio = { workspace = true, features = ["test-util"] }
+# A real websocket client for driving `/api/v1/ws` end to end (#589) — subscribe frames and the
+# events they filter can't be checked from the raw HTTP handshake alone. Already in the tree as an
+# axum dependency, as is futures-util.
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

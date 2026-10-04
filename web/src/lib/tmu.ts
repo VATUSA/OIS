@@ -4,6 +4,7 @@ import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Tmi = components["schemas"]["TmiBody"];
 export type CreateTmi = components["schemas"]["CreateTmiRequest"];
@@ -61,6 +62,7 @@ export function useTmis(filters?: TmiFilters, { enabled = true }: { enabled?: bo
       if (error || !data) throw new Error("failed to load TMIs");
       return data;
     },
+    refetchInterval: at == null ? SOCKET_FALLBACK_MS : false,
     staleTime: at == null ? undefined : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
@@ -137,6 +139,7 @@ export function usePrograms() {
       if (error || !data) throw new Error("failed to load programs");
       return data;
     },
+    refetchInterval: SOCKET_FALLBACK_MS,
   });
 }
 
@@ -213,6 +216,7 @@ export function useGroundStops() {
       if (error || !data) throw new Error("failed to load ground stops");
       return data;
     },
+    refetchInterval: at == null ? SOCKET_FALLBACK_MS : false,
     staleTime: at == null ? undefined : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });

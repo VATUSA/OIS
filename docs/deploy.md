@@ -53,6 +53,13 @@ just deploy
 pinning to a specific `vX.Y.Z` (below) is safer for prod if you want deploys and releases to be the
 same event.
 
+## Running more than one backend replica
+
+Supported. Realtime nudges (the websocket's "something changed" signals) reach clients on every replica
+through Postgres `LISTEN/NOTIFY` on the `ois_realtime` channel, so nothing beyond the shared database is
+needed; each replica holds one extra Postgres connection for its listener. Delivery is best-effort — a
+nudge lost while a listener reconnects is picked up by the clients' 60-second fallback poll.
+
 ## What `just deploy` does
 
 ```bash
@@ -80,6 +87,13 @@ It builds from `deploy/discord.Dockerfile` the same way backend/web/docs do, has
 access, and reaches the backend over the compose network (`OIS_API_BASE=http://backend:3000`).
 `.env`'s discord section documents `DISCORD_BOT_TOKEN`, `OIS_API_TOKEN` (a service-account token,
 not a user key), and `OIS_POLL_SECS`. Leaving the profile off (the default) runs OIS without it.
+
+**The bot's service account key must be `discord`** (#656). The job queue hands a service account only
+its own consumer's jobs, and the consumer is the account's key, so a bot whose account has another key
+leases nothing. Migration `0115` renames it on deploy when exactly one active account holds a current
+`BOT` grant and none is keyed `discord` yet. It leaves anything else alone (no bot account, two
+candidates), and then you set it yourself in the admin UI, or with one statement:
+`update access.service_accounts set key = 'discord' where id = '<the bot account id>';`
 
 ## Observability (optional)
 

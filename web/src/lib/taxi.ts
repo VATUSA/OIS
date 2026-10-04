@@ -1,3 +1,4 @@
+import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {keepPreviousData, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
@@ -26,12 +27,14 @@ export async function fetchHistTaxi(icao: string, at: number) {
 /** Taxi monitor for one airport. Live (15s poll) by default; inside a `HistoricalProvider` it
  * replays the taxi machine over the stored positions at the scrubber instant. */
 export function useTaxiStats(icao: string) {
+  const live = useRealtimeLive();
   const at = useHistoricalAt();
   return useQuery({
     queryKey: at == null ? ["taxi", icao] : ["hist-taxi", icao, at],
     queryFn: () => (at == null ? fetchTaxi(icao) : fetchHistTaxi(icao, at!)),
     enabled: !!icao,
-    refetchInterval: at == null ? 15_000 : false,
+    // Off while feed ticks arrive (#648); the tick refetches this once per upstream publish.
+    refetchInterval: at == null ? pollUnlessLive(15_000, live) : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
