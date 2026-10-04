@@ -12,8 +12,10 @@
 //!
 //! #587 adds the document's other half, its security requirements:
 //!
-//! - **(d)** a `RequirePermission<M>` handler declares `security(("bearer" = ["<M's permission>"]))`
-//!   — exactly that, so a path's scope is the grant an integrator must request;
+//! - **(d)** a handler that takes a credential declares, as alternatives, exactly the schemes its
+//!   extractors accept (see [`expected_schemes`]) — each scoped to its `RequirePermission` marker's
+//!   permission, or `[]` when it checks identity only — so a path's scope is the grant an integrator
+//!   must request, and a credential kind is never promised a path that would 401 it;
 //! - **(e)** a handler that takes no credential declares no `security`.
 
 use std::collections::BTreeSet;
@@ -70,6 +72,11 @@ struct Handler {
     marker: Option<String>,
     /// The annotation's `security(...)` argument, whitespace removed.
     security: Option<String>,
+    /// The parameter list, whitespace removed.
+    params: String,
+    /// The source from the parameter list to the next annotation — enough to see how the handler
+    /// resolves its caller (`Principal::require` admits fewer credential kinds than `Actor`).
+    body: String,
 }
 
 /// From `open` (just past an opening paren) to just past its matching close.
@@ -114,7 +121,12 @@ fn handlers_in(file: &str, src: &str) -> Vec<Handler> {
         );
         let params_start = src[name_start..].find('(').map(|i| name_start + i).unwrap();
         let name = src[name_start..params_start].split('<').next().unwrap();
-        let params = squash(&src[params_start..balanced(src, params_start + 1)]);
+        let params_end = balanced(src, params_start + 1);
+        let params = squash(&src[params_start..params_end]);
+        let body = src[params_end..]
+            .find(ANNOTATION)
+            .map_or(&src[params_end..], |i| &src[params_end..params_end + i])
+            .to_string();
         let marker = params
             .split("RequirePermission<")
             .nth(1)
@@ -132,6 +144,8 @@ fn handlers_in(file: &str, src: &str) -> Vec<Handler> {
             takes_auth: AUTH_EXTRACTORS.iter().any(|e| params.contains(e)),
             marker,
             security,
+            params,
+            body,
         });
         at = annotation_end;
     }
@@ -218,20 +232,51 @@ fn every_unauthenticated_handler_is_public_on_purpose() {
     assert!(PUBLIC.iter().all(|(_, _, why)| !why.trim().is_empty()));
 }
 
+/// The security schemes a handler accepts, judged from how it resolves its caller (#587 review):
+///
+/// | Handler identifies its caller with | Accepts |
+/// | --- | --- |
+/// | `Actor` (or `Principal::require_any`), or only `RequirePermission` | session, api_key, service_account |
+/// | `Principal::require` | session, api_key |
+/// | `Extension<Option<CurrentUser>>` / `SessionToken` | session |
+fn expected_schemes(h: &Handler) -> &'static [&'static str] {
+    const ALL: &[&str] = &["session", "api_key", "service_account"];
+    if h.params.contains(":Actor") || h.body.contains("Principal::require_any") {
+        ALL
+    } else if h.body.contains("Principal::require(") || h.body.contains("Principal::optional(") {
+        &["session", "api_key"]
+    } else if h.params.contains("CurrentUser") || h.params.contains("SessionToken") {
+        &["session"]
+    } else {
+        ALL
+    }
+}
+
 #[test]
-fn every_gated_handler_declares_the_permission_it_requires() {
+fn every_gated_handler_declares_the_credentials_and_permission_it_requires() {
     let permissions: std::collections::HashMap<String, String> =
         crate::auth::permissions::marker_permissions()
             .into_iter()
             .collect();
-    let wrong: Vec<String> = scan()
+    let handlers = scan();
+    let wrong: Vec<String> = handlers
         .iter()
+        .filter(|h| h.takes_auth)
         .filter_map(|h| {
-            let marker = h.marker.as_ref()?;
-            let permission = permissions
-                .get(marker)
-                .unwrap_or_else(|| panic!("{marker} has no permission marker line"));
-            let expected = format!(r#"("bearer"=["{permission}"])"#);
+            let scope = match &h.marker {
+                Some(marker) => format!(
+                    r#"["{}"]"#,
+                    permissions
+                        .get(marker)
+                        .unwrap_or_else(|| panic!("{marker} has no permission marker line"))
+                ),
+                None => "[]".to_string(),
+            };
+            let expected = expected_schemes(h)
+                .iter()
+                .map(|scheme| format!(r#"("{scheme}"={scope})"#))
+                .collect::<Vec<_>>()
+                .join(",");
             (h.security.as_deref() != Some(expected.as_str())).then(|| {
                 format!(
                     "{}::{} needs security({expected}), has {:?}",
@@ -242,8 +287,32 @@ fn every_gated_handler_declares_the_permission_it_requires() {
         .collect();
     assert!(
         wrong.is_empty(),
-        "a gated path must declare exactly the permission its RequirePermission checks: {wrong:#?}"
+        "a gated path must declare exactly the credentials its handler accepts, scoped to the \
+         permission it checks: {wrong:#?}"
     );
+    // The three tiers all occur, so the rule is exercised rather than collapsing to one answer.
+    for tier in [3, 2, 1] {
+        assert!(
+            handlers
+                .iter()
+                .any(|h| h.takes_auth && expected_schemes(h).len() == tier),
+            "no handler accepts exactly {tier} credential kind(s); the scan is misreading handlers"
+        );
+    }
+}
+
+/// The review's own case (#587): a service account holding `events.plan.read` gets 401 on
+/// `GET /api/v1/airport-configs`, because the handler uses `Principal::require` — so the document
+/// must not offer `service_account` there.
+#[test]
+fn a_principal_require_path_does_not_offer_service_accounts() {
+    let handler = scan()
+        .into_iter()
+        .find(|h| h.file == "airport_configs" && h.name == "list_all_airport_configs")
+        .expect("the handler exists");
+    let security = handler.security.expect("it is gated");
+    assert!(security.contains(r#"("api_key"="#), "{security}");
+    assert!(!security.contains("service_account"), "{security}");
 }
 
 #[test]

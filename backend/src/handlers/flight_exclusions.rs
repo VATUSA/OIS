@@ -88,7 +88,7 @@ async fn may_edit_artcc(
 
 #[utoipa::path(
     get, path = "/api/v1/flow/fcas/{id}/exclusions", tag = "flow",
-    security(("bearer" = ["flow.fca.read"])),
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = FlightExclusionsBody), (status = 401), (status = 404))
 )]
@@ -115,7 +115,7 @@ pub async fn list_flight_exclusions(
 
 #[utoipa::path(
     post, path = "/api/v1/flow/fcas/{id}/exclusions/{callsign}", tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"])),
     params(("id" = String, Path), ("callsign" = String, Path)),
     request_body = ExcludeFlightRequest,
     responses((status = 200, body = FlightExclusionBody), (status = 401), (status = 403), (status = 404))
@@ -153,7 +153,7 @@ pub async fn exclude_flight(
 
 #[utoipa::path(
     delete, path = "/api/v1/flow/fcas/{id}/exclusions/{callsign}", tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"])),
     params(("id" = String, Path), ("callsign" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]

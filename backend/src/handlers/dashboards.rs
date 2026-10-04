@@ -46,7 +46,7 @@ fn check_size(data: &Option<serde_json::Value>) -> Result<(), ApiError> {
 
 #[utoipa::path(
     get, path = "/api/v1/dashboards", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     responses((status = 200, body = DashboardLibrary), (status = 401))
 )]
 pub async fn list_dashboards(
@@ -84,7 +84,7 @@ pub async fn list_dashboards(
 
 #[utoipa::path(
     post, path = "/api/v1/dashboards", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     request_body = CreateDashboardRequest,
     responses((status = 200, body = DashboardBody), (status = 400), (status = 401))
 )]
@@ -109,7 +109,7 @@ pub async fn create_dashboard(
 
 #[utoipa::path(
     get, path = "/api/v1/dashboards/{id}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = DashboardBody), (status = 401), (status = 404))
 )]
@@ -128,7 +128,7 @@ pub async fn get_dashboard(
 
 #[utoipa::path(
     put, path = "/api/v1/dashboards/{id}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)), request_body = UpdateDashboardRequest,
     responses((status = 200, body = DashboardBody), (status = 400), (status = 401), (status = 404))
 )]
@@ -156,7 +156,7 @@ pub async fn update_dashboard(
 
 #[utoipa::path(
     delete, path = "/api/v1/dashboards/{id}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -176,7 +176,7 @@ pub async fn delete_dashboard(
 
 #[utoipa::path(
     post, path = "/api/v1/dashboards/{id}/share", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = ShareResponse), (status = 401), (status = 404))
 )]
@@ -198,7 +198,7 @@ pub async fn share_dashboard(
 
 #[utoipa::path(
     delete, path = "/api/v1/dashboards/{id}/share", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -218,7 +218,7 @@ pub async fn unshare_dashboard(
 
 #[utoipa::path(
     get, path = "/api/v1/dashboards/shared/{slug}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("slug" = String, Path)),
     responses((status = 200, body = SharedDashboardBody), (status = 401), (status = 404))
 )]
@@ -237,7 +237,7 @@ pub async fn get_shared_dashboard(
 
 #[utoipa::path(
     post, path = "/api/v1/dashboards/shared/{slug}/copy", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("slug" = String, Path)),
     responses((status = 200, body = CopyResponse), (status = 401), (status = 404))
 )]
@@ -256,7 +256,7 @@ pub async fn copy_shared_dashboard(
 
 #[utoipa::path(
     post, path = "/api/v1/dashboard-collections", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     request_body = NameRequest,
     responses((status = 200, body = DashboardCollection), (status = 401))
 )]
@@ -273,7 +273,7 @@ pub async fn create_collection(
 
 #[utoipa::path(
     put, path = "/api/v1/dashboard-collections/{id}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)), request_body = NameRequest,
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -294,7 +294,7 @@ pub async fn rename_collection(
 
 #[utoipa::path(
     delete, path = "/api/v1/dashboard-collections/{id}", tag = "dashboards",
-    security(("bearer" = ["auth.profile.read"])),
+    security(("session" = ["auth.profile.read"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]

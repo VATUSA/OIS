@@ -58,7 +58,7 @@ pub struct ObservationsQuery {
     get,
     path = "/api/v1/stats/taxi/observations",
     tag = "stats",
-    security(("bearer" = ["stats.data.read"])),
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("airport" = Option<String>, Query, description = "Filter to one airport ICAO"),
         ("gate_id" = Option<String>, Query, description = "Filter to one gate/parking spot"),
@@ -120,7 +120,7 @@ pub struct EstimatesQuery {
     get,
     path = "/api/v1/stats/taxi/estimates",
     tag = "stats",
-    security(("bearer" = ["stats.data.read"])),
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     params(
         ("airport" = String, Query, description = "Airport ICAO (required — estimates are computed per-airport)"),
         ("gate_id" = Option<String>, Query, description = "Filter to one gate/parking spot"),

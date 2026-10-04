@@ -559,3 +559,24 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         .unwrap();
     assert!(matches!(national, PermissionScope::National { .. }));
 }
+
+/// #587 review: the OpenAPI document offers `service_account` only where a service account is
+/// actually let through. `list_all_airport_configs` uses `Principal::require`, so a service account
+/// holding exactly its permission is refused — and `auth_annotation_tests` holds the annotation to
+/// that. Migrating the handler to `Actor` (#607) must change both, together.
+#[sqlx::test]
+async fn a_service_account_is_refused_where_the_spec_does_not_offer_it(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, bearer) = service_account(&pool, "events.plan.read", None).await;
+
+    let (status, _) = call(
+        &state,
+        http::Method::GET,
+        "/api/v1/airport-configs",
+        &bearer,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+}

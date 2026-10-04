@@ -268,7 +268,7 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
     post,
     path = "/api/v1/flow/fcas",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"])),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = FcaBody), (status = 400), (status = 401))
 )]
@@ -293,7 +293,7 @@ pub async fn create_fca(
     put,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 404))
@@ -322,7 +322,7 @@ pub async fn update_fca(
     delete,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
-    security(("bearer" = ["flow.fca.delete"])),
+    security(("session" = ["flow.fca.delete"]), ("api_key" = ["flow.fca.delete"]), ("service_account" = ["flow.fca.delete"])),
     params(("id" = String, Path, description = "FCA id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -433,7 +433,7 @@ async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, A
     post,
     path = "/api/v1/flow/routes",
     tag = "flow",
-    security(("bearer" = ["flow.route.update"])),
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"])),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401))
 )]
@@ -469,7 +469,7 @@ pub async fn create_route(
     put,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
-    security(("bearer" = ["flow.route.update"])),
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"])),
     params(("id" = String, Path, description = "Route id")),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401), (status = 404))
@@ -514,7 +514,7 @@ pub async fn update_route(
     delete,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
-    security(("bearer" = ["flow.route.delete"])),
+    security(("session" = ["flow.route.delete"]), ("api_key" = ["flow.route.delete"])),
     params(("id" = String, Path, description = "Route id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -746,7 +746,7 @@ pub async fn aircraft_route(
     post,
     path = "/api/v1/flow/resolve-routes",
     tag = "flow",
-    security(("bearer" = ["stats.data.read"])),
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     request_body = Vec<ResolveRouteRequest>,
     responses((status = 200, body = Vec<ResolvedRoute>), (status = 401))
 )]
@@ -1028,7 +1028,7 @@ pub(crate) async fn build_flight_advisory(
     get,
     path = "/api/v1/me/flight",
     tag = "public",
-    security(("bearer" = [])),
+    security(("session" = [])),
     responses((status = 200, body = FlightImpact), (status = 401))
 )]
 pub async fn my_flight(
@@ -1086,7 +1086,7 @@ pub struct ValidateFixesQuery {
 /// typos (e.g. `MLLETT` for `MLLET`) that would silently exclude matching traffic.
 #[utoipa::path(
     get, path = "/api/v1/flow/validate-fixes", tag = "flow",
-    security(("bearer" = ["flow.fca.read"])),
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(("fixes" = Option<String>, Query, description = "Space/comma-separated fix tokens")),
     responses((status = 200, body = FixValidationBody), (status = 401))
 )]
@@ -1144,7 +1144,7 @@ impl Drop for DataRefreshClaim<'_> {
     post,
     path = "/api/v1/flow/data-refresh",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     responses((status = 200, body = DataStatus), (status = 401), (status = 409))
 )]
 pub async fn data_refresh(
@@ -2162,7 +2162,7 @@ fn split_codes(s: &Option<String>) -> Vec<String> {
     get,
     path = "/api/v1/flow/idst",
     tag = "flow",
-    security(("bearer" = ["flow.fca.read"])),
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(
         ("airports" = Option<String>, Query, description = "Comma-separated airport ICAOs"),
         ("tracons" = Option<String>, Query, description = "Comma-separated TRACON ids"),
@@ -2332,7 +2332,7 @@ pub async fn list_idst(
     post,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
         ("callsign" = String, Path, description = "Aircraft callsign")
@@ -2412,7 +2412,7 @@ pub async fn mark_release(
     delete,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
         ("callsign" = String, Path, description = "Aircraft callsign")
@@ -2482,7 +2482,7 @@ pub async fn clear_release(
     post,
     path = "/api/v1/flow/fcas/{id}/swap",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
     responses((status = 200), (status = 400), (status = 401), (status = 404))
@@ -2516,7 +2516,7 @@ pub async fn swap_releases(
     put,
     path = "/api/v1/flow/fcas/{id}/order",
     tag = "flow",
-    security(("bearer" = ["flow.fca.update"])),
+    security(("session" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
     responses((status = 204), (status = 401), (status = 404))

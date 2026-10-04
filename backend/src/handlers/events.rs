@@ -223,7 +223,7 @@ fn default_dcc() -> DccRequestBody {
     get,
     path = "/api/v1/events",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     responses((status = 200, body = Vec<EventBody>), (status = 401))
 )]
 pub async fn list_events(
@@ -238,7 +238,7 @@ pub async fn list_events(
     get,
     path = "/api/v1/events/{id}",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventBody), (status = 401), (status = 404))
 )]
@@ -380,7 +380,7 @@ pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     get,
     path = "/api/v1/events/{id}/banner",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses(
         (status = 200, description = "The event's banner image", content_type = "image/*"),
@@ -494,7 +494,7 @@ pub(crate) async fn relay_banner(url: &str) -> Result<(String, Vec<u8>), BannerR
     get,
     path = "/api/v1/events/{id}/dcc",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = DccRequestBody), (status = 401))
 )]
@@ -515,7 +515,7 @@ pub async fn get_event_dcc(
     put,
     path = "/api/v1/events/{id}/dcc",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateDccRequest,
     responses((status = 200, body = DccRequestBody), (status = 400), (status = 401), (status = 404))
@@ -550,7 +550,7 @@ pub async fn update_event_dcc(
     get,
     path = "/api/v1/events/{id}/facilities",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<FacilitySupportBody>), (status = 401), (status = 404))
 )]
@@ -664,7 +664,7 @@ pub async fn list_event_facilities(
     put,
     path = "/api/v1/events/{id}/facilities/{facility}",
     tag = "events",
-    security(("bearer" = ["events.support.update"])),
+    security(("session" = ["events.support.update"]), ("api_key" = ["events.support.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("facility" = String, Path, description = "ARTCC/TRACON id")
@@ -721,7 +721,7 @@ pub async fn upsert_event_facility(
     delete,
     path = "/api/v1/events/{id}/facilities/{facility}",
     tag = "events",
-    security(("bearer" = ["events.support.update"])),
+    security(("session" = ["events.support.update"]), ("api_key" = ["events.support.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("facility" = String, Path, description = "ARTCC/TRACON id")
@@ -762,7 +762,7 @@ pub async fn delete_event_facility(
     post,
     path = "/api/v1/events/{id}/facilities/tier1",
     tag = "events",
-    security(("bearer" = ["events.support.update"])),
+    security(("session" = ["events.support.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses(
         (status = 200, body = Tier1GenerateResult),
@@ -847,7 +847,7 @@ pub async fn generate_tier1(
     get,
     path = "/api/v1/events/{id}/rates",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<AirportRateBody>), (status = 401))
 )]
@@ -876,7 +876,7 @@ pub async fn list_event_rates(
     put,
     path = "/api/v1/events/{id}/rates/{icao}",
     tag = "events",
-    security(("bearer" = ["events.rate.update"])),
+    security(("session" = ["events.rate.update"]), ("api_key" = ["events.rate.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("icao" = String, Path, description = "Airport ICAO")
@@ -938,7 +938,7 @@ pub async fn upsert_event_rate(
     delete,
     path = "/api/v1/events/{id}/rates/{icao}",
     tag = "events",
-    security(("bearer" = ["events.rate.update"])),
+    security(("session" = ["events.rate.update"]), ("api_key" = ["events.rate.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("icao" = String, Path, description = "Airport ICAO")
@@ -992,7 +992,7 @@ async fn package_status(
     get,
     path = "/api/v1/events/{id}/packages",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<TmiPackageBody>), (status = 401))
 )]
@@ -1009,7 +1009,7 @@ pub async fn list_event_packages(
     post,
     path = "/api/v1/events/{id}/packages",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = CreatePackageRequest,
     responses((status = 200, body = Vec<TmiPackageBody>), (status = 400), (status = 401), (status = 404))
@@ -1038,7 +1038,7 @@ pub async fn create_event_package(
     delete,
     path = "/api/v1/events/{id}/packages/{package_id}",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1060,7 +1060,7 @@ pub async fn delete_event_package(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/items",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1103,7 +1103,7 @@ pub async fn add_event_package_item(
     delete,
     path = "/api/v1/events/{id}/packages/{package_id}/items/{item_id}",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id"),
@@ -1128,7 +1128,7 @@ pub async fn delete_event_package_item(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/activate",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1431,7 +1431,7 @@ pub(crate) async fn activate_package(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/deactivate",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1537,7 +1537,7 @@ pub(crate) async fn deactivate_package(
     put,
     path = "/api/v1/events/{id}/packages/{package_id}/auto",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1626,7 +1626,7 @@ async fn owned_event_fca(
     get,
     path = "/api/v1/events/{id}/fcas",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
 )]
@@ -1643,7 +1643,7 @@ pub async fn list_event_fcas(
     post,
     path = "/api/v1/events/{id}/fcas",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
@@ -1671,7 +1671,7 @@ pub async fn create_event_fca(
     put,
     path = "/api/v1/events/{id}/fcas/{fca_id}",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1700,7 +1700,7 @@ pub async fn update_event_fca(
     delete,
     path = "/api/v1/events/{id}/fcas/{fca_id}",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1722,7 +1722,7 @@ pub async fn delete_event_fca(
     post,
     path = "/api/v1/events/{id}/fcas/{fca_id}/publish",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1748,7 +1748,7 @@ pub async fn publish_event_fca(
     post,
     path = "/api/v1/events/{id}/fcas/{fca_id}/archive",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1774,7 +1774,7 @@ pub async fn archive_event_fca(
     put,
     path = "/api/v1/events/{id}/fcas/{fca_id}/auto",
     tag = "events",
-    security(("bearer" = ["events.plan.update"])),
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1798,7 +1798,7 @@ pub async fn set_event_fca_auto(
     get,
     path = "/api/v1/events/{id}/capture",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventCaptureBody), (status = 401), (status = 404))
 )]
@@ -1827,7 +1827,7 @@ pub async fn get_event_capture(
     put,
     path = "/api/v1/events/{id}/capture",
     tag = "events",
-    security(("bearer" = ["stats.capture.update"])),
+    security(("session" = ["stats.capture.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateEventCaptureRequest,
     responses((status = 200, body = EventCaptureBody), (status = 400), (status = 401), (status = 404))
@@ -1854,7 +1854,7 @@ pub async fn update_event_capture(
     get,
     path = "/api/v1/events/{id}/availability",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<EventAvailabilityBody>), (status = 401))
 )]
@@ -1871,7 +1871,7 @@ pub async fn get_event_availability(
     get,
     path = "/api/v1/events/{id}/stats",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventStatsBody), (status = 401), (status = 404))
 )]
@@ -2022,7 +2022,7 @@ async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, Api
     get,
     path = "/api/v1/events/{id}/debrief",
     tag = "events",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventDebriefBody), (status = 401))
 )]
@@ -2056,7 +2056,7 @@ pub async fn get_event_debrief(
     put,
     path = "/api/v1/events/{id}/debrief",
     tag = "events",
-    security(("bearer" = ["events.debrief.create"])),
+    security(("session" = ["events.debrief.create"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateEventDebriefRequest,
     responses((status = 200, body = EventDebriefBody), (status = 400), (status = 401), (status = 404))
@@ -2107,7 +2107,7 @@ fn dcc_region(facility: &str) -> Option<&'static str> {
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/discord/publish", tag = "events",
-    security(("bearer" = ["events.discord.publish"])),
+    security(("session" = ["events.discord.publish"]), ("api_key" = ["events.discord.publish"]), ("service_account" = ["events.discord.publish"])),
     params(("id" = i64, Path)),
     responses(
         (status = 202, description = "Thread creation enqueued"),

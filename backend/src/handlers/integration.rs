@@ -42,7 +42,7 @@ pub struct LeaseQuery {
 
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/lease", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("limit" = Option<i64>, Query, description = "Max jobs (default 10)")),
     responses((status = 200, body = Vec<OutboundJobBody>), (status = 401))
 )]
@@ -59,7 +59,7 @@ pub async fn lease_jobs(
 
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/{id}/ack", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = String, Path)), request_body = AckJobRequest,
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -100,7 +100,7 @@ pub async fn ack_job(
 
 #[utoipa::path(
     get, path = "/api/v1/me/discord", tag = "integration",
-    security(("bearer" = [])),
+    security(("session" = [])),
     responses((status = 200, body = DiscordLinkBody), (status = 401))
 )]
 pub async fn get_my_discord(
@@ -128,7 +128,7 @@ pub async fn get_my_discord(
 
 #[utoipa::path(
     get, path = "/api/v1/integration/discord/ace/{id}", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = String, Path)),
     responses((status = 200, body = DiscordAceInfoBody), (status = 401), (status = 404))
 )]
@@ -158,7 +158,7 @@ pub async fn discord_ace_info(
 /// What the bot needs to reply to a "View structured" button click on a TMI post.
 #[utoipa::path(
     get, path = "/api/v1/integration/discord/tmi/{id}", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = String, Path)),
     responses((status = 200, body = DiscordTmiInfoBody), (status = 401), (status = 404))
 )]
@@ -179,7 +179,7 @@ pub async fn discord_tmi_info(
 /// What the bot needs to reply to a "View structured" button click on an advisory post.
 #[utoipa::path(
     get, path = "/api/v1/integration/discord/advisory/{id}", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = String, Path)),
     responses((status = 200, body = DiscordAdvisoryInfoBody), (status = 401), (status = 404))
 )]
@@ -199,7 +199,7 @@ pub async fn discord_advisory_info(
 
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/ace/{id}/claim", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = String, Path)), request_body = DiscordAceClaimRequest,
     responses(
         (status = 200, body = AceRequestBody), (status = 401),
@@ -257,7 +257,7 @@ pub async fn discord_ace_claim(
 /// status) so the bot can explain why to the user.
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/availability/{id}", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     params(("id" = i64, Path)), request_body = DiscordAvailabilityRequest,
     responses((status = 200, body = DiscordAvailabilityResult), (status = 401), (status = 404))
 )]
@@ -320,7 +320,7 @@ pub async fn discord_availability(
 
 #[utoipa::path(
     get, path = "/api/v1/integration/discord", tag = "integration",
-    security(("bearer" = ["discord.config.read"])),
+    security(("session" = ["discord.config.read"]), ("api_key" = ["discord.config.read"]), ("service_account" = ["discord.config.read"])),
     responses((status = 200, body = DiscordConfigBody), (status = 401))
 )]
 pub async fn get_discord_config(
@@ -332,7 +332,7 @@ pub async fn get_discord_config(
 
 #[utoipa::path(
     put, path = "/api/v1/integration/discord", tag = "integration",
-    security(("bearer" = ["discord.config.update"])),
+    security(("session" = ["discord.config.update"]), ("api_key" = ["discord.config.update"]), ("service_account" = ["discord.config.update"])),
     request_body = UpsertDiscordConfigRequest,
     responses((status = 200, body = DiscordConfigBody), (status = 400), (status = 401))
 )]
@@ -366,7 +366,7 @@ pub async fn put_discord_config(
 
 #[utoipa::path(
     get, path = "/api/v1/integration/discord/thread-template", tag = "integration",
-    security(("bearer" = ["discord.config.read"])),
+    security(("session" = ["discord.config.read"]), ("api_key" = ["discord.config.read"]), ("service_account" = ["discord.config.read"])),
     responses((status = 200, body = EventThreadTemplateBody), (status = 401))
 )]
 pub async fn get_event_thread_template(
@@ -395,7 +395,7 @@ fn validate_template_body(body: &str) -> Result<&str, ApiError> {
 
 #[utoipa::path(
     put, path = "/api/v1/integration/discord/thread-template", tag = "integration",
-    security(("bearer" = ["discord.config.update"])),
+    security(("session" = ["discord.config.update"]), ("api_key" = ["discord.config.update"]), ("service_account" = ["discord.config.update"])),
     request_body = UpsertEventThreadTemplateRequest,
     responses((status = 200, body = EventThreadTemplateBody), (status = 400), (status = 401))
 )]
@@ -462,7 +462,7 @@ mod thread_template_tests {
 /// the bot's `integration.jobs.update` (a human admin never calls this).
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/guilds/snapshot", tag = "integration",
-    security(("bearer" = ["integration.jobs.update"])),
+    security(("session" = ["integration.jobs.update"]), ("api_key" = ["integration.jobs.update"]), ("service_account" = ["integration.jobs.update"])),
     request_body = PushGuildSnapshotRequest,
     responses((status = 204), (status = 401))
 )]
@@ -479,7 +479,7 @@ pub async fn push_guild_snapshot(
 /// `guild_snapshot` job the bot handles by pushing a fresh snapshot. Gated by `discord.config.update`.
 #[utoipa::path(
     post, path = "/api/v1/integration/discord/refresh", tag = "integration",
-    security(("bearer" = ["discord.config.update"])),
+    security(("session" = ["discord.config.update"]), ("api_key" = ["discord.config.update"]), ("service_account" = ["discord.config.update"])),
     responses((status = 202), (status = 401))
 )]
 pub async fn refresh_guild_snapshot(

@@ -252,7 +252,7 @@ pub struct RequestsQuery {
     get,
     path = "/api/v1/me/ace-claims",
     tag = "ace",
-    security(("bearer" = ["ace.requests.claim"])),
+    security(("session" = ["ace.requests.claim"])),
     responses((status = 200, body = Vec<MyAceClaim>), (status = 401), (status = 403))
 )]
 /// The signed-in user's claimed ACE positions for events still to come.
@@ -273,7 +273,7 @@ pub async fn my_ace_claims(
 
 #[utoipa::path(
     get, path = "/api/v1/events/{id}/ace", tag = "ace",
-    security(("bearer" = ["events.plan.read"])),
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path), ("status" = Option<String>, Query, description = "Filter by status")),
     responses((status = 200, body = Vec<AceRequestBody>), (status = 401))
 )]
@@ -291,7 +291,7 @@ pub async fn list_requests(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace", tag = "ace",
-    security(("bearer" = ["ace.requests.create"])),
+    security(("session" = ["ace.requests.create"])),
     params(("id" = i64, Path)), request_body = CreateAceRequestRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404))
 )]
@@ -379,7 +379,7 @@ pub(crate) async fn create_one(
 
 #[utoipa::path(
     delete, path = "/api/v1/events/{id}/ace/{req}", tag = "ace",
-    security(("bearer" = ["ace.requests.decide"])),
+    security(("session" = ["ace.requests.decide"]), ("api_key" = ["ace.requests.decide"]), ("service_account" = ["ace.requests.decide"])),
     params(("id" = i64, Path), ("req" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -397,7 +397,7 @@ pub async fn delete_request(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace/{req}/claim", tag = "ace",
-    security(("bearer" = ["ace.requests.claim"])),
+    security(("session" = ["ace.requests.claim"])),
     params(("id" = i64, Path), ("req" = String, Path)), request_body = ClaimAceRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404), (status = 409))
 )]
@@ -450,7 +450,7 @@ pub async fn claim_request(
 
 #[utoipa::path(
     delete, path = "/api/v1/events/{id}/ace/{req}/claim", tag = "ace",
-    security(("bearer" = ["ace.requests.claim"])),
+    security(("session" = ["ace.requests.claim"])),
     params(("id" = i64, Path), ("req" = String, Path)),
     responses((status = 200, body = AceRequestBody), (status = 401), (status = 404))
 )]
@@ -476,7 +476,7 @@ pub async fn release_claim(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace/{req}/decide", tag = "ace",
-    security(("bearer" = ["ace.requests.decide"])),
+    security(("session" = ["ace.requests.decide"])),
     params(("id" = i64, Path), ("req" = String, Path)), request_body = DecideAceRequestRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404), (status = 409))
 )]

@@ -3,31 +3,46 @@
 
 use utoipa::{
     Modify, OpenApi,
-    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 
-/// The one credential the document describes (#587). Every gated path carries
-/// `security(("bearer" = ["<permission>"]))`, so a path's scope *is* the permission it requires;
-/// `handlers/auth_annotation_tests.rs` holds each scope to its handler's `RequirePermission`.
-struct BearerAuth;
+/// The three credentials the document describes (#587), one scheme each, because not every path takes
+/// every kind. Each gated path lists, as alternatives, exactly the schemes its handler accepts — all
+/// three for an `Actor` (or bare `RequirePermission`) handler, `session` + `api_key` for
+/// `Principal::require`, `session` alone for `CurrentUser` — with the permission it requires as the
+/// scope. `handlers/auth_annotation_tests.rs` derives that set from each handler and holds the
+/// annotation to it, so a key or service-account token is never promised a path that would 401 it.
+struct CredentialSchemes;
 
-impl Modify for BearerAuth {
+impl Modify for CredentialSchemes {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_with(Default::default);
-        components.add_security_scheme(
-            "bearer",
+        let bearer = |description: &str| {
             SecurityScheme::Http(
                 HttpBuilder::new()
                     .scheme(HttpAuthScheme::Bearer)
-                    .description(Some(
-                        "`Authorization: Bearer <token>`, where the token is a personal API key \
-                         (`ois_pat_…`), a service account (`ois_sa_…`) or a desktop session \
-                         (`ois_dsk_…`). A path's scopes name the permission it requires; an API \
-                         key is further capped by its owner's live access. In a browser on the same \
-                         origin, the `ois_session` cookie authenticates too.",
-                    ))
+                    .description(Some(description.to_string()))
                     .build(),
+            )
+        };
+        components.add_security_scheme(
+            "session",
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                "ois_session",
+                "A signed-in person: the `ois_session` cookie set by VATSIM sign-in. The desktop app \
+                 sends the same session as `Authorization: Bearer ois_dsk_…`.",
+            ))),
+        );
+        components.add_security_scheme(
+            "api_key",
+            bearer(
+                "A personal API key: `Authorization: Bearer ois_pat_…`. Capped by its owner's live \
+                 access as well as the permissions granted to the key.",
             ),
+        );
+        components.add_security_scheme(
+            "service_account",
+            bearer("A service account: `Authorization: Bearer ois_sa_…`."),
         );
     }
 }
@@ -36,7 +51,7 @@ impl Modify for BearerAuth {
 // published spec names the build it describes.
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&BearerAuth),
+    modifiers(&CredentialSchemes),
     info(
         title = "OIS API",
         description = "VATUSA Event Operational Information System API"
