@@ -13463,6 +13463,8 @@ export interface operations {
     lease_jobs: {
         parameters: {
             query?: {
+                /** @description Optional. The consumer is the calling service account's key (the Discord bot's is `discord`); if given, this must match it. */
+                consumer?: string;
                 /** @description Max jobs (default 10) */
                 limit?: number;
             };
@@ -13486,11 +13488,21 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Not a service account, or `consumer` names another consumer */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     ack_job: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Optional. The consumer is the calling service account's key; if given, this must match it. An ack applies only to that consumer's job. */
+                consumer?: string;
+            };
             header?: never;
             path: {
                 id: string;
@@ -13510,6 +13522,13 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a service account, or `consumer` names another consumer */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
