@@ -126,6 +126,42 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     dispose();
   });
 
+  // AC3 holds only if no feed key refetches more often than it polled before #648. These intervals are
+  // each hook's `refetchInterval` on `next` before the tick existed, written out rather than read from
+  // FEED_KEYS, so a changed spacing fails here instead of passing against itself.
+  it.each([
+    ["flow-traffic", 15_000],
+    ["flow-atc", 15_000],
+    ["taxi", 15_000],
+    ["fca-counts", 15_000],
+    ["flow", 20_000],
+    ["aadc", 20_000],
+    ["fca-traffic", 30_000],
+    ["feed-status", 30_000],
+    ["idst", 30_000],
+    ["departures", 60_000],
+  ] as const)("a tick refetches %s no more often than its old %ims poll", async (prefix, polledMs) => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    invalidated.length = 0;
+    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+
+    const now = Date.now();
+    const call = invalidated.find((q) => (q as { queryKey: string[] }).queryKey[0] === prefix) as
+      | { predicate: (q: { state: { dataUpdatedAt: number } }) => boolean }
+      | undefined;
+    expect(call, `${prefix} refetches on a tick`).toBeDefined();
+    const refetchesAt = (ageMs: number) => call!.predicate({ state: { dataUpdatedAt: now - ageMs } });
+    if (polledMs <= 15_000) {
+      // The feed publishes about every 15s, so a 15s query keeps up by refetching on every tick.
+      expect(refetchesAt(1_000), `${prefix} refetches on every tick`).toBe(true);
+    } else {
+      expect(refetchesAt(polledMs - 1), `${prefix} waits out its old interval`).toBe(false);
+      expect(refetchesAt(polledMs), `${prefix} refetches once its old interval has passed`).toBe(true);
+    }
+    dispose();
+  });
+
   it("refetches a slower query only once its old poll interval has passed", async () => {
     const dispose = connectRealtime(qc);
     const socket = await opened();
