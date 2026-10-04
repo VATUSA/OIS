@@ -73,9 +73,14 @@ the machine, never a person and never nobody (an API key's owner stays reachable
 Reads coalesce the two names. Scope is unchanged: a key is capped by its owner's live scope, and a
 service account is scoped by its roles' ARTCCs.
 
-Machine-capable today: the release path (#583), the TMU, flow and GDP writes, and the events planning
-writes — DCC, facility support, airport rates, capture, debriefs, event FCAs, and building and standing
-down a TMI package — and airport configurations and surface data (#607). Arming and activating a package stay a person's act: the lifecycle job later
-publishes and archives it as the person in `events.tmi_package.updated_by`. The rest still
-take `CurrentUser`; `backend/src/handlers/actor_ratchet_tests.rs` lists every one as `Pending` or
-`UserOnly("why")`, and is the source of truth — it fails if a new handler blocks machines unlisted.
+Every handler is machine-capable except the ones listed `UserOnly("why")` in
+`backend/src/handlers/actor_ratchet_tests.rs` — things about a person by nature: their own access, API
+keys and dashboards; managing access groups or another person's access (a machine there could grant
+access); and ACE requests, whose requester is a person (#607). The ratchet fails if a new handler takes
+`CurrentUser` without being listed.
+
+**Acting later on someone's behalf.** The event-package lifecycle job publishes a package when its event
+nears, and archives it when the event ends, as whoever armed or activated it — the package's
+`updated_by_actor`, rebuilt with `Principal::from_actor`. It is held to that principal's scope at fire
+time (a key at its owner's scope intersected with its own grant), and a credential that has since been
+revoked or disabled publishes nothing.

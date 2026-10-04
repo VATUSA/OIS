@@ -10,6 +10,7 @@ use sqlx::PgPool;
 
 use serde_json::json;
 
+use crate::auth::principal::{Attribution, Principal};
 use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
@@ -1288,7 +1289,7 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
 
 /// Drive event TMI packages through their lifecycle: auto-activate draft + auto packages ~30 min
 /// before their event starts (materializing live TMU rows), and auto-deactivate (archive) activated
-/// ones when it ends. Acts as the package's `updated_by`. Nudges connected clients when anything
+/// ones when it ends. Acts as the package's `updated_by_actor`. Nudges connected clients when anything
 /// changed. Runs every minute.
 pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Events) {
     tokio::spawn(run_interval(
@@ -1305,15 +1306,36 @@ pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events
 
 /// One event-TMI-package lifecycle pass: auto-activate draft+auto packages entering the pre-event
 /// window and auto-archive activated ones whose event ended; nudges clients when anything changed.
-async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<String, String> {
+pub(crate) async fn event_package_lifecycle_once(
+    pool: &PgPool,
+    events: &Events,
+) -> Result<String, String> {
     let mut changed = 0u32;
 
     // Auto-activate: draft + auto packages entering the 30-min pre-event window.
     match events_repo::auto_due_packages(pool).await {
         Ok(due) => {
             for (package_id, event_id, actor) in due {
-                match crate::handlers::events::activate_package(pool, event_id, &package_id, &actor)
-                    .await
+                // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a
+                // disabled service account issues nothing, as its request would be refused.
+                let principal = match Principal::from_actor(pool, &actor).await {
+                    Ok(Some(principal)) => principal,
+                    Ok(None) => {
+                        tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(%package_id, "auto-activate: cannot load the armer");
+                        continue;
+                    }
+                };
+                match crate::handlers::events::activate_package(
+                    pool,
+                    event_id,
+                    &package_id,
+                    &principal,
+                )
+                .await
                 {
                     Ok(()) => changed += 1,
                     Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
@@ -1327,14 +1349,23 @@ async fn event_package_lifecycle_once(pool: &PgPool, events: &Events) -> Result<
     match events_repo::ended_activated_packages(pool).await {
         Ok(ended) => {
             for (package_id, _event_id, actor) in ended {
-                // The person who last touched the package, as before; their actor too (#607).
-                let by = match crate::auth::principal::Attribution::for_user_id(pool, &actor).await
-                {
+                // Archiving only cancels what the package issued, so it runs even if the activator's
+                // credential has since been revoked — otherwise its TMIs would outlive the event. It is
+                // attributed to that actor either way.
+                let by = match Principal::from_actor(pool, &actor).await {
+                    Ok(Some(principal)) => principal.attribution_in(pool).await,
+                    Ok(None) => Ok(Attribution {
+                        user_id: None,
+                        actor_id: Some(actor.clone()),
+                    }),
+                    Err(e) => Err(e),
+                };
+                let by = match by {
                     Ok(by) => by,
                     Err(e) => {
                         tracing::warn!(
                             package_id,
-                            "auto-archive: cannot attribute the package's person: {e:?}"
+                            "auto-archive: cannot attribute the package: {e:?}"
                         );
                         continue;
                     }

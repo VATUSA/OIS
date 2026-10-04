@@ -561,15 +561,16 @@ pub async fn set_package_auto(
 }
 
 /// `(package_id, event_id, actor)` for a package the scheduler should act on. `actor` is the package's
-/// `updated_by` (the human who last touched it); rows with no attributable actor are skipped.
+/// `updated_by_actor` (the `access.actors` id of whoever last touched it: a person, a key or a service
+/// account); rows with no actor are skipped.
 pub type SchedulablePackage = (String, i64, String);
 
 /// Draft + auto packages whose event is within 30 min of starting (and hasn't ended) — auto-activate.
 pub async fn auto_due_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
     sqlx::query_as::<_, SchedulablePackage>(
-        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+        "select p.id, p.event_id, p.updated_by_actor from events.tmi_package p \
          join events.event e on e.id = p.event_id \
-         where p.status = 'draft' and p.auto_publish and p.updated_by is not null \
+         where p.status = 'draft' and p.auto_publish and p.updated_by_actor is not null \
            and now() >= e.start_time - interval '30 minutes' and now() < e.end_time",
     )
     .fetch_all(pool)
@@ -580,9 +581,9 @@ pub async fn auto_due_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>,
 /// Activated packages whose event has ended — auto-deactivate (cancel live rows) + archive.
 pub async fn ended_activated_packages(pool: &PgPool) -> Result<Vec<SchedulablePackage>, ApiError> {
     sqlx::query_as::<_, SchedulablePackage>(
-        "select p.id, p.event_id, p.updated_by from events.tmi_package p \
+        "select p.id, p.event_id, p.updated_by_actor from events.tmi_package p \
          join events.event e on e.id = p.event_id \
-         where p.status = 'activated' and p.updated_by is not null and now() >= e.end_time",
+         where p.status = 'activated' and p.updated_by_actor is not null and now() >= e.end_time",
     )
     .fetch_all(pool)
     .await
