@@ -17,6 +17,10 @@ use crate::{
 /// Retry backoff cap and the max attempts before a job is parked as `failed`.
 const MAX_ATTEMPTS: i32 = 8;
 
+/// The consumer every job enqueued here belongs to: the Discord bot, which leases with
+/// `?consumer=discord`. A lease sees only its own consumer's jobs (#590).
+pub const DISCORD_CONSUMER: &str = "discord";
+
 /// Enqueue an outbound job **inside the caller's transaction**, so the side-effect is atomic with
 /// the state change that triggered it (no job without the change, no change without the job).
 pub async fn enqueue_job(
@@ -28,13 +32,14 @@ pub async fn enqueue_job(
 ) -> Result<String, ApiError> {
     let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     sqlx::query_scalar::<_, String>(
-        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id) \
-         values ($1, $2::jsonb, $3, $4) returning id",
+        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id, consumer) \
+         values ($1, $2::jsonb, $3, $4, $5) returning id",
     )
     .bind(job_type)
     .bind(payload)
     .bind(subject_type)
     .bind(subject_id)
+    .bind(DISCORD_CONSUMER)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)
@@ -51,15 +56,20 @@ struct LeaseRow {
     created_at: DateTime<Utc>,
 }
 
-/// Atomically lease up to `limit` due jobs: flip them `pending → in_progress`, bump `attempt_count`,
-/// and hand them over. `for update skip locked` lets multiple bot instances lease without collisions.
-pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody>, ApiError> {
+/// Atomically lease up to `limit` of `consumer`'s due jobs: flip them `pending → in_progress`, bump
+/// `attempt_count`, and hand them over. `for update skip locked` lets multiple bot instances lease
+/// without collisions; the `consumer` filter keeps a second consumer off the bot's jobs (#590).
+pub async fn lease_jobs(
+    pool: &PgPool,
+    consumer: &str,
+    limit: i64,
+) -> Result<Vec<OutboundJobBody>, ApiError> {
     let rows = sqlx::query_as::<_, LeaseRow>(
         "update integration.outbound_jobs j \
          set status = 'in_progress', attempt_count = j.attempt_count + 1, last_attempt_at = now() \
          from ( \
              select id from integration.outbound_jobs \
-             where status = 'pending' and next_attempt_at <= now() \
+             where status = 'pending' and consumer = $2 and next_attempt_at <= now() \
              order by next_attempt_at for update skip locked limit $1 \
          ) d \
          where j.id = d.id \
@@ -67,6 +77,7 @@ pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody
                    j.attempt_count, j.created_at",
     )
     .bind(limit.clamp(1, 100))
+    .bind(consumer)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1041,7 +1052,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            lease_jobs(&pool, 10)
+            lease_jobs(&pool, DISCORD_CONSUMER, 10)
                 .await
                 .unwrap()
                 .iter()
@@ -1068,7 +1079,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let b = lease_jobs(&pool, 10)
+        let b = lease_jobs(&pool, DISCORD_CONSUMER, 10)
             .await
             .unwrap()
             .into_iter()

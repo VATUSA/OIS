@@ -171,13 +171,18 @@ impl OisClient {
         format!("{}{}", self.base_url, path)
     }
 
-    /// Lease up to `limit` pending outbound jobs (marks them in-progress). Needs `integration.jobs.update`.
-    pub async fn lease_jobs(&self, limit: u32) -> Result<Vec<OutboundJob>, ClientError> {
+    /// Lease up to `limit` of `consumer`'s pending outbound jobs (marks them in-progress). Needs
+    /// `integration.jobs.update`. The backend requires `consumer` and returns only that consumer's jobs.
+    pub async fn lease_jobs(
+        &self,
+        consumer: &str,
+        limit: u32,
+    ) -> Result<Vec<OutboundJob>, ClientError> {
         let resp = self
             .http
             .post(self.url("/api/v1/integration/jobs/lease"))
             .bearer_auth(&self.token)
-            .query(&[("limit", limit)])
+            .query(&lease_query(consumer, limit))
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -334,9 +339,30 @@ impl OisClient {
     }
 }
 
+/// The lease's query string. A function so its wire names can be pinned (#590): the backend 400s a
+/// lease without `consumer`, so a rename here stops the bot leasing anything.
+fn lease_query(consumer: &str, limit: u32) -> [(&'static str, String); 2] {
+    [
+        ("consumer", consumer.to_string()),
+        ("limit", limit.to_string()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AckBody;
+    use super::{AckBody, lease_query};
+
+    /// Pinned against `LeaseQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
+    #[test]
+    fn a_lease_names_its_consumer_on_the_wire() {
+        assert_eq!(
+            lease_query("discord", 10),
+            [
+                ("consumer", "discord".to_string()),
+                ("limit", "10".to_string())
+            ]
+        );
+    }
 
     /// `AckBody` is hand-written, not generated, and the backend reads the lease token through
     /// `#[serde(default)]` so that an old bot keeps working across a deploy (VATUSA/OIS#472). Together

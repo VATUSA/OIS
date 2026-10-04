@@ -12576,7 +12576,9 @@ export interface operations {
     };
     lease_jobs: {
         parameters: {
-            query?: {
+            query: {
+                /** @description Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`. */
+                consumer: string;
                 /** @description Max jobs (default 10) */
                 limit?: number;
             };
@@ -12593,6 +12595,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["OutboundJobBody"][];
                 };
+            };
+            /** @description No `consumer` given */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: {
                 headers: {

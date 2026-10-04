@@ -35,6 +35,7 @@ moving to `published`). The row carries:
 
 | column | meaning |
 | --- | --- |
+| `consumer` | whose job it is; everything enqueued today is `discord` (#590) |
 | `job_type` | discriminator selecting the handler (see [Job types](#job-types)) |
 | `payload` (jsonb) | everything the handler needs: resolved channel/role logical names, embed fields, subject ids |
 | `subject_type` / `subject_id` | back-reference to the originating row (e.g. `event` / `<event_id>`) for idempotency and audit |
@@ -46,7 +47,8 @@ moving to `published`). The row carries:
 Job lifecycle:
 
 1. **Enqueue** — feature handler inserts a `pending` job with `next_attempt_at = now()`.
-2. **Lease** — the bot asks the backend for due pending jobs (`status = pending AND next_attempt_at <= now()`); the
+2. **Lease** — the bot asks the backend for its due pending jobs (`POST /api/v1/integration/jobs/lease?consumer=discord`:
+   `consumer = discord AND status = pending AND next_attempt_at <= now()`; `consumer` is required, #590); the
    backend marks them `in_progress` and hands them over. Leasing is claim-and-lock so concurrent bot instances don't
    double-deliver.
 3. **Perform** — the bot executes the Discord action (create thread, post embed, edit embed, DM/ping).

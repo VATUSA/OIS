@@ -36,23 +36,38 @@ fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
 
 #[derive(Deserialize)]
 pub struct LeaseQuery {
+    /// Whose jobs to lease. Required (#590): with no filter a second consumer leased the bot's jobs.
+    consumer: Option<String>,
     /// Max jobs to lease (default 10, clamped 1–100).
     limit: Option<i64>,
 }
 
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/lease", tag = "integration",
-    params(("limit" = Option<i64>, Query, description = "Max jobs (default 10)")),
-    responses((status = 200, body = Vec<OutboundJobBody>), (status = 401))
+    params(
+        ("consumer" = String, Query, description = "Whose jobs to lease; only that consumer's jobs are returned. The Discord bot is `discord`."),
+        ("limit" = Option<i64>, Query, description = "Max jobs (default 10)")
+    ),
+    responses(
+        (status = 200, body = Vec<OutboundJobBody>),
+        (status = 400, description = "No `consumer` given"),
+        (status = 401)
+    )
 )]
 pub async fn lease_jobs(
     State(state): State<AppState>,
     _permission: RequirePermission<IntegrationJobsUpdate>,
     Query(q): Query<LeaseQuery>,
 ) -> Result<Json<Vec<OutboundJobBody>>, ApiError> {
+    let consumer = q
+        .consumer
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or(ApiError::BadRequest)?;
     let limit = q.limit.unwrap_or(10);
     Ok(Json(
-        integration_repo::lease_jobs(pool(&state)?, limit).await?,
+        integration_repo::lease_jobs(pool(&state)?, consumer, limit).await?,
     ))
 }
 
@@ -623,5 +638,79 @@ mod tests {
         grant(&pool, &user, "integration.jobs.update", None).await;
         let allowed = send(&state, http::Method::POST, &uri, &cookie, Some(body)).await;
         assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+    }
+    /// A Discord job made the way production makes one — through `enqueue_job` — so the test proves
+    /// what the bot will actually see, not what a fixture says.
+    async fn enqueued_discord_job(pool: &PgPool) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        let id = crate::repos::integration::enqueue_job(
+            &mut tx,
+            "guild_snapshot",
+            &serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+
+    /// A due job belonging to another consumer — what an outbound-webhook worker would lease.
+    async fn webhook_job(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs (job_type, consumer) \
+             values ('webhook_delivery', 'webhook') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #590 AC1: two consumers lease from the one queue and neither takes the other's job. Before
+    /// the `consumer` filter, the webhook lease took the bot's job, which the webhook worker could only
+    /// nack.
+    #[sqlx::test]
+    async fn two_consumers_lease_only_their_own_jobs(pool: PgPool) {
+        let discord = enqueued_discord_job(&pool).await;
+        let webhook = webhook_job(&pool).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+        let lease = |consumer: &str| format!("/api/v1/integration/jobs/lease?consumer={consumer}");
+
+        let ok = send(&state, http::Method::POST, &lease("webhook"), &cookie, None).await;
+        assert_eq!(ok, http::StatusCode::OK);
+        assert_eq!(status_of(&pool, &webhook).await, "in_progress");
+        assert_eq!(
+            status_of(&pool, &discord).await,
+            "pending",
+            "the webhook consumer must not take the bot's job"
+        );
+
+        // The bot, leasing as it does in `discord/src/jobs/mod.rs`, still gets its job.
+        let ok = send(&state, http::Method::POST, &lease("discord"), &cookie, None).await;
+        assert_eq!(ok, http::StatusCode::OK);
+        assert_eq!(status_of(&pool, &discord).await, "in_progress");
+    }
+
+    /// A lease that names no consumer is refused rather than given every consumer's jobs.
+    #[sqlx::test]
+    async fn a_lease_without_a_consumer_is_refused(pool: PgPool) {
+        let discord = enqueued_discord_job(&pool).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+
+        for uri in [
+            "/api/v1/integration/jobs/lease",
+            "/api/v1/integration/jobs/lease?consumer=%20",
+        ] {
+            let refused = send(&state, http::Method::POST, uri, &cookie, None).await;
+            assert_eq!(refused, http::StatusCode::BAD_REQUEST, "{uri}");
+        }
+        assert_eq!(status_of(&pool, &discord).await, "pending");
     }
 }
