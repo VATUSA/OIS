@@ -353,10 +353,36 @@ async fn reconcile_vatusa_grants(
 
 // --- Role → group mappings (#548) ---
 
-type MappingRow = (i64, String, Option<String>, String, DateTime<Utc>);
+/// The VATUSA roles confirmed in the division pull (`GET /v3/division/controllers`, VATUSA's
+/// `acl_user_role` table), for documentation and tests — not a filter: the editor offers whatever
+/// [`fetch_known_vatusa_roles`] actually sees. They are the **long** form; VATUSA's per-facility
+/// endpoint lists the same grants under short codes (`EC`, `INS`, `WM`, `FACCBT`, …) that the sync never
+/// receives, so a mapping on a short code would match nobody (#699). There is no assistant role:
+/// VATUSA's `AEC` is "holds `EVENT_COORDINATOR` but isn't the facility's point of contact", which a
+/// mapping can't express, so OIS's `AEC` group stays hand-assigned.
+pub const DOCUMENTED_VATUSA_ROLES: &[&str] = &[
+    "DIVISION_TECH_TEAM",
+    "EVENT_COORDINATOR",
+    "FACILITY_ACADEMY_EDITOR",
+    "INSTRUCTOR",
+    "WEB_MAINTAINER",
+];
+
+/// Whether `role` (already trimmed and uppercased) can name a VATUSA role: `A–Z`, `0–9` and `_`, at
+/// most 64 characters. The real vocabulary is long-form with underscores (`FACILITY_ACADEMY_EDITOR` is
+/// 23), which the earlier alphanumeric, 16-character rule refused (#699).
+pub fn is_valid_vatusa_role(role: &str) -> bool {
+    !role.is_empty()
+        && role.len() <= 64
+        && role
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+type MappingRow = (i64, String, Option<String>, String, DateTime<Utc>, i64);
 
 fn mapping_body(
-    (id, vatusa_role, facility, role_name, created_at): MappingRow,
+    (id, vatusa_role, facility, role_name, created_at, holders): MappingRow,
 ) -> VatusaRoleMappingBody {
     VatusaRoleMappingBody {
         id,
@@ -364,15 +390,20 @@ fn mapping_body(
         facility,
         role_name,
         created_at,
+        holders,
     }
 }
 
-const MAPPING_SELECT: &str =
-    "select id, vatusa_role, facility, role_name, created_at from access.vatusa_role_mappings";
+/// `holders` is how many synced members the mapping matches today, so the editor can say when one
+/// grants nobody (#699).
+const MAPPING_SELECT: &str = "select m.id, m.vatusa_role, m.facility, m.role_name, m.created_at, \
+     (select count(distinct r.cid) from identity.vatusa_roles r \
+      where r.role = m.vatusa_role and (m.facility is null or r.facility = m.facility)) \
+     from access.vatusa_role_mappings m";
 
 pub async fn fetch_role_mappings(pool: &PgPool) -> Result<Vec<VatusaRoleMappingBody>, ApiError> {
     let rows = sqlx::query_as::<_, MappingRow>(&format!(
-        "{MAPPING_SELECT} order by role_name, vatusa_role, facility nulls first"
+        "{MAPPING_SELECT} order by m.role_name, m.vatusa_role, m.facility nulls first"
     ))
     .fetch_all(pool)
     .await
@@ -384,7 +415,7 @@ pub async fn fetch_role_mapping(
     pool: &PgPool,
     id: i64,
 ) -> Result<Option<VatusaRoleMappingBody>, ApiError> {
-    let row = sqlx::query_as::<_, MappingRow>(&format!("{MAPPING_SELECT} where id = $1"))
+    let row = sqlx::query_as::<_, MappingRow>(&format!("{MAPPING_SELECT} where m.id = $1"))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -1140,13 +1171,115 @@ mod tests {
         );
     }
 
-    /// Mappings are seeded with nothing, so deploying this grants nobody anything (owner decision).
+    // ---- #699: real role names, default mappings --------------------------------------------------
+
+    async fn seeded(pool: &PgPool) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "select vatusa_role, facility, role_name from access.vatusa_role_mappings \
+             order by vatusa_role",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The owner's decision on #699, shipped by 0124: VATUSA's event coordinators are OIS's EC at their
+    /// own ARTCC, and the division tech team is national VATUSA staff. Nothing else.
     #[sqlx::test]
-    async fn no_mappings_are_seeded(pool: PgPool) {
-        let count: i64 = sqlx::query_scalar("select count(*) from access.vatusa_role_mappings")
-            .fetch_one(&pool)
+    async fn the_default_mappings_are_seeded(pool: PgPool) {
+        assert_eq!(
+            seeded(&pool).await,
+            vec![
+                (
+                    "DIVISION_TECH_TEAM".into(),
+                    Some("ZHQ".into()),
+                    "VATUSA_STAFF".into()
+                ),
+                ("EVENT_COORDINATOR".into(), None, "EC".into()),
+            ]
+        );
+    }
+
+    /// A default mapping on a role the sync never sends would grant nobody, silently — the failure
+    /// #699 found. Every seeded role is one the division pull is known to send.
+    #[sqlx::test]
+    async fn seeded_mappings_name_documented_roles(pool: PgPool) {
+        for (role, _, _) in seeded(&pool).await {
+            assert!(
+                super::DOCUMENTED_VATUSA_ROLES.contains(&role.as_str()),
+                "{role} is not a documented VATUSA role"
+            );
+        }
+    }
+
+    /// The real vocabulary is long-form with underscores; the old rule (alphanumeric, ≤ 16) refused
+    /// four of the five roles VATUSA actually sends.
+    #[test]
+    fn every_documented_role_passes_validation_and_junk_does_not() {
+        for role in super::DOCUMENTED_VATUSA_ROLES {
+            assert!(super::is_valid_vatusa_role(role), "{role} is refused");
+        }
+        for bad in ["", "EC-1", "EC 1", "ec", &"A".repeat(65)] {
+            assert!(!super::is_valid_vatusa_role(bad), "{bad:?} is accepted");
+        }
+        assert!(super::is_valid_vatusa_role(&"A".repeat(64)));
+    }
+
+    /// A role nothing maps (here a real one) is stored, grants nothing, and is offered to the editor so
+    /// an admin can map it.
+    #[sqlx::test]
+    async fn an_unmapped_role_is_stored_offered_and_grants_nothing(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sync(&pool, &[("FACILITY_ACADEMY_EDITOR", "ZDC")]).await;
+        assert!(grants(&pool, &user).await.is_empty());
+        assert!(
+            super::fetch_known_vatusa_roles(&pool)
+                .await
+                .unwrap()
+                .contains(&"FACILITY_ACADEMY_EDITOR".to_string())
+        );
+    }
+
+    /// VATUSA sends a division-wide role with facility `*`. End to end through the ingest path, that is
+    /// a national grant (artcc_id null) — not one scoped to a facility called `*` or `ZHQ`.
+    #[sqlx::test]
+    async fn a_star_division_role_is_a_national_grant(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sync(&pool, &[("DIVISION_TECH_TEAM", "*")]).await;
+        assert_eq!(
+            grants(&pool, &user).await,
+            vec![vatusa("VATUSA_STAFF", None)]
+        );
+    }
+
+    #[sqlx::test]
+    async fn an_event_coordinator_is_ec_at_their_own_artcc(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sync(&pool, &[("EVENT_COORDINATOR", "ZDC")]).await;
+        assert_eq!(grants(&pool, &user).await, vec![vatusa("EC", Some("ZDC"))]);
+    }
+
+    /// The editor's "grants nobody" warning reads this count.
+    #[sqlx::test]
+    async fn holders_counts_the_members_a_mapping_matches(pool: PgPool) {
+        seed_user(&pool).await;
+        map(&pool, "INSTRUCTOR", Some("ZLA"), "EC").await;
+        sync(
+            &pool,
+            &[("EVENT_COORDINATOR", "ZDC"), ("INSTRUCTOR", "ZDC")],
+        )
+        .await;
+        let holders: std::collections::BTreeMap<String, i64> = super::fetch_role_mappings(&pool)
             .await
-            .unwrap();
-        assert_eq!(count, 0);
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.vatusa_role, m.holders))
+            .collect();
+        assert_eq!(holders["EVENT_COORDINATOR"], 1, "any facility: matches ZDC");
+        assert_eq!(
+            holders["INSTRUCTOR"], 0,
+            "held at ZDC, mapped at ZLA: matches nobody"
+        );
+        assert_eq!(holders["DIVISION_TECH_TEAM"], 0);
     }
 }

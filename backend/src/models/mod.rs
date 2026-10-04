@@ -256,6 +256,9 @@ pub struct VatusaRoleMappingBody {
     pub facility: Option<String>,
     pub role_name: String,
     pub created_at: DateTime<Utc>,
+    /// How many synced members hold this VATUSA role (at `facility`, or anywhere) right now. `0` means
+    /// the mapping grants nobody.
+    pub holders: i64,
 }
 
 /// Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those

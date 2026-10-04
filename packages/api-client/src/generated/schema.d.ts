@@ -7212,6 +7212,12 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             facility?: string | null;
+            /**
+             * Format: int64
+             * @description How many synced members hold this VATUSA role (at `facility`, or anywhere) right now. `0` means
+             *     the mapping grants nobody.
+             */
+            holders: number;
             /** Format: int64 */
             id: number;
             role_name: string;
