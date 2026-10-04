@@ -1,7 +1,7 @@
 //! Persistence for VATUSA member sync — member detail on `identity.users`, the mirrored
 //! roles/visits tables, and the per-facility webhook secrets.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -112,7 +112,7 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     for role in &m.roles {
         // Stored verbatim before #548; now it is joined against org.facilities and the mappings, so
         // " zdc " must arrive as "ZDC".
-        let facility = role.facility.trim().to_uppercase();
+        let facility = normalise_facility(&role.facility);
         let role_name = role.role.trim().to_uppercase();
         if facility.is_empty() || role_name.is_empty() {
             continue;
@@ -465,6 +465,19 @@ async fn reconcile_member_access(
     tx: &mut Transaction<'_, Postgres>,
     cid: i64,
 ) -> Result<(), ApiError> {
+    // No "before": the member's roles didn't change, a mapping did — so a removal's reason is that no
+    // mapping supports the grant any more, which is what the reconciler says when it has no prior view.
+    reconcile_member(tx, cid, &BTreeMap::new()).await
+}
+
+/// Reconcile one member from their stored VATUSA roles, given what those roles justified before the
+/// change being applied (so a removal's audit names the role that was lost). Takes the member's
+/// `identity.users` row lock — the lock a sync holds — so concurrent writers for one member queue.
+async fn reconcile_member(
+    tx: &mut Transaction<'_, Postgres>,
+    cid: i64,
+    justified_before: &JustifiedGrants,
+) -> Result<(), ApiError> {
     let Some(user_id) =
         sqlx::query_scalar::<_, String>("select id from identity.users where cid = $1 for update")
             .bind(cid)
@@ -475,9 +488,7 @@ async fn reconcile_member_access(
         return Ok(());
     };
     let justified_now = desired_vatusa_grants(tx, cid).await?;
-    // No "before": the member's roles didn't change, a mapping did — so a removal's reason is that no
-    // mapping supports the grant any more, which is what the reconciler says when it has no prior view.
-    reconcile_vatusa_grants(tx, &user_id, cid, &BTreeMap::new(), &justified_now).await
+    reconcile_vatusa_grants(tx, &user_id, cid, justified_before, &justified_now).await
 }
 
 fn scope_label(scope: &Option<String>) -> String {
@@ -506,84 +517,304 @@ async fn access_snapshot(
 /// The audit actor seeded by migration 0100.
 const VATUSA_SYNC_ACTOR: &str = "vatusa-sync";
 
-/// CIDs from the given set that we actually have a user row for.
-pub async fn known_cids(pool: &PgPool, cids: &[i64]) -> Result<Vec<i64>, ApiError> {
-    if cids.is_empty() {
-        return Ok(Vec::new());
+// --- Division pull (VATUSA/OIS#605) ---
+
+/// A facility code as OIS stores it: trimmed, uppercased, and with v3's division-wide `*` stored as
+/// `ZHQ` — the marker v2 used — so the role mapping's national case (0100) and its editor's
+/// "ZHQ (division)" choice work whichever API a role arrived from.
+pub fn normalise_facility(raw: &str) -> String {
+    match raw.trim() {
+        "*" => "ZHQ".to_string(),
+        code => code.to_uppercase(),
     }
-    sqlx::query_scalar::<_, i64>("select cid from identity.users where cid = any($1)")
-        .bind(cids)
-        .fetch_all(pool)
+}
+
+/// One controller from the division pull, already normalised.
+#[derive(Debug, Clone)]
+pub struct DivisionMember {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating_numeric: i32,
+    pub rating_short: Option<String>,
+    pub facility: String,
+    pub facility_join: Option<DateTime<Utc>>,
+    pub visits: Vec<String>,
+    /// `(facility, role, granted_at)`.
+    pub roles: Vec<(String, String, Option<DateTime<Utc>>)>,
+}
+
+/// Members with a stored VATUSA sync — the floor the pull's sanity check compares against.
+pub async fn count_synced_members(pool: &PgPool) -> Result<i64, ApiError> {
+    sqlx::query_scalar("select count(*) from identity.users where vatusa_synced_at is not null")
+        .fetch_one(pool)
         .await
         .map_err(|_| ApiError::Internal)
 }
 
-/// The least-recently-synced members (never-synced first), for reconciliation.
-pub async fn stale_member_cids(pool: &PgPool, limit: i64) -> Result<Vec<i64>, ApiError> {
-    sqlx::query_scalar::<_, i64>(
-        "select cid from identity.users
-         where cid is not null
-         order by vatusa_synced_at asc nulls first
-         limit $1",
+/// How many VATUSA role grants are stored — the role half of the pull's truncation check.
+pub async fn count_stored_roles(pool: &PgPool) -> Result<i64, ApiError> {
+    sqlx::query_scalar("select count(*) from identity.vatusa_roles")
+        .fetch_one(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Apply one chunk of the division pull in one transaction, as a handful of bulk statements rather
+/// than ~10 per member: seed or refresh the users, diff (not replace) their roles and visits, and
+/// re-reconcile the VATUSA-mapped access (#548) of exactly the members whose roles changed. Returns
+/// `(users seeded, members whose roles changed)`.
+///
+/// `members` must be sorted by CID: rows are locked in that order, which is also the order the role
+/// mapping editor's re-reconcile locks them, so the two can never deadlock.
+///
+/// Deliberately untouched: names and email (sign-in owns them, from VATSIM Connect), the audit actor
+/// (created at sign-in, so seeded strangers don't get one), and **the Discord mapping** — v3 doesn't
+/// carry `discord_id`, and absence must never read as "cleared" (sign-in refreshes it over v2).
+pub async fn apply_division_chunk(
+    pool: &PgPool,
+    members: &[DivisionMember],
+) -> Result<(usize, usize), ApiError> {
+    let db = |_| ApiError::Internal;
+    let cids: Vec<i64> = members.iter().map(|m| m.cid).collect();
+    let mut tx = pool.begin().await.map_err(db)?;
+
+    let seeded: Vec<bool> = sqlx::query_scalar(
+        r#"
+        insert into identity.users as u
+            (cid, full_name, display_name, rating, rating_numeric, home_facility,
+             flag_home_controller, facility_join, vatusa_synced_at)
+        select c.cid, c.name, c.name, c.short, c.numeric, nullif(c.facility, ''),
+               exists (select 1 from org.facilities f where f.id = c.facility),
+               c.joined, now()
+        from unnest($1::bigint[], $2::text[], $3::text[], $4::int[], $5::text[], $6::timestamptz[])
+             as c(cid, name, short, numeric, facility, joined)
+        on conflict (cid) do update
+        set rating = coalesce(excluded.rating, u.rating),
+            rating_numeric = excluded.rating_numeric,
+            home_facility = excluded.home_facility,
+            -- v2 at sign-in carries VATUSA's own flag; the pull can only derive one. Deferring to an
+            -- existing value keeps the profile from flipping between the two each day.
+            flag_home_controller = coalesce(u.flag_home_controller, excluded.flag_home_controller),
+            facility_join = coalesce(excluded.facility_join, u.facility_join),
+            vatusa_synced_at = now(),
+            updated_at = now()
+        returning (xmax = 0)
+        "#,
     )
-    .bind(limit)
+    .bind(&cids)
+    .bind(
+        members
+            .iter()
+            .map(|m| m.display_name.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        members
+            .iter()
+            .map(|m| m.rating_short.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(members.iter().map(|m| m.rating_numeric).collect::<Vec<_>>())
+    .bind(
+        members
+            .iter()
+            .map(|m| m.facility.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(members.iter().map(|m| m.facility_join).collect::<Vec<_>>())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+
+    let roles: Vec<(i64, &str, &str, Option<DateTime<Utc>>)> = members
+        .iter()
+        .flat_map(|m| {
+            m.roles
+                .iter()
+                .map(move |(f, r, at)| (m.cid, f.as_str(), r.as_str(), *at))
+        })
+        .collect();
+    let changed = replace_roles(&mut tx, &cids, &roles).await?;
+
+    let visits: Vec<(i64, &str)> = members
+        .iter()
+        .flat_map(|m| m.visits.iter().map(move |v| (m.cid, v.as_str())))
+        .collect();
+    replace_visits(&mut tx, &cids, &visits).await?;
+
+    tx.commit().await.map_err(db)?;
+    Ok((seeded.iter().filter(|s| **s).count(), changed))
+}
+
+/// Controllers who have left the division keep nothing VATUSA granted them: their stored roles go
+/// (and with them, through the reconciler, any VATUSA-mapped access). `present` is every CID in the
+/// pull. Returns how many members were cleared. Only ever called after the pull's sanity floor.
+pub async fn clear_departed(pool: &PgPool, present: &[i64]) -> Result<usize, ApiError> {
+    let db = |_| ApiError::Internal;
+    let departed: Vec<i64> = sqlx::query_scalar(
+        "select distinct cid from identity.vatusa_roles where cid <> all($1) order by cid",
+    )
+    .bind(present)
     .fetch_all(pool)
     .await
-    .map_err(|_| ApiError::Internal)
+    .map_err(db)?;
+    for chunk in departed.chunks(500) {
+        let mut tx = pool.begin().await.map_err(db)?;
+        replace_roles(&mut tx, chunk, &[]).await?;
+        replace_visits(&mut tx, chunk, &[]).await?;
+        tx.commit().await.map_err(db)?;
+    }
+    Ok(departed.len())
 }
 
-/// Active ARTCC ids, used to decide which facilities to register webhooks for.
-pub async fn active_facilities(pool: &PgPool) -> Result<Vec<String>, ApiError> {
-    sqlx::query_scalar::<_, String>("select id from org.facilities where active = true order by id")
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)
-}
+/// Make the stored roles of `cids` exactly `roles` — deleting what's gone and inserting what's new
+/// rather than rewriting both tables daily — then re-reconcile the members whose roles changed, each
+/// with what their old roles justified so the audit names the role that was lost. Returns how many.
+async fn replace_roles(
+    tx: &mut Transaction<'_, Postgres>,
+    cids: &[i64],
+    roles: &[(i64, &str, &str, Option<DateTime<Utc>>)],
+) -> Result<usize, ApiError> {
+    let db = |_| ApiError::Internal;
+    let r_cid: Vec<i64> = roles.iter().map(|r| r.0).collect();
+    let r_fac: Vec<&str> = roles.iter().map(|r| r.1).collect();
+    let r_role: Vec<&str> = roles.iter().map(|r| r.2).collect();
+    let r_at: Vec<Option<DateTime<Utc>>> = roles.iter().map(|r| r.3).collect();
 
-/// Facilities that already have a registered webhook.
-pub async fn registered_facilities(pool: &PgPool) -> Result<HashSet<String>, ApiError> {
-    let rows = sqlx::query_scalar::<_, String>("select facility from identity.vatusa_webhooks")
-        .fetch_all(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
-    Ok(rows.into_iter().collect())
-}
-
-pub async fn upsert_webhook(
-    pool: &PgPool,
-    facility: &str,
-    webhook_id: i64,
-    secret: &str,
-    url: &str,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "insert into identity.vatusa_webhooks (facility, webhook_id, secret, url)
-         values ($1, $2, $3, $4)
-         on conflict (facility) do update
-         set webhook_id = excluded.webhook_id,
-             secret = excluded.secret,
-             url = excluded.url,
-             updated_at = now()",
+    let changed: Vec<i64> = sqlx::query_scalar(
+        r#"
+        with desired(cid, facility, role) as (
+            select * from unnest($1::bigint[], $2::text[], $3::text[])
+        ), held as (
+            select cid, facility, role from identity.vatusa_roles where cid = any($4)
+        )
+        select distinct cid from (
+            (select * from desired except select * from held)
+            union all
+            (select * from held except select * from desired)
+        ) d order by cid
+        "#,
     )
-    .bind(facility)
-    .bind(webhook_id)
-    .bind(secret)
-    .bind(url)
-    .execute(pool)
+    .bind(&r_cid)
+    .bind(&r_fac)
+    .bind(&r_role)
+    .bind(cids)
+    .fetch_all(&mut **tx)
     .await
-    .map(|_| ())
-    .map_err(|_| ApiError::Internal)
+    .map_err(db)?;
+    if changed.is_empty() {
+        return Ok(0);
+    }
+
+    let mut before = BTreeMap::new();
+    for &cid in &changed {
+        before.insert(cid, desired_vatusa_grants(tx, cid).await?);
+    }
+
+    sqlx::query(
+        r#"
+        delete from identity.vatusa_roles r
+        where r.cid = any($4)
+          and not exists (
+              select 1 from unnest($1::bigint[], $2::text[], $3::text[]) d(cid, facility, role)
+              where d.cid = r.cid and d.facility = r.facility and d.role = r.role)
+        "#,
+    )
+    .bind(&r_cid)
+    .bind(&r_fac)
+    .bind(&r_role)
+    .bind(cids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+    sqlx::query(
+        "insert into identity.vatusa_roles (cid, facility, role, granted_at) \
+         select * from unnest($1::bigint[], $2::text[], $3::text[], $4::timestamptz[]) \
+         on conflict (cid, facility, role) do nothing",
+    )
+    .bind(&r_cid)
+    .bind(&r_fac)
+    .bind(&r_role)
+    .bind(&r_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+
+    for &cid in &changed {
+        reconcile_member(tx, cid, &before[&cid]).await?;
+    }
+    Ok(changed.len())
 }
 
-/// The signing secret for a facility's webhook, used to verify inbound deliveries.
-pub async fn webhook_secret(pool: &PgPool, facility: &str) -> Result<Option<String>, ApiError> {
-    sqlx::query_scalar::<_, String>(
-        "select secret from identity.vatusa_webhooks where facility = $1",
+/// Make the stored visits of `cids` exactly `visits` (delete what's gone, insert what's new).
+async fn replace_visits(
+    tx: &mut Transaction<'_, Postgres>,
+    cids: &[i64],
+    visits: &[(i64, &str)],
+) -> Result<(), ApiError> {
+    let db = |_| ApiError::Internal;
+    let v_cid: Vec<i64> = visits.iter().map(|v| v.0).collect();
+    let v_fac: Vec<&str> = visits.iter().map(|v| v.1).collect();
+    sqlx::query(
+        "delete from identity.vatusa_visits v where v.cid = any($3) and not exists ( \
+             select 1 from unnest($1::bigint[], $2::text[]) d(cid, facility) \
+             where d.cid = v.cid and d.facility = v.facility)",
     )
-    .bind(facility)
+    .bind(&v_cid)
+    .bind(&v_fac)
+    .bind(cids)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+    sqlx::query(
+        "insert into identity.vatusa_visits (cid, facility) \
+         select * from unnest($1::bigint[], $2::text[]) on conflict (cid, facility) do nothing",
+    )
+    .bind(&v_cid)
+    .bind(&v_fac)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+    Ok(())
+}
+
+// --- The division webhook (#605) ---
+
+/// The stored division webhook: VATUSA's id for it (read back from its webhook list, since creating
+/// one returns only the secret), our receiver URL, and the secret encrypted with `OIS_SECRET_KEY`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StoredWebhook {
+    pub vatusa_id: Option<i64>,
+    pub url: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub key_version: i32,
+}
+
+pub async fn fetch_webhook(pool: &PgPool) -> Result<Option<StoredWebhook>, ApiError> {
+    sqlx::query_as(
+        "select vatusa_id, url, secret_ciphertext, key_version from identity.vatusa_webhook",
+    )
     .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+pub async fn store_webhook(pool: &PgPool, webhook: &StoredWebhook) -> Result<(), ApiError> {
+    sqlx::query(
+        "insert into identity.vatusa_webhook (vatusa_id, url, secret_ciphertext, key_version) \
+         values ($1, $2, $3, $4) \
+         on conflict (singleton) do update set vatusa_id = excluded.vatusa_id, url = excluded.url, \
+             secret_ciphertext = excluded.secret_ciphertext, \
+             key_version = excluded.key_version, created_at = now()",
+    )
+    .bind(webhook.vatusa_id)
+    .bind(&webhook.url)
+    .bind(&webhook.secret_ciphertext)
+    .bind(webhook.key_version)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(())
 }
 
 #[cfg(test)]
