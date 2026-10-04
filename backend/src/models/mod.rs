@@ -1,3 +1,10 @@
+//! Request and response bodies, and the OpenAPI schemas generated from them.
+//!
+//! **A `///` doc comment on a `ToSchema` model or field is contract, not prose** (#591). utoipa emits
+//! it as the schema's `description`, so editing one changes `packages/api-client`'s generated types:
+//! regenerate the client in the same change, or CI's `client-drift` fails. See `AGENTS.md`
+//! § "The API contract → typed client".
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
