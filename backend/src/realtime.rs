@@ -154,9 +154,16 @@ pub mod topic {
     /// desktop app is a second delivery channel for the same decision (#348).
     pub const EVENT_REMINDER: &str = "events.reminder";
 
+    /// An ACE support request was created, claimed, released, decided or deleted (#645). Every viewer's
+    /// board refetches, so two controllers don't race the same request on a stale view.
+    pub const ACE: &str = "events.ace";
+    /// A runway configuration was changed, saved or deleted (#646) — low-frequency, but it changes
+    /// what every arrival is sequenced against, so other clients see it at once.
+    pub const RUNWAY: &str = "flow.runway";
+
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-    pub const ALL: [&str; 11] = [
+    pub const ALL: [&str; 13] = [
         RELEASE,
         FCA,
         GDP,
@@ -168,6 +175,8 @@ pub mod topic {
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
         EVENT_REMINDER,
+        ACE,
+        RUNWAY,
     ];
 }
 

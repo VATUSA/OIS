@@ -273,6 +273,8 @@ pub async fn put_runway(
         body.custom_ends.as_ref(),
     )
     .await?;
+    // Every client's runway view, on the write path (#646).
+    state.publish(crate::realtime::topic::RUNWAY);
     Ok(Json(build_board(&state, &icao).await?))
 }
 
@@ -338,6 +340,8 @@ pub async fn save_config(
         &by,
     )
     .await?;
+    // Every client's runway view, on the write path (#646).
+    state.publish(crate::realtime::topic::RUNWAY);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -359,6 +363,8 @@ pub async fn delete_config(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if runway_repo::delete_saved(pool, &icao.to_ascii_uppercase(), name.trim()).await? {
+        // Every client's runway view, on the write path (#646).
+        state.publish(crate::realtime::topic::RUNWAY);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)

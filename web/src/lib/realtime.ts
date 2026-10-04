@@ -23,6 +23,8 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
   "access.granted": [["me"]],
   "events.reminder": [["my-ace-claims"]],
+  "events.ace": [["event-ace"], ["my-ace-claims"]],
+  "flow.runway": [["runway"], ["runway-configs"]],
 };
 
 /**

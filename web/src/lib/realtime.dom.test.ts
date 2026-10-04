@@ -78,3 +78,24 @@ describe("connectRealtime (VATUSA/OIS#348 review)", () => {
     dispose();
   });
 });
+
+describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {
+  async function nudge(topic: string) {
+    const dispose = connectRealtime(qc);
+    await flush();
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    invalidated.length = 0; // drop the reconnect catch-up
+    socket.onmessage?.({ data: JSON.stringify({ topic }) });
+    dispose();
+    return [...invalidated];
+  }
+
+  it("an ACE change refreshes the board and the user's own claims", async () => {
+    expect(await nudge("events.ace")).toEqual([{ queryKey: ["event-ace"] }, { queryKey: ["my-ace-claims"] }]);
+  });
+
+  it("a runway change refreshes the runway view and the saved configurations", async () => {
+    expect(await nudge("flow.runway")).toEqual([{ queryKey: ["runway"] }, { queryKey: ["runway-configs"] }]);
+  });
+});
