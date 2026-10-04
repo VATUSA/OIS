@@ -52,3 +52,20 @@ export function useIdst(scope: IdstScope) {
     },
   });
 }
+
+/**
+ * Who a released flight may trade times with (#56): another released flight metered by the same FCA,
+ * off the same airport, on the same assigned runway. A flight with no runway has no partners. The server
+ * enforces the same rule; this only keeps the picker from offering a swap it would refuse.
+ */
+export function swapPartners(selected: IdstFlight, released: IdstFlight[]): IdstFlight[] {
+  if (!selected.released || !selected.runway) return [];
+  return released.filter(
+    (f) =>
+      f.released &&
+      f.callsign !== selected.callsign &&
+      f.fca_id === selected.fca_id &&
+      f.dep.toUpperCase() === selected.dep.toUpperCase() &&
+      f.runway === selected.runway,
+  );
+}

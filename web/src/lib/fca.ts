@@ -486,6 +486,43 @@ export function useClearRelease(fcaId: string) {
   });
 }
 
+/** Why the server refused a swap (#56, #585), in words a controller can act on. */
+const SWAP_REFUSALS: Record<string, string> = {
+  different_runway: "They depart different runways",
+  different_departure: "They depart different airports",
+  runway_unassigned: "One of them has no departure runway assigned",
+  departure_unknown: "One of them is no longer in the feed",
+  held_by_person: "A person holds one of these releases",
+  held_by_other_machine: "Another tool holds one of these releases",
+};
+
+/**
+ * Trade two released flights' times (#514). The server allows it only within one FCA, off the same
+ * airport and runway (#56), and moves no third flight, so there is no re-metered list to cache: refetch.
+ */
+export function useSwapReleases(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ a, b }: { a: string; b: string }) => {
+      const { error, response } = await ois.POST("/api/v1/flow/fcas/{id}/swap", {
+        params: { path: { id: fcaId } },
+        body: { a, b },
+      });
+      if (!response.ok) {
+        const code = (error as { error?: string } | undefined)?.error;
+        throw new Error((code && SWAP_REFUSALS[code]) ?? "Couldn’t swap the releases");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["idst"] });
+      queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
+      queryClient.invalidateQueries({ queryKey: ["departures"] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Couldn’t swap the releases"),
+  });
+}
+
 /** Set the manual crossing order (empty array resets to auto). */
 export function useReorderFca(fcaId: string) {
   const queryClient = useQueryClient();

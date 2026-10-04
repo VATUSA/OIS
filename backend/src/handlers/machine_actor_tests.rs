@@ -490,7 +490,20 @@ async fn a_service_account_marks_a_release_attributed_to_itself(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_service_account_swaps_releases_attributed_to_itself(pool: PgPool) {
-    let state = test_state(pool.clone(), HashMap::new());
+    // Both off KJFK, on one runway: the swap only trades within a departure slot (#56).
+    let state = crossing_state_of(pool.clone(), &["AAL1", "UAL2"]).await;
+    for callsign in ["AAL1", "UAL2"] {
+        crate::repos::departure_runway::assign(
+            &pool,
+            "KJFK",
+            callsign,
+            "31L",
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let fca_id = fca(&pool).await;
     let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
     seed_owned_release(&pool, &fca_id, "AAL1", 1_000, &sa).await;
@@ -1860,7 +1873,20 @@ async fn a_scoped_holder_clears_a_release_only_in_its_artcc(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_scoped_holder_swaps_releases_only_in_its_artcc(pool: PgPool) {
-    let state = test_state(pool.clone(), HashMap::new());
+    // Both off KJFK, on one runway, so the in-scope swap is otherwise allowed (#56).
+    let state = crossing_state_of(pool.clone(), &["AAL1", "UAL2"]).await;
+    for callsign in ["AAL1", "UAL2"] {
+        crate::repos::departure_runway::assign(
+            &pool,
+            "KJFK",
+            callsign,
+            "31L",
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let (sa, auth) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
     let (zny, zdc) = (fca_in(&pool, "ZNY").await, fca_in(&pool, "ZDC").await);
     for fca_id in [&zny, &zdc] {
