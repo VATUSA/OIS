@@ -133,8 +133,15 @@ authority over both):
 curl -X POST -H "Authorization: Bearer $OIS_TOKEN" -H "Content-Type: application/json" -d '{"a":"AAL123","b":"DAL456"}' https://<your-ois-host>/api/v1/flow/fcas/{id}/swap
 ```
 
-**CFRs** follow the same rules, issued with `POST /api/v1/tmu/cfr` (an RFC 3339 `ready_time`) and
-cleared with:
+**CFRs** follow the same rules, issued with `POST /api/v1/tmu/cfr` (an RFC 3339 `ready_time`). A
+CFR's version is the `ETag` of the write that issued it, and `cfr_version` on each departure in a
+field's departures list, so you can always re-read it:
+
+```bash
+curl -H "Authorization: Bearer $OIS_TOKEN" https://<your-ois-host>/api/v1/tmu/departures/{dep}
+```
+
+Clear one with:
 
 ```bash
 curl -X DELETE -H "Authorization: Bearer $OIS_TOKEN" -H 'If-Match: "1"' https://<your-ois-host>/api/v1/tmu/cfr/{callsign}
@@ -155,6 +162,7 @@ the current `ETag: "2"`: re-read the flight, decide again, and retry with `"2"`.
 
 | Response | Meaning | What to do |
 | --- | --- | --- |
+| `403 forbidden` | the FCA or airport is in an ARTCC outside your credential's scope | write only where your credential is scoped |
 | `409 held_by_person` | a controller holds it | leave it; people win |
 | `409 held_by_other_machine` | another tool holds it | leave it; coordinate out of band |
 | `412 precondition_failed` | it isn't at the version you named; the current one is in `ETag` | re-read, decide, retry with the new version |
