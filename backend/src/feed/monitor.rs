@@ -14,7 +14,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::feed::gdp::BIN_MIN;
+use crate::feed::monitor_alert::{SectorAlert, sector_alert};
+use crate::feed::monitor_tracks::OwnedTrack;
 use crate::feed::sectors::{SectorMaps, SectorTable, map_for};
+use crate::feed::vnas::Staffing;
 
 /// Sectors worked at another sector's position (#599): `(artcc, source) → target`, same ARTCC, already
 /// flattened (a target is never itself a source), as cached in `AppState::sector_consolidations`.
@@ -178,6 +181,80 @@ pub fn sector_loads(
                     peak
                 })
                 .collect(),
+        })
+        .collect()
+}
+
+/// One bin of a Monitor row as served (#701): the peaks and the alert they earn against the MAP.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorBin {
+    pub start_ms: i64,
+    pub active: usize,
+    pub proposed: usize,
+    pub combined: usize,
+    pub alert: SectorAlert,
+}
+
+/// One row of an ARTCC's Monitor (#701).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorRow {
+    pub sector_id: String,
+    pub name: Option<String>,
+    pub map: i32,
+    pub consolidated: Vec<String>,
+    /// Someone is working the row's sector now (vNAS). A display attribute, never a filter.
+    pub staffed: bool,
+    pub bins: Vec<MonitorBin>,
+}
+
+/// `artcc`'s Monitor: [`sector_loads`] over that ARTCC's volumes only, each bin classified by
+/// `monitor_alert::sector_alert`, with each sector's name and whether vNAS shows it staffed. Sector ids
+/// match vNAS's directly, since both are normalised to two digits (`feed::vnas::sector_id`).
+pub fn artcc_table(
+    table: &SectorTable,
+    consolidations: &Consolidations,
+    maps: &SectorMaps,
+    staffing: &Staffing,
+    tracks: &[OwnedTrack],
+    artcc: &str,
+    now_ms: i64,
+) -> Vec<MonitorRow> {
+    let own = SectorTable {
+        volumes: table
+            .volumes
+            .iter()
+            .filter(|v| v.artcc == artcc)
+            .cloned()
+            .collect(),
+    };
+    let names: HashMap<String, Option<String>> = own.sectors_of(artcc).into_iter().collect();
+    let tracks: Vec<Track> = tracks
+        .iter()
+        .map(|t| Track {
+            id: &t.id,
+            population: t.population,
+            fixes: &t.fixes,
+        })
+        .collect();
+    sector_loads(&own, consolidations, maps, &tracks, now_ms)
+        .into_iter()
+        .map(|load| MonitorRow {
+            name: names.get(&load.sector_id).cloned().flatten(),
+            staffed: !staffing.staffed_by(artcc, &load.sector_id).is_empty(),
+            bins: load
+                .bins
+                .iter()
+                .map(|b| MonitorBin {
+                    start_ms: b.start_ms,
+                    active: b.active,
+                    proposed: b.proposed,
+                    combined: b.combined,
+                    alert: sector_alert(b.active, b.combined, load.map.max(0) as u32),
+                })
+                .collect(),
+            sector_id: load.sector_id,
+            map: load.map,
+            consolidated: load.consolidated,
         })
         .collect()
 }
@@ -492,5 +569,113 @@ mod tests {
         assert_eq!(apart.iter().map(|r| r.map).collect::<Vec<_>>(), [30, 12]);
         let merged = sector_loads(&table, &eighteen_at_41(), &maps, &[], now());
         assert_eq!(merged[0].map, 12);
+    }
+
+    // ---- #701: an ARTCC's served table ----------------------------------------------------------
+
+    fn owned(id: &str, population: Population, fixes: Vec<Fix>) -> OwnedTrack {
+        OwnedTrack {
+            id: id.to_string(),
+            population,
+            fixes,
+        }
+    }
+
+    /// ZDC's sector `02` (the fixture square) with a MAP of 1, plus a ZNY sector that must not appear.
+    fn zdc_table() -> (SectorTable, SectorMaps) {
+        let zdc = SectorVolume {
+            sector_id: "02".into(),
+            ..volume("ZDC", "02001")
+        };
+        let zny = SectorVolume {
+            sector_id: "10".into(),
+            ..volume("ZNY", "10001")
+        };
+        let maps = SectorMaps::from([(("ZDC".to_string(), "02".to_string()), 1)]);
+        (
+            SectorTable {
+                volumes: vec![zdc, zny],
+            },
+            maps,
+        )
+    }
+
+    /// AC3: each bin's alert is `sector_alert(active, combined, map)` against the row's MAP of 1:
+    /// two airborne is red, one airborne plus one proposed is amber, one airborne (equal) is green.
+    #[test]
+    fn each_bin_is_classified_against_the_rows_map() {
+        let (table, maps) = zdc_table();
+        let tracks = [
+            owned(
+                "A",
+                Population::Active,
+                vec![
+                    inside(at(14, 8, 0)),
+                    inside(at(14, 20, 0)),
+                    inside(at(14, 35, 0)),
+                ],
+            ),
+            owned("B", Population::Active, vec![inside(at(14, 8, 0))]),
+            owned("P", Population::Proposed, vec![inside(at(14, 20, 0))]),
+        ];
+        let rows = artcc_table(
+            &table,
+            &Default::default(),
+            &maps,
+            &Default::default(),
+            &tracks,
+            "ZDC",
+            now(),
+        );
+        assert_eq!(rows.len(), 1, "only the requested ARTCC's sectors");
+        assert_eq!(rows[0].map, 1);
+        let alerts: Vec<SectorAlert> = rows[0].bins[..3].iter().map(|b| b.alert).collect();
+        assert_eq!(
+            alerts,
+            [SectorAlert::Red, SectorAlert::Amber, SectorAlert::Green]
+        );
+        assert_eq!((rows[0].bins[1].active, rows[0].bins[1].combined), (1, 2));
+    }
+
+    /// AC4: the staffed flag joins vNAS staffing on the normalised sector id. vNAS sends `"2"`, which
+    /// normalises to the stored `"02"`; a different sector or ARTCC is not staffing it.
+    #[test]
+    fn a_sector_is_staffed_when_vnas_shows_it_worked() {
+        let (table, maps) = zdc_table();
+        let feed = |facility: &str, sector: &str| {
+            serde_json::json!({"controllers": [{
+                "isActive": true, "isObserver": false,
+                "vatsimData": {"cid": "1", "callsign": "DC_02_CTR"},
+                "positions": [{"facilityId": facility, "isActive": true, "eramData": {"sectorId": sector}}],
+            }]})
+        };
+        let staffed = |facility: &str, sector: &str| {
+            let staffing = crate::feed::vnas::parse_controllers(&feed(facility, sector));
+            artcc_table(
+                &table,
+                &Default::default(),
+                &maps,
+                &staffing,
+                &[],
+                "ZDC",
+                now(),
+            )[0]
+            .staffed
+        };
+        assert!(staffed("ZDC", "2"));
+        assert!(!staffed("ZDC", "03"));
+        assert!(!staffed("ZNY", "02"));
+        assert!(
+            !artcc_table(
+                &table,
+                &Default::default(),
+                &maps,
+                &Default::default(),
+                &[],
+                "ZDC",
+                now()
+            )[0]
+            .staffed
+        );
     }
 }

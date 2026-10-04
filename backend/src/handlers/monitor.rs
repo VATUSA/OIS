@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -21,12 +23,19 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    feed::sectors::{DEFAULT_MAP, map_for},
-    models::{
-        ConsolidateSectorRequest, SectorConsolidationBody, SectorConsolidationsBody, SectorMapBody,
-        SectorMapsBody, SetSectorMapRequest,
+    feed::{
+        monitor::artcc_table,
+        monitor_tracks::{AIRBORNE_GS_KT, Bbox, project_tracks},
+        sectors::{DEFAULT_MAP, map_for},
+        vatsim::VatsimData,
     },
-    repos::{sector_consolidations as consolidations_repo, sector_maps as repo},
+    handlers::flow::all_excluded_callsigns,
+    models::{
+        ConsolidateSectorRequest, MonitorBinBody, MonitorRowBody, MonitorTableBody,
+        SectorConsolidationBody, SectorConsolidationsBody, SectorMapBody, SectorMapsBody,
+        SetSectorMapRequest,
+    },
+    repos::{flow as flow_repo, sector_consolidations as consolidations_repo, sector_maps as repo},
     state::AppState,
 };
 
@@ -62,6 +71,115 @@ async fn require_edit(
     } else {
         Err(ApiError::Forbidden)
     }
+}
+
+/// `artcc`'s Airspace Monitor (#701): every sector's peak occupancy per 15-minute bin over six hours,
+/// classified against its MAP, with consolidations and vNAS staffing. Computed on request from the
+/// live feed and the cached sectors, MAPs and consolidations, so nothing about it is stored. Live
+/// flights are projected along their routes by the shared trajectory model (`feed::monitor_tracks`).
+#[utoipa::path(
+    get, path = "/api/v1/flow/monitor/{artcc}", tag = "flow",
+    params(("artcc" = String, Path)),
+    responses((status = 200, body = MonitorTableBody), (status = 401), (status = 503))
+)]
+pub async fn monitor_table(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorRead>,
+    Actor(principal): Actor,
+    Path(artcc): Path<String>,
+) -> Result<Json<MonitorTableBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    let editable = may_edit(&state, &principal, &artcc).await?;
+    let (snapshot, airports) = {
+        let feed = state.feed.read().await;
+        (feed.snapshot.clone(), feed.airports.clone())
+    };
+    // A release only matters for a flight still on the ground; an airborne one is projected from
+    // where it is.
+    let grounded: Vec<String> = snapshot
+        .iter()
+        .flat_map(|s| {
+            let pilots = s
+                .data
+                .pilots
+                .iter()
+                .filter(|p| p.groundspeed < AIRBORNE_GS_KT);
+            pilots
+                .map(|p| p.callsign.clone())
+                .chain(s.data.prefiles.iter().map(|p| p.callsign.clone()))
+        })
+        .collect();
+    let releases = flow_repo::releases_for_callsigns(pool, &grounded).await?;
+    let excluded = all_excluded_callsigns(&state.flight_exclusions.load());
+    let (nav, profiles, winds) = (
+        state.nav.load_full(),
+        state.aircraft_profiles.load_full(),
+        state.winds.load_full(),
+    );
+    let (sectors, consolidations, maps, staffing) = (
+        state.airspace_sectors.load_full(),
+        state.sector_consolidations.load_full(),
+        state.sector_maps.load_full(),
+        state.vnas.staffing.load_full(),
+    );
+    let now = Utc::now();
+    let served = artcc.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        let empty = VatsimData::default();
+        let data = snapshot.as_ref().map_or(&empty, |s| &s.data);
+        let tracks = match Bbox::of_artcc(&sectors, &artcc) {
+            Some(bbox) => project_tracks(
+                data,
+                &nav,
+                &airports,
+                &profiles,
+                &winds,
+                &releases,
+                &excluded,
+                now.timestamp_millis(),
+                Some(bbox),
+            ),
+            None => Vec::new(), // no sectors, no rows: nothing to project for
+        };
+        artcc_table(
+            &sectors,
+            &consolidations,
+            &maps,
+            &staffing,
+            &tracks,
+            &artcc,
+            now.timestamp_millis(),
+        )
+        .into_iter()
+        .map(|row| MonitorRowBody {
+            bins: row
+                .bins
+                .into_iter()
+                .map(|b| MonitorBinBody {
+                    start: DateTime::from_timestamp_millis(b.start_ms).unwrap_or(now),
+                    active: b.active as i64,
+                    proposed: b.proposed as i64,
+                    combined: b.combined as i64,
+                    alert: b.alert,
+                })
+                .collect(),
+            sector_id: row.sector_id,
+            name: row.name,
+            map: row.map,
+            consolidated: row.consolidated,
+            staffed: row.staffed,
+        })
+        .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(Json(MonitorTableBody {
+        artcc: served,
+        editable,
+        as_of: now,
+        rows,
+    }))
 }
 
 #[utoipa::path(
@@ -493,6 +611,48 @@ mod tests {
             "ZNY's sector"
         );
         assert!(stored(&pool).await.is_empty());
+    }
+
+    /// #701 AC5: the Monitor table is gated on `flow.monitor.read` — no session and a session without
+    /// it are both refused (401, as every missing permission is) — and a holder gets every one of the
+    /// ARTCC's sectors as a row of six hours of bins. With no feed there are no flights, so every bin
+    /// is empty and green.
+    #[sqlx::test]
+    async fn the_monitor_table_is_gated_and_shaped(pool: PgPool) {
+        let state = state(pool.clone());
+        const URI: &str = "/api/v1/flow/monitor/zdc";
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, "").await.0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, &cookie)
+                .await
+                .0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        grant(&pool, &user, "flow.monitor.read", None).await;
+        let (status, body) = send_json(&state, axum::http::Method::GET, URI, &cookie).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["artcc"], "ZDC");
+        assert_eq!(body["editable"], false);
+        let rows = body["rows"].as_array().unwrap();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r["sector_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["24", "25"], "ZDC's sectors once each, not ZNY's");
+        assert_eq!(rows[0]["name"], "ZDC 24");
+        assert_eq!(rows[0]["map"], 10);
+        assert_eq!(rows[0]["staffed"], false);
+        let bins = rows[0]["bins"].as_array().unwrap();
+        assert_eq!(bins.len(), 24, "six hours of quarter-hours");
+        assert_eq!(bins[0]["combined"], 0);
+        assert_eq!(bins[0]["alert"], "green");
     }
 }
 
