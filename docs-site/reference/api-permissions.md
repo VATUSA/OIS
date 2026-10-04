@@ -26,6 +26,10 @@ always matches the running API.
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
 | `/api/v1/admin/audit` | GET | `audit.logs.read` |
+| `/api/v1/admin/diagnostics` | GET | `diagnostics.reports.read` |
+| `/api/v1/admin/diagnostics/{id}` | DELETE | `diagnostics.reports.delete` |
+| `/api/v1/admin/diagnostics/{id}` | GET | `diagnostics.reports.read` |
+| `/api/v1/admin/diagnostics/{id}/logs` | GET | `diagnostics.reports.read` |
 | `/api/v1/admin/groups` | GET | `access.groups.read` |
 | `/api/v1/admin/groups` | POST | `access.groups.update` |
 | `/api/v1/admin/groups/{name}` | DELETE | `access.groups.update` |
@@ -37,8 +41,10 @@ always matches the running API.
 | `/api/v1/admin/jobs/{name}/run` | POST | `system.jobs.update` |
 | `/api/v1/admin/service-accounts` | GET | `service_accounts.read` |
 | `/api/v1/admin/service-accounts` | POST | `service_accounts.create` |
+| `/api/v1/admin/service-accounts/grantable-permissions` | GET | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/roles` | GET | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/disable` | POST | `service_accounts.delete` |
+| `/api/v1/admin/service-accounts/{id}/permissions` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/roles` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/rotate` | POST | `service_accounts.update` |
 | `/api/v1/admin/summary` | GET | — (no permission marker) |
