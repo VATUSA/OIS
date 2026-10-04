@@ -1963,6 +1963,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/monitor/{artcc}/neighbours": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s first-tier neighbours (#712): the ARTCCs whose Monitor tables follow its own, collapsed
+         *     and view-only. Restricted to facilities OIS runs (active), which drops the Canadian and oceanic
+         *     FIRs in the adjacency data, as the ACE fan-out does (`events::generate_tier1`).
+         */
+        get: operations["monitor_neighbours"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/resolve-routes": {
         parameters: {
             query?: never;
@@ -5902,6 +5923,12 @@ export interface components {
              * @description The bin's start, an absolute Zulu quarter-hour.
              */
             start: string;
+        };
+        /** @description An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own. */
+        MonitorNeighboursBody: {
+            artcc: string;
+            /** @description Directly bordering ARTCCs that OIS runs, sorted. */
+            neighbours: string[];
         };
         /** @description One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it. */
         MonitorRowBody: {
@@ -14542,6 +14569,48 @@ export interface operations {
                 headers: {
                     /** @description Seconds until the next request will be accepted. */
                     "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    monitor_neighbours: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorNeighboursBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content?: never;

@@ -177,6 +177,7 @@ always matches the running API.
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/maps` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/maps/{sector_id}` | PUT | `flow.monitor.update` |
+| `/api/v1/flow/monitor/{artcc}/neighbours` | GET | `flow.monitor.read` |
 | `/api/v1/flow/resolve-routes` | POST | `stats.data.read` |
 | `/api/v1/flow/route-coverage` | GET | — (no permission marker) |
 | `/api/v1/flow/routes` | GET | — (no permission marker) |

@@ -3302,6 +3302,14 @@ pub struct MonitorRowBody {
     pub bins: Vec<MonitorBinBody>,
 }
 
+/// An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorNeighboursBody {
+    pub artcc: String,
+    /// Directly bordering ARTCCs that OIS runs, sorted.
+    pub neighbours: Vec<String>,
+}
+
 /// An ARTCC's Airspace Monitor (#701), computed from the live feed on request.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MonitorTableBody {

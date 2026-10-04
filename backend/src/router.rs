@@ -491,6 +491,10 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         )
         .route("/api/v1/flow/monitor/{artcc}", get(monitor::monitor_table))
         .route(
+            "/api/v1/flow/monitor/{artcc}/neighbours",
+            get(monitor::monitor_neighbours),
+        )
+        .route(
             "/api/v1/flow/monitor/{artcc}/maps",
             get(monitor::list_sector_maps),
         )

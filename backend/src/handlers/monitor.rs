@@ -32,10 +32,13 @@ use crate::{
     handlers::flow::all_excluded_callsigns,
     models::{
         BulkConsolidateMode, BulkConsolidateRequest, ConsolidateSectorRequest, MonitorBinBody,
-        MonitorRowBody, MonitorTableBody, SectorConsolidationBody, SectorConsolidationsBody,
-        SectorMapBody, SectorMapsBody, SetSectorMapRequest,
+        MonitorNeighboursBody, MonitorRowBody, MonitorTableBody, SectorConsolidationBody,
+        SectorConsolidationsBody, SectorMapBody, SectorMapsBody, SetSectorMapRequest,
     },
-    repos::{flow as flow_repo, sector_consolidations as consolidations_repo, sector_maps as repo},
+    repos::{
+        flow as flow_repo, org as org_repo, sector_consolidations as consolidations_repo,
+        sector_maps as repo,
+    },
     state::AppState,
 };
 
@@ -180,6 +183,31 @@ pub async fn monitor_table(
         as_of: now,
         rows,
     }))
+}
+
+/// `artcc`'s first-tier neighbours (#712): the ARTCCs whose Monitor tables follow its own, collapsed
+/// and view-only. Restricted to facilities OIS runs (active), which drops the Canadian and oceanic
+/// FIRs in the adjacency data, as the ACE fan-out does (`events::generate_tier1`).
+#[utoipa::path(
+    get, path = "/api/v1/flow/monitor/{artcc}/neighbours", tag = "flow",
+    params(("artcc" = String, Path)),
+    responses((status = 200, body = MonitorNeighboursBody), (status = 401), (status = 503))
+)]
+pub async fn monitor_neighbours(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorRead>,
+    Path(artcc): Path<String>,
+) -> Result<Json<MonitorNeighboursBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    let known: std::collections::HashSet<String> = org_repo::list_facilities(pool)
+        .await?
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let mut neighbours = crate::feed::neighbors::tier1(&artcc, &known);
+    neighbours.sort();
+    Ok(Json(MonitorNeighboursBody { artcc, neighbours }))
 }
 
 #[utoipa::path(
@@ -702,6 +730,33 @@ mod tests {
         assert_eq!(bins.len(), 24, "six hours of quarter-hours");
         assert_eq!(bins[0]["combined"], 0);
         assert_eq!(bins[0]["alert"], "green");
+    }
+
+    /// #712 AC3: the neighbours read is gated on `flow.monitor.read`, and lists only directly
+    /// bordering facilities OIS runs: ZDC's adjacency also holds ZWY (an oceanic FIR OIS doesn't run)
+    /// and ZOB, made inactive here, so neither appears. Sorted, never the ARTCC itself.
+    #[sqlx::test]
+    async fn the_neighbours_read_is_gated_and_lists_active_neighbours(pool: PgPool) {
+        let state = state(pool.clone());
+        const URI: &str = "/api/v1/flow/monitor/zdc/neighbours";
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, "").await.0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        sqlx::query("update org.facilities set active = false where id = 'ZOB'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "flow.monitor.read", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let (status, body) = send_json(&state, axum::http::Method::GET, URI, &cookie).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["artcc"], "ZDC");
+        assert_eq!(
+            body["neighbours"],
+            serde_json::json!(["ZBW", "ZID", "ZJX", "ZNY", "ZTL"])
+        );
     }
 }
 
