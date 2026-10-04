@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 #[cfg(test)]
 mod docs_tests;
+pub mod deprecation;
 pub mod errors;
 pub mod feed;
 pub mod handlers;

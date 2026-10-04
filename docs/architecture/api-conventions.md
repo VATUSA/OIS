@@ -6,7 +6,9 @@ every caller goes through the same authenticated, permission-checked surface.
 
 ## Shape
 
-- **Base**: `/api/v1`. Breaking changes get a new version prefix.
+- **Base**: `/api/v1`. Until product 1.0 it is malleable: breaking changes land on `v1` and nothing is
+  stable. The freeze, the supported surface and the deprecation rule are policy in `AGENTS.md`
+  § Versioning, so they aren't restated here.
 - **Resources** are nouns; verbs are HTTP methods. `GET` list/read, `POST` create,
   `PATCH`/`PUT` update, `DELETE` remove. Domain actions that aren't plain CRUD use a
   sub-path (`POST /events/{id}/review`, `POST /ace/requests/{id}/claim`).
