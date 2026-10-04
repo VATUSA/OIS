@@ -5,6 +5,8 @@
 //! - `UserOnly(reason)`: about a person by nature, and must stay that way.
 //! - `Pending`: should admit a machine (via [`crate::auth::principal::Actor`]) and does not yet.
 //!   Migrating these is tracked in a follow-up; the list only ever shrinks.
+//! - `AdmitsMachines(reason)`: reads `CurrentUser` only beside `CurrentServiceAccount` and
+//!   `CurrentApiKey`, so a machine is not refused. Checked: an entry missing either fails.
 //!
 //! A handler that takes `CurrentUser` and is not listed fails this test, so a new machine-blocked
 //! write can't land by accident. So does a listed one that no longer does, so the list can't rot.
@@ -15,8 +17,9 @@ use std::collections::BTreeSet;
 enum Intent {
     UserOnly(&'static str),
     Pending,
+    AdmitsMachines(&'static str),
 }
-use Intent::{Pending, UserOnly};
+use Intent::{AdmitsMachines, Pending, UserOnly};
 
 #[rustfmt::skip]
 const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
@@ -133,12 +136,18 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("tmu", "publish_advisory", Pending),
     ("tmu", "cancel_advisory", Pending),
     ("tmu", "delete_advisory", Pending),
+    ("flow", "fca_traffic", AdmitsMachines("public; it reads every credential kind only to show a planner or signed-in caller the FCAs hidden from the public list (#586)")),
 ];
 
 /// `(file stem, fn)` for every `pub async fn` in `handlers/*.rs` whose parameters take
 /// `Extension<Option<CurrentUser>>`. Read from disk, so a file not yet in `mod.rs` is scanned too.
 fn scan(dir: &std::path::Path) -> BTreeSet<(String, String)> {
-    let mut found = BTreeSet::new();
+    scan_params(dir).into_keys().collect()
+}
+
+/// Every `CurrentUser` handler, with its whitespace-stripped parameter list.
+fn scan_params(dir: &std::path::Path) -> std::collections::BTreeMap<(String, String), String> {
+    let mut found = std::collections::BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|e| e != "rs") {
@@ -171,7 +180,7 @@ fn scan(dir: &std::path::Path) -> BTreeSet<(String, String)> {
             }
             let params: String = rest[open..=close].split_whitespace().collect();
             if params.contains(&["Extension<Option<", "CurrentUser>>"].concat()) {
-                found.insert((stem.clone(), name));
+                found.insert((stem.clone(), name), params);
             }
         }
     }
@@ -236,5 +245,24 @@ fn the_release_path_is_not_on_the_list() {
                 .any(|(f, n, _)| *f == file && *n == name),
             "{file}::{name} is on the release path and must admit a machine"
         );
+    }
+}
+
+/// An `AdmitsMachines` entry is a claim about the signature, so check it: the handler must read a
+/// service account and an API key beside the user, or a machine is still refused and the entry lies.
+#[test]
+fn every_admits_machines_entry_reads_every_credential() {
+    let params = scan_params(&handlers_dir());
+    for (file, name, intent) in CURRENT_USER_HANDLERS {
+        if let AdmitsMachines(reason) = intent {
+            assert!(!reason.trim().is_empty(), "{file}::{name} needs a reason");
+            let p = &params[&(file.to_string(), name.to_string())];
+            for credential in ["CurrentServiceAccount>>", "CurrentApiKey>>"] {
+                assert!(
+                    p.contains(&["Extension<Option<", credential].concat()),
+                    "{file}::{name} is listed as AdmitsMachines but doesn't take {credential}"
+                );
+            }
+        }
     }
 }

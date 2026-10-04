@@ -1748,7 +1748,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out. */
+        /**
+         * Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
+         * @description Public only for an FCA the public list shows. An unpublished event FCA is served to a planner
+         *     (`events.plan.read`, the gate on `GET /events/{id}/fcas`, whose FCAs tab counts its crossings), and a
+         *     deleted one to any signed-in caller (historical replay can still select it). Anyone else gets 404,
+         *     not 403, so the route never confirms that a hidden FCA exists.
+         */
         get: operations["fca_traffic"];
         put?: never;
         post?: never;
