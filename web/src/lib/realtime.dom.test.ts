@@ -6,7 +6,7 @@ const token = vi.hoisted(() => ({value: undefined as string | undefined}));
 vi.mock("./desktop-token", () => ({getDesktopToken: async () => token.value}));
 vi.mock("./api", () => ({API_BASE: "https://ois.example"}));
 
-import {connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
+import {TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
 
 /** Records how each socket was opened, and lets a test push frames through it. */
 class FakeSocket {
@@ -185,6 +185,48 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
     socket.onclose?.();
     expect(isRealtimeLive()).toBe(false); // dropped: polling resumes
+    dispose();
+  });
+
+  // #648 review: a half-open socket stays "open" with nothing arriving. Liveness must follow the ticks,
+  // or every feed screen stops polling and freezes until the browser finally notices the drop.
+  it("stops being live when ticks go quiet, and is live again on the next tick", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const dispose = connectRealtime(qc);
+      await vi.advanceTimersByTimeAsync(0);
+      const socket = FakeSocket.opened.at(-1)!;
+      socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+      expect(isRealtimeLive()).toBe(true);
+
+      // Ticks keep it live, however long the session runs.
+      for (let i = 0; i < 4; i++) {
+        await vi.advanceTimersByTimeAsync(TICK_SILENCE_MS - 1_000);
+        socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+        expect(isRealtimeLive()).toBe(true);
+      }
+
+      // Silence past the window: not live, so the feed hooks poll again — the socket never closed.
+      await vi.advanceTimersByTimeAsync(TICK_SILENCE_MS + 1_000);
+      expect(isRealtimeLive()).toBe(false);
+
+      // The next tick brings it back.
+      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+      expect(isRealtimeLive()).toBe(true);
+      dispose();
+      expect(isRealtimeLive()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A tick that arrives on a socket that isn't subscribed to them must not make it live.
+  it("a stray tick without a tick subscription is not liveness", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["flow.release"] }) });
+    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+    expect(isRealtimeLive()).toBe(false);
     dispose();
   });
 
