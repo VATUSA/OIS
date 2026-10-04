@@ -25,6 +25,7 @@ always matches the running API.
 | `/api/v1/admin/api-keys` | GET | `api_keys.key.read` |
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
+| `/api/v1/admin/api-keys/{id}/rate-limit` | PUT | `api_keys.key.delete` |
 | `/api/v1/admin/audit` | GET | `audit.logs.read` |
 | `/api/v1/admin/diagnostics` | GET | `diagnostics.reports.read` |
 | `/api/v1/admin/diagnostics/{id}` | DELETE | `diagnostics.reports.delete` |
@@ -45,6 +46,7 @@ always matches the running API.
 | `/api/v1/admin/service-accounts/roles` | GET | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/disable` | POST | `service_accounts.delete` |
 | `/api/v1/admin/service-accounts/{id}/permissions` | PUT | `service_accounts.update` |
+| `/api/v1/admin/service-accounts/{id}/rate-limit` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/roles` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/rotate` | POST | `service_accounts.update` |
 | `/api/v1/admin/summary` | GET | — (no permission marker) |

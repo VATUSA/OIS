@@ -130,7 +130,7 @@ pub async fn find_current_service_account_by_bearer_token(
 
     let account = sqlx::query_as::<_, CurrentServiceAccount>(
         r#"
-        select sa.id, sa.key, sa.name
+        select sa.id, sa.key, sa.name, sa.rate_limit_per_min
         from access.service_account_credentials sac
         join access.service_accounts sa on sa.id = sac.service_account_id
         where sac.secret_hash = $1
@@ -175,7 +175,7 @@ pub async fn find_current_api_key_by_bearer_token(
 
     let key = sqlx::query_as::<_, CurrentApiKey>(
         r#"
-        select k.id, k.owner_user_id, k.prefix, k.name
+        select k.id, k.owner_user_id, k.prefix, k.name, k.rate_limit_per_min
         from access.api_keys k
         join identity.users u on u.id = k.owner_user_id
         where k.secret_hash = $1

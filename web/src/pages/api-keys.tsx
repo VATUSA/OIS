@@ -34,6 +34,8 @@ import {
   withoutReveal,
   withReveal,
 } from "@/lib/api-keys";
+import {usageLabel} from "@/lib/rate-limits";
+import {RateLimitCell} from "@/components/credential-rate-limit";
 import {
   buildPermissionInputs,
   PermissionPicker,
@@ -327,6 +329,20 @@ export function ApiKeysPage() {
             </div>
           );
         },
+      },
+      {
+        id: "usage",
+        header: "Usage",
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{usageLabel(c.row.original.usage)}</span>,
+      },
+      {
+        id: "rate_limit",
+        header: "Limit",
+        mono: true,
+        cell: (c) => (
+          <RateLimitCell label={c.row.original.name} value={c.row.original.rate_limit_per_min} editable={false} onSave={() => {}} />
+        ),
       },
       {
         accessorKey: "last_used_at",

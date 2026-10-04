@@ -6,9 +6,26 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{ApiKeyPermissionBody, ServiceAccountBody},
+    models::{ApiKeyPermissionBody, CredentialUsageBody, ServiceAccountBody},
     repos::access as access_repo,
 };
+
+/// Set or clear one account's rate limit override (#611). `false` if there is no such account.
+pub async fn set_rate_limit(
+    pool: &PgPool,
+    id: &str,
+    per_min: Option<i32>,
+) -> Result<bool, ApiError> {
+    sqlx::query(
+        "update access.service_accounts set rate_limit_per_min = $2, updated_at = now() where id = $1",
+    )
+    .bind(id)
+    .bind(per_min)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .map_err(|_| ApiError::Internal)
+}
 
 /// Days without use (or, never used, since issue) after which a live credential reads as stale.
 const STALE_AFTER_DAYS: i32 = 30;
@@ -24,6 +41,10 @@ struct ServiceAccountRow {
     expires_at: Option<DateTime<Utc>>,
     stale: bool,
     created_at: DateTime<Utc>,
+    rate_limit_per_min: Option<i32>,
+    requests_this_hour: i64,
+    requests_last_day: i64,
+    refused_last_day: i64,
 }
 
 async fn row_into_body(
@@ -44,6 +65,12 @@ async fn row_into_body(
         expires_at: row.expires_at,
         stale: row.stale,
         created_at: row.created_at,
+        rate_limit_per_min: row.rate_limit_per_min,
+        usage: CredentialUsageBody {
+            requests_this_hour: row.requests_this_hour,
+            requests_last_day: row.requests_last_day,
+            refused_last_day: row.refused_last_day,
+        },
     })
 }
 
@@ -54,7 +81,17 @@ const SELECT: &str = "select sa.id, sa.key, sa.name, sa.description, sa.status, 
     c.last_used_at, c.expires_at, \
     coalesce(coalesce(c.last_used_at, c.created_at) < now() - make_interval(days => $1), false) \
         as stale, \
-    sa.created_at from access.service_accounts sa \
+    sa.created_at, sa.rate_limit_per_min, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'service_account' and cu.credential_id = sa.id \
+       and cu.hour >= date_trunc('hour', now()))::bigint as requests_this_hour, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'service_account' and cu.credential_id = sa.id \
+       and cu.hour > now() - interval '24 hours')::bigint as requests_last_day, \
+    (select coalesce(sum(refused), 0) from access.credential_usage cu \
+     where cu.kind = 'service_account' and cu.credential_id = sa.id \
+       and cu.hour > now() - interval '24 hours')::bigint as refused_last_day \
+    from access.service_accounts sa \
     left join lateral (select last_used_at, expires_at, created_at \
         from access.service_account_credentials \
         where service_account_id = sa.id and revoked_at is null \

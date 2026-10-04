@@ -35,11 +35,14 @@ import {
   useGrantableServiceAccountPermissions,
   useRotateServiceAccount,
   useServiceAccounts,
+  useSetServiceAccountRateLimit,
   useSetServiceAccountPermissions,
   useSetServiceAccountRoles,
   withReveal,
   withoutReveal,
 } from "@/lib/service-accounts";
+import {usageLabel} from "@/lib/rate-limits";
+import {RateLimitCell} from "@/components/credential-rate-limit";
 
 const SUBTITLE =
   "Credentials for machine clients — the Discord bot and tooling. A token is shown once, on creation.";
@@ -413,6 +416,7 @@ export function AdminServiceAccounts() {
   const [rotating, setRotating] = useState<ServiceAccount | null>(null);
   const canCreate = hasPermission(me, "service_accounts.create");
   const canUpdate = hasPermission(me, "service_accounts.update");
+  const setLimit = useSetServiceAccountRateLimit();
 
   const reveal = useCallback((token: ServiceAccountToken, rolesSet: boolean) => {
     setReveals((list) => withReveal(list, token));
@@ -472,6 +476,25 @@ export function AdminServiceAccounts() {
         },
       },
       {
+        id: "usage",
+        header: "Usage",
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{usageLabel(c.row.original.usage)}</span>,
+      },
+      {
+        id: "rate_limit",
+        header: "Limit",
+        mono: true,
+        cell: (c) => (
+          <RateLimitCell
+            label={c.row.original.name}
+            value={c.row.original.rate_limit_per_min}
+            editable={canUpdate}
+            onSave={(perMin) => setLimit.mutate({id: c.row.original.id, perMin})}
+          />
+        ),
+        },
+        {
         id: "permissions",
         header: "Permissions",
         icon: KeyRound,
@@ -538,7 +561,7 @@ export function AdminServiceAccounts() {
           ]
         : []),
     ],
-    [canUpdate],
+    [canUpdate, setLimit],
   );
 
   return (

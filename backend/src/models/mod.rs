@@ -2902,6 +2902,27 @@ pub struct ServiceAccountBody {
     pub expires_at: Option<DateTime<Utc>>,
     pub stale: bool,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this account may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
+}
+
+/// A credential's recent request volume (#611), summed across replicas from hourly counts. Up to a
+/// minute behind: each replica records its counts once a minute.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CredentialUsageBody {
+    /// Requests in the current clock hour.
+    pub requests_this_hour: i64,
+    /// Requests in the last 24 hours.
+    pub requests_last_day: i64,
+    /// Of those, how many were refused with `429`.
+    pub refused_last_day: i64,
+}
+
+/// Set or clear one credential's rate limit (#611). `null` restores the deployment default.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRateLimitRequest {
+    pub rate_limit_per_min: Option<i32>,
 }
 
 /// Returned once on create/rotate — the plaintext bearer token is never stored or
@@ -2974,6 +2995,9 @@ pub struct ApiKeyBody {
     pub last_used_ip: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this key may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
 }
 
 /// Returned once on create/rotate — the plaintext `ois_pat_…` token is never stored or shown again.

@@ -40,6 +40,10 @@ refilling evenly. Every response tells you where you stand:
 | `RateLimit-Remaining` | requests left right now |
 | `RateLimit-Reset` | seconds until the full allowance is back |
 
+Need more for an integration? An administrator can raise the limit for **one** key without changing
+anyone else's. Your key's recent request volume and any refusals are shown next to it on the API keys
+page.
+
 Go over it and you get **`429 Too Many Requests`** with a **`Retry-After`** header: wait that many
 seconds before trying again — retrying sooner is simply refused again. Polling an endpoint more often
 than its data changes (live traffic updates about every 15 seconds) only spends your allowance.

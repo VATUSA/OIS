@@ -73,6 +73,13 @@ A full minute's allowance is available as a burst and refills evenly. Every limi
 back); a refused one is `429 too_many_requests` with `Retry-After` (seconds until the next request is
 accepted). CORS exposes all four. `/health`, `/metrics` and `/docs` are not limited.
 
+- **Per-credential override (#611).** An admin can set one key's or service account's limit
+  (`PUT /api/v1/admin/api-keys/{id}/rate-limit`, `.../service-accounts/{id}/rate-limit`; `null` clears
+  it). It lives on the credential row, read by the bearer lookup, so it applies on the next request on
+  every replica.
+- **Usage (#611).** Each replica counts credential requests and 429s and adds them to
+  `access.credential_usage` (hourly, kept 7 days) once a minute; key and service-account lists show the
+  sums as `usage`.
 - **Per process.** Buckets live in memory, so with N backend replicas a caller can reach N× its limit.
 - **Client IP** is read `TRUSTED_PROXY_HOPS` entries from the right of `X-Forwarded-For`, since anything
   further left is client-supplied. The default, 2, matches production (Cloudflare → Traefik); a

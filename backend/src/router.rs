@@ -649,6 +649,10 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/admin/api-keys/{id}",
             delete(api_keys::admin_delete_key),
         )
+        .route(
+            "/api/v1/admin/api-keys/{id}/rate-limit",
+            put(api_keys::admin_set_key_rate_limit),
+        )
         // Admin landing summary (per-permission sections)
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
@@ -693,6 +697,10 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/service-accounts/{id}/roles",
             put(service_accounts::set_service_account_roles),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/rate-limit",
+            put(service_accounts::set_service_account_rate_limit),
         )
         .route(
             "/api/v1/admin/service-accounts/grantable-permissions",

@@ -84,6 +84,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/api-keys/{id}/rate-limit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set or clear one key's rate limit (#611): only this key gets it, on its next request, on every
+         *     replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`. Gated by the admin key-management
+         *     permission that disables and deletes keys — an owner can't raise their own.
+         */
+        put: operations["admin_set_key_rate_limit"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/audit": {
         parameters: {
             query?: never;
@@ -315,6 +336,26 @@ export interface paths {
          *     admin's own live authority (403 otherwise), and none may let a machine mint credentials (400).
          */
         put: operations["set_service_account_permissions"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/service-accounts/{id}/rate-limit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set or clear one account's rate limit (#611): only this account gets it, on its next request, on
+         *     every replica. `null` restores `RATE_LIMIT_CREDENTIAL_PER_MIN`.
+         */
+        put: operations["set_service_account_rate_limit"];
         post?: never;
         delete?: never;
         options?: never;
@@ -4082,9 +4123,15 @@ export interface components {
             owner_display_name?: string | null;
             permissions: components["schemas"]["ApiKeyPermissionBody"][];
             prefix: string;
+            /**
+             * Format: int32
+             * @description Requests per minute this key may make; `None` is the deployment default (#611).
+             */
+            rate_limit_per_min?: number | null;
             /** Format: date-time */
             revoked_at?: string | null;
             status: string;
+            usage: components["schemas"]["CredentialUsageBody"];
         };
         ApiKeyPermissionBody: {
             artcc_id?: string | null;
@@ -4367,6 +4414,27 @@ export interface components {
             reason: string;
             role_name: string;
             vatusa_role: string;
+        };
+        /**
+         * @description A credential's recent request volume (#611), summed across replicas from hourly counts. Up to a
+         *     minute behind: each replica records its counts once a minute.
+         */
+        CredentialUsageBody: {
+            /**
+             * Format: int64
+             * @description Of those, how many were refused with `429`.
+             */
+            refused_last_day: number;
+            /**
+             * Format: int64
+             * @description Requests in the last 24 hours.
+             */
+            requests_last_day: number;
+            /**
+             * Format: int64
+             * @description Requests in the current clock hour.
+             */
+            requests_this_hour: number;
         };
         /** @description A manually-added runway end (for fields the bundled dataset lacks). */
         CustomEnd: {
@@ -6602,9 +6670,15 @@ export interface components {
             last_used_at?: string | null;
             name: string;
             permissions: components["schemas"]["ApiKeyPermissionBody"][];
+            /**
+             * Format: int32
+             * @description Requests per minute this account may make; `None` is the deployment default (#611).
+             */
+            rate_limit_per_min?: number | null;
             roles: string[];
             stale: boolean;
             status: string;
+            usage: components["schemas"]["CredentialUsageBody"];
         };
         /**
          * @description Returned once on create/rotate — the plaintext bearer token is never stored or
@@ -6621,6 +6695,11 @@ export interface components {
         /** @description Toggle an event FCA's auto-publish flag (publish 30 min before the event starts). */
         SetFcaAutoRequest: {
             auto_publish: boolean;
+        };
+        /** @description Set or clear one credential's rate limit (#611). `null` restores the deployment default. */
+        SetRateLimitRequest: {
+            /** Format: int32 */
+            rate_limit_per_min?: number | null;
         };
         /** @description Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset. */
         SetSectorMapRequest: {
@@ -7470,6 +7549,59 @@ export interface operations {
         };
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    admin_set_key_rate_limit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetRateLimitRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiKeyBody"];
+                };
+            };
+            /** @description Not a positive whole number */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8409,6 +8541,60 @@ export interface operations {
             };
         };
     };
+    set_service_account_rate_limit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Service account id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetRateLimitRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountBody"];
+                };
+            };
+            /** @description Not a positive whole number */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_service_account_roles: {
         parameters: {
             query?: never;
@@ -8738,6 +8924,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     resync_user_vatusa: {
@@ -8784,6 +8979,15 @@ export interface operations {
             };
             404: {
                 headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
                     [name: string]: unknown;
                 };
                 content?: never;

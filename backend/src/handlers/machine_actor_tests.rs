@@ -581,6 +581,7 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         id: sa.clone(),
         key: "vtbfm".into(),
         name: "vTBFM".into(),
+        rate_limit_per_min: None,
     });
 
     let scope = principal
