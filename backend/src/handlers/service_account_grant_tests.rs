@@ -247,7 +247,9 @@ async fn a_role_within_the_admins_authority_is_granted(pool: PgPool) {
 async fn no_one_can_grant_a_machine_credential_management(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let admin = seed_user(&pool).await;
-    sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, 'SERVER_ADMIN')")
+    sqlx::query(
+        "insert into access.user_roles (user_id, role_name, source) values ($1, 'SERVER_ADMIN', 'system')",
+    )
         .bind(&admin)
         .execute(&pool)
         .await
