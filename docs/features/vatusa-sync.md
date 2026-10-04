@@ -54,6 +54,20 @@ There is no re-encryption path, by design — the webhook is disposable.
 Without `OIS_PUBLIC_URL` or `OIS_SECRET_KEY` there is simply no webhook; the daily pull keeps everyone
 current regardless.
 
+### Replay protection
+
+The HMAC proves who signed a body, not when, so a captured delivery would verify forever (#627). The
+preferred fix binds the signature to a moment: reject a signed timestamp outside a window. v3 offers
+nothing to bind to, though. Its spec documents no delivery schema and no signed timestamp header, and
+VATUSA has not been asked to add one. So the receiver **dedupes** instead: it remembers the SHA-256 of
+every *verified* body (`ReplayGuard` in `backend/src/handlers/webhooks.rs`) and acknowledges a repeat
+with `200` without acting on it. A body is forgotten once 10 minutes pass without it being seen again.
+
+The set is in memory and per process. A restart forgets it, and each replica guards alone. An identical
+body that VATUSA itself re-sends inside the window is skipped too. All three are acceptable while a
+delivery only brings the idempotent, coalesced pull forward. If the receiver ever starts acting on a
+payload's contents, revisit this with VATUSA (a signed timestamp) or move the set to Postgres.
+
 ## Role → group mapping
 
 `access.vatusa_role_mappings` maps `(vatusa_role, facility?)` → an OIS group. A null facility means

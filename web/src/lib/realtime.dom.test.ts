@@ -67,6 +67,16 @@ describe("connectRealtime (VATUSA/OIS#348 review)", () => {
     expect(invalidated).toEqual([{queryKey: ["my-ace-claims"]}]);
     dispose();
   });
+
+  // #643: a published or cancelled advisory refreshed only the publishing client's list.
+  it("refetches the advisory list on a tmu.advisory nudge", async () => {
+    const dispose = connectRealtime(qc);
+    await flush();
+
+    FakeSocket.opened[0]?.onmessage?.({data: JSON.stringify({topic: "tmu.advisory"})});
+    expect(invalidated).toEqual([{queryKey: ["advisories"]}]);
+    dispose();
+  });
 });
 
 describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {

@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::CurrentUser,
+        context::{CurrentServiceAccount, CurrentUser},
         permissions::{DiscordConfigRead, DiscordConfigUpdate, IntegrationJobsUpdate},
         require_permission::RequirePermission,
     },
@@ -34,42 +34,88 @@ fn pool(state: &AppState) -> Result<&sqlx::PgPool, ApiError> {
     state.db.as_ref().ok_or(ApiError::ServiceUnavailable)
 }
 
+/// The queue consumer a lease or ack acts for: the calling **service account's key** (#656). A queue
+/// consumer is a machine, so a person's session or API key is refused; a declared `?consumer=` is
+/// optional and must name that same key. Before this the consumer was whatever the caller declared, so
+/// any `integration.jobs.update` holder could lease or ack as the Discord bot (#590 stopped only the
+/// accidental case).
+fn bound_consumer<'a>(
+    account: Option<&'a CurrentServiceAccount>,
+    declared: Option<&str>,
+) -> Result<&'a str, ApiError> {
+    let account = account.ok_or(ApiError::Forbidden)?;
+    match declared.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(declared) if declared != account.key => Err(ApiError::Forbidden),
+        _ => Ok(&account.key),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LeaseQuery {
+    /// Optional; must be the caller's own consumer — see [`bound_consumer`].
+    consumer: Option<String>,
     /// Max jobs to lease (default 10, clamped 1–100).
     limit: Option<i64>,
 }
 
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/lease", tag = "integration",
-    params(("limit" = Option<i64>, Query, description = "Max jobs (default 10)")),
-    responses((status = 200, body = Vec<OutboundJobBody>), (status = 401))
+    params(
+        ("consumer" = Option<String>, Query, description = "Optional. The consumer is the calling service account's key (the Discord bot's is `discord`); if given, this must match it."),
+        ("limit" = Option<i64>, Query, description = "Max jobs (default 10)")
+    ),
+    responses(
+        (status = 200, body = Vec<OutboundJobBody>),
+        (status = 401),
+        (status = 403, description = "Not a service account, or `consumer` names another consumer")
+    )
 )]
 pub async fn lease_jobs(
     State(state): State<AppState>,
     _permission: RequirePermission<IntegrationJobsUpdate>,
+    Extension(account): Extension<Option<CurrentServiceAccount>>,
     Query(q): Query<LeaseQuery>,
 ) -> Result<Json<Vec<OutboundJobBody>>, ApiError> {
+    let consumer = bound_consumer(account.as_ref(), q.consumer.as_deref())?;
     let limit = q.limit.unwrap_or(10);
     Ok(Json(
-        integration_repo::lease_jobs(pool(&state)?, limit).await?,
+        integration_repo::lease_jobs(pool(&state)?, consumer, limit).await?,
     ))
+}
+
+#[derive(Deserialize)]
+pub struct AckQuery {
+    /// Optional; must be the caller's own consumer — see [`bound_consumer`]. An ack applies only to that
+    /// consumer's job.
+    consumer: Option<String>,
 }
 
 #[utoipa::path(
     post, path = "/api/v1/integration/jobs/{id}/ack", tag = "integration",
-    params(("id" = String, Path)), request_body = AckJobRequest,
-    responses((status = 204), (status = 401), (status = 404))
+    params(
+        ("id" = String, Path),
+        ("consumer" = Option<String>, Query, description = "Optional. The consumer is the calling service account's key; if given, this must match it. An ack applies only to that consumer's job.")
+    ),
+    request_body = AckJobRequest,
+    responses(
+        (status = 204), (status = 401),
+        (status = 403, description = "Not a service account, or `consumer` names another consumer"),
+        (status = 404)
+    )
 )]
 pub async fn ack_job(
     State(state): State<AppState>,
     _permission: RequirePermission<IntegrationJobsUpdate>,
+    Extension(account): Extension<Option<CurrentServiceAccount>>,
     Path(id): Path<String>,
+    Query(q): Query<AckQuery>,
     Json(payload): Json<AckJobRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let consumer = bound_consumer(account.as_ref(), q.consumer.as_deref())?;
     let ok = integration_repo::ack_job(
         pool(&state)?,
         &id,
+        consumer,
         payload.success,
         payload.result.as_ref(),
         payload.error.as_deref(),
@@ -88,7 +134,8 @@ pub async fn ack_job(
             job = %id,
             success = payload.success,
             attempt = ?payload.attempt,
-            "integration: ack did not apply — unknown job, or this worker no longer holds the lease"
+            consumer,
+            "integration: ack did not apply — unknown job, another consumer's job, or this worker no longer holds the lease"
         );
         Err(ApiError::NotFound)
     }
@@ -490,7 +537,82 @@ pub async fn refresh_guild_snapshot(
 mod tests {
     use sqlx::PgPool;
 
-    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+    use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
+
+    /// A queue consumer as the bot is one (#656): a service account keyed `key`, as its bearer. With
+    /// `bot_role` it holds `BOT`, which grants `integration.jobs.update`.
+    async fn account(pool: &PgPool, key: &str, bot_role: bool) -> (String, String) {
+        let id: String = sqlx::query_scalar(
+            "insert into access.service_accounts (key, name) values ($1, $1) returning id",
+        )
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let token = format!("ois_sa_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "insert into access.service_account_credentials (service_account_id, secret_hash) \
+             values ($1, $2)",
+        )
+        .bind(&id)
+        .bind(crate::repos::access::sha256_hex(&token))
+        .execute(pool)
+        .await
+        .unwrap();
+        if bot_role {
+            give_bot_role(pool, &id).await;
+        }
+        (id, format!("Bearer {token}"))
+    }
+
+    async fn give_bot_role(pool: &PgPool, account_id: &str) {
+        sqlx::query(
+            "insert into access.service_account_roles (service_account_id, role_name) \
+             values ($1, 'BOT')",
+        )
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The bearer of a `BOT` service account keyed `key`.
+    async fn consumer(pool: &PgPool, key: &str) -> String {
+        account(pool, key, true).await.1
+    }
+
+    /// One request through the real router with `credential` as a bearer, or as the session cookie.
+    async fn call(
+        state: &crate::state::AppState,
+        method: http::Method,
+        uri: &str,
+        credential: &str,
+        json: Option<serde_json::Value>,
+    ) -> http::StatusCode {
+        use tower::ServiceExt;
+
+        let header = if credential.starts_with("Bearer ") {
+            http::header::AUTHORIZATION
+        } else {
+            http::header::COOKIE
+        };
+        let builder = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header, credential);
+        let request = match json {
+            Some(body) => builder
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_string())),
+            None => builder.body(axum::body::Body::empty()),
+        }
+        .unwrap();
+        crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
 
     /// A job `in_progress` on `attempt_count`, as a successor holds it after a reap and re-lease.
     ///
@@ -532,13 +654,11 @@ mod tests {
     #[sqlx::test]
     async fn the_route_refuses_a_predecessors_ack_and_accepts_the_holders(pool: PgPool) {
         let id = job_held_on_attempt(&pool, 2).await;
-        let user = seed_user(&pool).await;
-        grant(&pool, &user, "integration.jobs.update", None).await;
-        let cookie = session_cookie(&pool, &user).await;
+        let cookie = consumer(&pool, "discord").await;
         let state = test_state(pool.clone(), Default::default());
-        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+        let uri = format!("/api/v1/integration/jobs/{id}/ack?consumer=discord");
 
-        let stale = send(
+        let stale = call(
             &state,
             http::Method::POST,
             &uri,
@@ -557,7 +677,7 @@ mod tests {
             "the successor is still working the job"
         );
 
-        let current = send(
+        let current = call(
             &state,
             http::Method::POST,
             &uri,
@@ -575,15 +695,13 @@ mod tests {
     #[sqlx::test]
     async fn the_route_still_accepts_an_ack_carrying_no_lease_token(pool: PgPool) {
         let id = job_held_on_attempt(&pool, 2).await;
-        let user = seed_user(&pool).await;
-        grant(&pool, &user, "integration.jobs.update", None).await;
-        let cookie = session_cookie(&pool, &user).await;
+        let cookie = consumer(&pool, "discord").await;
         let state = test_state(pool.clone(), Default::default());
 
-        let status = send(
+        let status = call(
             &state,
             http::Method::POST,
-            &format!("/api/v1/integration/jobs/{id}/ack"),
+            &format!("/api/v1/integration/jobs/{id}/ack?consumer=discord"),
             &cookie,
             Some(serde_json::json!({"success": true})),
         )
@@ -599,13 +717,12 @@ mod tests {
     #[sqlx::test]
     async fn acking_a_job_requires_the_integration_jobs_permission(pool: PgPool) {
         let id = job_held_on_attempt(&pool, 1).await;
-        let user = seed_user(&pool).await;
-        let cookie = session_cookie(&pool, &user).await;
+        let (account_id, cookie) = account(&pool, "discord", false).await;
         let state = test_state(pool.clone(), Default::default());
-        let uri = format!("/api/v1/integration/jobs/{id}/ack");
+        let uri = format!("/api/v1/integration/jobs/{id}/ack?consumer=discord");
         let body = serde_json::json!({"success": true, "attempt": 1});
 
-        let refused = send(
+        let refused = call(
             &state,
             http::Method::POST,
             &uri,
@@ -620,8 +737,278 @@ mod tests {
             "a refused ack must not have touched the row"
         );
 
-        grant(&pool, &user, "integration.jobs.update", None).await;
-        let allowed = send(&state, http::Method::POST, &uri, &cookie, Some(body)).await;
+        give_bot_role(&pool, &account_id).await;
+        let allowed = call(&state, http::Method::POST, &uri, &cookie, Some(body)).await;
         assert_eq!(allowed, http::StatusCode::NO_CONTENT);
+    }
+    /// A Discord job made the way production makes one — through `enqueue_job` — so the test proves
+    /// what the bot will actually see, not what a fixture says.
+    async fn enqueued_discord_job(pool: &PgPool) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        let id = crate::repos::integration::enqueue_job(
+            &mut tx,
+            "guild_snapshot",
+            &serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        id
+    }
+
+    /// A due job belonging to another consumer — what an outbound-webhook worker would lease.
+    async fn webhook_job(pool: &PgPool) -> String {
+        sqlx::query_scalar::<_, String>(
+            "insert into integration.outbound_jobs (job_type, consumer) \
+             values ('webhook_delivery', 'webhook') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #590 AC1: two consumers lease from the one queue and neither takes the other's job. Each is now
+    /// its own service account (#656), and leases without naming itself.
+    #[sqlx::test]
+    async fn two_consumers_lease_only_their_own_jobs(pool: PgPool) {
+        let discord = enqueued_discord_job(&pool).await;
+        let webhook = webhook_job(&pool).await;
+        let (bot, hook) = (
+            consumer(&pool, "discord").await,
+            consumer(&pool, "webhook").await,
+        );
+        let state = test_state(pool.clone(), Default::default());
+        let lease = "/api/v1/integration/jobs/lease";
+
+        assert_eq!(
+            call(&state, http::Method::POST, lease, &hook, None).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(status_of(&pool, &webhook).await, "in_progress");
+        assert_eq!(
+            status_of(&pool, &discord).await,
+            "pending",
+            "the webhook consumer must not take the bot's job"
+        );
+
+        // AC2: the bot, leasing as `discord/src/jobs/mod.rs` does — naming itself — still gets its job.
+        let ok = call(
+            &state,
+            http::Method::POST,
+            &format!("{lease}?consumer=discord"),
+            &bot,
+            None,
+        )
+        .await;
+        assert_eq!(ok, http::StatusCode::OK);
+        assert_eq!(status_of(&pool, &discord).await, "in_progress");
+    }
+
+    /// #656 AC1: a consumer can't lease another's jobs by naming it. The `webhook` account asking for
+    /// `discord`'s jobs is refused, and the bot's job is untouched.
+    #[sqlx::test]
+    async fn a_consumer_cannot_lease_as_another(pool: PgPool) {
+        let discord = enqueued_discord_job(&pool).await;
+        let hook = consumer(&pool, "webhook").await;
+        let state = test_state(pool.clone(), Default::default());
+
+        let refused = call(
+            &state,
+            http::Method::POST,
+            "/api/v1/integration/jobs/lease?consumer=discord",
+            &hook,
+            None,
+        )
+        .await;
+
+        assert_eq!(refused, http::StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&pool, &discord).await, "pending");
+    }
+
+    /// A queue consumer is a machine: a person holding `integration.jobs.update` — by session or API
+    /// key — can't lease or ack, so they can't drain the bot's queue either.
+    #[sqlx::test]
+    async fn a_person_cannot_lease_or_ack(pool: PgPool) {
+        let discord = enqueued_discord_job(&pool).await;
+        let held = job_held_on_attempt(&pool, 1).await;
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "integration.jobs.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), Default::default());
+
+        let lease = call(
+            &state,
+            http::Method::POST,
+            "/api/v1/integration/jobs/lease?consumer=discord",
+            &cookie,
+            None,
+        )
+        .await;
+        let ack = call(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/integration/jobs/{held}/ack?consumer=discord"),
+            &cookie,
+            Some(serde_json::json!({"success": true, "attempt": 1})),
+        )
+        .await;
+
+        assert_eq!(lease, http::StatusCode::FORBIDDEN);
+        assert_eq!(ack, http::StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&pool, &discord).await, "pending");
+        assert_eq!(status_of(&pool, &held).await, "in_progress");
+    }
+
+    /// #590 review + #656 AC1: an ack applies only to the caller's own consumer's job. The `webhook`
+    /// account can't complete or fail the bot's in-flight job — by its id alone (404), or by also
+    /// claiming to be `discord` (403).
+    #[sqlx::test]
+    async fn an_ack_from_another_consumer_does_not_apply(pool: PgPool) {
+        let id = job_held_on_attempt(&pool, 1).await; // the bot's: consumer defaults to `discord`
+        let (bot, hook) = (
+            consumer(&pool, "discord").await,
+            consumer(&pool, "webhook").await,
+        );
+        let state = test_state(pool.clone(), Default::default());
+        let body = serde_json::json!({"success": true, "attempt": 1});
+        let fail = serde_json::json!({"success": false, "error": "not mine", "attempt": 1});
+        let ack = format!("/api/v1/integration/jobs/{id}/ack");
+
+        for b in [body.clone(), fail] {
+            let own = call(&state, http::Method::POST, &ack, &hook, Some(b.clone())).await;
+            assert_eq!(
+                own,
+                http::StatusCode::NOT_FOUND,
+                "not the webhook consumer's job"
+            );
+            let spoofed = call(
+                &state,
+                http::Method::POST,
+                &format!("{ack}?consumer=discord"),
+                &hook,
+                Some(b),
+            )
+            .await;
+            assert_eq!(
+                spoofed,
+                http::StatusCode::FORBIDDEN,
+                "and it can't claim to be the bot"
+            );
+            assert_eq!(
+                status_of(&pool, &id).await,
+                "in_progress",
+                "the bot's job is untouched"
+            );
+        }
+
+        let applied = call(&state, http::Method::POST, &ack, &bot, Some(body)).await;
+        assert_eq!(applied, http::StatusCode::NO_CONTENT);
+        assert_eq!(status_of(&pool, &id).await, "succeeded");
+    }
+    // ---- #656 QA: the deploy renames the bot's account, never a guess ------------------------------
+
+    /// The migration exactly as it ships, so editing `0115` can't leave these green on a stale copy.
+    const BOT_RENAME: &str =
+        include_str!("../../migrations/0115_bot_account_is_the_discord_consumer.sql");
+
+    async fn rename(pool: &PgPool) {
+        sqlx::raw_sql(BOT_RENAME)
+            .execute(pool)
+            .await
+            .expect("0115 runs");
+    }
+
+    async fn keys(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select key from access.service_accounts order by key")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Gives an account a role other than BOT, so a fixture's non-bot is a real integration rather than
+    /// an account holding nothing — which would let a dropped `role_name = 'BOT'` filter pass unseen.
+    async fn give_other_role(pool: &PgPool, account_id: &str) {
+        sqlx::query(
+            "insert into access.service_account_roles (service_account_id, role_name) \
+             values ($1, 'SERVICE_APP')",
+        )
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn the_one_bot_account_becomes_the_discord_consumer(pool: PgPool) {
+        account(&pool, "ois-discord-bot", true).await;
+        let (vtbfm, _) = account(&pool, "vtbfm", false).await;
+        give_other_role(&pool, &vtbfm).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["discord", "vtbfm"]);
+    }
+
+    /// The guess the guard exists to refuse: no account holds BOT, but one holds another role. Renaming
+    /// it would hand the bot's jobs to that integration.
+    #[sqlx::test]
+    async fn an_account_without_a_bot_grant_is_never_the_bot(pool: PgPool) {
+        let (vtbfm, _) = account(&pool, "vtbfm", false).await;
+        give_other_role(&pool, &vtbfm).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["vtbfm"]);
+    }
+
+    /// Two candidates is a guess, so nothing changes, and the migration still runs.
+    #[sqlx::test]
+    async fn two_bot_accounts_are_left_alone(pool: PgPool) {
+        account(&pool, "bot-a", true).await;
+        account(&pool, "bot-b", true).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["bot-a", "bot-b"]);
+    }
+
+    #[sqlx::test]
+    async fn an_existing_discord_key_is_left_alone(pool: PgPool) {
+        account(&pool, "discord", false).await;
+        account(&pool, "ois-discord-bot", true).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["discord", "ois-discord-bot"]);
+    }
+
+    /// Only a live bot counts: a disabled account, an expired BOT grant or one not yet started is not a
+    /// candidate, so the one live bot is still renamed.
+    #[sqlx::test]
+    async fn a_disabled_expired_or_future_bot_is_not_a_candidate(pool: PgPool) {
+        account(&pool, "ois-discord-bot", true).await;
+        let (disabled, _) = account(&pool, "old-bot", true).await;
+        sqlx::query("update access.service_accounts set status = 'disabled' where id = $1")
+            .bind(&disabled)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (expired, _) = account(&pool, "lapsed-bot", true).await;
+        sqlx::query(
+            "update access.service_account_roles set ends_at = now() - interval '1 day' \
+             where service_account_id = $1",
+        )
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (future, _) = account(&pool, "future-bot", true).await;
+        sqlx::query(
+            "update access.service_account_roles set starts_at = now() + interval '1 day' \
+             where service_account_id = $1",
+        )
+        .bind(&future)
+        .execute(&pool)
+        .await
+        .unwrap();
+        rename(&pool).await;
+        assert_eq!(
+            keys(&pool).await,
+            ["discord", "future-bot", "lapsed-bot", "old-bot"]
+        );
     }
 }

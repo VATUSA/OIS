@@ -16,13 +16,14 @@ static NEIGHBORS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
 /// OIS uses `HCF` for Honolulu; the adjacency dataset uses `ZHN`. Normalize in both directions.
 ///
 /// **This is the only `ZHN`↔`HCF` alias left in OIS** (#556). It stays because the adjacency map is a
-/// genuinely third-party dataset kept as published. Everything OIS owns — `org.facilities`, the
+/// genuinely third-party dataset kept as published; `feed::vnas` reuses `from_dataset` for the same
+/// reason (vNAS says `ZHN` too) rather than growing a second copy. Everything OIS owns — `org.facilities`, the
 /// boundary assets, `center_artcc`, the feed's facility map and stored rows — says `HCF`, so don't add
 /// a second alias elsewhere; fix the data instead.
 fn to_dataset(id: &str) -> &str {
     if id == "HCF" { "ZHN" } else { id }
 }
-fn from_dataset(id: &str) -> &str {
+pub(crate) fn from_dataset(id: &str) -> &str {
     if id == "ZHN" { "HCF" } else { id }
 }
 

@@ -132,9 +132,13 @@ fn derive(
     Some((action, resource_type, resource_id))
 }
 
-/// Realtime nudge topic for the broader TMU boards (GDP / TMI / ground stops / rate programs), keyed
-/// off the matched route. FCA releases, FCA edits, and CFRs publish precisely from their own handlers,
-/// so they're intentionally excluded here to avoid a double nudge.
+/// Realtime nudge topic for the broader TMU boards (GDP / TMI / ground stops / rate programs /
+/// advisories), keyed off the matched route. FCA releases, FCA edits, and CFRs publish precisely from
+/// their own handlers, so they're intentionally excluded here to avoid a double nudge.
+///
+/// A mutating `/api/v1/tmu/*` route missing from this chain is invisible to every other client — the
+/// way advisories were until #643. `every_mutating_tmu_route_has_a_topic` fails for one, so a new TMU
+/// entity can't ship silent.
 fn tmu_realtime_topic(path: &str) -> Option<&'static str> {
     use crate::realtime::topic;
     if path.starts_with("/api/v1/tmu/gdp") {
@@ -145,6 +149,8 @@ fn tmu_realtime_topic(path: &str) -> Option<&'static str> {
         Some(topic::GROUND_STOP)
     } else if path.starts_with("/api/v1/tmu/programs") {
         Some(topic::PROGRAM)
+    } else if path.starts_with("/api/v1/tmu/advisories") {
+        Some(topic::ADVISORY)
     } else {
         None
     }
@@ -269,6 +275,67 @@ async fn record(
 
 #[cfg(test)]
 mod tests {
+    /// #643: every route that changes TMU data must nudge the other clients. Reads `router.rs` so a new
+    /// route is covered the moment it is wired, and splits on route literals so multi-line `.route(`
+    /// blocks are seen. An exception has to be written into `SELF_PUBLISHING` with its reason.
+    #[test]
+    fn every_mutating_tmu_route_has_a_topic() {
+        /// Routes whose handlers publish their own topic, so the middleware must not double-nudge.
+        const SELF_PUBLISHING: &[(&str, &str)] = &[
+            ("/api/v1/tmu/cfr", "feed::issue_cfr publishes flow.cfr"),
+            (
+                "/api/v1/tmu/cfr/{callsign}",
+                "feed::release_cfr publishes flow.cfr",
+            ),
+        ];
+        let router = include_str!("router.rs");
+        let starts: Vec<usize> = router.match_indices("\"/api/").map(|(i, _)| i).collect();
+        let mut mutating = Vec::new();
+        for (n, &start) in starts.iter().enumerate() {
+            let end = starts.get(n + 1).copied().unwrap_or(router.len());
+            let block = &router[start..end];
+            let path = &block[1..block[1..].find('"').unwrap() + 1];
+            let writes = ["post(", "put(", "patch(", "delete("]
+                .iter()
+                .any(|m| block.contains(m));
+            if path.starts_with("/api/v1/tmu/") && writes {
+                mutating.push(path.to_string());
+            }
+        }
+
+        assert!(
+            mutating
+                .iter()
+                .any(|p| p.starts_with("/api/v1/tmu/advisories")),
+            "the scan must see the advisory routes, or it is proving nothing: {mutating:?}"
+        );
+        let silent: Vec<_> = mutating
+            .iter()
+            .filter(|p| super::tmu_realtime_topic(p).is_none())
+            .filter(|p| !SELF_PUBLISHING.iter().any(|(s, _)| s == p))
+            .collect();
+        assert!(
+            silent.is_empty(),
+            "these TMU writes nudge no other client — add a topic in tmu_realtime_topic: {silent:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_writes_nudge_the_advisory_topic() {
+        for path in [
+            "/api/v1/tmu/advisories",
+            "/api/v1/tmu/advisories/{id}",
+            "/api/v1/tmu/advisories/{id}/publish",
+            "/api/v1/tmu/advisories/{id}/cancel",
+        ] {
+            assert_eq!(
+                super::tmu_realtime_topic(path),
+                Some("tmu.advisory"),
+                "{path}"
+            );
+        }
+    }
+
     use super::*;
 
     fn d(m: Method, tmpl: &str, actual: &str) -> (String, String, Option<String>) {
