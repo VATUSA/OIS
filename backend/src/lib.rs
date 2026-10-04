@@ -93,6 +93,12 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.sector_maps.clone(),
         );
+        // Sector consolidations, for the Airspace Monitor (#599).
+        jobs::spawn_sector_consolidations_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.sector_consolidations.clone(),
+        );
         // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Manually excluded ("bogus") flights, for the DB-less flow surfaces (#342). Also runs the

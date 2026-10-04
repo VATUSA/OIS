@@ -22,8 +22,11 @@ use crate::{
     },
     errors::ApiError,
     feed::sectors::{DEFAULT_MAP, map_for},
-    models::{SectorMapBody, SectorMapsBody, SetSectorMapRequest},
-    repos::sector_maps as repo,
+    models::{
+        ConsolidateSectorRequest, SectorConsolidationBody, SectorConsolidationsBody, SectorMapBody,
+        SectorMapsBody, SetSectorMapRequest,
+    },
+    repos::{sector_consolidations as consolidations_repo, sector_maps as repo},
     state::AppState,
 };
 
@@ -36,6 +39,29 @@ async fn may_edit(state: &AppState, principal: &Principal, artcc: &str) -> Resul
         .permission_scope(state, MONITOR_UPDATE)
         .await?
         .allows(Some(artcc)))
+}
+
+/// Whether `sector_id` is one of `artcc`'s sectors in the imported dataset.
+fn is_sector(state: &AppState, artcc: &str, sector_id: &str) -> bool {
+    state
+        .airspace_sectors
+        .load()
+        .sectors_of(artcc)
+        .iter()
+        .any(|(id, _)| id == sector_id)
+}
+
+/// Refuse unless `principal` may change `artcc`'s Monitor configuration.
+async fn require_edit(
+    state: &AppState,
+    principal: &Principal,
+    artcc: &str,
+) -> Result<(), ApiError> {
+    if may_edit(state, principal, artcc).await? {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
 }
 
 #[utoipa::path(
@@ -94,19 +120,11 @@ pub async fn set_sector_map(
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let artcc = artcc.trim().to_ascii_uppercase();
-    if !may_edit(&state, &principal, &artcc).await? {
-        return Err(ApiError::Forbidden);
-    }
+    require_edit(&state, &principal, &artcc).await?;
     if payload.map <= 0 {
         return Err(ApiError::BadRequest);
     }
-    let known = state
-        .airspace_sectors
-        .load()
-        .sectors_of(&artcc)
-        .iter()
-        .any(|(id, _)| *id == sector_id);
-    if !known {
+    if !is_sector(&state, &artcc, &sector_id) {
         return Err(ApiError::NotFound);
     }
     // Against the stored row, not this pod's cache: another replica may have written since our last
@@ -121,6 +139,105 @@ pub async fn set_sector_map(
     state
         .sector_maps
         .store(Arc::new(repo::load_all(pool).await?));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reload the consolidation cache so a write is visible to every viewer at once.
+async fn refresh_consolidations(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiError> {
+    let loaded = consolidations_repo::load_all(pool).await?;
+    state.sector_consolidations.store(Arc::new(loaded));
+    Ok(())
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/flow/monitor/{artcc}/consolidations", tag = "flow",
+    params(("artcc" = String, Path)),
+    responses((status = 200, body = SectorConsolidationsBody), (status = 401))
+)]
+pub async fn list_consolidations(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorRead>,
+    Actor(principal): Actor,
+    Path(artcc): Path<String>,
+) -> Result<Json<SectorConsolidationsBody>, ApiError> {
+    let artcc = artcc.trim().to_ascii_uppercase();
+    let mut consolidations: Vec<SectorConsolidationBody> = state
+        .sector_consolidations
+        .load()
+        .iter()
+        .filter(|((a, _), _)| *a == artcc)
+        .map(|((_, source), target)| SectorConsolidationBody {
+            sector_id: source.clone(),
+            target_sector_id: target.clone(),
+        })
+        .collect();
+    consolidations.sort_by(|a, b| a.sector_id.cmp(&b.sector_id));
+    Ok(Json(SectorConsolidationsBody {
+        editable: may_edit(&state, &principal, &artcc).await?,
+        consolidations,
+    }))
+}
+
+/// Work a sector at another sector's position (#599). Both must be this ARTCC's sectors, so a
+/// cross-ARTCC target can't be named (404). A sector can't be worked at itself (400), and a save that
+/// would make a loop is refused (409). The arrangement stays flat — see
+/// [`consolidations_repo::consolidate`] — and the save is all-or-nothing.
+#[utoipa::path(
+    put, path = "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}", tag = "flow",
+    params(("artcc" = String, Path), ("sector_id" = String, Path)),
+    request_body = ConsolidateSectorRequest,
+    responses(
+        (status = 204),
+        (status = 400, description = "A sector can't be worked at itself"),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
+        (status = 404, description = "Either sector isn't one of this ARTCC's"),
+        (status = 409, description = "The save would make a loop")
+    )
+)]
+pub async fn consolidate_sector(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorUpdate>,
+    Actor(principal): Actor,
+    Path((artcc, sector_id)): Path<(String, String)>,
+    Json(payload): Json<ConsolidateSectorRequest>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    require_edit(&state, &principal, &artcc).await?;
+    let target = payload.target_sector_id.trim();
+    if !is_sector(&state, &artcc, &sector_id) || !is_sector(&state, &artcc, target) {
+        return Err(ApiError::NotFound);
+    }
+    if target == sector_id {
+        return Err(ApiError::BadRequest);
+    }
+    consolidations_repo::consolidate(pool, &artcc, &sector_id, target, principal.user_id()).await?;
+    refresh_consolidations(&state, pool).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Give a consolidated sector its own row back. A sector that isn't consolidated is a no-op.
+#[utoipa::path(
+    delete, path = "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}", tag = "flow",
+    params(("artcc" = String, Path), ("sector_id" = String, Path)),
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC")
+    )
+)]
+pub async fn release_sector(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorUpdate>,
+    Actor(principal): Actor,
+    Path((artcc, sector_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    require_edit(&state, &principal, &artcc).await?;
+    consolidations_repo::release(pool, &artcc, &sector_id).await?;
+    refresh_consolidations(&state, pool).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -376,5 +493,241 @@ mod tests {
             "ZNY's sector"
         );
         assert!(stored(&pool).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod consolidation_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::{
+        feed::sectors::{SectorTable, tests::volume},
+        scope_test_support::{grant, seed_user, send, send_json, session_cookie, test_state},
+        state::AppState,
+    };
+
+    /// ZLA sectors 018, 041 and 020, and ZDC 024 (the fixture names a sector by its volume id's
+    /// first three characters).
+    fn state(pool: PgPool) -> AppState {
+        let state = test_state(pool, Default::default());
+        state.airspace_sectors.store(Arc::new(SectorTable {
+            volumes: vec![
+                volume("ZLA", "0180"),
+                volume("ZLA", "0410"),
+                volume("ZLA", "0200"),
+                volume("ZDC", "0240"),
+            ],
+        }));
+        state
+    }
+
+    async fn user(pool: &PgPool, update_at: Option<&str>) -> String {
+        let id = seed_user(pool).await;
+        grant(pool, &id, "flow.monitor.read", None).await;
+        if let Some(artcc) = update_at {
+            grant(pool, &id, "flow.monitor.update", Some(artcc)).await;
+        }
+        session_cookie(pool, &id).await
+    }
+
+    async fn work_at(state: &AppState, cookie: &str, source: &str, target: &str) -> u16 {
+        send(
+            state,
+            http::Method::PUT,
+            &format!("/api/v1/flow/monitor/ZLA/consolidations/{source}"),
+            cookie,
+            Some(json!({"target_sector_id": target})),
+        )
+        .await
+        .as_u16()
+    }
+
+    async fn stored(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select sector_id, target_sector_id from flow.sector_consolidation order by 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    fn cached(state: &AppState) -> Vec<(String, String)> {
+        let mut rows: Vec<_> = state
+            .sector_consolidations
+            .load()
+            .iter()
+            .map(|((_, s), t)| (s.clone(), t.clone()))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Releasing is a write to another facility's Monitor too: a TMU at another ARTCC (and a viewer
+    /// with no update grant) is refused on the DELETE route, and the consolidation survives. The owning
+    /// ARTCC's TMU can release it.
+    #[sqlx::test]
+    async fn only_the_owning_artcc_can_release_a_consolidation(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let zdc = user(&pool, Some("ZDC")).await;
+        let viewer = user(&pool, None).await;
+        let state = state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "018", "041").await, 204);
+
+        let release = |cookie: String| {
+            let state = state.clone();
+            async move {
+                send(
+                    &state,
+                    http::Method::DELETE,
+                    "/api/v1/flow/monitor/ZLA/consolidations/018",
+                    &cookie,
+                    None,
+                )
+                .await
+                .as_u16()
+            }
+        };
+        assert_eq!(
+            release(zdc).await,
+            403,
+            "a TMU at another ARTCC can't release ZLA's"
+        );
+        assert_eq!(
+            release(viewer).await,
+            401,
+            "nor can a viewer without flow.monitor.update"
+        );
+        assert_eq!(
+            stored(&pool).await,
+            pairs(&[("018", "041")]),
+            "nothing was released"
+        );
+        assert_eq!(cached(&state), pairs(&[("018", "041")]));
+
+        assert_eq!(release(zla).await, 204, "ZLA's own TMU can");
+        assert!(stored(&pool).await.is_empty());
+    }
+
+    /// AC1: a consolidation is server-side and every viewer sees it at once — the write reloads the
+    /// cache the engine reads. Releasing it gives the sector its row back.
+    #[sqlx::test]
+    async fn a_consolidation_is_shared_with_every_viewer_at_once(pool: PgPool) {
+        let tmu = user(&pool, Some("ZLA")).await;
+        let viewer = user(&pool, None).await;
+        let state = state(pool.clone());
+
+        assert_eq!(work_at(&state, &tmu, "018", "041").await, 204);
+
+        assert_eq!(cached(&state), pairs(&[("018", "041")]));
+        let (status, body) = send_json(
+            &state,
+            http::Method::GET,
+            "/api/v1/flow/monitor/ZLA/consolidations",
+            &viewer,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(body["editable"], false);
+        assert_eq!(
+            body["consolidations"],
+            json!([{"sector_id": "018", "target_sector_id": "041"}])
+        );
+
+        let release = send(
+            &state,
+            http::Method::DELETE,
+            "/api/v1/flow/monitor/ZLA/consolidations/018",
+            &tmu,
+            None,
+        )
+        .await;
+        assert_eq!(release.as_u16(), 204);
+        assert!(stored(&pool).await.is_empty());
+        assert!(cached(&state).is_empty());
+    }
+
+    /// AC5: a sector can only be worked at another sector in the same ARTCC, not at itself, and a
+    /// loop is refused — and so is a TMU from another ARTCC. None of them writes anything.
+    #[sqlx::test]
+    async fn cross_artcc_self_loops_and_other_facilities_are_refused(pool: PgPool) {
+        let tmu = user(&pool, Some("ZLA")).await;
+        let zdc = user(&pool, Some("ZDC")).await;
+        let state = state(pool.clone());
+
+        assert_eq!(
+            work_at(&state, &tmu, "018", "024").await,
+            404,
+            "ZDC's sector"
+        );
+        assert_eq!(work_at(&state, &tmu, "018", "018").await, 400, "itself");
+        assert_eq!(
+            work_at(&state, &zdc, "018", "041").await,
+            403,
+            "another facility's TMU"
+        );
+        assert!(stored(&pool).await.is_empty());
+
+        assert_eq!(work_at(&state, &tmu, "018", "041").await, 204);
+        assert_eq!(
+            work_at(&state, &tmu, "041", "018").await,
+            409,
+            "018 at 041, then 041 at 018"
+        );
+        assert_eq!(stored(&pool).await, pairs(&[("018", "041")]));
+    }
+
+    /// AC6: chains are flattened on every write. 018 at 041, then 041 at 020, leaves 018 at 020 —
+    /// 041's row no longer exists to hold it. And a target that is itself worked elsewhere resolves
+    /// to where it is worked.
+    #[sqlx::test]
+    async fn chains_are_flattened_on_every_write(pool: PgPool) {
+        let tmu = user(&pool, Some("ZLA")).await;
+        let state = state(pool.clone());
+
+        assert_eq!(work_at(&state, &tmu, "018", "041").await, 204);
+        assert_eq!(work_at(&state, &tmu, "041", "020").await, 204);
+        assert_eq!(
+            stored(&pool).await,
+            pairs(&[("018", "020"), ("041", "020")])
+        );
+
+        sqlx::query("delete from flow.sector_consolidation where sector_id = '018'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            work_at(&state, &tmu, "018", "041").await,
+            204,
+            "041 is worked at 020"
+        );
+        assert_eq!(
+            stored(&pool).await,
+            pairs(&[("018", "020"), ("041", "020")])
+        );
+    }
+
+    /// AC7: a refused save leaves the stored arrangement and the cache exactly as they were. The
+    /// save is one transaction, so a failed one does too.
+    #[sqlx::test]
+    async fn a_refused_save_restores_nothing_because_it_changed_nothing(pool: PgPool) {
+        let tmu = user(&pool, Some("ZLA")).await;
+        let state = state(pool.clone());
+        assert_eq!(work_at(&state, &tmu, "018", "041").await, 204);
+        assert_eq!(work_at(&state, &tmu, "020", "041").await, 204);
+        let (rows, cache) = (stored(&pool).await, cached(&state));
+
+        assert_eq!(work_at(&state, &tmu, "041", "018").await, 409);
+
+        assert_eq!(stored(&pool).await, rows);
+        assert_eq!(cached(&state), cache);
     }
 }

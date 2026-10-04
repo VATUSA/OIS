@@ -9,6 +9,8 @@
 //!
 //! Pure data and validation only — the feed reads this through the cache and never queries.
 
+use crate::feed::airspace::point_in_ring;
+
 /// One stored volume. A sector can be several volumes (the source splits some into pieces), so
 /// `volume_id` — not `sector_id` — is unique within an ARTCC.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +25,21 @@ pub struct SectorVolume {
     pub top_alt_ft: i32,
     /// Closed `[lat, lon]` rings, one per polygon part (no holes).
     pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+impl SectorVolume {
+    /// Whether a point at `alt_ft` is inside this volume (#596): laterally inside a ring **and** in the
+    /// half-open band `base_alt_ft <= alt < top_alt_ft`, so a sector's top is the next stratum's floor
+    /// and stacked strata over one footprint never both claim an altitude.
+    ///
+    /// One altitude, supplied by the caller (the trajectory's predicted altitude at that point) — not
+    /// the FCA's "filed **or** current" rule, which would count a climber below the floor and could
+    /// count one aircraft in two stacked sectors. An unknown altitude (`None`) fails open: laterally
+    /// inside counts.
+    pub fn contains(&self, lat: f64, lon: f64, alt_ft: Option<f64>) -> bool {
+        alt_ft.is_none_or(|a| f64::from(self.base_alt_ft) <= a && a < f64::from(self.top_alt_ft))
+            && self.rings.iter().any(|r| point_in_ring(r, lat, lon))
+    }
 }
 
 /// Every stored volume, as cached in `AppState`.
@@ -43,6 +60,19 @@ impl SectorTable {
             }
         }
         sectors.into_iter().collect()
+    }
+
+    /// Every volume containing the point — see [`SectorVolume::contains`]. Several can match: a
+    /// sector may be split into pieces, and an unknown altitude matches every stratum.
+    pub fn containing(
+        &self,
+        lat: f64,
+        lon: f64,
+        alt_ft: Option<f64>,
+    ) -> impl Iterator<Item = &SectorVolume> {
+        self.volumes
+            .iter()
+            .filter(move |v| v.contains(lat, lon, alt_ft))
     }
 }
 
@@ -219,6 +249,69 @@ pub(crate) mod tests {
         assert!(validate_volume(&v).is_err());
         (v.base_alt_ft, v.top_alt_ft) = (9_999, 10_000);
         assert_eq!(validate_volume(&v), Ok(()));
+    }
+
+    /// The fixture square (38–39N, 76–77W) as an 18,000–60,000 ft high sector.
+    fn high() -> SectorVolume {
+        let mut v = volume("ZDC", "01001");
+        (v.base_alt_ft, v.top_alt_ft) = (18_000, 60_000);
+        v
+    }
+
+    const IN: (f64, f64) = (38.5, -76.5);
+
+    /// #596 AC2: laterally inside but below the floor is not in the sector; above the floor is.
+    #[test]
+    fn an_aircraft_below_the_floor_is_not_in_the_sector() {
+        let v = high();
+        assert!(!v.contains(IN.0, IN.1, Some(12_000.0)));
+        assert!(v.contains(IN.0, IN.1, Some(25_000.0)));
+    }
+
+    /// AC3: the band is half-open, and each edge is checked from both sides.
+    #[test]
+    fn the_floor_is_inside_and_the_top_is_not() {
+        let v = high();
+        assert!(!v.contains(IN.0, IN.1, Some(17_999.9)));
+        assert!(v.contains(IN.0, IN.1, Some(18_000.0)));
+        assert!(v.contains(IN.0, IN.1, Some(59_999.9)));
+        assert!(!v.contains(IN.0, IN.1, Some(60_000.0)));
+    }
+
+    /// AC4: an unknown altitude fails open — but only laterally inside.
+    #[test]
+    fn an_unknown_altitude_counts_only_laterally_inside() {
+        let v = high();
+        assert!(v.contains(IN.0, IN.1, None));
+        assert!(!v.contains(40.0, -76.5, None));
+    }
+
+    /// In band but outside every ring is outside: the altitude half can't satisfy it alone.
+    #[test]
+    fn in_band_but_outside_the_ring_is_outside() {
+        assert!(!high().contains(40.0, -76.5, Some(25_000.0)));
+    }
+
+    /// AC5: two strata stacked on one footprint — an altitude belongs to exactly one, including at
+    /// the shared boundary.
+    #[test]
+    fn stacked_sectors_resolve_to_one_stratum() {
+        let mut low = volume("ZDC", "01001");
+        (low.base_alt_ft, low.top_alt_ft) = (0, 24_000);
+        let mut high = volume("ZDC", "02001");
+        (high.base_alt_ft, high.top_alt_ft) = (24_000, 60_000);
+        let table = SectorTable {
+            volumes: vec![low, high],
+        };
+        let ids = |alt: f64| -> Vec<&str> {
+            table
+                .containing(IN.0, IN.1, Some(alt))
+                .map(|v| v.volume_id.as_str())
+                .collect()
+        };
+        assert_eq!(ids(23_999.0), ["01001"]);
+        assert_eq!(ids(24_000.0), ["02001"]);
+        assert_eq!(ids(70_000.0), Vec::<&str>::new());
     }
 
     #[test]

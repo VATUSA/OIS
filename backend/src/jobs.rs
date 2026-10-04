@@ -504,6 +504,34 @@ pub fn spawn_sector_maps_refresh(
     ));
 }
 
+/// Keep the sector consolidation cache current (#599). Writes force-reload it (`handlers::monitor`);
+/// this is the backstop, and what carries another replica's write. Fails safe.
+pub fn spawn_sector_consolidations_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    consolidations: Arc<ArcSwap<crate::feed::monitor::Consolidations>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "sector_consolidations_refresh",
+        "Reload sector consolidations from the DB",
+        SECTOR_MAPS_INTERVAL,
+        move || {
+            let (pool, consolidations) = (pool.clone(), consolidations.clone());
+            async move {
+                match crate::repos::sector_consolidations::load_all(&pool).await {
+                    Ok(loaded) => {
+                        let n = loaded.len();
+                        consolidations.store(Arc::new(loaded));
+                        Ok(format!("{n} consolidated sectors"))
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
 /// Keep the airport surface gate cache current for the DB-less feed subsystem
 /// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
 /// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.

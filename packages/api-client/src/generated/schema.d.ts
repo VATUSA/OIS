@@ -1733,6 +1733,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/monitor/{artcc}/consolidations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_consolidations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Work a sector at another sector's position (#599). Both must be this ARTCC's sectors, so a
+         *     cross-ARTCC target can't be named (404). A sector can't be worked at itself (400), and a save that
+         *     would make a loop is refused (409). The arrangement stays flat — see
+         *     [`consolidations_repo::consolidate`] — and the save is all-or-nothing.
+         */
+        put: operations["consolidate_sector"];
+        post?: never;
+        /** Give a consolidated sector its own row back. A sector that isn't consolidated is a no-op. */
+        delete: operations["release_sector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/monitor/{artcc}/maps": {
         parameters: {
             query?: never;
@@ -4034,6 +4073,10 @@ export interface components {
             /** Format: int64 */
             unique_pilots: number;
         };
+        /** @description Work a sector at another sector's position in the same ARTCC. */
+        ConsolidateSectorRequest: {
+            target_sector_id: string;
+        };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
             id: string;
@@ -6217,6 +6260,21 @@ export interface components {
             artcc_id?: string | null;
             permissions: Record<string, never>;
             role_names?: string[] | null;
+        };
+        /** @description A sector worked at another sector's position (#599). */
+        SectorConsolidationBody: {
+            sector_id: string;
+            target_sector_id: string;
+        };
+        /** @description An ARTCC's sector consolidations (#599). */
+        SectorConsolidationsBody: {
+            /** @description Sorted by sector. */
+            consolidations: components["schemas"]["SectorConsolidationBody"][];
+            /**
+             * @description Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
+             *     or scoped).
+             */
+            editable: boolean;
         };
         /** @description One Airspace Monitor sector and the alert parameter its count is coloured against (#598). */
         SectorMapBody: {
@@ -11989,6 +12047,124 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_consolidations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    consolidate_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsolidateSectorRequest"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A sector can't be worked at itself */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Either sector isn't one of this ARTCC's */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The save would make a loop */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artcc: string;
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
