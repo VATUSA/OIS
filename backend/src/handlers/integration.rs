@@ -927,12 +927,36 @@ mod tests {
             .unwrap()
     }
 
+    /// Gives an account a role other than BOT, so a fixture's non-bot is a real integration rather than
+    /// an account holding nothing — which would let a dropped `role_name = 'BOT'` filter pass unseen.
+    async fn give_other_role(pool: &PgPool, account_id: &str) {
+        sqlx::query(
+            "insert into access.service_account_roles (service_account_id, role_name) \
+             values ($1, 'SERVICE_APP')",
+        )
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[sqlx::test]
     async fn the_one_bot_account_becomes_the_discord_consumer(pool: PgPool) {
         account(&pool, "ois-discord-bot", true).await;
-        account(&pool, "vtbfm", false).await;
+        let (vtbfm, _) = account(&pool, "vtbfm", false).await;
+        give_other_role(&pool, &vtbfm).await;
         rename(&pool).await;
         assert_eq!(keys(&pool).await, ["discord", "vtbfm"]);
+    }
+
+    /// The guess the guard exists to refuse: no account holds BOT, but one holds another role. Renaming
+    /// it would hand the bot's jobs to that integration.
+    #[sqlx::test]
+    async fn an_account_without_a_bot_grant_is_never_the_bot(pool: PgPool) {
+        let (vtbfm, _) = account(&pool, "vtbfm", false).await;
+        give_other_role(&pool, &vtbfm).await;
+        rename(&pool).await;
+        assert_eq!(keys(&pool).await, ["vtbfm"]);
     }
 
     /// Two candidates is a guess, so nothing changes, and the migration still runs.
@@ -952,10 +976,10 @@ mod tests {
         assert_eq!(keys(&pool).await, ["discord", "ois-discord-bot"]);
     }
 
-    /// Only a live bot counts: a disabled account or an expired BOT grant is not a candidate, so the
-    /// one live bot is still renamed.
+    /// Only a live bot counts: a disabled account, an expired BOT grant or one not yet started is not a
+    /// candidate, so the one live bot is still renamed.
     #[sqlx::test]
-    async fn a_disabled_or_expired_bot_is_not_a_candidate(pool: PgPool) {
+    async fn a_disabled_expired_or_future_bot_is_not_a_candidate(pool: PgPool) {
         account(&pool, "ois-discord-bot", true).await;
         let (disabled, _) = account(&pool, "old-bot", true).await;
         sqlx::query("update access.service_accounts set status = 'disabled' where id = $1")
@@ -972,7 +996,19 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        let (future, _) = account(&pool, "future-bot", true).await;
+        sqlx::query(
+            "update access.service_account_roles set starts_at = now() + interval '1 day' \
+             where service_account_id = $1",
+        )
+        .bind(&future)
+        .execute(&pool)
+        .await
+        .unwrap();
         rename(&pool).await;
-        assert_eq!(keys(&pool).await, ["discord", "lapsed-bot", "old-bot"]);
+        assert_eq!(
+            keys(&pool).await,
+            ["discord", "future-bot", "lapsed-bot", "old-bot"]
+        );
     }
 }
