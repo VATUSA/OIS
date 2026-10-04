@@ -144,20 +144,27 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     const dispose = connectRealtime(qc);
     const socket = await opened();
     invalidated.length = 0;
-    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+    // Freeze the clock across the tick: the handler reads `Date.now()` when the tick arrives and this
+    // test reads it again, so an unfrozen millisecond between them flips the exact-boundary checks.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
 
-    const now = Date.now();
-    const call = invalidated.find((q) => (q as { queryKey: string[] }).queryKey[0] === prefix) as
-      | { predicate: (q: { state: { dataUpdatedAt: number } }) => boolean }
-      | undefined;
-    expect(call, `${prefix} refetches on a tick`).toBeDefined();
-    const refetchesAt = (ageMs: number) => call!.predicate({ state: { dataUpdatedAt: now - ageMs } });
-    if (polledMs <= 15_000) {
-      // The feed publishes about every 15s, so a 15s query keeps up by refetching on every tick.
-      expect(refetchesAt(1_000), `${prefix} refetches on every tick`).toBe(true);
-    } else {
-      expect(refetchesAt(polledMs - 1), `${prefix} waits out its old interval`).toBe(false);
-      expect(refetchesAt(polledMs), `${prefix} refetches once its old interval has passed`).toBe(true);
+      const now = Date.now();
+      const call = invalidated.find((q) => (q as { queryKey: string[] }).queryKey[0] === prefix) as
+        | { predicate: (q: { state: { dataUpdatedAt: number } }) => boolean }
+        | undefined;
+      expect(call, `${prefix} refetches on a tick`).toBeDefined();
+      const refetchesAt = (ageMs: number) => call!.predicate({ state: { dataUpdatedAt: now - ageMs } });
+      if (polledMs <= 15_000) {
+        // The feed publishes about every 15s, so a 15s query keeps up by refetching on every tick.
+        expect(refetchesAt(1_000), `${prefix} refetches on every tick`).toBe(true);
+      } else {
+        expect(refetchesAt(polledMs - 1), `${prefix} waits out its old interval`).toBe(false);
+        expect(refetchesAt(polledMs), `${prefix} refetches once its old interval has passed`).toBe(true);
+      }
+    } finally {
+      vi.useRealTimers();
     }
     dispose();
   });
