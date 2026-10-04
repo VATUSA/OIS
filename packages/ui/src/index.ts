@@ -51,6 +51,14 @@ export {
   useTokenRgba,
   type Rgba,
 } from "./lib/tokens";
+export {
+  DARK_GROUND,
+  MIN_GROUND_CONTRAST,
+  contrastRatio,
+  meetsGroundFloor,
+  normalizeHex,
+} from "./lib/colour";
+export { ColorSwatches, type Swatch } from "./components/color-swatches";
 export { Modal, type ModalProps } from "./components/modal";
 export { Sheet } from "./components/sheet";
 export { SegmentedControl, type SegmentOption } from "./components/segmented-control";

@@ -29,6 +29,25 @@ curl -H "Authorization: Bearer ois_pat_xxxxxxxx…" \
 
 The full API is described by the OpenAPI document at **`/docs/api/v1/openapi.json`** — point your client generator at it — and you can browse and try it in **Swagger UI** at **`/docs/swagger`**. See [Using the API](/reference/api), and [API permissions](/reference/api-permissions) for what each endpoint requires.
 
+### Rate limits
+
+Each key has its own allowance — **300 requests per minute** by default, available as a burst and
+refilling evenly. Every response tells you where you stand:
+
+| Header | Meaning |
+| --- | --- |
+| `RateLimit-Limit` | requests per minute this key is allowed |
+| `RateLimit-Remaining` | requests left right now |
+| `RateLimit-Reset` | seconds until the full allowance is back |
+
+Need more for an integration? An administrator can raise the limit for **one** key without changing
+anyone else's. Your key's recent request volume and any refusals are shown next to it on the API keys
+page.
+
+Go over it and you get **`429 Too Many Requests`** with a **`Retry-After`** header: wait that many
+seconds before trying again — retrying sooner is simply refused again. Polling an endpoint more often
+than its data changes (live traffic updates about every 15 seconds) only spends your allowance.
+
 ::: tip User keys vs. service accounts
 A `ois_pat_…` token is a **user** key, owned by and capped to a person. Machine clients that aren't tied to a person (a bot, shared tooling) use **service accounts** (`ois_sa_…`), which an administrator manages separately.
 :::
@@ -96,6 +115,13 @@ only source of the data. A nudge never says *what* changed or for whom.
 | `events.availability` | event availability responses (NTMO / DCC staff) |
 | `events.reminder` | ACE claim reminders |
 | `access.granted` | someone's access changed (re-check your own) |
+| `tmu.advisory` | advisories (created, edited, published, cancelled or deleted) |
+| `events.ace` | ACE support requests (created, claimed, released, decided or deleted) |
+| `flow.runway` | runway configurations |
+| `feed.tick` | the VATSIM feed ingested a new publish — refetch feed-derived views |
+
+`feed.tick` comes from the server you're connected to, so keep a slow fallback poll for live traffic rather
+than relying on the tick alone.
 
 **Choose your topics.** Until you say otherwise you receive every topic. Send a subscribe message to
 receive only some — it replaces your current set:

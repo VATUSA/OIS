@@ -8,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{ApiKeyBody, ApiKeyPermissionBody, GrantablePermissionBody},
+    models::{ApiKeyBody, ApiKeyPermissionBody, CredentialUsageBody, GrantablePermissionBody},
     repos::access::{self as access_repo, PermissionScope},
 };
 
@@ -376,11 +376,25 @@ struct ApiKeyRow {
     last_used_ip: Option<String>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    rate_limit_per_min: Option<i32>,
+    requests_this_hour: i64,
+    requests_last_day: i64,
+    refused_last_day: i64,
 }
 
 const SELECT: &str = "select k.id, k.name, k.description, k.prefix, k.status, \
     u.cid as owner_cid, u.display_name as owner_display_name, \
-    k.expires_at, k.last_used_at, k.last_used_ip::text as last_used_ip, k.revoked_at, k.created_at \
+    k.expires_at, k.last_used_at, k.last_used_ip::text as last_used_ip, k.revoked_at, k.created_at, \
+    k.rate_limit_per_min, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour >= date_trunc('hour', now()))::bigint as requests_this_hour, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour > now() - interval '24 hours')::bigint as requests_last_day, \
+    (select coalesce(sum(refused), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour > now() - interval '24 hours')::bigint as refused_last_day \
     from access.api_keys k join identity.users u on u.id = k.owner_user_id";
 
 async fn row_into_body(pool: &PgPool, row: ApiKeyRow) -> Result<ApiKeyBody, ApiError> {
@@ -399,6 +413,12 @@ async fn row_into_body(pool: &PgPool, row: ApiKeyRow) -> Result<ApiKeyBody, ApiE
         last_used_ip: row.last_used_ip,
         revoked_at: row.revoked_at,
         created_at: row.created_at,
+        rate_limit_per_min: row.rate_limit_per_min,
+        usage: CredentialUsageBody {
+            requests_this_hour: row.requests_this_hour,
+            requests_last_day: row.requests_last_day,
+            refused_last_day: row.refused_last_day,
+        },
     })
 }
 
@@ -471,6 +491,23 @@ pub async fn list_all_keys(
     .await
     .map_err(|_| ApiError::Internal)?;
     rows_into_bodies(pool, rows).await
+}
+
+/// Set or clear one key's rate limit override (#611). `false` if there is no such key.
+pub async fn set_rate_limit(
+    pool: &PgPool,
+    id: &str,
+    per_min: Option<i32>,
+) -> Result<bool, ApiError> {
+    sqlx::query(
+        "update access.api_keys set rate_limit_per_min = $2, updated_at = now() where id = $1",
+    )
+    .bind(id)
+    .bind(per_min)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_key(pool: &PgPool, id: &str) -> Result<Option<ApiKeyBody>, ApiError> {

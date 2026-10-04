@@ -54,7 +54,11 @@ export function useSetSectorMap(artcc: string) {
       });
       if (error) throw new Error("set sector map failed");
     },
-    onSuccess: () => queryClient.invalidateQueries({queryKey: sectorMapsKey(artcc)}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({queryKey: sectorMapsKey(artcc)});
+      // The Airspace Monitor colours against the MAP (#601).
+      queryClient.invalidateQueries({queryKey: ["monitor", artcc]});
+    },
     onError: () => toast.error("Couldn’t save the alert parameter"),
   });
 }

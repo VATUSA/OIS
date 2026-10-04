@@ -1,8 +1,8 @@
 # VATUSA sync and role mapping
 
 > **Status: built (#548, #605, 2026-10).** A daily v3 pull of the whole division, the role → group
-> mapping, and its editor. Mappings ship **unseeded** — VATUSA grants nobody anything until an admin
-> adds a mapping.
+> mapping, and its editor. Two **default mappings** ship (#699, below); everything else is mapped by an
+> admin.
 
 ## What is synced
 
@@ -54,6 +54,9 @@ There is no re-encryption path, by design — the webhook is disposable.
 Without `OIS_PUBLIC_URL` or `OIS_SECRET_KEY` there is simply no webhook; the daily pull keeps everyone
 current regardless.
 
+Every check logs registration positively (`… registered` / `… already registered`), and a failed VATUSA
+call logs VATUSA's response body. `docs/deploy.md` has the post-deploy check (#688).
+
 ### Replay protection
 
 The HMAC proves who signed a body, not when, so a captured delivery would verify forever (#627). The
@@ -87,6 +90,32 @@ payload's contents, revisit this with VATUSA (a signed timestamp) or move the se
 
 A sign-in and a webhook for the same person cannot race: `upsert_member` updates the member's
 `identity.users` row first, and that row lock holds until commit, so their syncs run one at a time.
+
+### The vocabulary, and the defaults (#699)
+
+The division pull sends **long-form** role names: `EVENT_COORDINATOR`, `FACILITY_ACADEMY_EDITOR`,
+`INSTRUCTOR`, `WEB_MAINTAINER`, `DIVISION_TECH_TEAM` (`repos::vatusa::DOCUMENTED_VATUSA_ROLES`; a
+division-wide grant arrives with facility `*`, stored as `ZHQ`). VATUSA's per-facility endpoint shows the
+same grants under short codes (`EC`, `INS`, `WM`, `FACCBT`, …) that the sync never receives, so a mapping
+must name the long form. A role name may hold `A–Z`, `0–9` and `_`, up to 64 characters. The list is
+documentation, not a filter: the editor offers whatever synced members actually hold.
+
+Migration 0124 ships two mappings (owner's decision on #699):
+
+| VATUSA role | held at | grants |
+| --- | --- | --- |
+| `EVENT_COORDINATOR` | any facility | `EC`, at that ARTCC |
+| `DIVISION_TECH_TEAM` | `ZHQ` (the division) | `VATUSA_STAFF`, national |
+
+**There is no assistant role.** VATUSA's "AEC" is a holder of `EVENT_COORDINATOR` who isn't the facility's
+point of contact (`info.ec`), which a mapping can't see. So every holder gets `EC`, and OIS's `AEC`
+group stays hand-assigned; the two groups seed the same domains. The `VATUSA_STAFF` default is a
+reviewed migration, not an editor action, which is why it ships despite that group being server-admin
+only in the editor. Defaults grant at each member's next reconcile, not at migrate time; an admin can
+remove either one, which revokes its grants.
+
+The editor shows how many synced members each mapping matches, and warns when one matches nobody; with
+no mappings at all it says VATUSA grants nothing.
 
 ### Editing mappings
 

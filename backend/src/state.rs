@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 
 use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::sync::broadcast;
 
 use crate::feed::{
     self, FeedState,
@@ -110,9 +109,7 @@ pub struct AppState {
 impl AppState {
     /// Publish a realtime nudge to every connected websocket. No-op error when nobody's listening.
     pub fn publish(&self, topic: &str) {
-        let _ = self.events.send(crate::realtime::WsEvent {
-            topic: topic.to_string(),
-        });
+        self.events.publish(topic);
     }
 }
 
@@ -137,7 +134,6 @@ impl AppState {
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let data_refresh_in_flight = Arc::new(AtomicBool::new(false));
         let metar_cache = Arc::new(Mutex::new(HashMap::new()));
-        let events = broadcast::channel(256).0;
         let jobs = Arc::new(crate::job_registry::JobRegistry::new());
         tracing::info!(
             nav_points = nav.load().len(),
@@ -161,6 +157,7 @@ impl AppState {
                 .acquire_timeout(std::time::Duration::from_secs(10))
                 .connect(&database_url)
                 .await?;
+            let events = crate::realtime::Events::new(Some(pool.clone()));
             return Ok(Self {
                 db: Some(pool),
                 feed,
@@ -212,7 +209,7 @@ impl AppState {
             data_refresh_in_flight,
             metar_cache,
             webhook_replays: Arc::default(),
-            events,
+            events: crate::realtime::Events::new(None),
             jobs,
             metrics: crate::metrics::handle(),
             metrics_token: metrics_token_from_env(),
@@ -242,7 +239,7 @@ impl AppState {
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             metar_cache: Arc::new(Mutex::new(HashMap::new())),
             webhook_replays: Arc::default(),
-            events: broadcast::channel(256).0,
+            events: crate::realtime::Events::new(None),
             jobs: Arc::new(crate::job_registry::JobRegistry::new()),
             metrics: crate::metrics::handle(),
             metrics_token: metrics_token_from_env(),

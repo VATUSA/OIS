@@ -13,6 +13,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod models;
 pub mod openapi;
+pub mod rate_limit;
 pub mod realtime;
 pub mod repos;
 pub mod reqlog;
@@ -46,7 +47,7 @@ pub async fn run() -> color_eyre::Result<()> {
     // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
     metrics::spawn_upkeep(state.metrics.clone());
 
-    feed::spawn_poller(state.feed.clone());
+    feed::spawn_poller(state.feed.clone(), state.events.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
     // vNAS sector identities and live sector staffing for the Airspace Monitor (#595).
@@ -67,6 +68,11 @@ pub async fn run() -> color_eyre::Result<()> {
         state.db.clone(),
     );
     if let Some(pool) = state.db.clone() {
+        // Realtime nudges from the other replicas (#649). A failure here only costs cross-replica
+        // nudges — clients still poll — so it is logged, not fatal.
+        if let Err(e) = state.events.start_listener().await {
+            tracing::warn!(error = %e, "realtime: cross-replica listener did not start");
+        }
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
@@ -153,7 +159,13 @@ pub async fn run() -> color_eyre::Result<()> {
         feed::vatusa::spawn_division_pull(state.jobs.clone(), pool, state.events.clone());
     }
 
-    let app = router::build_router(state);
+    let limits = std::sync::Arc::new(rate_limit::RateLimits::from_env());
+    rate_limit::spawn_cleanup(limits.clone());
+    // Per-credential request volume, shown where keys are managed (#611).
+    if let Some(pool) = state.db.clone() {
+        jobs::spawn_credential_usage_flush(state.jobs.clone(), pool, limits.clone());
+    }
+    let app = router::build_router_with_limits(state, limits);
 
     let addr: SocketAddr = std::env::var("BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".to_string())

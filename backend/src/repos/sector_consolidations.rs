@@ -83,6 +83,74 @@ pub async fn consolidate(
     tx.commit().await.map_err(db)
 }
 
+/// Work many of `artcc`'s `sectors` at `target` in one transaction (#713), under the same per-ARTCC lock
+/// as [`consolidate`], so a failure part-way writes nothing.
+///
+/// - Every sector (`except_consolidated` false): `target` gets its own row back if it was worked
+///   elsewhere, and every other sector is worked at it — flat by construction.
+/// - `except_consolidated`: only sectors in no consolidation move — not worked elsewhere, and not a
+///   position others are worked at — so every existing arrangement stands. `Conflict` (nothing
+///   written) if `target` is itself worked elsewhere, since moving it would break that promise.
+pub async fn consolidate_all(
+    pool: &PgPool,
+    artcc: &str,
+    target: &str,
+    sectors: &[String],
+    except_consolidated: bool,
+    updated_by: Option<&str>,
+) -> Result<(), ApiError> {
+    let db = |_| ApiError::Internal;
+    let mut tx = pool.begin().await.map_err(db)?;
+    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("sector_consolidation:{artcc}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "select sector_id, target_sector_id from flow.sector_consolidation where artcc = $1",
+    )
+    .bind(artcc)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+    let target_is_worked_elsewhere = rows.iter().any(|(source, _)| source == target);
+
+    let moving: Vec<&String> = if except_consolidated {
+        if target_is_worked_elsewhere {
+            return Err(ApiError::Conflict);
+        }
+        sectors
+            .iter()
+            .filter(|s| *s != target && !rows.iter().any(|(src, tgt)| src == *s || tgt == *s))
+            .collect()
+    } else {
+        sqlx::query("delete from flow.sector_consolidation where artcc = $1 and sector_id = $2")
+            .bind(artcc)
+            .bind(target)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        sectors.iter().filter(|s| *s != target).collect()
+    };
+    for source in moving {
+        sqlx::query(
+            "insert into flow.sector_consolidation (artcc, sector_id, target_sector_id, updated_by) \
+             values ($1, $2, $3, $4) \
+             on conflict (artcc, sector_id) do update \
+             set target_sector_id = excluded.target_sector_id, updated_by = excluded.updated_by, \
+                 updated_at = now()",
+        )
+        .bind(artcc)
+        .bind(source)
+        .bind(target)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    }
+    tx.commit().await.map_err(db)
+}
+
 /// Stop working `source` elsewhere; it gets its own row back. Releasing a sector that isn't
 /// consolidated is a no-op.
 pub async fn release(pool: &PgPool, artcc: &str, source: &str) -> Result<(), ApiError> {

@@ -25,6 +25,7 @@ always matches the running API.
 | `/api/v1/admin/api-keys` | GET | `api_keys.key.read` |
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
+| `/api/v1/admin/api-keys/{id}/rate-limit` | PUT | `api_keys.key.delete` |
 | `/api/v1/admin/audit` | GET | `audit.logs.read` |
 | `/api/v1/admin/diagnostics` | GET | `diagnostics.reports.read` |
 | `/api/v1/admin/diagnostics/{id}` | DELETE | `diagnostics.reports.delete` |
@@ -45,12 +46,15 @@ always matches the running API.
 | `/api/v1/admin/service-accounts/roles` | GET | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/disable` | POST | `service_accounts.delete` |
 | `/api/v1/admin/service-accounts/{id}/permissions` | PUT | `service_accounts.update` |
+| `/api/v1/admin/service-accounts/{id}/rate-limit` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/roles` | PUT | `service_accounts.update` |
 | `/api/v1/admin/service-accounts/{id}/rotate` | POST | `service_accounts.update` |
 | `/api/v1/admin/summary` | GET | — (no permission marker) |
 | `/api/v1/admin/users` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | GET | `access.users.read` |
 | `/api/v1/admin/users/{cid}/access` | POST | `access.users.update` |
+| `/api/v1/admin/users/{cid}/vatusa` | GET | `access.users.read` |
+| `/api/v1/admin/users/{cid}/vatusa/resync` | POST | `access.users.update` |
 | `/api/v1/admin/vatusa-role-mappings` | GET | `access.groups.read` |
 | `/api/v1/admin/vatusa-role-mappings` | POST | `access.groups.update` |
 | `/api/v1/admin/vatusa-role-mappings/{id}` | DELETE | `access.groups.update` |
@@ -171,11 +175,14 @@ always matches the running API.
 | `/api/v1/flow/fcas/{id}/swap` | POST | `flow.fca.update` |
 | `/api/v1/flow/fcas/{id}/traffic` | GET | — (no permission marker) |
 | `/api/v1/flow/idst` | GET | `flow.fca.read` |
+| `/api/v1/flow/monitor/{artcc}` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/consolidations` | GET | `flow.monitor.read` |
+| `/api/v1/flow/monitor/{artcc}/consolidations` | POST | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | DELETE | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
 | `/api/v1/flow/monitor/{artcc}/maps` | GET | `flow.monitor.read` |
 | `/api/v1/flow/monitor/{artcc}/maps/{sector_id}` | PUT | `flow.monitor.update` |
+| `/api/v1/flow/monitor/{artcc}/neighbours` | GET | `flow.monitor.read` |
 | `/api/v1/flow/resolve-routes` | POST | `stats.data.read` |
 | `/api/v1/flow/route-coverage` | GET | — (no permission marker) |
 | `/api/v1/flow/routes` | GET | — (no permission marker) |

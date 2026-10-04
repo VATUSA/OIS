@@ -142,6 +142,7 @@ mod tests {
             owner_user_id: user,
             prefix: "ois_pat_test".to_string(),
             name: "summary-test".to_string(),
+            rate_limit_per_min: None,
         });
 
         let body = build_summary(&state, &key).await.unwrap();
@@ -172,6 +173,7 @@ mod tests {
             owner_user_id: user,
             prefix: "ois_pat_test".to_string(),
             name: "summary-test".to_string(),
+            rate_limit_per_min: None,
         });
 
         let body = build_summary(&state, &key).await.unwrap();

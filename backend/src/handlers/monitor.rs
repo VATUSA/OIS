@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -21,12 +23,22 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    feed::sectors::{DEFAULT_MAP, map_for},
-    models::{
-        ConsolidateSectorRequest, SectorConsolidationBody, SectorConsolidationsBody, SectorMapBody,
-        SectorMapsBody, SetSectorMapRequest,
+    feed::{
+        monitor::artcc_table,
+        monitor_tracks::{AIRBORNE_GS_KT, Bbox, project_tracks},
+        sectors::{DEFAULT_MAP, map_for},
+        vatsim::VatsimData,
     },
-    repos::{sector_consolidations as consolidations_repo, sector_maps as repo},
+    handlers::flow::all_excluded_callsigns,
+    models::{
+        BulkConsolidateMode, BulkConsolidateRequest, ConsolidateSectorRequest, MonitorBinBody,
+        MonitorNeighboursBody, MonitorRowBody, MonitorTableBody, SectorConsolidationBody,
+        SectorConsolidationsBody, SectorMapBody, SectorMapsBody, SetSectorMapRequest,
+    },
+    repos::{
+        flow as flow_repo, org as org_repo, sector_consolidations as consolidations_repo,
+        sector_maps as repo,
+    },
     state::AppState,
 };
 
@@ -62,6 +74,140 @@ async fn require_edit(
     } else {
         Err(ApiError::Forbidden)
     }
+}
+
+/// `artcc`'s Airspace Monitor (#701): every sector's peak occupancy per 15-minute bin over six hours,
+/// classified against its MAP, with consolidations and vNAS staffing. Computed on request from the
+/// live feed and the cached sectors, MAPs and consolidations, so nothing about it is stored. Live
+/// flights are projected along their routes by the shared trajectory model (`feed::monitor_tracks`).
+#[utoipa::path(
+    get, path = "/api/v1/flow/monitor/{artcc}", tag = "flow",
+    params(("artcc" = String, Path)),
+    responses((status = 200, body = MonitorTableBody), (status = 401), (status = 503))
+)]
+pub async fn monitor_table(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorRead>,
+    Actor(principal): Actor,
+    Path(artcc): Path<String>,
+) -> Result<Json<MonitorTableBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    let editable = may_edit(&state, &principal, &artcc).await?;
+    let (snapshot, airports) = {
+        let feed = state.feed.read().await;
+        (feed.snapshot.clone(), feed.airports.clone())
+    };
+    // A release only matters for a flight still on the ground; an airborne one is projected from
+    // where it is.
+    let grounded: Vec<String> = snapshot
+        .iter()
+        .flat_map(|s| {
+            let pilots = s
+                .data
+                .pilots
+                .iter()
+                .filter(|p| p.groundspeed < AIRBORNE_GS_KT);
+            pilots
+                .map(|p| p.callsign.clone())
+                .chain(s.data.prefiles.iter().map(|p| p.callsign.clone()))
+        })
+        .collect();
+    let releases = flow_repo::releases_for_callsigns(pool, &grounded).await?;
+    let excluded = all_excluded_callsigns(&state.flight_exclusions.load());
+    let (nav, profiles, winds) = (
+        state.nav.load_full(),
+        state.aircraft_profiles.load_full(),
+        state.winds.load_full(),
+    );
+    let (sectors, consolidations, maps, staffing) = (
+        state.airspace_sectors.load_full(),
+        state.sector_consolidations.load_full(),
+        state.sector_maps.load_full(),
+        state.vnas.staffing.load_full(),
+    );
+    let now = Utc::now();
+    let served = artcc.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        let empty = VatsimData::default();
+        let data = snapshot.as_ref().map_or(&empty, |s| &s.data);
+        let tracks = match Bbox::of_artcc(&sectors, &artcc) {
+            Some(bbox) => project_tracks(
+                data,
+                &nav,
+                &airports,
+                &profiles,
+                &winds,
+                &releases,
+                &excluded,
+                now.timestamp_millis(),
+                Some(bbox),
+            ),
+            None => Vec::new(), // no sectors, no rows: nothing to project for
+        };
+        artcc_table(
+            &sectors,
+            &consolidations,
+            &maps,
+            &staffing,
+            &tracks,
+            &artcc,
+            now.timestamp_millis(),
+        )
+        .into_iter()
+        .map(|row| MonitorRowBody {
+            bins: row
+                .bins
+                .into_iter()
+                .map(|b| MonitorBinBody {
+                    start: DateTime::from_timestamp_millis(b.start_ms).unwrap_or(now),
+                    active: b.active as i64,
+                    proposed: b.proposed as i64,
+                    combined: b.combined as i64,
+                    alert: b.alert,
+                })
+                .collect(),
+            sector_id: row.sector_id,
+            name: row.name,
+            map: row.map,
+            consolidated: row.consolidated,
+            staffed: row.staffed,
+        })
+        .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(Json(MonitorTableBody {
+        artcc: served,
+        editable,
+        as_of: now,
+        rows,
+    }))
+}
+
+/// `artcc`'s first-tier neighbours (#712): the ARTCCs whose Monitor tables follow its own, collapsed
+/// and view-only. Restricted to facilities OIS runs (active), which drops the Canadian and oceanic
+/// FIRs in the adjacency data, as the ACE fan-out does (`events::generate_tier1`).
+#[utoipa::path(
+    get, path = "/api/v1/flow/monitor/{artcc}/neighbours", tag = "flow",
+    params(("artcc" = String, Path)),
+    responses((status = 200, body = MonitorNeighboursBody), (status = 401), (status = 503))
+)]
+pub async fn monitor_neighbours(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorRead>,
+    Path(artcc): Path<String>,
+) -> Result<Json<MonitorNeighboursBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    let known: std::collections::HashSet<String> = org_repo::list_facilities(pool)
+        .await?
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    let mut neighbours = crate::feed::neighbors::tier1(&artcc, &known);
+    neighbours.sort();
+    Ok(Json(MonitorNeighboursBody { artcc, neighbours }))
 }
 
 #[utoipa::path(
@@ -129,13 +275,21 @@ pub async fn set_sector_map(
     }
     // Against the stored row, not this pod's cache: another replica may have written since our last
     // refresh, and a stale cache would turn a real change (14 → 10) into a silent no-op.
-    let current = repo::get(pool, &artcc, &sector_id)
-        .await?
-        .unwrap_or(DEFAULT_MAP);
-    if payload.map == current {
+    let stored = repo::get(pool, &artcc, &sector_id).await?;
+    // The default is the reset: drop the override rather than store a row holding the default, which
+    // would read as overridden forever and pin the sector if `DEFAULT_MAP` ever changed (#706). That
+    // includes a row already holding the default, written before this fix. With no row, the default
+    // is already the value, so nothing is written.
+    if payload.map == DEFAULT_MAP {
+        if stored.is_none() {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        repo::delete(pool, &artcc, &sector_id).await?;
+    } else if stored == Some(payload.map) {
         return Ok(StatusCode::NO_CONTENT);
+    } else {
+        repo::upsert(pool, &artcc, &sector_id, payload.map, principal.user_id()).await?;
     }
-    repo::upsert(pool, &artcc, &sector_id, payload.map, principal.user_id()).await?;
     state
         .sector_maps
         .store(Arc::new(repo::load_all(pool).await?));
@@ -213,6 +367,55 @@ pub async fn consolidate_sector(
         return Err(ApiError::BadRequest);
     }
     consolidations_repo::consolidate(pool, &artcc, &sector_id, target, principal.user_id()).await?;
+    refresh_consolidations(&state, pool).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Consolidate many of this ARTCC's sectors into one at once (#713): every other sector, or only those in
+/// no consolidation yet. One transaction — a refused or failed save changes nothing — gated like the
+/// single-sector write. See [`consolidations_repo::consolidate_all`].
+#[utoipa::path(
+    post, path = "/api/v1/flow/monitor/{artcc}/consolidations", tag = "flow",
+    params(("artcc" = String, Path)),
+    request_body = BulkConsolidateRequest,
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
+        (status = 404, description = "The target isn't one of this ARTCC's sectors"),
+        (status = 409, description = "`except_consolidated`, and the target is itself worked elsewhere")
+    )
+)]
+pub async fn consolidate_all_sectors(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorUpdate>,
+    Actor(principal): Actor,
+    Path(artcc): Path<String>,
+    Json(payload): Json<BulkConsolidateRequest>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    require_edit(&state, &principal, &artcc).await?;
+    let target = payload.target_sector_id.trim();
+    if !is_sector(&state, &artcc, target) {
+        return Err(ApiError::NotFound);
+    }
+    let sectors: Vec<String> = state
+        .airspace_sectors
+        .load()
+        .sectors_of(&artcc)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    consolidations_repo::consolidate_all(
+        pool,
+        &artcc,
+        target,
+        &sectors,
+        payload.mode == BulkConsolidateMode::ExceptConsolidated,
+        principal.user_id(),
+    )
+    .await?;
     refresh_consolidations(&state, pool).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -382,6 +585,66 @@ mod tests {
         assert_eq!(stored(&pool).await, [("ZDC".into(), "24".into(), 14)]);
     }
 
+    /// #706: typing the default on an overridden sector removes the override, rather than storing a row
+    /// holding the default — which read as overridden forever and pinned the sector to today's default.
+    #[sqlx::test]
+    async fn resetting_to_the_default_removes_the_override(pool: PgPool) {
+        let zdc = tmu(&pool, "ZDC").await;
+        let state = state(pool.clone());
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 14})).await, 204);
+        // Neighbours the reset must not touch: another sector in the same ARTCC, and the same sector
+        // id at another ARTCC (#706 review: each half of the delete's WHERE is otherwise unpinned).
+        sqlx::query(
+            "insert into flow.sector_map (artcc, sector_id, map) values ('ZDC', '25', 12), ('ZLA', '24', 13)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
+
+        assert_eq!(
+            stored(&pool).await,
+            [
+                ("ZDC".into(), "25".into(), 12),
+                ("ZLA".into(), "24".into(), 13)
+            ],
+            "only ZDC 24's override is gone"
+        );
+        sqlx::query("delete from flow.sector_map")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::feed::sectors::map_for(&state.sector_maps.load(), "ZDC", "24"),
+            10,
+            "the cache the Monitor reads follows the default again"
+        );
+        let (_, body) = send_json(
+            &state,
+            http::Method::GET,
+            "/api/v1/flow/monitor/ZDC/maps",
+            &zdc,
+        )
+        .await;
+        assert_eq!(body["sectors"][0]["map"], 10);
+        assert_eq!(body["sectors"][0]["overridden"], false);
+
+        // A row already holding the default (written before this fix) is cleaned the same way.
+        sqlx::query("insert into flow.sector_map (artcc, sector_id, map) values ('ZDC', '24', 10)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
+        assert!(
+            stored(&pool).await.is_empty(),
+            "a legacy default row is removed too"
+        );
+
+        // And the default on a sector with no row is still a no-op.
+        assert_eq!(put(&state, &zdc, "25", json!({"map": 10})).await, 204);
+        assert!(stored(&pool).await.is_empty());
+    }
+
     /// AC3: a TMU at another ARTCC is refused, and nothing is written.
     #[sqlx::test]
     async fn a_tmu_at_another_artcc_is_refused(pool: PgPool) {
@@ -466,20 +729,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
-        assert_eq!(stored(&pool).await, [("ZDC".into(), "24".into(), 10)]);
-    }
-
-    /// Typing the default over an override is the reset — it is written like any other value.
-    #[sqlx::test]
-    async fn typing_the_default_resets_an_override(pool: PgPool) {
-        let zdc = tmu(&pool, "ZDC").await;
-        let state = state(pool.clone());
-        assert_eq!(put(&state, &zdc, "24", json!({"map": 14})).await, 204);
-        assert_eq!(put(&state, &zdc, "24", json!({"map": 10})).await, 204);
-        assert_eq!(
-            crate::feed::sectors::map_for(&state.sector_maps.load(), "ZDC", "24"),
-            10
-        );
+        // Reset, not dropped: a no-op would have left the 14 behind (#706: a reset removes the row).
+        assert!(stored(&pool).await.is_empty());
     }
 
     /// A sector that isn't in the ARTCC's dataset can't be given a MAP.
@@ -493,6 +744,75 @@ mod tests {
             "ZNY's sector"
         );
         assert!(stored(&pool).await.is_empty());
+    }
+
+    /// #701 AC5: the Monitor table is gated on `flow.monitor.read` — no session and a session without
+    /// it are both refused (401, as every missing permission is) — and a holder gets every one of the
+    /// ARTCC's sectors as a row of six hours of bins. With no feed there are no flights, so every bin
+    /// is empty and green.
+    #[sqlx::test]
+    async fn the_monitor_table_is_gated_and_shaped(pool: PgPool) {
+        let state = state(pool.clone());
+        const URI: &str = "/api/v1/flow/monitor/zdc";
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, "").await.0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        let user = seed_user(&pool).await;
+        let cookie = session_cookie(&pool, &user).await;
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, &cookie)
+                .await
+                .0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+
+        grant(&pool, &user, "flow.monitor.read", None).await;
+        let (status, body) = send_json(&state, axum::http::Method::GET, URI, &cookie).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["artcc"], "ZDC");
+        assert_eq!(body["editable"], false);
+        let rows = body["rows"].as_array().unwrap();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r["sector_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["24", "25"], "ZDC's sectors once each, not ZNY's");
+        assert_eq!(rows[0]["name"], "ZDC 24");
+        assert_eq!(rows[0]["map"], 10);
+        assert_eq!(rows[0]["staffed"], false);
+        let bins = rows[0]["bins"].as_array().unwrap();
+        assert_eq!(bins.len(), 24, "six hours of quarter-hours");
+        assert_eq!(bins[0]["combined"], 0);
+        assert_eq!(bins[0]["alert"], "green");
+    }
+
+    /// #712 AC3: the neighbours read is gated on `flow.monitor.read`, and lists only directly
+    /// bordering facilities OIS runs: ZDC's adjacency also holds ZWY (an oceanic FIR OIS doesn't run)
+    /// and ZOB, made inactive here, so neither appears. Sorted, never the ARTCC itself.
+    #[sqlx::test]
+    async fn the_neighbours_read_is_gated_and_lists_active_neighbours(pool: PgPool) {
+        let state = state(pool.clone());
+        const URI: &str = "/api/v1/flow/monitor/zdc/neighbours";
+        assert_eq!(
+            send_json(&state, axum::http::Method::GET, URI, "").await.0,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        sqlx::query("update org.facilities set active = false where id = 'ZOB'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "flow.monitor.read", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let (status, body) = send_json(&state, axum::http::Method::GET, URI, &cookie).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["artcc"], "ZDC");
+        assert_eq!(
+            body["neighbours"],
+            serde_json::json!(["ZBW", "ZID", "ZJX", "ZNY", "ZTL"])
+        );
     }
 }
 
@@ -569,6 +889,168 @@ mod consolidation_tests {
             .collect();
         rows.sort();
         rows
+    }
+
+    // ---- #713: bulk consolidation ----------------------------------------------------------------
+
+    /// ZLA sectors 010–060 — room for a consolidation, a hub and free sectors — and ZDC 024 plus ZDC
+    /// sectors sharing ZLA's ids (030, 040, 050), so a write that forgot its ARTCC would show.
+    fn wide_state(pool: PgPool) -> AppState {
+        let state = test_state(pool, Default::default());
+        let mut volumes: Vec<_> = ["0100", "0200", "0300", "0400", "0500", "0600"]
+            .iter()
+            .map(|v| volume("ZLA", v))
+            .collect();
+        for v in ["0240", "0300", "0400", "0500"] {
+            volumes.push(volume("ZDC", v));
+        }
+        state
+            .airspace_sectors
+            .store(Arc::new(SectorTable { volumes }));
+        state
+    }
+
+    /// ZDC's own arrangement, on sector ids ZLA has too: 030 and 040 worked at 050. A ZLA bulk write
+    /// must neither delete these nor read them as ZLA's (the ARTCC predicate of each statement).
+    async fn seed_zdc_neighbours(pool: &PgPool) {
+        sqlx::query(
+            "insert into flow.sector_consolidation (artcc, sector_id, target_sector_id) \
+             values ('ZDC', '030', '050'), ('ZDC', '040', '050')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn rows_at(pool: &PgPool, artcc: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select sector_id, target_sector_id from flow.sector_consolidation \
+             where artcc = $1 order by 1",
+        )
+        .bind(artcc)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn all_into(state: &AppState, cookie: &str, target: &str, mode: &str) -> u16 {
+        send(
+            state,
+            http::Method::POST,
+            "/api/v1/flow/monitor/ZLA/consolidations",
+            cookie,
+            Some(json!({"target_sector_id": target, "mode": mode})),
+        )
+        .await
+        .as_u16()
+    }
+
+    /// AC1: "All into N" leaves N the only row — even when N was itself worked elsewhere, and whatever
+    /// was consolidated before. Another ARTCC's sectors with the same ids are untouched.
+    #[sqlx::test]
+    async fn all_into_n_leaves_n_the_only_row(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "010", "020").await, 204);
+        assert_eq!(work_at(&state, &zla, "040", "050").await, 204);
+        seed_zdc_neighbours(&pool).await;
+
+        assert_eq!(all_into(&state, &zla, "040", "all").await, 204);
+
+        let expected = pairs(&[
+            ("010", "040"),
+            ("020", "040"),
+            ("030", "040"),
+            ("050", "040"),
+            ("060", "040"),
+        ]);
+        assert_eq!(
+            rows_at(&pool, "ZLA").await,
+            expected,
+            "N has no row; everything else is at N"
+        );
+        assert_eq!(
+            rows_at(&pool, "ZDC").await,
+            pairs(&[("030", "050"), ("040", "050")]),
+            "ZDC's own 040 survives releasing ZLA's"
+        );
+        let cached_zla: std::collections::BTreeSet<(String, String)> = state
+            .sector_consolidations
+            .load()
+            .iter()
+            .filter(|((artcc, _), _)| artcc == "ZLA")
+            .map(|((_, s), t)| (s.clone(), t.clone()))
+            .collect();
+        assert_eq!(
+            cached_zla.into_iter().collect::<Vec<_>>(),
+            expected,
+            "and every viewer sees it at once"
+        );
+    }
+
+    /// AC2: "except consolidated" moves only free-standing sectors: one worked elsewhere (010) and the
+    /// position it is worked at (020) both stay as they were. ZDC's consolidated 030 and 040 must not
+    /// make ZLA's 030 look consolidated, nor ZLA's 040 look worked elsewhere.
+    #[sqlx::test]
+    async fn except_consolidated_leaves_existing_arrangements(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "010", "020").await, 204);
+        seed_zdc_neighbours(&pool).await;
+
+        assert_eq!(
+            all_into(&state, &zla, "040", "except_consolidated").await,
+            204
+        );
+
+        assert_eq!(
+            rows_at(&pool, "ZLA").await,
+            pairs(&[
+                ("010", "020"),
+                ("030", "040"),
+                ("050", "040"),
+                ("060", "040")
+            ])
+        );
+        assert_eq!(
+            rows_at(&pool, "ZDC").await,
+            pairs(&[("030", "050"), ("040", "050")])
+        );
+    }
+
+    /// AC2/AC3: with N itself worked elsewhere, "except consolidated" can't keep its promise, so it is
+    /// refused — and the refused save writes nothing.
+    #[sqlx::test]
+    async fn except_consolidated_is_refused_when_n_is_worked_elsewhere(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "040", "050").await, 204);
+
+        assert_eq!(
+            all_into(&state, &zla, "040", "except_consolidated").await,
+            409
+        );
+        assert_eq!(stored(&pool).await, pairs(&[("040", "050")]));
+    }
+
+    /// AC4: a TMU at another ARTCC, a viewer without the update grant and an unknown target are all
+    /// refused, and nothing is written.
+    #[sqlx::test]
+    async fn a_bulk_consolidation_is_gated_like_one_sector(pool: PgPool) {
+        let zdc = user(&pool, Some("ZDC")).await;
+        let viewer = user(&pool, None).await;
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+
+        assert_eq!(all_into(&state, &zdc, "040", "all").await, 403);
+        assert_eq!(all_into(&state, &viewer, "040", "all").await, 401);
+        assert_eq!(all_into(&state, &zla, "999", "all").await, 404);
+        assert_eq!(
+            all_into(&state, &zla, "024", "all").await,
+            404,
+            "another ARTCC's sector"
+        );
+        assert!(stored(&pool).await.is_empty());
     }
 
     /// Releasing is a write to another facility's Monitor too: a TMU at another ARTCC (and a viewer

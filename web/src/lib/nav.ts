@@ -113,6 +113,7 @@ export const AREAS: readonly NavArea[] = [
         label: "Flow",
         prefix: "/admin/flow",
         items: [
+          { label: "Monitor", to: "/admin/flow/monitor", icon: Radar, permission: "flow.monitor.read" },
           { label: "Sectors", to: "/admin/flow/sectors", icon: Layers, permission: "flow.sectors.read" },
         ],
       },

@@ -161,3 +161,20 @@ export function useRotateServiceAccount() {
     onError: () => toast.error("Couldn’t rotate the token"),
   });
 }
+
+/** Set or clear one account's rate limit (#611); `null` restores the deployment default. */
+export function useSetServiceAccountRateLimit() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: {id: string; perMin: number | null}): Promise<void> => {
+      const {error} = await ois.PUT("/api/v1/admin/service-accounts/{id}/rate-limit", {
+        params: {path: {id: args.id}},
+        body: {rate_limit_per_min: args.perMin},
+      });
+      if (error) throw new Error("set rate limit failed");
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
+    onError: () => toast.error("Couldn’t set the rate limit"),
+  });
+}

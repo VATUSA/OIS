@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -18,11 +20,18 @@ use crate::{
         preferences, public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
+    rate_limit::{self, RateLimits},
     realtime,
     state::AppState,
 };
 
+/// The router with rate limits from the environment. Startup uses [`build_router_with_limits`] so it
+/// can also prune the buckets; this is for callers that build a throwaway router (tests).
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_limits(state, Arc::new(RateLimits::from_env()))
+}
+
+pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Router {
     Router::new()
         .route("/health", get(health::health))
         // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
@@ -127,6 +136,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
+        )
+        // A member's VATUSA side, and putting them back on VATUSA role sync — #549
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa",
+            get(access::get_user_vatusa),
+        )
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa/resync",
+            post(access::resync_user_vatusa),
         )
         // Group (role) management — #545
         .route(
@@ -485,6 +503,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
         )
+        .route("/api/v1/flow/monitor/{artcc}", get(monitor::monitor_table))
+        .route(
+            "/api/v1/flow/monitor/{artcc}/neighbours",
+            get(monitor::monitor_neighbours),
+        )
         .route(
             "/api/v1/flow/monitor/{artcc}/maps",
             get(monitor::list_sector_maps),
@@ -495,7 +518,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/flow/monitor/{artcc}/consolidations",
-            get(monitor::list_consolidations),
+            get(monitor::list_consolidations).post(monitor::consolidate_all_sectors),
         )
         .route(
             "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
@@ -636,6 +659,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/api-keys/{id}",
             delete(api_keys::admin_delete_key),
         )
+        .route(
+            "/api/v1/admin/api-keys/{id}/rate-limit",
+            put(api_keys::admin_set_key_rate_limit),
+        )
         // Admin landing summary (per-permission sections)
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
@@ -682,6 +709,10 @@ pub fn build_router(state: AppState) -> Router {
             put(service_accounts::set_service_account_roles),
         )
         .route(
+            "/api/v1/admin/service-accounts/{id}/rate-limit",
+            put(service_accounts::set_service_account_rate_limit),
+        )
+        .route(
             "/api/v1/admin/service-accounts/grantable-permissions",
             get(service_accounts::grantable_service_account_permissions),
         )
@@ -695,6 +726,10 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             crate::audit::audit_mutations,
         ))
+        // Rate limiting (#588). Inside resolve_current_user, so the caller is known and choosing the
+        // bucket costs no query; inside reqlog, metrics and CORS, so a 429 is logged, counted and still
+        // readable cross-origin.
+        .layer(middleware::from_fn_with_state(limits, rate_limit::enforce))
         // Dev request log — one line per request. Outside audit (so its latency covers the
         // whole request), inside resolve_current_user (so it can name the actor).
         .layer(middleware::from_fn(crate::reqlog::log_requests))

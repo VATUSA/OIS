@@ -490,7 +490,20 @@ async fn a_service_account_marks_a_release_attributed_to_itself(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_service_account_swaps_releases_attributed_to_itself(pool: PgPool) {
-    let state = test_state(pool.clone(), HashMap::new());
+    // Both off KJFK, on one runway: the swap only trades within a departure slot (#56).
+    let state = crossing_state_of(pool.clone(), &["AAL1", "UAL2"]).await;
+    for callsign in ["AAL1", "UAL2"] {
+        crate::repos::departure_runway::assign(
+            &pool,
+            "KJFK",
+            callsign,
+            "31L",
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let fca_id = fca(&pool).await;
     let (sa, auth) = service_account(&pool, "flow.fca.update", None).await;
     seed_owned_release(&pool, &fca_id, "AAL1", 1_000, &sa).await;
@@ -568,6 +581,7 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
         id: sa.clone(),
         key: "vtbfm".into(),
         name: "vTBFM".into(),
+        rate_limit_per_min: None,
     });
 
     let scope = principal
@@ -1860,7 +1874,20 @@ async fn a_scoped_holder_clears_a_release_only_in_its_artcc(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_scoped_holder_swaps_releases_only_in_its_artcc(pool: PgPool) {
-    let state = test_state(pool.clone(), HashMap::new());
+    // Both off KJFK, on one runway, so the in-scope swap is otherwise allowed (#56).
+    let state = crossing_state_of(pool.clone(), &["AAL1", "UAL2"]).await;
+    for callsign in ["AAL1", "UAL2"] {
+        crate::repos::departure_runway::assign(
+            &pool,
+            "KJFK",
+            callsign,
+            "31L",
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     let (sa, auth) = service_account(&pool, "flow.fca.update", Some("ZDC")).await;
     let (zny, zdc) = (fca_in(&pool, "ZNY").await, fca_in(&pool, "ZDC").await);
     for fca_id in [&zny, &zdc] {
@@ -3139,7 +3166,7 @@ async fn issued_advisory(pool: &PgPool) -> Option<(Option<String>, Option<String
 }
 
 async fn lifecycle_pass(pool: &PgPool) {
-    crate::jobs::event_package_lifecycle_once(pool, &tokio::sync::broadcast::channel(8).0)
+    crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None))
         .await
         .unwrap();
 }
@@ -3562,4 +3589,39 @@ async fn a_disabled_machines_package_is_still_archived(pool: PgPool) {
         updated(&pool, "events.tmi_package", &format!("id = '{pkg}'")).await,
         (None, Some(actor))
     );
+}
+
+/// #636: deleting an FCA stays open to a machine credential, as it was before the ARTCC gate — and the
+/// gate applies to it too. A ZDC-scoped service account deletes a ZDC FCA, not a ZNY one.
+#[sqlx::test]
+async fn a_scoped_service_account_deletes_only_its_artccs_fcas(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    let (_, bearer) = service_account(&pool, "flow.fca.delete", Some("ZDC")).await;
+    let owner = seed_user(&pool).await;
+    let mut ids = HashMap::new();
+    for artcc in ["ZDC", "ZNY"] {
+        let req = serde_json::from_value(
+            json!({ "name": artcc, "artcc": artcc, "points": [[0.0, 0.0], [1.0, 1.0]] }),
+        )
+        .unwrap();
+        ids.insert(
+            artcc,
+            crate::repos::flow::create_fca(
+                &pool,
+                &req,
+                &crate::auth::principal::Attribution {
+                    user_id: Some(owner.clone()),
+                    actor_id: None,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let uri = |artcc: &str| format!("/api/v1/flow/fcas/{}", ids[artcc]);
+
+    let (status, _) = call(&state, http::Method::DELETE, &uri("ZNY"), &bearer, None).await;
+    assert_eq!(status, http::StatusCode::FORBIDDEN);
+    let (status, _) = call(&state, http::Method::DELETE, &uri("ZDC"), &bearer, None).await;
+    assert_eq!(status, http::StatusCode::NO_CONTENT);
 }

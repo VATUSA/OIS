@@ -1,38 +1,11 @@
 import {useEffect, useMemo, useState} from "react";
-import {type DataColumn, DataTable, FilterBar, Input, Select} from "@ois/ui";
+import {type DataColumn, DataTable, FilterBar, Select} from "@ois/ui";
 import {Gauge, Hash, Tag} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useFacilities} from "@/lib/admin";
-import {mapEdit, type SectorMap, useSectorMaps, useSetSectorMap} from "@/lib/sector-maps";
-
-/** A sector's MAP: a number, or — when the caller may edit this ARTCC — an input that writes on Enter
- * or blur only through `mapEdit`, and otherwise snaps back. Opening the page never writes. */
-function MapCell({artcc, row, editable}: {artcc: string; row: SectorMap; editable: boolean}) {
-  const setMap = useSetSectorMap(artcc);
-  const [draft, setDraft] = useState(String(row.map));
-  useEffect(() => setDraft(String(row.map)), [row.map]);
-
-  if (!editable) return <span className="font-mono">{row.map}</span>;
-
-  const commit = () => {
-    const value = mapEdit(draft, row.map);
-    if (value === null) setDraft(String(row.map));
-    else setMap.mutate({sectorId: row.sector_id, map: value});
-  };
-
-  return (
-    <Input
-      aria-label={`${row.sector_id} alert parameter`}
-      className="h-8 w-20 font-mono"
-      inputMode="numeric"
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-    />
-  );
-}
+import {SectorMapCell} from "@/components/sector-map-cell";
+import {type SectorMap, useSectorMaps} from "@/lib/sector-maps";
 
 export function SectorMapsPage() {
   usePageHeader({
@@ -60,7 +33,9 @@ export function SectorMapsPage() {
         accessorKey: "map",
         header: "MAP",
         icon: Gauge,
-        cell: (c) => <MapCell artcc={artcc ?? ""} row={c.row.original} editable={editable} />,
+        cell: (c) => (
+          <SectorMapCell artcc={artcc ?? ""} sectorId={c.row.original.sector_id} map={c.row.original.map} editable={editable} />
+        ),
       },
       {
         accessorKey: "overridden",

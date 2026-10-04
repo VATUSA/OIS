@@ -31,7 +31,8 @@ use crate::{
         AccessCatalogBody, AdminUserPage, CreateGroupRequest, CreateVatusaRoleMappingRequest,
         GroupBody, GroupMemberBody, GroupMemberPage, GroupMemberRequest, HeldGroupBody,
         SelfAccessBody, UpdateGroupRequest, UpdateUserAccessRequest, UserAccessBody,
-        VatusaRoleMappingBody, VatusaRoleMappingList,
+        UserVatusaBody, VatusaGrantChange, VatusaResyncRequest, VatusaRoleMappingBody,
+        VatusaRoleMappingList,
     },
     repos::{
         access as access_repo, audit as audit_repo, org as org_repo, users as user_repo,
@@ -322,9 +323,23 @@ pub async fn update_user_access(
                     access_repo::GrantSource::Manual,
                 )
                 .await?;
+                // The save detaches the user from VATUSA role sync (below), so the admin now owns
+                // them: an unticked group goes, even one VATUSA granted (#549).
+                if !held {
+                    access_repo::set_user_role_scoped(
+                        &mut tx,
+                        &target_user_id,
+                        role_name,
+                        false,
+                        scope.artcc.as_deref(),
+                        access_repo::GrantSource::Vatusa,
+                    )
+                    .await?;
+                }
             }
         }
     }
+    let detached = vatusa_repo::detach_roles(&mut tx, &target_user_id, &user.id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     let after_grants = access_repo::fetch_user_direct_grants(pool, &target_user_id).await?;
@@ -342,7 +357,7 @@ pub async fn update_user_access(
             resource_type: "USER_ACCESS".to_string(),
             resource_id: Some(target_user_id.clone()),
             artcc_id: None,
-            reason: Some(reason.to_string()),
+            reason: Some(audit_reason(reason, detached)),
             before_state: serde_json::to_value(&before_body).ok(),
             after_state: serde_json::to_value(&response).ok(),
             ip_address: audit_repo::client_ip(&headers),
@@ -356,6 +371,130 @@ pub async fn update_user_access(
     state.publish(crate::realtime::topic::ACCESS_GRANTED);
 
     Ok(Json(response))
+}
+
+/// The audit reason for a hand edit. The edit that took the member off VATUSA role sync says so in its
+/// own entry (#549 AC6), so both editors keep writing exactly one entry per change.
+fn audit_reason(reason: &str, detached: bool) -> String {
+    if detached {
+        format!("{reason} (detached from VATUSA role sync)")
+    } else {
+        reason.to_string()
+    }
+}
+
+fn grant_change(group: String, scope: Option<String>) -> VatusaGrantChange {
+    VatusaGrantChange {
+        group,
+        artcc_id: scope,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users/{cid}/vatusa",
+    tag = "access",
+    params(("cid" = i64, Path, description = "VATSIM CID")),
+    responses((status = 200, body = UserVatusaBody), (status = 401), (status = 404))
+)]
+/// A member's VATUSA side for the access editor (#549): whether they're on role sync, their VATUSA
+/// roles, and exactly what a Resync would change.
+pub async fn get_user_vatusa(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessUsersRead>,
+    Path(cid): Path<i64>,
+) -> Result<Json<UserVatusaBody>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    user_vatusa_body(pool, cid).await.map(Json)
+}
+
+async fn user_vatusa_body(pool: &sqlx::PgPool, cid: i64) -> Result<UserVatusaBody, ApiError> {
+    let target = access_repo::find_user_id_by_cid(pool, cid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let detached = vatusa_repo::detached_state(pool, &target).await?;
+    let (grants, revokes) = vatusa_repo::preview_resync(pool, &target, cid).await?;
+    Ok(UserVatusaBody {
+        detached_at: detached.as_ref().map(|(at, _)| *at),
+        detached_by: detached.and_then(|(_, by)| by),
+        profile: vatusa_repo::fetch_profile(pool, cid).await?,
+        resync_grants: grants
+            .into_iter()
+            .map(|((group, scope), _)| grant_change(group, scope))
+            .collect(),
+        resync_revokes: revokes
+            .into_iter()
+            .map(|(group, scope)| grant_change(group, scope))
+            .collect(),
+    })
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/users/{cid}/vatusa/resync",
+    tag = "access",
+    params(("cid" = i64, Path, description = "VATSIM CID")),
+    request_body = VatusaResyncRequest,
+    responses((status = 200, body = UserVatusaBody), (status = 400), (status = 401), (status = 403), (status = 404))
+)]
+/// Put a hand-managed member back on VATUSA role sync and reconcile them now (#549 AC3). Needs
+/// `access.users.update` **nationally**: re-attaching lets VATUSA mappings change the member's grants
+/// at any scope.
+pub async fn resync_user_vatusa(
+    State(state): State<AppState>,
+    _permission: RequirePermission<AccessUsersUpdate>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(cid): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<VatusaResyncRequest>,
+) -> Result<Json<UserVatusaBody>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let reason = payload.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::BadRequest);
+    }
+    let scope = access_repo::permission_scope(pool, &user.id, "access.users.update").await?;
+    // Unrestricted national only: `allows(None)` fails closed for a national holder with a scoped deny.
+    if !scope.allows(None) {
+        return Err(ApiError::Forbidden);
+    }
+    let target = access_repo::find_user_id_by_cid(pool, cid)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let before = acl_user_access_body(
+        &target,
+        cid,
+        access_repo::fetch_user_direct_grants(pool, &target).await?,
+        access_repo::fetch_user_role_grants(pool, &target).await?,
+    )?;
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    vatusa_repo::resync(&mut tx, &target, cid).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    let after = acl_user_access_body(
+        &target,
+        cid,
+        access_repo::fetch_user_direct_grants(pool, &target).await?,
+        access_repo::fetch_user_role_grants(pool, &target).await?,
+    )?;
+    audit_repo::record_audit(
+        pool,
+        audit_repo::AuditEntry {
+            actor_id: audit_repo::fetch_user_actor_id(pool, &user.id).await?,
+            action: "UPDATE".to_string(),
+            resource_type: "USER_ACCESS".to_string(),
+            resource_id: Some(target.clone()),
+            artcc_id: None,
+            reason: Some(format!("Resynced from VATUSA: {reason}")),
+            before_state: serde_json::to_value(&before).ok(),
+            after_state: serde_json::to_value(&after).ok(),
+            ip_address: audit_repo::client_ip(&headers),
+        },
+    )
+    .await?;
+    state.publish(crate::realtime::topic::ACCESS_GRANTED);
+    user_vatusa_body(pool, cid).await.map(Json)
 }
 
 /// A validated, normalized scope from the save payload.
@@ -958,11 +1097,7 @@ async fn create_mapping(
         .map(str::to_ascii_uppercase);
     let role_name = payload.role_name.trim().to_ascii_uppercase();
     let reason = payload.reason.trim();
-    if reason.is_empty()
-        || vatusa_role.is_empty()
-        || vatusa_role.len() > 16
-        || !vatusa_role.chars().all(|c| c.is_ascii_alphanumeric())
-    {
+    if reason.is_empty() || !vatusa_repo::is_valid_vatusa_role(&vatusa_role) {
         return Err(ApiError::BadRequest);
     }
     // `ZHQ` is the division, which is not a facility row (it maps to a national grant).
@@ -2149,6 +2284,20 @@ async fn change_membership(
         access_repo::GrantSource::Manual,
     )
     .await?;
+    // A hand edit detaches the member from VATUSA role sync (#549), and the admin then owns them: a
+    // removal takes the VATUSA-granted membership too.
+    if !held {
+        access_repo::set_user_role_scoped(
+            &mut tx,
+            &target,
+            name,
+            false,
+            artcc.as_deref(),
+            access_repo::GrantSource::Vatusa,
+        )
+        .await?;
+    }
+    let detached = vatusa_repo::detach_roles(&mut tx, &target, &actor.id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     let mut after = acl_user_access_body(
@@ -2167,7 +2316,7 @@ async fn change_membership(
             resource_type: "USER_ACCESS".to_string(),
             resource_id: Some(target.clone()),
             artcc_id: None,
-            reason: Some(reason.to_string()),
+            reason: Some(audit_reason(reason, detached)),
             before_state: serde_json::to_value(&before).ok(),
             after_state: serde_json::to_value(&after).ok(),
             ip_address: audit_repo::client_ip(headers),
@@ -2303,6 +2452,32 @@ mod mapping_tests {
             .unwrap()
     }
 
+    /// The role names VATUSA's division pull actually sends are long-form with underscores (#699): the
+    /// old rule (alphanumeric, at most 16) refused four of the five confirmed, so an admin couldn't map
+    /// them at all. Junk is still refused.
+    #[sqlx::test]
+    async fn a_long_form_vatusa_role_can_be_mapped(pool: PgPool) {
+        let actor = admin(&pool).await;
+        let state = test_state(pool.clone(), std::collections::HashMap::new());
+        for role in ["FACILITY_ACADEMY_EDITOR", "WEB_MAINTAINER", "INSTRUCTOR"] {
+            let created = create_mapping(
+                &state,
+                &actor,
+                &HeaderMap::new(),
+                request(role, None, "AEC"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{role} refused: {e:?}"));
+            assert_eq!(created.vatusa_role, role);
+        }
+        for bad in ["EC-1", "EC 1", &"A".repeat(65)] {
+            assert!(matches!(
+                create_mapping(&state, &actor, &HeaderMap::new(), request(bad, None, "AEC")).await,
+                Err(ApiError::BadRequest)
+            ));
+        }
+    }
+
     /// AC5's "changing it re-reconciles": a new mapping reaches members who already synced, now — not
     /// at their next sync, which the AC8 gap can put days away — and the grant is audited naming the
     /// VATUSA role, beside the audit of the mapping itself.
@@ -2353,6 +2528,8 @@ mod mapping_tests {
     /// the same group at the same scope survives.
     #[sqlx::test]
     async fn deleting_a_mapping_is_gated_like_creating_one(pool: PgPool) {
+        // Counted from here: 0124 ships default mappings (#699).
+        let seeded = mapping_count(&pool).await;
         // A delete reconciles the group away from every member it reached, so it carries the same power
         // as creating the mapping and needs the same authority. The create side was pinned; this side
         // was not — removing `enforce_mapping_scope` from `delete_mapping` left the suite green (#548
@@ -2403,7 +2580,7 @@ mod mapping_tests {
         let refused = delete_mapping(&state, &actor(&scoped), &HeaderMap::new(), mapping.id).await;
         assert!(matches!(refused, Err(ApiError::Forbidden)), "{refused:?}");
         assert_eq!(
-            mapping_count(&pool).await,
+            mapping_count(&pool).await - seeded,
             1,
             "a refused delete must leave the mapping"
         );
@@ -2417,7 +2594,7 @@ mod mapping_tests {
         delete_mapping(&state, &admin, &HeaderMap::new(), mapping.id)
             .await
             .unwrap();
-        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(mapping_count(&pool).await - seeded, 0);
         assert_eq!(
             synced().await,
             0,
@@ -2467,6 +2644,8 @@ mod mapping_tests {
     /// Refused even to a server admin: no system group is VATUSA's to grant.
     #[sqlx::test]
     async fn a_mapping_to_a_system_group_is_refused(pool: PgPool) {
+        // Counted from here: 0124 ships default mappings (#699).
+        let seeded = mapping_count(&pool).await;
         let actor = admin(&pool).await;
         let state = test_state(pool.clone(), std::collections::HashMap::new());
 
@@ -2483,7 +2662,7 @@ mod mapping_tests {
                 "{group}: {result:?}"
             );
         }
-        assert_eq!(mapping_count(&pool).await, 0);
+        assert_eq!(mapping_count(&pool).await - seeded, 0);
     }
 
     /// A non-admin editor must hold everything the group grants — mapping a group is granting it.
@@ -3247,5 +3426,330 @@ mod role_guard_tests {
 
         assert_eq!(save_roles(&w, None, &[ROLE]).await, http::StatusCode::OK);
         assert_eq!(target_roles(&w).await, ["national"]);
+    }
+}
+
+/// #549: a hand edit takes a member off VATUSA role sync, the editor shows it, and Resync puts them
+/// back — all through the real router, so the routes, the gates and the audit are on the path.
+#[cfg(test)]
+mod vatusa_detach_tests {
+    use axum::http;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::scope_test_support::{
+        grant, seed_user, send, send_json, session_cookie, test_state,
+    };
+
+    const MEMBER_CID: i64 = 1_549_100;
+
+    struct World {
+        pool: PgPool,
+        state: AppState,
+        admin: String,
+        cookie: String,
+        member: String,
+    }
+
+    /// A national server admin, and a member VATUSA-synced into EC@ZDC through a DATM→EC mapping.
+    async fn world(pool: PgPool) -> World {
+        let admin = seed_user(&pool).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'system')",
+        )
+        .bind(&admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cookie = session_cookie(&pool, &admin).await;
+        let member: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name, cid, vatusa_synced_at, last_login_at) \
+             values ('M', 'M', $1, now(), now()) returning id",
+        )
+        .bind(MEMBER_CID)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into identity.vatusa_roles (cid, facility, role) values ($1, 'ZDC', 'DATM')",
+        )
+        .bind(MEMBER_CID)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = test_state(pool.clone(), Default::default());
+        let actor = CurrentUser {
+            id: admin.clone(),
+            cid: 0,
+            email: String::new(),
+            display_name: "Admin".into(),
+            rating: None,
+            primary_role: None,
+        };
+        create_mapping(
+            &state,
+            &actor,
+            &HeaderMap::new(),
+            CreateVatusaRoleMappingRequest {
+                vatusa_role: "DATM".into(),
+                facility: None,
+                role_name: "EC".into(),
+                reason: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
+        World {
+            pool,
+            state,
+            admin,
+            cookie,
+            member,
+        }
+    }
+
+    async fn groups(w: &World) -> Vec<(String, Option<String>, String)> {
+        sqlx::query_as(
+            "select role_name, artcc_id, source from access.user_roles where user_id = $1 \
+             order by role_name, source",
+        )
+        .bind(&w.member)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    fn vatusa(group: &str) -> (String, Option<String>, String) {
+        (group.into(), Some("ZDC".into()), "vatusa".into())
+    }
+
+    /// The editor saving the member's ZDC scope with `roles` ticked.
+    async fn save_zdc(w: &World, roles: &[&str]) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{MEMBER_CID}/access"),
+            &w.cookie,
+            Some(json!({
+                "reason": "hand edit",
+                "scopes": [{"artcc_id": "ZDC", "permissions": {}, "role_names": roles}],
+            })),
+        )
+        .await
+    }
+
+    async fn vatusa_view(w: &World) -> serde_json::Value {
+        let (status, body) = send_json(
+            &w.state,
+            http::Method::GET,
+            &format!("/api/v1/admin/users/{MEMBER_CID}/vatusa"),
+            &w.cookie,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{body}");
+        body
+    }
+
+    async fn resync_as(w: &World, cookie: &str) -> http::StatusCode {
+        send(
+            &w.state,
+            http::Method::POST,
+            &format!("/api/v1/admin/users/{MEMBER_CID}/vatusa/resync"),
+            cookie,
+            Some(json!({"reason": "back to VATUSA"})),
+        )
+        .await
+    }
+
+    async fn access_audit_reasons(w: &World) -> Vec<String> {
+        sqlx::query_scalar(
+            "select reason from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and resource_id = $1 and actor_id <> 'vatusa-sync' \
+             order by created_at",
+        )
+        .bind(&w.member)
+        .fetch_all(&w.pool)
+        .await
+        .unwrap()
+    }
+
+    /// AC1: a save detaches the member; an unticked VATUSA group goes; later reconciles leave them be.
+    /// AC2/AC5: the editor's view shows who and when, the VATUSA roles, and what Resync would change.
+    #[sqlx::test]
+    async fn a_save_detaches_the_member_and_sync_then_leaves_them_alone(pool: PgPool) {
+        let w = world(pool).await;
+        assert_eq!(groups(&w).await, [vatusa("EC")]);
+        assert!(vatusa_view(&w).await["detached_at"].is_null());
+
+        assert_eq!(save_zdc(&w, &[]).await, http::StatusCode::OK);
+        assert_eq!(
+            groups(&w).await,
+            [],
+            "unticking takes the VATUSA-granted EC too"
+        );
+
+        // A mapping change re-reconciles every holder — but not a detached one.
+        sqlx::query(
+            "insert into identity.vatusa_roles (cid, facility, role) values ($1, 'ZDC', 'TMU')",
+        )
+        .bind(MEMBER_CID)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+        let actor = CurrentUser {
+            id: w.admin.clone(),
+            cid: 0,
+            email: String::new(),
+            display_name: "Admin".into(),
+            rating: None,
+            primary_role: None,
+        };
+        create_mapping(
+            &w.state,
+            &actor,
+            &HeaderMap::new(),
+            CreateVatusaRoleMappingRequest {
+                vatusa_role: "TMU".into(),
+                facility: None,
+                role_name: "AEC".into(),
+                reason: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            groups(&w).await,
+            [],
+            "a detached member gets nothing from sync"
+        );
+
+        let view = vatusa_view(&w).await;
+        assert!(view["detached_at"].is_string(), "{view}");
+        assert_eq!(view["detached_by"], "Scope Test User");
+        let roles: Vec<&str> = view["profile"]["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["DATM", "TMU"]);
+        let adds: Vec<&str> = view["resync_grants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["group"].as_str().unwrap())
+            .collect();
+        assert_eq!(adds, ["AEC", "EC"]);
+
+        // AC6: the save that detached is audited as such, once.
+        assert_eq!(save_zdc(&w, &["EC"]).await, http::StatusCode::OK);
+        let detach_audits = access_audit_reasons(&w)
+            .await
+            .into_iter()
+            .filter(|r| r.contains("(detached from VATUSA role sync)"))
+            .count();
+        assert_eq!(detach_audits, 1);
+    }
+
+    /// AC3 + AC6: Resync re-attaches and applies exactly the preview, keeps the hand-made grant, and is
+    /// audited with the admin's reason.
+    #[sqlx::test]
+    async fn resync_reattaches_and_reconciles(pool: PgPool) {
+        let w = world(pool).await;
+        assert_eq!(save_zdc(&w, &["AEC"]).await, http::StatusCode::OK); // EC (vatusa) unticked
+        assert_eq!(
+            groups(&w).await,
+            [("AEC".into(), Some("ZDC".into()), "manual".into())]
+        );
+
+        assert_eq!(resync_as(&w, &w.cookie).await, http::StatusCode::OK);
+        assert_eq!(
+            groups(&w).await,
+            [
+                ("AEC".into(), Some("ZDC".into()), "manual".into()),
+                vatusa("EC"),
+            ],
+            "VATUSA's EC is back; the hand-made AEC is never removed"
+        );
+        let view = vatusa_view(&w).await;
+        assert!(view["detached_at"].is_null());
+        assert_eq!(view["resync_grants"], json!([]));
+        assert!(
+            access_audit_reasons(&w)
+                .await
+                .iter()
+                .any(|r| r == "Resynced from VATUSA: back to VATUSA")
+        );
+    }
+
+    /// Resync needs `access.users.update` nationally: a ZDC-scoped editor is refused and nothing moves.
+    #[sqlx::test]
+    async fn a_scoped_admin_cannot_resync(pool: PgPool) {
+        let w = world(pool).await;
+        assert_eq!(save_zdc(&w, &[]).await, http::StatusCode::OK);
+        let scoped = seed_user(&w.pool).await;
+        grant(&w.pool, &scoped, "access.users.update", Some("ZDC")).await;
+        let scoped_cookie = session_cookie(&w.pool, &scoped).await;
+
+        assert_eq!(
+            resync_as(&w, &scoped_cookie).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert!(vatusa_view(&w).await["detached_at"].is_string());
+        assert_eq!(groups(&w).await, []);
+    }
+
+    /// AC1 covers the Groups page too: removing a membership detaches, and takes the VATUSA grant.
+    #[sqlx::test]
+    async fn a_membership_removal_detaches_the_member(pool: PgPool) {
+        let w = world(pool).await;
+        let actor = CurrentUser {
+            id: w.admin.clone(),
+            cid: 0,
+            email: String::new(),
+            display_name: "Admin".into(),
+            rating: None,
+            primary_role: None,
+        };
+        change_membership(
+            &w.state,
+            &actor,
+            &HeaderMap::new(),
+            "EC",
+            GroupMemberRequest {
+                cid: MEMBER_CID,
+                artcc_id: Some("ZDC".into()),
+                reason: "off EC".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(groups(&w).await, []);
+        assert!(vatusa_view(&w).await["detached_at"].is_string());
+    }
+
+    /// AC2: the user list flags a detached member.
+    #[sqlx::test]
+    async fn the_user_list_flags_a_detached_member(pool: PgPool) {
+        let w = world(pool).await;
+        let flag = |w: &World| {
+            let (state, cookie) = (w.state.clone(), w.cookie.clone());
+            async move {
+                let (_, body) = send_json(
+                    &state,
+                    http::Method::GET,
+                    &format!("/api/v1/admin/users?q={MEMBER_CID}"),
+                    &cookie,
+                )
+                .await;
+                body["items"][0]["vatusa_detached_at"].clone()
+            }
+        };
+        assert!(flag(&w).await.is_null());
+        assert_eq!(save_zdc(&w, &[]).await, http::StatusCode::OK);
+        assert!(flag(&w).await.is_string());
     }
 }

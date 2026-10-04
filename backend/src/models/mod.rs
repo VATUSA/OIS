@@ -84,6 +84,35 @@ pub struct VatusaRoleEntry {
     pub role: String,
 }
 
+/// A member's VATUSA side in the admin access editor (#549).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserVatusaBody {
+    /// Set while the member is off VATUSA role sync because an admin edited their access by hand.
+    /// `None` = synced.
+    pub detached_at: Option<DateTime<Utc>>,
+    /// Who first detached them (display name), if still known.
+    pub detached_by: Option<String>,
+    /// Their VATUSA details and roles, or `None` if never synced.
+    pub profile: Option<VatusaProfile>,
+    /// Group grants a Resync would add (VATUSA-sourced).
+    pub resync_grants: Vec<VatusaGrantChange>,
+    /// VATUSA-sourced group grants a Resync would remove. Hand-made grants are never removed.
+    pub resync_revokes: Vec<VatusaGrantChange>,
+}
+
+/// One group grant a Resync would change. `artcc_id` `None` = national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaGrantChange {
+    pub group: String,
+    pub artcc_id: Option<String>,
+}
+
+/// Put a hand-managed member back on VATUSA role sync. The reason is recorded in the audit log.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VatusaResyncRequest {
+    pub reason: String,
+}
+
 /// A lightweight user match for the directory search.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct UserSummary {
@@ -107,6 +136,8 @@ pub struct AdminUserRow {
     /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
     /// have broken any consumer without the schema type moving to warn them.
     pub scoped_roles: Vec<String>,
+    /// Set while the user is off VATUSA role sync because an admin edited their access by hand (#549).
+    pub vatusa_detached_at: Option<DateTime<Utc>>,
 }
 
 /// A page of the access-admin user browser.
@@ -256,6 +287,9 @@ pub struct VatusaRoleMappingBody {
     pub facility: Option<String>,
     pub role_name: String,
     pub created_at: DateTime<Utc>,
+    /// How many synced members hold this VATUSA role (at `facility`, or anywhere) right now. `0` means
+    /// the mapping grants nobody.
+    pub holders: i64,
 }
 
 /// Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
@@ -2260,6 +2294,8 @@ pub struct FcaBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertFcaRequest {
     pub name: String,
+    /// `#rrggbb`, stored lowercase; defaults to `#efc14d`. It must contrast at least 3:1 with the dark
+    /// ground (`#08080a`), so an FCA can't be drawn invisible; anything else is a 400.
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
@@ -2887,6 +2923,27 @@ pub struct ServiceAccountBody {
     pub expires_at: Option<DateTime<Utc>>,
     pub stale: bool,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this account may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
+}
+
+/// A credential's recent request volume (#611), summed across replicas from hourly counts. Up to a
+/// minute behind: each replica records its counts once a minute.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CredentialUsageBody {
+    /// Requests in the current clock hour.
+    pub requests_this_hour: i64,
+    /// Requests in the last 24 hours.
+    pub requests_last_day: i64,
+    /// Of those, how many were refused with `429`.
+    pub refused_last_day: i64,
+}
+
+/// Set or clear one credential's rate limit (#611). `null` restores the deployment default.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRateLimitRequest {
+    pub rate_limit_per_min: Option<i32>,
 }
 
 /// Returned once on create/rotate — the plaintext bearer token is never stored or
@@ -2959,6 +3016,9 @@ pub struct ApiKeyBody {
     pub last_used_ip: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this key may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
 }
 
 /// Returned once on create/rotate — the plaintext `ois_pat_…` token is never stored or shown again.
@@ -3294,6 +3354,50 @@ pub struct SectorMapBody {
     pub overridden: bool,
 }
 
+/// One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
+/// against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorBinBody {
+    /// The bin's start, an absolute Zulu quarter-hour.
+    pub start: DateTime<Utc>,
+    pub active: i64,
+    pub proposed: i64,
+    pub combined: i64,
+    pub alert: crate::feed::monitor_alert::SectorAlert,
+}
+
+/// One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorRowBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    pub map: i32,
+    /// The sectors worked at this one; non-empty marks a combined row.
+    pub consolidated: Vec<String>,
+    /// Someone is working this sector now (vNAS). Shown, never used to hide a row.
+    pub staffed: bool,
+    /// Six hours of bins, the first being the quarter-hour that contains `as_of`.
+    pub bins: Vec<MonitorBinBody>,
+}
+
+/// An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorNeighboursBody {
+    pub artcc: String,
+    /// Directly bordering ARTCCs that OIS runs, sorted.
+    pub neighbours: Vec<String>,
+}
+
+/// An ARTCC's Airspace Monitor (#701), computed from the live feed on request.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorTableBody {
+    pub artcc: String,
+    /// Whether the caller may change this ARTCC's MAPs and consolidations.
+    pub editable: bool,
+    pub as_of: DateTime<Utc>,
+    pub rows: Vec<MonitorRowBody>,
+}
+
 /// An ARTCC's sectors with their Monitor Alert Parameters (#598).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SectorMapsBody {
@@ -3331,4 +3435,23 @@ pub struct SectorConsolidationsBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ConsolidateSectorRequest {
     pub target_sector_id: String,
+}
+
+/// Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BulkConsolidateRequest {
+    /// The sector everything is worked at.
+    pub target_sector_id: String,
+    pub mode: BulkConsolidateMode,
+}
+
+/// Which sectors a bulk consolidation moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkConsolidateMode {
+    /// Every other sector, and the target gets its own row back if it was worked elsewhere.
+    All,
+    /// Only sectors in no consolidation: neither worked elsewhere nor worked at by others. Refused if
+    /// the target is itself worked elsewhere.
+    ExceptConsolidated,
 }

@@ -174,13 +174,20 @@ export function VatusaRoles({
   const [facility, setFacility] = useState("");
   const [reason, setReason] = useState("");
 
-  const mine = (mappings.data?.mappings ?? []).filter((m) => m.role_name === group.name);
+  const all = mappings.data?.mappings ?? [];
+  const mine = all.filter((m) => m.role_name === group.name);
   const known = mappings.data?.known_vatusa_roles ?? [];
 
   return (
     <div className="flex flex-col gap-3 border-t border-line-soft pt-4">
       <span className={labelClass}>VATUSA roles — {mine.length}</span>
 
+      {/* An empty table is a policy state, not a list to leave blank (#699): say what it means. */}
+      {mappings.isSuccess && all.length === 0 && (
+        <p className="text-xs text-warning">
+          No VATUSA role grants anything yet: VATUSA sync adds no access until a mapping exists.
+        </p>
+      )}
       {mine.length === 0 && (
         <p className="text-xs text-ink-3">No VATUSA role grants this group.</p>
       )}
@@ -196,6 +203,13 @@ export function VatusaRoles({
               <StatusPill tone={m.facility ? "brand" : "neutral"}>
                 {m.facility ?? "any facility"}
               </StatusPill>
+              {m.holders === 0 ? (
+                <span className="text-xs text-warning">No synced member holds this, so it grants nobody</span>
+              ) : (
+                <span className="text-xs text-ink-3">
+                  {m.holders} {m.holders === 1 ? "member" : "members"}
+                </span>
+              )}
             </div>
             <ConfirmButton variant="ghost" onConfirm={() => remove.mutate(m.id)}>
               Remove

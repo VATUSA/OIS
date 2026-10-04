@@ -38,7 +38,9 @@ pub enum ApiError {
     /// A request body over its route's limit (#629).
     #[error("payload too large")]
     PayloadTooLarge,
-    /// The caller has hit a limit on how often it may do this (#629: diagnostics reports per hour).
+    /// The caller has hit a limit on how often it may do this: #588's per-credential rate limiter
+    /// (raised by `rate_limit::enforce`, which adds the `Retry-After` / `RateLimit-*` headers), and
+    /// #629's cap on diagnostics reports per hour.
     #[error("too many requests")]
     TooManyRequests,
     #[error("service unavailable")]

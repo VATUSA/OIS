@@ -37,6 +37,7 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
+import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {SectorsPage} from "@/pages/flow/sectors";
 import {SectorMapsPage} from "@/pages/planning/sector-maps";
@@ -395,7 +396,7 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
-// --- Flow (internal monitoring data) ---
+// --- Flow (sector loading, and the sector data behind it) ---
 
 const adminFlowRoute = createRoute({
   getParentRoute: () => adminRoute,
@@ -409,6 +410,13 @@ const adminFlowSectorsRoute = createRoute({
   path: "sectors",
   staticData: { title: "Sectors" },
   component: SectorsPage,
+});
+
+const adminFlowMonitorRoute = createRoute({
+  getParentRoute: () => adminFlowRoute,
+  path: "monitor",
+  staticData: { title: "Airspace Monitor" },
+  component: MonitorPage,
 });
 
 // --- Planning (pre-event) ---
@@ -701,6 +709,7 @@ const routeTree = rootRoute.addChildren([
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
+    adminFlowRoute.addChildren([adminFlowMonitorRoute, adminFlowSectorsRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,
@@ -712,7 +721,6 @@ const routeTree = rootRoute.addChildren([
       planningEventRoute,
       planningEventFcasRoute,
     ]),
-    adminFlowRoute.addChildren([adminFlowSectorsRoute]),
     statsRoute.addChildren([
       statsIndexRoute,
       statsFlightRoute,

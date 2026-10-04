@@ -49,9 +49,9 @@ const ec: Group = {
 
 const list: VatusaRoleMappingList = {
   mappings: [
-    {id: 1, vatusa_role: "DATM", facility: null, role_name: "EC", created_at: "2026-10-01T00:00:00Z"},
-    {id: 2, vatusa_role: "ATM", facility: "ZDC", role_name: "EC", created_at: "2026-10-01T00:00:00Z"},
-    {id: 3, vatusa_role: "INS", facility: null, role_name: "NTMO", created_at: "2026-10-01T00:00:00Z"},
+    {id: 1, vatusa_role: "DATM", facility: null, role_name: "EC", created_at: "2026-10-01T00:00:00Z", holders: 3},
+    {id: 2, vatusa_role: "ATM", facility: "ZDC", role_name: "EC", created_at: "2026-10-01T00:00:00Z", holders: 0},
+    {id: 3, vatusa_role: "INS", facility: null, role_name: "NTMO", created_at: "2026-10-01T00:00:00Z", holders: 1},
   ],
   known_vatusa_roles: ["ATM", "DATM", "INS", "WM"],
 };
@@ -71,11 +71,11 @@ function button(root: ParentNode, text: string) {
   return el;
 }
 
-async function mount() {
+async function mount(mappings: VatusaRoleMappingList = list) {
   const qc = new QueryClient({
     defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}},
   });
-  qc.setQueryData(VATUSA_ROLE_MAPPINGS, list);
+  qc.setQueryData(VATUSA_ROLE_MAPPINGS, mappings);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -100,6 +100,26 @@ describe("VATUSA roles on a group card (#548)", () => {
     const rows = [...host.querySelectorAll("span.font-mono")].map((el) => el.textContent);
     expect(rows).toEqual(["DATM", "ATM"]);
     expect(host.textContent).toContain("any facility");
+  });
+
+  // #699: an empty mapping table means VATUSA grants nothing at all, and a mapping no synced member
+  // holds grants nobody. Both used to look like the same blank list.
+  it("says when no mapping exists anywhere, so VATUSA grants nothing", async () => {
+    const host = await mount({mappings: [], known_vatusa_roles: ["EVENT_COORDINATOR"]});
+    expect(host.textContent).toContain("VATUSA sync adds no access until a mapping exists");
+  });
+
+  it("does not say so once any mapping exists, even another group's", async () => {
+    const host = await mount({mappings: [list.mappings[2]!], known_vatusa_roles: ["INS"]});
+    expect(host.textContent).not.toContain("VATUSA sync adds no access");
+    expect(host.textContent).toContain("No VATUSA role grants this group.");
+  });
+
+  it("shows how many members each mapping matches, and warns when it matches nobody", async () => {
+    const host = await mount();
+    expect(host.textContent).toContain("3 members");
+    const warnings = host.textContent!.split("so it grants nobody").length - 1;
+    expect(warnings).toBe(1);
   });
 
   it("offers only VATUSA roles seen in synced members", async () => {

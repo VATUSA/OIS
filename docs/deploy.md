@@ -27,7 +27,9 @@ them if not).
    each one does. The same `docker-compose.yml` runs every environment; only `.env` differs.
 2. Point a reverse proxy (Caddy/nginx/Cloudflare) at the three bound ports
    (`API_PORT`/`WEB_PORT`/`DOCS_PORT`) — `docker-compose.yml`'s header comment has the exact
-   subdomain mapping.
+   subdomain mapping. Set `TRUSTED_PROXY_HOPS` to the number of proxies in that chain (default 2,
+   Cloudflare → Traefik; **1** behind a single Caddy/nginx), or rate limits and audit IPs key on the
+   proxy's address instead of the client's.
 
 ## Deploying to the test server (`next` images)
 
@@ -51,6 +53,13 @@ just deploy
 pinning to a specific `vX.Y.Z` (below) is safer for prod if you want deploys and releases to be the
 same event.
 
+## Running more than one backend replica
+
+Supported. Realtime nudges (the websocket's "something changed" signals) reach clients on every replica
+through Postgres `LISTEN/NOTIFY` on the `ois_realtime` channel, so nothing beyond the shared database is
+needed; each replica holds one extra Postgres connection for its listener. Delivery is best-effort — a
+nudge lost while a listener reconnects is picked up by the clients' 60-second fallback poll.
+
 ## What `just deploy` does
 
 ```bash
@@ -65,6 +74,19 @@ DB. It fails the command (non-zero exit) only once that budget is spent without 
 — `/health` itself always returns HTTP 200, even when the DB is down, so a plain "did it return
 200" check would miss that. A failing `just deploy` means the new containers
 are already running but unhealthy; docker doesn't automatically revert.
+
+## After a deploy: confirm the VATUSA webhook
+
+Check that the division webhook is **registered**, not just that nothing warned (#688). A run that never
+reached VATUSA warns about nothing either. The backend log should show one of:
+
+- `VATUSA division webhook registered` (it created one), or
+- `VATUSA division webhook already registered` (the stored one is still valid).
+
+Anything else is a failure: a `VATUSA webhook:` warning, which now carries VATUSA's own response body (a
+`400` names what VATUSA objected to, e.g. a bad API key), or a `not registered:` line for a missing
+`OIS_PUBLIC_URL`/`OIS_SECRET_KEY`, or **no line at all**. Until it registers, roster changes reach OIS
+only through the daily pull.
 
 ## The Discord bot (optional)
 

@@ -96,6 +96,7 @@ mod tests {
             id: "sa".into(),
             key: "vtbfm".into(),
             name: "vTBFM".into(),
+            rate_limit_per_min: None,
         })
     }
 
@@ -105,6 +106,7 @@ mod tests {
             owner_user_id: "owner".into(),
             prefix: "ois_pat_x".into(),
             name: "k".into(),
+            rate_limit_per_min: None,
         })
     }
 

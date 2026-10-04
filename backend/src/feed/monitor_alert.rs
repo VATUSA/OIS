@@ -9,7 +9,7 @@
 use serde::Serialize;
 
 /// One cell of the Monitor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SectorAlert {
     /// Neither peak exceeds the MAP.

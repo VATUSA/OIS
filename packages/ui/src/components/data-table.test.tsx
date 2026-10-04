@@ -50,3 +50,21 @@ describe("DataTable sorting", () => {
     expect(html).not.toContain("aria-sort");
   });
 });
+
+describe("DataTable opt-in props (#601)", () => {
+  it("keeps the caller's row order and offers no sort when sortable is false", () => {
+    const html = renderToStaticMarkup(
+      <DataTable columns={columns} data={rows} getRowId={(r) => r.id} initialSort={[{ id: "n", desc: false }]} sortable={false} />,
+    );
+    expect(order(html)).toEqual(["2", "3", "1"]);
+    expect(headerSortable(html)).toBe(false);
+  });
+
+  it("renders a footer under the body only when given one", () => {
+    const withFooter = renderToStaticMarkup(
+      <DataTable columns={columns} data={rows} footer={<tr><td>FOOT</td></tr>} />,
+    );
+    expect(withFooter).toMatch(/<tfoot[^>]*><tr><td>FOOT<\/td><\/tr><\/tfoot>/);
+    expect(renderToStaticMarkup(<DataTable columns={columns} data={rows} />)).not.toContain("<tfoot");
+  });
+});

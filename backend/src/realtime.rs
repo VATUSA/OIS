@@ -1,9 +1,15 @@
-//! Additive websocket push layer. An in-process broadcast hub (in `AppState`) carries small
-//! "something changed" nudges — a topic string — to every connected client, which then refetches the
-//! matching data through the normal REST API. REST stays the single source of truth; the socket only
-//! lowers latency versus polling, and if it drops the app degrades cleanly to the existing polls.
+//! Additive websocket push layer. A broadcast hub (in `AppState`) carries small "something changed"
+//! nudges — a topic string — to every connected client, which then refetches the matching data
+//! through the normal REST API. REST stays the single source of truth; the socket only lowers latency
+//! versus polling, and if it drops the app degrades cleanly to the existing polls (every key the
+//! socket nudges also polls, at least every `SOCKET_FALLBACK_MS` in `web/src/lib/realtime.ts`).
+//!
+//! **Deployment contract (#649):** any number of backend replicas may share one Postgres. A nudge is
+//! delivered to this process's sockets at once and to every other replica through Postgres
+//! `LISTEN/NOTIFY` on [`NOTIFY_CHANNEL`] — no extra infrastructure. Delivery is best-effort: a nudge
+//! lost while a listener reconnects is healed by the client's fallback poll.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use axum::{
     Extension,
@@ -15,6 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, postgres::PgListener};
 use tokio::sync::broadcast;
 
 use crate::{
@@ -28,7 +35,111 @@ pub struct WsEvent {
     pub topic: String,
 }
 
-pub type Events = broadcast::Sender<WsEvent>;
+/// The Postgres channel replicas fan nudges out on.
+pub const NOTIFY_CHANNEL: &str = "ois_realtime";
+
+/// The realtime hub: this process's subscribers, plus — with a database — every other replica's.
+#[derive(Clone)]
+pub struct Events {
+    local: broadcast::Sender<WsEvent>,
+    pool: Option<PgPool>,
+    /// Tags this process's notifications, so it can drop its own echo instead of delivering twice.
+    instance: Arc<str>,
+}
+
+impl Events {
+    pub fn new(pool: Option<PgPool>) -> Self {
+        Self {
+            local: broadcast::channel(256).0,
+            pool,
+            instance: uuid::Uuid::new_v4().simple().to_string().into(),
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
+        self.local.subscribe()
+    }
+
+    /// Nudges this process's sockets now, then tells the other replicas. Never fails: with no
+    /// listener anywhere, or the database unreachable, the nudge simply goes no further.
+    pub fn publish(&self, topic: &str) {
+        self.deliver(topic);
+        let (Some(pool), Ok(runtime)) = (self.pool.clone(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let payload = format!("{}:{topic}", self.instance);
+        runtime.spawn(async move {
+            let notified = sqlx::query("select pg_notify($1, $2)")
+                .bind(NOTIFY_CHANNEL)
+                .bind(&payload)
+                .execute(&pool)
+                .await;
+            if let Err(e) = notified {
+                tracing::warn!(error = %e, "realtime: could not notify the other replicas");
+            }
+        });
+    }
+
+    /// Nudges this process's sockets only. For a signal every replica raises for itself — the feed
+    /// tick (#648): each replica polls VATSIM and installs its own snapshot, so fanning its tick out
+    /// would tell every client N times, some before their own replica has the data.
+    pub fn publish_local(&self, topic: &str) {
+        self.deliver(topic);
+    }
+
+    fn deliver(&self, topic: &str) {
+        // An error only means nobody on this process is listening right now.
+        let _ = self.local.send(WsEvent {
+            topic: topic.to_string(),
+        });
+    }
+
+    /// The topic of a notification from another replica; `None` for this process's own echo.
+    fn foreign_topic<'a>(&self, payload: &'a str) -> Option<&'a str> {
+        let (from, topic) = payload.split_once(':')?;
+        (from != &*self.instance).then_some(topic)
+    }
+
+    /// Starts forwarding the other replicas' nudges into this hub. Returns once it is listening, so a
+    /// nudge published after this call is not missed; a no-op without a database. If the listening
+    /// connection is lost it reconnects, and the clients' fallback poll covers the gap.
+    pub async fn start_listener(&self) -> Result<(), sqlx::Error> {
+        let Some(pool) = self.pool.clone() else {
+            return Ok(());
+        };
+        let mut listener = listen(&pool).await?;
+        let hub = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.recv().await {
+                    Ok(notification) => {
+                        if let Some(topic) = hub.foreign_topic(notification.payload()) {
+                            hub.deliver(topic);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "realtime: listener lost; reconnecting");
+                        listener = loop {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            match listen(&pool).await {
+                                Ok(listener) => break listener,
+                                Err(e) => tracing::warn!(error = %e, "realtime: reconnect failed"),
+                            }
+                        };
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+async fn listen(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.listen(NOTIFY_CHANNEL).await?;
+    Ok(listener)
+}
 
 /// Topic strings — kept in sync with the frontend invalidation map (`web/src/lib/realtime.ts`).
 pub mod topic {
@@ -49,10 +160,19 @@ pub mod topic {
     /// An ACE claim reminder came due. Mirrors the Discord DM the scheduler already sends, so the
     /// desktop app is a second delivery channel for the same decision (#348).
     pub const EVENT_REMINDER: &str = "events.reminder";
+    /// The VATSIM feed ingested a new upstream publish (#648). Every feed-derived view refetches.
+    pub const FEED_TICK: &str = "feed.tick";
+
+    /// An ACE support request was created, claimed, released, decided or deleted (#645). Every viewer's
+    /// board refetches, so two controllers don't race the same request on a stale view.
+    pub const ACE: &str = "events.ace";
+    /// A runway configuration was changed, saved or deleted (#646) — low-frequency, but it changes
+    /// what every arrival is sequenced against, so other clients see it at once.
+    pub const RUNWAY: &str = "flow.runway";
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-    pub const ALL: [&str; 11] = [
+    pub const ALL: [&str; 14] = [
         RELEASE,
         FCA,
         GDP,
@@ -64,6 +184,9 @@ pub mod topic {
         EVENT_AVAILABILITY,
         ACCESS_GRANTED,
         EVENT_REMINDER,
+        ACE,
+        RUNWAY,
+        FEED_TICK,
     ];
 }
 
@@ -199,6 +322,54 @@ async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {
 
 #[cfg(test)]
 mod tests {
+    // ---- #693: every topic constant is subscribable ----------------------------------------------
+
+    /// The values of every `pub const …: &str` in a `pub mod topic { … }` block of Rust source.
+    fn topic_constants(source: &str) -> Vec<String> {
+        let start = source
+            .find("pub mod topic {")
+            .expect("a `pub mod topic` block");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}").expect("the block closes")];
+        body.lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (_, value) = rest.split_once(": &str = \"")?;
+                Some(value.split('"').next()?.to_string())
+            })
+            .collect()
+    }
+
+    /// `ALL` is the subscribe allowlist, kept by hand beside the constants (#693). A topic missing from
+    /// it still compiles — every subscriber asking for it is just refused as `unknown_topic`.
+    #[test]
+    fn every_topic_constant_is_in_all() {
+        let declared = topic_constants(include_str!("realtime.rs"));
+        assert!(
+            declared.contains(&"flow.release".to_string())
+                && declared.contains(&"flow.runway".to_string()),
+            "the scan found the topic constants: {declared:?}"
+        );
+        let all: std::collections::BTreeSet<&str> = super::topic::ALL.iter().copied().collect();
+        assert_eq!(
+            all.len(),
+            super::topic::ALL.len(),
+            "ALL lists a topic twice"
+        );
+        let declared: std::collections::BTreeSet<&str> =
+            declared.iter().map(String::as_str).collect();
+        assert_eq!(
+            declared, all,
+            "every topic constant, and nothing else, is in ALL"
+        );
+    }
+
+    #[test]
+    fn the_topic_scan_sees_a_new_constant() {
+        let sample = "pub mod topic {\n    pub const A: &str = \"a.one\";\n    /// doc\n    pub const B: &str = \"b.two\";\n    pub const ALL: [&str; 1] = [A];\n}\n\nfn after() {}\n";
+        assert_eq!(topic_constants(sample), ["a.one", "b.two"]);
+    }
+
     use crate::state::AppState;
 
     #[tokio::test]
@@ -216,6 +387,21 @@ mod tests {
     fn a_new_connection_gets_every_topic() {
         let sub = super::Subscription::default();
         assert!(super::topic::ALL.iter().all(|t| sub.wants(t)));
+    }
+
+    #[test]
+    fn the_feed_tick_is_a_topic_a_client_can_subscribe_to() {
+        let mut sub = super::Subscription::default();
+        let ack = sub.apply(r#"{"subscribe":["feed.tick"]}"#);
+        assert!(
+            ack.contains("subscribed") && ack.contains("feed.tick"),
+            "{ack}"
+        );
+        assert!(sub.wants(super::topic::FEED_TICK));
+        assert!(
+            !sub.wants(super::topic::RELEASE),
+            "and only what it asked for"
+        );
     }
 
     #[test]
@@ -628,5 +814,52 @@ mod handshake_tests {
             as_subprotocol.starts_with("http/1.1 401"),
             "{as_subprotocol}"
         );
+    }
+
+    // --- #649: Postgres fan-out across replicas ---
+
+    /// #649: two replicas share one database. A nudge published on one reaches the other's sockets
+    /// through Postgres, and reaches its own sockets exactly once — its own echo is dropped.
+    #[sqlx::test]
+    async fn a_nudge_reaches_every_replica_once(pool: sqlx::PgPool) {
+        use std::time::Duration;
+        use tokio::{sync::broadcast::error::TryRecvError, time::timeout};
+
+        let a = super::Events::new(Some(pool.clone()));
+        let b = super::Events::new(Some(pool.clone()));
+        a.start_listener().await.unwrap();
+        b.start_listener().await.unwrap();
+        let (mut on_a, mut on_b) = (a.subscribe(), b.subscribe());
+
+        a.publish(super::topic::RELEASE);
+
+        let crossed = timeout(Duration::from_secs(10), on_b.recv())
+            .await
+            .expect("the other replica hears it")
+            .unwrap();
+        assert_eq!(crossed.topic, "flow.release");
+        assert_eq!(
+            on_a.try_recv().unwrap().topic,
+            "flow.release",
+            "delivered locally at once"
+        );
+        // Give A's own echo time to arrive (it travels with B's copy), then check it was dropped.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            matches!(on_a.try_recv(), Err(TryRecvError::Empty)),
+            "no duplicate from the echo"
+        );
+        assert!(
+            matches!(on_b.try_recv(), Err(TryRecvError::Empty)),
+            "and B heard it once"
+        );
+    }
+
+    #[test]
+    fn a_hub_without_a_database_stays_local() {
+        let hub = super::Events::new(None);
+        let mut rx = hub.subscribe();
+        hub.publish(super::topic::GDP);
+        assert_eq!(rx.try_recv().unwrap().topic, "tmu.gdp");
     }
 }

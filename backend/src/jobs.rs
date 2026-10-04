@@ -20,7 +20,7 @@ use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
 use crate::job_registry::{JobRegistry, run_interval};
 use crate::models::AirportGateBody;
-use crate::realtime::{Events, WsEvent, topic};
+use crate::realtime::{Events, topic};
 use crate::repos::ace as ace_repo;
 use crate::repos::aircraft_profiles as aircraft_profiles_repo;
 use crate::repos::airport_surface as airport_surface_repo;
@@ -449,6 +449,38 @@ pub fn spawn_aircraft_profiles_refresh(
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
+            }
+        },
+    ));
+}
+
+/// Write each credential's request and 429 counts to `access.credential_usage` once a minute (#611),
+/// and drop hours older than a week. Counts live in this replica's memory until flushed, so a crash
+/// loses at most a minute; a failed write puts nothing back (usage is a guide, not a ledger).
+pub fn spawn_credential_usage_flush(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    limits: Arc<crate::rate_limit::RateLimits>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "credential_usage_flush",
+        "Record API key and service account request volume",
+        Duration::from_secs(60),
+        move || {
+            let (pool, limits) = (pool.clone(), limits.clone());
+            async move {
+                let counts = limits.take_usage();
+                crate::repos::credential_usage::add(&pool, &counts)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                let pruned = crate::repos::credential_usage::prune(&pool)
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                Ok(format!(
+                    "{} credentials, {pruned} old hours pruned",
+                    counts.len()
+                ))
             }
         },
     ));
@@ -1042,9 +1074,7 @@ async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<S
     // user without a linked Discord account was never nudged and never reminded. Payload-free: each
     // client re-checks its own claims, and its notifier fires once per claim and tier.
     if in_window > 0 {
-        let _ = events.send(WsEvent {
-            topic: topic::EVENT_REMINDER.to_string(),
-        });
+        events.publish(topic::EVENT_REMINDER);
     }
 
     // Unconditional on `tier_failed`: a persistently-failing tier must always surface to the
@@ -1368,9 +1398,7 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
                 match flow_repo::run_event_fca_lifecycle(&pool).await {
                     Ok(0) => Ok("no changes".to_string()),
                     Ok(changed) => {
-                        let _ = events.send(WsEvent {
-                            topic: topic::FCA.to_string(),
-                        });
+                        events.publish(topic::FCA);
                         tracing::info!(changed, "event FCA lifecycle pass");
                         Ok(format!("{changed} changed"))
                     }
@@ -1475,9 +1503,7 @@ pub(crate) async fn event_package_lifecycle_once(
 
     if changed > 0 {
         for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
-            let _ = events.send(WsEvent {
-                topic: t.to_string(),
-            });
+            events.publish(t);
         }
         tracing::info!(changed, "event package lifecycle pass");
     }
@@ -1785,7 +1811,8 @@ mod ace_reminder_tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        let (events, mut received) = tokio::sync::broadcast::channel(8);
+        let events = crate::realtime::Events::new(None);
+        let mut received = events.subscribe();
         ace_reminder_scheduler_once(&pool, &events).await.unwrap();
 
         let event = received.try_recv().expect("a reminder nudge was published");
