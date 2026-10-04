@@ -29,7 +29,7 @@ metering tool reading flow and issuing departure releases.
 | | `POST /flow/fcas/{id}/swap` | Trade two flights' release times |
 | CFRs | `POST /tmu/cfr` | Issue a call-for-release time |
 | | `DELETE /tmu/cfr/{callsign}` | Release a CFR |
-| | `GET /tmu/flow/{icao}` | An airport's departure flow, with CFR state |
+| | `GET /tmu/departures/{dep}` | A field's departures, each with its CFR and the `cfr_version` that `If-Match` on the two CFR writes needs |
 | Realtime | `GET /ws` | Topic nudges, instead of polling |
 
 ## Open questions for the owner
