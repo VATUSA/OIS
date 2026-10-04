@@ -19,6 +19,14 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
+/**
+ * Whether `path` is Monitor code, judged on its path *within* `web/src`, never on where the checkout
+ * lives: a worktree under `…/monitor-page/` would otherwise make every file look like one (#709).
+ */
+function isMonitorFile(path: string): boolean {
+  return /monitor/i.test(path.replace(/.*\/web\/src\//, ""));
+}
+
 function withoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 }
@@ -27,12 +35,19 @@ const LITERAL_COLOUR = /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?)\(/i;
 
 describe("Monitor colours", () => {
   it("are tokens, not literals", () => {
-    const files = sourceFiles(new URL("..", import.meta.url).pathname).filter((p) => /monitor/i.test(p));
+    const files = sourceFiles(new URL("..", import.meta.url).pathname).filter(isMonitorFile);
     expect(files.length).toBeGreaterThan(0);
     const offenders = files
       .filter((path) => LITERAL_COLOUR.test(withoutComments(readFileSync(path, "utf8"))))
       .map((path) => path.replace(/.*\/web\/src\//, "web/src/"));
     expect(offenders).toEqual([]);
+  });
+
+  it("selects files by their path within web/src, not the checkout's (#709)", () => {
+    const checkout = "/home/dev/ois-wt/feat/601/monitor-page/web/src/";
+    expect(isMonitorFile(`${checkout}lib/facility-map/palette.ts`)).toBe(false);
+    expect(isMonitorFile(`${checkout}pages/flow/monitor.tsx`)).toBe(true);
+    expect(isMonitorFile("/home/dev/OIS/web/src/lib/monitor-alert.ts")).toBe(true);
   });
 
   it("would notice one — the pattern matches the shapes it forbids", () => {
