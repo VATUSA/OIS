@@ -100,6 +100,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_reports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_report"];
+        put?: never;
+        post?: never;
+        /** Deletes a report — e.g. when its sender asks for their data to be erased. */
+        delete: operations["delete_report"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/diagnostics/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The report's logs, as the gzip file the desktop sent. */
+        get: operations["get_report_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/groups": {
         parameters: {
             query?: never;
@@ -196,6 +246,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/grantable-permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The permission picker's source: what the calling admin holds, minus what a service account may
+         *     never hold — exactly what `set_service_account_permissions` will accept from them.
+         */
+        get: operations["grantable_service_account_permissions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/roles": {
         parameters: {
             query?: never;
@@ -232,6 +302,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/service-accounts/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace an account's direct `(permission, ARTCC)` grants (#584). Each must be within the calling
+         *     admin's own live authority (403 otherwise), and none may let a machine mint credentials (400).
+         */
+        put: operations["set_service_account_permissions"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/service-accounts/{id}/roles": {
         parameters: {
             query?: never;
@@ -257,6 +347,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /**
+         * Revoke the live token and issue a new one. Whoever rotates *receives* the token, and with it the
+         *     account's authority — so, like a grant, it is capped: the admin must hold everything the account
+         *     holds, at its scope (#584). Otherwise `service_accounts.update` alone would be a way to take BOT.
+         */
         post: operations["rotate_service_account"];
         delete?: never;
         options?: never;
@@ -4116,6 +4211,11 @@ export interface components {
         };
         CreateServiceAccountRequest: {
             description?: string | null;
+            /**
+             * Format: int32
+             * @description Credential lifetime in days: default 90, at most 365.
+             */
+            expires_in_days?: number | null;
             name: string;
         };
         CreateTmiRequest: {
@@ -4302,6 +4402,12 @@ export interface components {
             /** Format: date-time */
             cfr?: string | null;
             cfr_issued: boolean;
+            /**
+             * Format: int64
+             * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+             *     is issued for this callsign.
+             */
+            cfr_version?: number | null;
             /** Format: int64 */
             delay_min: number;
             /** @description Origin airport ICAO (a facility query spans several). */
@@ -4347,6 +4453,68 @@ export interface components {
             /** Format: date-time */
             expires_at: string;
             token: string;
+        };
+        /** @description One report in full, apart from the logs (downloaded separately as gzip). */
+        DiagnosticsReport: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: int32 */
+            logs_bytes: number;
+            /**
+             * @description Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+             *     webview's log tail, WebGL2 availability, updater status.
+             */
+            meta: Record<string, never>;
+            note: string;
+            os: string;
+            os_version: string;
+            route: string;
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            webview_version: string;
+            window_label: string;
+        };
+        /** @description A page of diagnostics reports, newest first. */
+        DiagnosticsReportPage: {
+            items: components["schemas"]["DiagnosticsReportSummary"][];
+            /** Format: int64 */
+            page: number;
+            /** Format: int64 */
+            page_size: number;
+            /** Format: int64 */
+            total: number;
+        };
+        /**
+         * @description One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+         *     the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+         */
+        DiagnosticsReportSummary: {
+            app_version: string;
+            arch: string;
+            /** Format: date-time */
+            created_at: string;
+            has_note: boolean;
+            id: string;
+            /**
+             * Format: int32
+             * @description Size of the gzipped logs.
+             */
+            logs_bytes: number;
+            os: string;
+            os_version: string;
+            route: string;
+            /** @description The sender's VATUSA home facility, when synced. */
+            user_artcc?: string | null;
+            /** Format: int64 */
+            user_cid: number;
+            user_display_name: string;
+            /** @description `main`, a route window (`window-…`) or a pop-out (`popout-…`). */
+            window_label: string;
         };
         /**
          * @description Bot interaction callback: a Discord user submitted the claim modal on an ACE request. The backend
@@ -6037,6 +6205,11 @@ export interface components {
         RevokeApiKeyRequest: {
             reason?: string | null;
         };
+        /** @description Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365). */
+        RotateServiceAccountRequest: {
+            /** Format: int32 */
+            expires_in_days?: number | null;
+        };
         /**
          * @description A named reference route on the flow map, defined by a filed-route string and resolved to a
          *     track by the nav engine (kept fresh on every read). Shared; not tied to any aircraft.
@@ -6248,17 +6421,25 @@ export interface components {
             role_names: string[];
             server_admin: boolean;
         };
-        /** @description A service account as listed (no secret). `roles` are its granted role names. */
+        /**
+         * @description A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+         *     direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+         *     been used (or, if never used, issued) in 30 days.
+         */
         ServiceAccountBody: {
             /** Format: date-time */
             created_at: string;
             description?: string | null;
+            /** Format: date-time */
+            expires_at?: string | null;
             id: string;
             key: string;
             /** Format: date-time */
             last_used_at?: string | null;
             name: string;
+            permissions: components["schemas"]["ApiKeyPermissionBody"][];
             roles: string[];
+            stale: boolean;
             status: string;
         };
         /**
@@ -6276,6 +6457,10 @@ export interface components {
         /** @description Toggle an event FCA's auto-publish flag (publish 30 min before the event starts). */
         SetFcaAutoRequest: {
             auto_publish: boolean;
+        };
+        /** @description A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national. */
+        SetServiceAccountPermissionsRequest: {
+            permissions: components["schemas"]["ApiKeyPermissionInput"][];
         };
         SetServiceAccountRolesRequest: {
             role_names: string[];
@@ -7114,6 +7299,137 @@ export interface operations {
             };
         };
     };
+    list_reports: {
+        parameters: {
+            query?: {
+                /** @description 1-based page (default 1) */
+                page?: number;
+                /** @description Page size (default 50, max 100) */
+                page_size?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReportPage"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_report_logs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Report id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The gzipped log files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": number[];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_groups: {
         parameters: {
             query?: never;
@@ -7535,6 +7851,32 @@ export interface operations {
             };
         };
     };
+    grantable_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the caller may grant a service account, with the scope */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantablePermissionBody"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_service_account_roles: {
         parameters: {
             query?: never;
@@ -7594,6 +7936,56 @@ export interface operations {
             };
         };
     };
+    set_service_account_permissions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Service account id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetServiceAccountPermissionsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     set_service_account_roles: {
         parameters: {
             query?: never;
@@ -7630,6 +8022,12 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -7648,7 +8046,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional lifetime; default 90 days */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["RotateServiceAccountRequest"];
+            };
+        };
         responses: {
             /** @description Rotated; new token shown once */
             200: {
@@ -7659,7 +8062,19 @@ export interface operations {
                     "application/json": components["schemas"]["ServiceAccountTokenBody"];
                 };
             };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12128,6 +12543,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `held_by_person` / `held_by_other_machine`: a machine may not trade it */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

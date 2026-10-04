@@ -35,6 +35,12 @@ pub enum ApiError {
     /// A write that must be conditional arrived without `If-Match` or `If-None-Match` (#585).
     #[error("precondition required")]
     PreconditionRequired,
+    /// A request body over its route's limit (#629).
+    #[error("payload too large")]
+    PayloadTooLarge,
+    /// The caller has hit a limit on how often it may do this (#629: diagnostics reports per hour).
+    #[error("too many requests")]
+    TooManyRequests,
     #[error("service unavailable")]
     ServiceUnavailable,
     #[error("internal server error")]
@@ -82,6 +88,8 @@ impl IntoResponse for ApiError {
             Self::PreconditionRequired => {
                 (StatusCode::PRECONDITION_REQUIRED, "precondition_required")
             }
+            Self::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             Self::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };

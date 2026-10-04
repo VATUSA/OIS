@@ -9,9 +9,16 @@ export type ServiceAccountToken = components["schemas"]["ServiceAccountTokenBody
 export type CreateServiceAccountRequest = components["schemas"]["CreateServiceAccountRequest"];
 export type SetServiceAccountRolesRequest =
   components["schemas"]["SetServiceAccountRolesRequest"];
+export type SetServiceAccountPermissionsRequest =
+  components["schemas"]["SetServiceAccountPermissionsRequest"];
 
 export const ACCOUNTS = ["service-accounts"] as const;
 const ROLES = ["service-account-roles"] as const;
+const GRANTABLE = ["service-account-grantable"] as const;
+
+/** Credential lifetimes an admin may pick, in days. The backend defaults to 90 and caps at 365. */
+export const EXPIRY_CHOICES = [30, 90, 180, 365] as const;
+export const DEFAULT_EXPIRY_DAYS = 90;
 
 /** Every service account, with its granted roles. */
 export function useServiceAccounts() {
@@ -37,6 +44,22 @@ export function useAssignableRoles() {
     queryFn: async (): Promise<string[]> => {
       const {data, error} = await ois.GET("/api/v1/admin/service-accounts/roles");
       if (error || !data) throw new Error("failed to load assignable roles");
+      return data;
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * What the signed-in admin may grant a service account, with the scope they hold it at. A grant
+ * outside this is refused by the backend, so the picker never offers one.
+ */
+export function useGrantableServiceAccountPermissions() {
+  return useQuery({
+    queryKey: GRANTABLE,
+    queryFn: async () => {
+      const {data, error} = await ois.GET("/api/v1/admin/service-accounts/grantable-permissions");
+      if (error || !data) throw new Error("failed to load grantable permissions");
       return data;
     },
     staleTime: 5 * 60_000,
@@ -93,6 +116,48 @@ export function useSetServiceAccountRoles() {
       return data;
     },
     onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
-    onError: () => toast.error("Couldn’t update the roles"),
+    onError: () =>
+      toast.error("Couldn’t update the roles", {
+        description: "You can only grant a role whose permissions you hold nationally.",
+      }),
+  });
+}
+
+/** Replace an account's direct (permission, ARTCC) grants. A full replace, not a patch. */
+export function useSetServiceAccountPermissions() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: {
+      id: string;
+      body: SetServiceAccountPermissionsRequest;
+    }): Promise<ServiceAccount> => {
+      const {data, error} = await ois.PUT("/api/v1/admin/service-accounts/{id}/permissions", {
+        params: {path: {id: args.id}},
+        body: args.body,
+      });
+      if (error || !data) throw new Error("set permissions failed");
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
+    onError: () => toast.error("Couldn’t update the permissions"),
+  });
+}
+
+/** Revoke the live credential and issue a new one. The new token is shown once. */
+export function useRotateServiceAccount() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: {id: string; expiresInDays: number}): Promise<ServiceAccountToken> => {
+      const {data, error} = await ois.POST("/api/v1/admin/service-accounts/{id}/rotate", {
+        params: {path: {id: args.id}},
+        body: {expires_in_days: args.expiresInDays},
+      });
+      if (error || !data) throw new Error("rotate failed");
+      return data;
+    },
+    onSuccess: () => qc.invalidateQueries({queryKey: ACCOUNTS}),
+    onError: () => toast.error("Couldn’t rotate the token"),
   });
 }

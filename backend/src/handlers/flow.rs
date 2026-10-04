@@ -2499,8 +2499,7 @@ pub async fn clear_release(
         release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     }
     // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
-    let deleted =
-        flow_repo::delete_release(pool, &id, &callsign, version, by.machine_actor()).await?;
+    let deleted = flow_repo::delete_release(pool, &id, &callsign, version, &by).await?;
     if !deleted && version.is_some() {
         return Err(ApiError::PreconditionFailed {
             etag: holder.map(|h| h.version),
@@ -2535,7 +2534,11 @@ pub async fn clear_release(
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    // The other flights' versions, as `mark_release` and the traffic list return them: a writer
+    // reading this list must not see a released flight with `release_version: null` (#585 QA).
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok(Json(flights))
 }
 
 /// Trade two flights' release times.
@@ -2564,7 +2567,8 @@ pub async fn clear_release(
     responses(
         (status = 200), (status = 400), (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
-        (status = 404)
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it"),
     )
 )]
 pub async fn swap_releases(

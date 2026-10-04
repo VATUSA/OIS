@@ -210,6 +210,11 @@ async fn audited_actor(pool: &PgPool) -> Option<String> {
 /// A state whose feed holds one prefile, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
 /// [`fca`] — so `mark_release` has a real crossing to release.
 async fn crossing_state(pool: PgPool) -> AppState {
+    crossing_state_of(pool, &["TEST1"]).await
+}
+
+/// [`crossing_state`] with one such prefile per callsign.
+async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
     let state = test_state(pool, HashMap::new());
     {
         let mut feed = state.feed.write().await;
@@ -218,16 +223,19 @@ async fn crossing_state(pool: PgPool) -> AppState {
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]));
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: vec![Prefile {
-                callsign: "TEST1".into(),
-                flight_plan: Some(FlightPlan {
-                    departure: "KJFK".into(),
-                    arrival: "KDCA".into(),
-                    route: "RBV WHITE SIE".into(),
+            prefiles: callsigns
+                .iter()
+                .map(|callsign| Prefile {
+                    callsign: (*callsign).into(),
+                    flight_plan: Some(FlightPlan {
+                        departure: "KJFK".into(),
+                        arrival: "KDCA".into(),
+                        route: "RBV WHITE SIE".into(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }],
+                })
+                .collect(),
             ..Default::default()
         })));
     }
@@ -1285,7 +1293,7 @@ async fn a_machine_conditional_write_never_lands_on_a_persons_release(pool: PgPo
     .unwrap();
     assert_eq!(written, None, "refused in the write");
     assert!(
-        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), machine.machine_actor())
+        !flow_repo::delete_release(&pool, &id, "AAL1", Some(v), &machine)
             .await
             .unwrap(),
         "a machine's clear at the matching version does not remove a person's release"
@@ -1392,7 +1400,7 @@ async fn a_machine_conditional_write_still_reaches_its_own_release(pool: PgPool)
     .unwrap();
     assert_eq!(v2, Some(v + 1));
     assert!(
-        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), machine.machine_actor())
+        flow_repo::delete_release(&pool, &id, "OWN1", Some(v + 1), &machine)
             .await
             .unwrap()
     );
@@ -1423,7 +1431,7 @@ async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPo
         None
     );
     assert!(
-        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), machine.machine_actor())
+        !tmu_repo::delete_issued_cfr(&pool, "AAL1", Some(v), &machine)
             .await
             .unwrap()
     );
@@ -1439,7 +1447,7 @@ async fn a_machine_conditional_cfr_write_never_lands_on_a_persons_cfr(pool: PgPo
             .unwrap()
             .unwrap();
     assert!(
-        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), machine.machine_actor())
+        tmu_repo::delete_issued_cfr(&pool, "UAL2", Some(own), &machine)
             .await
             .unwrap()
     );
@@ -1467,6 +1475,108 @@ fn only_a_machine_attribution_names_an_owner_and_a_missing_actor_fails_closed() 
         Some(""),
         "matches no row rather than every row"
     );
+}
+
+// ---- #585 QA: every read a writer takes a version from carries it -------------------------------
+
+/// A writer takes versions from whichever flight list it is handed, the clear response included: a
+/// released flight there carries its version, not null.
+#[sqlx::test]
+async fn the_clear_response_carries_the_remaining_releases_versions(pool: PgPool) {
+    let state = crossing_state_of(pool.clone(), &["TEST1", "TEST2"]).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let release = |callsign: &'static str, precondition: &'static str| {
+        let (state, auth, uri) = (
+            state.clone(),
+            auth.clone(),
+            format!("/api/v1/flow/fcas/{fca_id}/release/{callsign}"),
+        );
+        async move {
+            send_full(
+                &state,
+                http::Method::POST,
+                &uri,
+                &[&auth, precondition],
+                Some(json!({})),
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(
+        release("TEST1", "If-None-Match: *").await,
+        http::StatusCode::OK
+    );
+    assert_eq!(
+        release("TEST1", "If-Match: \"1\"").await,
+        http::StatusCode::OK
+    );
+    assert_eq!(
+        release("TEST2", "If-None-Match: *").await,
+        http::StatusCode::OK
+    );
+
+    let (status, _, flights) = send_full(
+        &state,
+        http::Method::DELETE,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/TEST2"),
+        &[&auth, "If-Match: \"1\""],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{flights}");
+    let test1 = flights
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["callsign"] == "TEST1")
+        .expect("TEST1 is still in the list");
+    assert_eq!(test1["released"], true);
+    assert_eq!(test1["release_version"], 2);
+}
+
+/// CFR writes need `If-Match`, so the departures list carries each issued CFR's version, rather than
+/// leaving a writer to provoke a 412 to learn it.
+#[sqlx::test]
+async fn the_departures_list_carries_an_issued_cfrs_version(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let (_, auth) = service_account(&pool, "tmu.cfr.assign", None).await;
+    sqlx::query("insert into access.role_permissions (role_name, permission_name) values ($1, 'tmu.program.read')")
+        .bind(ROLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut body = issue_body();
+    body["callsign"] = json!("TEST1");
+    for precondition in ["If-None-Match: *", "If-Match: \"1\""] {
+        let (status, _, reply) = send_full(
+            &state,
+            http::Method::POST,
+            CFR,
+            &[&auth, precondition],
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{reply}");
+    }
+
+    let (status, _, list) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/tmu/departures/KJFK",
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{list}");
+    let test1 = list["departures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["callsign"] == "TEST1")
+        .expect("TEST1 departs KJFK");
+    assert_eq!(test1["cfr_version"], 2);
 }
 
 // ---- #626: release and CFR writes honour the caller's ARTCC scope ---------------------------------

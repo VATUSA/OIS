@@ -375,6 +375,62 @@ pub struct AuditLogPage {
     pub page_size: i64,
 }
 
+// --- desktop diagnostics reports (#629) ---
+
+/// One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+/// the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReportSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    /// The sender's VATUSA home facility, when synced.
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    /// `main`, a route window (`window-…`) or a pop-out (`popout-…`).
+    pub window_label: String,
+    pub route: String,
+    pub has_note: bool,
+    /// Size of the gzipped logs.
+    pub logs_bytes: i32,
+}
+
+/// A page of diagnostics reports, newest first.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticsReportPage {
+    pub items: Vec<DiagnosticsReportSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// One report in full, apart from the logs (downloaded separately as gzip).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReport {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    pub webview_version: String,
+    pub window_label: String,
+    pub route: String,
+    pub note: String,
+    /// Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+    /// webview's log tail, WebGL2 availability, updater status.
+    #[schema(value_type = Object)]
+    pub meta: Value,
+    pub logs_bytes: i32,
+}
+
 // --- taxi insights (#183): browsable history over raw observations + derived estimates ---
 
 /// One raw pushback/start-up/taxi observation (#164 sub-issue C, #277).
@@ -946,6 +1002,10 @@ pub struct DepartureFlight {
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
+    /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+    /// is issued for this callsign.
+    #[serde(default)]
+    pub cfr_version: Option<i64>,
     pub seq: Option<i64>,
 }
 
@@ -2763,6 +2823,16 @@ pub struct CreateServiceAccountRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Credential lifetime in days: default 90, at most 365.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+}
+
+/// Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365).
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct RotateServiceAccountRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2770,7 +2840,15 @@ pub struct SetServiceAccountRolesRequest {
     pub role_names: Vec<String>,
 }
 
-/// A service account as listed (no secret). `roles` are its granted role names.
+/// A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetServiceAccountPermissionsRequest {
+    pub permissions: Vec<ApiKeyPermissionInput>,
+}
+
+/// A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+/// direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+/// been used (or, if never used, issued) in 30 days.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceAccountBody {
     pub id: String,
@@ -2779,7 +2857,10 @@ pub struct ServiceAccountBody {
     pub description: Option<String>,
     pub status: String,
     pub roles: Vec<String>,
+    pub permissions: Vec<ApiKeyPermissionBody>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub stale: bool,
     pub created_at: DateTime<Utc>,
 }
 

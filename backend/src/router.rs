@@ -1,5 +1,7 @@
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use utoipa::OpenApi;
@@ -10,7 +12,7 @@ use crate::{
     config::build_cors_layer,
     handlers::{
         access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        api_keys, atc, audit, auth, dashboards, desktop, docs, events, facilities,
+        api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs, events, facilities,
         facility_documents, facility_map, feed, flight_exclusions, flow, gdp, health, integration,
         jobs as jobs_handler, metrics as metrics_handler, preferences, public, runway,
         service_accounts, stats, taxi_insights, tmu, users, webhooks,
@@ -117,10 +119,7 @@ pub fn build_router(state: AppState) -> Router {
             get(flow::flight_advisory),
         )
         // Inbound VATUSA roster-change webhook — no session; verified by HMAC signature.
-        .route(
-            "/api/v1/webhooks/vatusa/{facility}",
-            post(webhooks::vatusa_webhook),
-        )
+        .route("/api/v1/webhooks/vatusa", post(webhooks::vatusa_webhook))
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))
@@ -620,6 +619,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Desktop diagnostics reports (#629): the desktop's own upload, capped per route (`Multipart`
+        // has no implicit limit), and the staff view.
+        .route(
+            "/api/v1/diagnostics/reports",
+            post(diagnostics::upload_report)
+                .layer(DefaultBodyLimit::max(diagnostics::MAX_UPLOAD_BYTES)),
+        )
+        .route("/api/v1/admin/diagnostics", get(diagnostics::list_reports))
+        .route(
+            "/api/v1/admin/diagnostics/{id}",
+            get(diagnostics::get_report).delete(diagnostics::delete_report),
+        )
+        .route(
+            "/api/v1/admin/diagnostics/{id}/logs",
+            get(diagnostics::get_report_logs),
+        )
         // Background-tasks viewer (job status + manual trigger)
         .route("/api/v1/admin/jobs", get(jobs_handler::list_jobs))
         .route("/api/v1/admin/jobs/{name}/run", post(jobs_handler::run_job))
@@ -644,6 +659,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/service-accounts/{id}/roles",
             put(service_accounts::set_service_account_roles),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/grantable-permissions",
+            get(service_accounts::grantable_service_account_permissions),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/permissions",
+            put(service_accounts::set_service_account_permissions),
         )
         // Innermost app layer: records every successful mutation to the audit log. Added
         // before resolve_current_user so it runs *after* it inbound and sees CurrentUser.

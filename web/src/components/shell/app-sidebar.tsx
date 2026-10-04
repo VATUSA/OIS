@@ -34,9 +34,11 @@ import {
   Settings as SettingsIcon,
   User as UserIcon,
   Download as DownloadIcon,
+  Sparkles,
 } from "lucide-react";
 
 import {SignInButton} from "@/components/sign-in-button";
+import {openWhatsNew} from "@/components/whats-new";
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
 import {useLogout, useMe} from "@/lib/auth";
@@ -185,6 +187,10 @@ function UserGroup() {
       </SidebarItem>
       <SidebarItem asChild icon={SettingsIcon} label="Settings">
         <Link to="/settings" />
+      </SidebarItem>
+      {/* Reopens the full changelog — once dismissed, the panel otherwise never shows again (#665). */}
+      <SidebarItem asChild icon={Sparkles} label="What's new">
+        <button type="button" onClick={openWhatsNew} />
       </SidebarItem>
       {hasPermission(me, "api_keys.key.create") && (
         <SidebarItem asChild icon={KeyRound} label="API keys">
