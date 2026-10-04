@@ -61,14 +61,19 @@ mod tests {
         Utc.with_ymd_and_hms(2027, 1, 4, 12, 0, 0).unwrap()
     }
 
+    /// The owner's 30 days, as absolute dates straddling it rather than `since + NOTICE_DAYS`, which
+    /// would pass for any value of the constant.
     #[test]
     fn the_notice_window_is_at_least_thirty_days() {
-        let thirty = since() + Duration::days(NOTICE_DAYS);
+        let thirty = Utc.with_ymd_and_hms(2027, 2, 3, 12, 0, 0).unwrap();
         assert!(
             Deprecated::new(since(), thirty).is_some(),
             "exactly 30 days is enough"
         );
-        assert!(Deprecated::new(since(), thirty - Duration::seconds(1)).is_none());
+        assert!(
+            Deprecated::new(since(), thirty - Duration::seconds(1)).is_none(),
+            "a second short of 30 days is not"
+        );
         assert!(Deprecated::new(since(), since()).is_none());
     }
 
