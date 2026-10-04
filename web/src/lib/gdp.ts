@@ -4,6 +4,7 @@ import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Gdp = components["schemas"]["GdpBody"];
 export type CreateGdp = components["schemas"]["CreateGdpRequest"];
@@ -30,6 +31,7 @@ export function useGdps() {
       if (error || !data) throw new Error("failed to load GDPs");
       return data;
     },
+    refetchInterval: at == null ? SOCKET_FALLBACK_MS : false,
     staleTime: at == null ? undefined : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });

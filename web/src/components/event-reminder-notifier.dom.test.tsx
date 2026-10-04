@@ -8,6 +8,10 @@ const notifyDesktop = vi.hoisted(() => vi.fn(async (_n: {title: string}, _enable
 const claims = vi.hoisted(() => ({rows: [] as unknown[], calls: 0}));
 
 vi.mock("@/lib/desktop-notify", () => ({notifyDesktop}));
+// The claims query also polls as the socket's fallback (#649). These tests pin that a reminder fires
+// on the clock alone — with no nudge and no refetch — so that poll is switched off here; it is pinned
+// for the other socket-only queries in `lib/socket-fallback.test.ts`.
+vi.mock("@/lib/realtime", () => ({SOCKET_FALLBACK_MS: false}));
 vi.mock("@/lib/platform", () => ({can: () => true}));
 vi.mock("@/lib/permissions", () => ({hasPermission: () => true}));
 vi.mock("@/lib/auth", () => ({useMe: () => ({data: {id: "u1", role_names: [], permissions: {}}})}));

@@ -2,6 +2,7 @@ import {useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type EventAvailability = components["schemas"]["EventAvailabilityBody"];
 
@@ -17,5 +18,6 @@ export function useEventAvailability(eventId: number) {
       if (error || !data) throw new Error("failed to load availability");
       return data;
     },
+    refetchInterval: SOCKET_FALLBACK_MS,
   });
 }

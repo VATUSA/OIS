@@ -1,9 +1,15 @@
-//! Additive websocket push layer. An in-process broadcast hub (in `AppState`) carries small
-//! "something changed" nudges — a topic string — to every connected client, which then refetches the
-//! matching data through the normal REST API. REST stays the single source of truth; the socket only
-//! lowers latency versus polling, and if it drops the app degrades cleanly to the existing polls.
+//! Additive websocket push layer. A broadcast hub (in `AppState`) carries small "something changed"
+//! nudges — a topic string — to every connected client, which then refetches the matching data
+//! through the normal REST API. REST stays the single source of truth; the socket only lowers latency
+//! versus polling, and if it drops the app degrades cleanly to the existing polls (every key the
+//! socket nudges also polls, at least every `SOCKET_FALLBACK_MS` in `web/src/lib/realtime.ts`).
+//!
+//! **Deployment contract (#649):** any number of backend replicas may share one Postgres. A nudge is
+//! delivered to this process's sockets at once and to every other replica through Postgres
+//! `LISTEN/NOTIFY` on [`NOTIFY_CHANNEL`] — no extra infrastructure. Delivery is best-effort: a nudge
+//! lost while a listener reconnects is healed by the client's fallback poll.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension,
@@ -15,6 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use sqlx::{PgPool, postgres::PgListener};
 use tokio::sync::broadcast;
 
 use crate::{auth::context::CurrentUser, state::AppState};
@@ -25,7 +32,104 @@ pub struct WsEvent {
     pub topic: String,
 }
 
-pub type Events = broadcast::Sender<WsEvent>;
+/// The Postgres channel replicas fan nudges out on.
+pub const NOTIFY_CHANNEL: &str = "ois_realtime";
+
+/// The realtime hub: this process's subscribers, plus — with a database — every other replica's.
+#[derive(Clone)]
+pub struct Events {
+    local: broadcast::Sender<WsEvent>,
+    pool: Option<PgPool>,
+    /// Tags this process's notifications, so it can drop its own echo instead of delivering twice.
+    instance: Arc<str>,
+}
+
+impl Events {
+    pub fn new(pool: Option<PgPool>) -> Self {
+        Self {
+            local: broadcast::channel(256).0,
+            pool,
+            instance: uuid::Uuid::new_v4().simple().to_string().into(),
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
+        self.local.subscribe()
+    }
+
+    /// Nudges this process's sockets now, then tells the other replicas. Never fails: with no
+    /// listener anywhere, or the database unreachable, the nudge simply goes no further.
+    pub fn publish(&self, topic: &str) {
+        self.deliver(topic);
+        let (Some(pool), Ok(runtime)) = (self.pool.clone(), tokio::runtime::Handle::try_current())
+        else {
+            return;
+        };
+        let payload = format!("{}:{topic}", self.instance);
+        runtime.spawn(async move {
+            let notified = sqlx::query("select pg_notify($1, $2)")
+                .bind(NOTIFY_CHANNEL)
+                .bind(&payload)
+                .execute(&pool)
+                .await;
+            if let Err(e) = notified {
+                tracing::warn!(error = %e, "realtime: could not notify the other replicas");
+            }
+        });
+    }
+
+    fn deliver(&self, topic: &str) {
+        // An error only means nobody on this process is listening right now.
+        let _ = self.local.send(WsEvent {
+            topic: topic.to_string(),
+        });
+    }
+
+    /// The topic of a notification from another replica; `None` for this process's own echo.
+    fn foreign_topic<'a>(&self, payload: &'a str) -> Option<&'a str> {
+        let (from, topic) = payload.split_once(':')?;
+        (from != &*self.instance).then_some(topic)
+    }
+
+    /// Starts forwarding the other replicas' nudges into this hub. Returns once it is listening, so a
+    /// nudge published after this call is not missed; a no-op without a database. If the listening
+    /// connection is lost it reconnects, and the clients' fallback poll covers the gap.
+    pub async fn start_listener(&self) -> Result<(), sqlx::Error> {
+        let Some(pool) = self.pool.clone() else {
+            return Ok(());
+        };
+        let mut listener = listen(&pool).await?;
+        let hub = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.recv().await {
+                    Ok(notification) => {
+                        if let Some(topic) = hub.foreign_topic(notification.payload()) {
+                            hub.deliver(topic);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "realtime: listener lost; reconnecting");
+                        listener = loop {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            match listen(&pool).await {
+                                Ok(listener) => break listener,
+                                Err(e) => tracing::warn!(error = %e, "realtime: reconnect failed"),
+                            }
+                        };
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
+async fn listen(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
+    let mut listener = PgListener::connect_with(pool).await?;
+    listener.listen(NOTIFY_CHANNEL).await?;
+    Ok(listener)
+}
 
 /// Topic strings — kept in sync with the frontend invalidation map (`web/src/lib/realtime.ts`).
 pub mod topic {
@@ -122,6 +226,51 @@ mod tests {
         state.publish(super::topic::RELEASE);
         let ev = rx.recv().await.expect("event delivered");
         assert_eq!(ev.topic, "flow.release");
+    }
+
+    /// #649: two replicas share one database. A nudge published on one reaches the other's sockets
+    /// through Postgres, and reaches its own sockets exactly once — its own echo is dropped.
+    #[sqlx::test]
+    async fn a_nudge_reaches_every_replica_once(pool: sqlx::PgPool) {
+        use std::time::Duration;
+        use tokio::{sync::broadcast::error::TryRecvError, time::timeout};
+
+        let a = super::Events::new(Some(pool.clone()));
+        let b = super::Events::new(Some(pool.clone()));
+        a.start_listener().await.unwrap();
+        b.start_listener().await.unwrap();
+        let (mut on_a, mut on_b) = (a.subscribe(), b.subscribe());
+
+        a.publish(super::topic::RELEASE);
+
+        let crossed = timeout(Duration::from_secs(10), on_b.recv())
+            .await
+            .expect("the other replica hears it")
+            .unwrap();
+        assert_eq!(crossed.topic, "flow.release");
+        assert_eq!(
+            on_a.try_recv().unwrap().topic,
+            "flow.release",
+            "delivered locally at once"
+        );
+        // Give A's own echo time to arrive (it travels with B's copy), then check it was dropped.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            matches!(on_a.try_recv(), Err(TryRecvError::Empty)),
+            "no duplicate from the echo"
+        );
+        assert!(
+            matches!(on_b.try_recv(), Err(TryRecvError::Empty)),
+            "and B heard it once"
+        );
+    }
+
+    #[test]
+    fn a_hub_without_a_database_stays_local() {
+        let hub = super::Events::new(None);
+        let mut rx = hub.subscribe();
+        hub.publish(super::topic::GDP);
+        assert_eq!(rx.try_recv().unwrap().topic, "tmu.gdp");
     }
 
     #[tokio::test]
