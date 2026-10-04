@@ -9,7 +9,7 @@ import {getDesktopToken} from "./desktop-token";
  * waiting for their poll. Purely additive — if the socket never connects, polling still keeps
  * everything correct. Keep these topics in sync with `backend/src/realtime.rs` `topic`.
  */
-const TOPIC_KEYS: Record<string, string[][]> = {
+export const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
