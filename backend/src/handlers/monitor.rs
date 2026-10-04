@@ -31,9 +31,9 @@ use crate::{
     },
     handlers::flow::all_excluded_callsigns,
     models::{
-        ConsolidateSectorRequest, MonitorBinBody, MonitorRowBody, MonitorTableBody,
-        SectorConsolidationBody, SectorConsolidationsBody, SectorMapBody, SectorMapsBody,
-        SetSectorMapRequest,
+        BulkConsolidateMode, BulkConsolidateRequest, ConsolidateSectorRequest, MonitorBinBody,
+        MonitorRowBody, MonitorTableBody, SectorConsolidationBody, SectorConsolidationsBody,
+        SectorMapBody, SectorMapsBody, SetSectorMapRequest,
     },
     repos::{flow as flow_repo, sector_consolidations as consolidations_repo, sector_maps as repo},
     state::AppState,
@@ -331,6 +331,55 @@ pub async fn consolidate_sector(
         return Err(ApiError::BadRequest);
     }
     consolidations_repo::consolidate(pool, &artcc, &sector_id, target, principal.user_id()).await?;
+    refresh_consolidations(&state, pool).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Consolidate many of this ARTCC's sectors into one at once (#713): every other sector, or only those in
+/// no consolidation yet. One transaction — a refused or failed save changes nothing — gated like the
+/// single-sector write. See [`consolidations_repo::consolidate_all`].
+#[utoipa::path(
+    post, path = "/api/v1/flow/monitor/{artcc}/consolidations", tag = "flow",
+    params(("artcc" = String, Path)),
+    request_body = BulkConsolidateRequest,
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.monitor.update` does not cover this ARTCC"),
+        (status = 404, description = "The target isn't one of this ARTCC's sectors"),
+        (status = 409, description = "`except_consolidated`, and the target is itself worked elsewhere")
+    )
+)]
+pub async fn consolidate_all_sectors(
+    State(state): State<AppState>,
+    _permission: RequirePermission<FlowMonitorUpdate>,
+    Actor(principal): Actor,
+    Path(artcc): Path<String>,
+    Json(payload): Json<BulkConsolidateRequest>,
+) -> Result<StatusCode, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let artcc = artcc.trim().to_ascii_uppercase();
+    require_edit(&state, &principal, &artcc).await?;
+    let target = payload.target_sector_id.trim();
+    if !is_sector(&state, &artcc, target) {
+        return Err(ApiError::NotFound);
+    }
+    let sectors: Vec<String> = state
+        .airspace_sectors
+        .load()
+        .sectors_of(&artcc)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    consolidations_repo::consolidate_all(
+        pool,
+        &artcc,
+        target,
+        &sectors,
+        payload.mode == BulkConsolidateMode::ExceptConsolidated,
+        principal.user_id(),
+    )
+    .await?;
     refresh_consolidations(&state, pool).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -729,6 +778,119 @@ mod consolidation_tests {
             .collect();
         rows.sort();
         rows
+    }
+
+    // ---- #713: bulk consolidation ----------------------------------------------------------------
+
+    /// ZLA sectors 010–060, and ZDC 024 — enough room for a consolidation, a hub and free sectors.
+    fn wide_state(pool: PgPool) -> AppState {
+        let state = test_state(pool, Default::default());
+        let mut volumes: Vec<_> = ["0100", "0200", "0300", "0400", "0500", "0600"]
+            .iter()
+            .map(|v| volume("ZLA", v))
+            .collect();
+        volumes.push(volume("ZDC", "0240"));
+        state
+            .airspace_sectors
+            .store(Arc::new(SectorTable { volumes }));
+        state
+    }
+
+    async fn all_into(state: &AppState, cookie: &str, target: &str, mode: &str) -> u16 {
+        send(
+            state,
+            http::Method::POST,
+            "/api/v1/flow/monitor/ZLA/consolidations",
+            cookie,
+            Some(json!({"target_sector_id": target, "mode": mode})),
+        )
+        .await
+        .as_u16()
+    }
+
+    /// AC1: "All into N" leaves N the only row — even when N was itself worked elsewhere, and whatever
+    /// was consolidated before.
+    #[sqlx::test]
+    async fn all_into_n_leaves_n_the_only_row(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "010", "020").await, 204);
+        assert_eq!(work_at(&state, &zla, "040", "050").await, 204);
+
+        assert_eq!(all_into(&state, &zla, "040", "all").await, 204);
+
+        let expected = pairs(&[
+            ("010", "040"),
+            ("020", "040"),
+            ("030", "040"),
+            ("050", "040"),
+            ("060", "040"),
+        ]);
+        assert_eq!(
+            stored(&pool).await,
+            expected,
+            "N has no row; everything else is worked at N"
+        );
+        assert_eq!(cached(&state), expected, "and every viewer sees it at once");
+    }
+
+    /// AC2: "except consolidated" moves only free-standing sectors: one worked elsewhere (010) and the
+    /// position it is worked at (020) both stay as they were.
+    #[sqlx::test]
+    async fn except_consolidated_leaves_existing_arrangements(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "010", "020").await, 204);
+
+        assert_eq!(
+            all_into(&state, &zla, "040", "except_consolidated").await,
+            204
+        );
+
+        assert_eq!(
+            stored(&pool).await,
+            pairs(&[
+                ("010", "020"),
+                ("030", "040"),
+                ("050", "040"),
+                ("060", "040")
+            ])
+        );
+    }
+
+    /// AC2/AC3: with N itself worked elsewhere, "except consolidated" can't keep its promise, so it is
+    /// refused — and the refused save writes nothing.
+    #[sqlx::test]
+    async fn except_consolidated_is_refused_when_n_is_worked_elsewhere(pool: PgPool) {
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+        assert_eq!(work_at(&state, &zla, "040", "050").await, 204);
+
+        assert_eq!(
+            all_into(&state, &zla, "040", "except_consolidated").await,
+            409
+        );
+        assert_eq!(stored(&pool).await, pairs(&[("040", "050")]));
+    }
+
+    /// AC4: a TMU at another ARTCC, a viewer without the update grant and an unknown target are all
+    /// refused, and nothing is written.
+    #[sqlx::test]
+    async fn a_bulk_consolidation_is_gated_like_one_sector(pool: PgPool) {
+        let zdc = user(&pool, Some("ZDC")).await;
+        let viewer = user(&pool, None).await;
+        let zla = user(&pool, Some("ZLA")).await;
+        let state = wide_state(pool.clone());
+
+        assert_eq!(all_into(&state, &zdc, "040", "all").await, 403);
+        assert_eq!(all_into(&state, &viewer, "040", "all").await, 401);
+        assert_eq!(all_into(&state, &zla, "999", "all").await, 404);
+        assert_eq!(
+            all_into(&state, &zla, "024", "all").await,
+            404,
+            "another ARTCC's sector"
+        );
+        assert!(stored(&pool).await.is_empty());
     }
 
     /// Releasing is a write to another facility's Monitor too: a TMU at another ARTCC (and a viewer
