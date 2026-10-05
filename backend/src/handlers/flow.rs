@@ -5271,6 +5271,64 @@ mod fca_scope_tests {
         session_cookie(pool, &user).await
     }
 
+    /// #730: a rostered controller's FCA access comes from the CONTROLLER group the VATUSA sync grants
+    /// at their facility — not a direct grant — and still stops at that facility's boundary.
+    #[sqlx::test]
+    async fn a_zdc_controller_edits_zdc_fcas_and_is_refused_ztls(pool: PgPool) {
+        use crate::repos::access::{GrantSource, set_user_role_scoped};
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let controller = seed_user(&pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        set_user_role_scoped(
+            &mut tx,
+            &controller,
+            "CONTROLLER",
+            true,
+            Some("ZDC"),
+            GrantSource::Vatusa,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let cookie = session_cookie(&pool, &controller).await;
+        let ztl_fca = seed_fca(&pool, &owner, "ZTL").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let put = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &put(&ztl_fca),
+                &cookie,
+                Some(fca("ZTL"))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &put(&zdc_fca),
+                &cookie,
+                Some(fca("ZDC"))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &put(&ztl_fca), &cookie, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            artcc_of(&pool, &ztl_fca).await.as_deref(),
+            Some("ZTL"),
+            "untouched"
+        );
+    }
+
     /// AC1 + AC4: create.
     #[sqlx::test]
     async fn a_scoped_holder_creates_fcas_only_in_its_artcc(pool: PgPool) {

@@ -14736,6 +14736,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -14832,6 +14839,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -14870,6 +14884,13 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
