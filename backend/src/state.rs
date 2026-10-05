@@ -7,18 +7,9 @@ use arc_swap::ArcSwap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::feed::{
-    self, FeedState,
-    airspace::Boundaries,
-    facilities::FacilityState,
-    monitor::Consolidations,
-    nav::NavData,
-    runway_db::RunwayDb,
-    sectors::{SectorMaps, SectorTable},
-    taxi_estimate,
-    tracon::TraconState,
-    trajectory::ProfileTable,
-    vnas::VnasState,
-    winds::Winds,
+    self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
+    runway_db::RunwayDb, sectors::SectorTable, taxi_estimate, tracon::TraconState,
+    trajectory::ProfileTable, winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -38,9 +29,6 @@ pub struct AppState {
     /// SimAware TRACON boundaries for the ATC layer. Starts empty, refreshed daily
     /// (`feed::tracon::spawn_refresh`); behind `ArcSwap` for lock-free reads.
     pub tracons: TraconState,
-    /// vNAS ERAM sector identities (daily) and live sector staffing (every 30 s), from the single
-    /// poller `feed::vnas::spawn_refresh` (#595). Behind `ArcSwap`s for lock-free reads.
-    pub vnas: VnasState,
     /// Runway ends per US airport, for the Runway Balancer (immutable, compile-time bundled).
     pub runways: Arc<RunwayDb>,
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
@@ -50,17 +38,11 @@ pub struct AppState {
     /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
-    /// ATC sector volumes for the Airspace Monitor (#594). Starts empty and is reloaded from the DB
+    /// ATC sector volumes (#594), the dataset kept when the Monitor was removed (#719). Starts empty and is reloaded from the DB
     /// by `jobs::spawn_airspace_sectors_refresh`; its only writer is the offline importer, so a new
     /// import appears on the next tick (see `feed::sectors`). Behind `ArcSwap` for lock-free reads
     /// from the DB-less feed subsystem.
     pub airspace_sectors: Arc<ArcSwap<SectorTable>>,
-    /// Monitor Alert Parameter overrides (#598). Reloaded by `jobs::spawn_sector_maps_refresh` and
-    /// force-reloaded by `handlers::monitor` after each write, so an edit applies on the next cycle.
-    pub sector_maps: Arc<ArcSwap<SectorMaps>>,
-    /// Sector consolidations (#599). Reloaded by `jobs::spawn_sector_consolidations_refresh` and
-    /// force-reloaded by `handlers::monitor` after each write, so every viewer sees it at once.
-    pub sector_consolidations: Arc<ArcSwap<Consolidations>>,
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
@@ -118,15 +100,12 @@ impl AppState {
         let feed = feed::new_state();
         let facilities = feed::facilities::new_state();
         let tracons = feed::tracon::new_state();
-        let vnas = feed::vnas::new_state();
         let nav = Arc::new(ArcSwap::from_pointee(NavData::load()));
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
-        let sector_maps = Arc::new(ArcSwap::from_pointee(SectorMaps::default()));
-        let sector_consolidations = Arc::new(ArcSwap::from_pointee(Consolidations::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
@@ -163,15 +142,12 @@ impl AppState {
                 feed,
                 facilities,
                 tracons,
-                vnas,
                 nav,
                 airspace,
                 runways,
                 winds,
                 aircraft_profiles,
                 airspace_sectors,
-                sector_maps,
-                sector_consolidations,
                 gates,
                 flight_exclusions,
                 taxi_estimate_samples,
@@ -192,15 +168,12 @@ impl AppState {
             feed,
             facilities,
             tracons,
-            vnas,
             nav,
             airspace,
             runways,
             winds,
             aircraft_profiles,
             airspace_sectors,
-            sector_maps,
-            sector_consolidations,
             gates,
             flight_exclusions,
             taxi_estimate_samples,
@@ -222,15 +195,12 @@ impl AppState {
             feed: feed::new_state(),
             facilities: feed::facilities::new_state(),
             tracons: feed::tracon::new_state(),
-            vnas: feed::vnas::new_state(),
             nav: Arc::new(ArcSwap::from_pointee(NavData::default())),
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
-            sector_maps: Arc::new(ArcSwap::from_pointee(SectorMaps::default())),
-            sector_consolidations: Arc::new(ArcSwap::from_pointee(Consolidations::default())),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),

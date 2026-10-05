@@ -37,10 +37,8 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
-import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {SectorsPage} from "@/pages/flow/sectors";
-import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
@@ -396,7 +394,7 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
-// --- Flow (sector loading, and the sector data behind it) ---
+// --- Flow (the sector dataset; the Airspace Monitor was removed in #719) ---
 
 const adminFlowRoute = createRoute({
   getParentRoute: () => adminRoute,
@@ -410,13 +408,6 @@ const adminFlowSectorsRoute = createRoute({
   path: "sectors",
   staticData: { title: "Sectors" },
   component: SectorsPage,
-});
-
-const adminFlowMonitorRoute = createRoute({
-  getParentRoute: () => adminFlowRoute,
-  path: "monitor",
-  staticData: { title: "Airspace Monitor" },
-  component: MonitorPage,
 });
 
 // --- Planning (pre-event) ---
@@ -477,13 +468,6 @@ const planningAircraftProfilesRoute = createRoute({
   path: "aircraft-profiles",
   staticData: { title: "Aircraft profiles" },
   component: AircraftProfilesPage,
-});
-
-const planningSectorMapsRoute = createRoute({
-  getParentRoute: () => planningRoute,
-  path: "sector-maps",
-  staticData: { title: "Monitor alert parameters" },
-  component: SectorMapsPage,
 });
 
 const planningEventRoute = createRoute({
@@ -709,7 +693,7 @@ const routeTree = rootRoute.addChildren([
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
-    adminFlowRoute.addChildren([adminFlowMonitorRoute, adminFlowSectorsRoute]),
+    adminFlowRoute.addChildren([adminFlowSectorsRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,
@@ -717,7 +701,6 @@ const routeTree = rootRoute.addChildren([
       planningFacilityDocumentsRoute,
       planningAirportSurfaceRoute,
       planningAircraftProfilesRoute,
-      planningSectorMapsRoute,
       planningEventRoute,
       planningEventFcasRoute,
     ]),

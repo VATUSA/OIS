@@ -1,5 +1,5 @@
 //! ATC sector volumes (#594): altitude-bounded polygons OIS owns in `flow.airspace_sector`
-//! (migration 0111), for the Airspace Monitor (#593).
+//! (migration 0111). The Airspace Monitor that first used them was removed (#719); the dataset stays.
 //!
 //! No public feed supplies these, so they are imported offline by `bin/airspace_sector_importer.rs`
 //! and loaded into `AppState::airspace_sectors` by `jobs::spawn_airspace_sectors_refresh`. The
@@ -50,7 +50,7 @@ pub struct SectorTable {
 
 impl SectorTable {
     /// One ARTCC's sectors, each once, as `(sector_id, name)` ordered by sector — a sector spans one
-    /// or more volumes, so this is what an Airspace Monitor row is.
+    /// or more volumes.
     pub fn sectors_of(&self, artcc: &str) -> Vec<(String, Option<String>)> {
         let mut sectors = std::collections::BTreeMap::new();
         for v in self.volumes.iter().filter(|v| v.artcc == artcc) {
@@ -74,20 +74,6 @@ impl SectorTable {
             .iter()
             .filter(move |v| v.contains(lat, lon, alt_ft))
     }
-}
-
-/// The Monitor Alert Parameter a sector reads until a TMU overrides it (#598). Taken from vTBFM, which
-/// tunes it down from real high-sector values of about 16–20 for VATSIM traffic levels.
-pub const DEFAULT_MAP: i32 = 10;
-
-/// Stored MAP overrides by `(artcc, sector_id)`, as cached in `AppState::sector_maps`.
-pub type SectorMaps = std::collections::HashMap<(String, String), i32>;
-
-/// A sector's MAP: its override, or [`DEFAULT_MAP`].
-pub fn map_for(maps: &SectorMaps, artcc: &str, sector_id: &str) -> i32 {
-    maps.get(&(artcc.to_string(), sector_id.to_string()))
-        .copied()
-        .unwrap_or(DEFAULT_MAP)
 }
 
 /// Why a volume can't be stored, or `Ok` if it can. The single gate every write passes through

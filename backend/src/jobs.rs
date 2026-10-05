@@ -130,9 +130,6 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often to reload ATC sector volumes from the DB. Their only writer is the offline importer,
 /// a separate process the server can't hear, so this tick is how an import goes live.
 const AIRSPACE_SECTORS_INTERVAL: Duration = Duration::from_secs(5 * 60);
-/// How often the Monitor Alert Parameter cache reloads (#598). A write reloads only its own replica,
-/// so this bounds how long another replica shows the old value. The table is tiny, so poll often.
-const SECTOR_MAPS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
@@ -507,62 +504,6 @@ pub fn spawn_airspace_sectors_refresh(
                         let n = table.volumes.len();
                         sectors.store(Arc::new(table));
                         Ok(format!("{n} volumes"))
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
-        },
-    ));
-}
-
-/// Keep the Monitor Alert Parameter cache current (#598). Writes force-reload it
-/// (`handlers::monitor`); this is the backstop. Fails safe — a failed load keeps the current map.
-pub fn spawn_sector_maps_refresh(
-    reg: Arc<JobRegistry>,
-    pool: PgPool,
-    maps: Arc<ArcSwap<crate::feed::sectors::SectorMaps>>,
-) {
-    tokio::spawn(run_interval(
-        reg,
-        "sector_maps_refresh",
-        "Reload Monitor Alert Parameters from the DB",
-        SECTOR_MAPS_INTERVAL,
-        move || {
-            let (pool, maps) = (pool.clone(), maps.clone());
-            async move {
-                match crate::repos::sector_maps::load_all(&pool).await {
-                    Ok(loaded) => {
-                        let n = loaded.len();
-                        maps.store(Arc::new(loaded));
-                        Ok(format!("{n} overrides"))
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
-        },
-    ));
-}
-
-/// Keep the sector consolidation cache current (#599). Writes force-reload it (`handlers::monitor`);
-/// this is the backstop, and what carries another replica's write. Fails safe.
-pub fn spawn_sector_consolidations_refresh(
-    reg: Arc<JobRegistry>,
-    pool: PgPool,
-    consolidations: Arc<ArcSwap<crate::feed::monitor::Consolidations>>,
-) {
-    tokio::spawn(run_interval(
-        reg,
-        "sector_consolidations_refresh",
-        "Reload sector consolidations from the DB",
-        SECTOR_MAPS_INTERVAL,
-        move || {
-            let (pool, consolidations) = (pool.clone(), consolidations.clone());
-            async move {
-                match crate::repos::sector_consolidations::load_all(&pool).await {
-                    Ok(loaded) => {
-                        let n = loaded.len();
-                        consolidations.store(Arc::new(loaded));
-                        Ok(format!("{n} consolidated sectors"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
