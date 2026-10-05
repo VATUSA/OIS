@@ -1006,11 +1006,14 @@ mod tests {
 mod departures_release_tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Timelike, Utc};
     use sqlx::PgPool;
 
     use crate::{
-        feed::vatsim::{FlightPlan, Prefile, VatsimData},
+        feed::{
+            airports::Airport,
+            vatsim::{FlightPlan, Prefile, VatsimData},
+        },
         scope_test_support::{grant, seed_user, send_json, session_cookie, test_state},
         state::AppState,
     };
@@ -1112,6 +1115,70 @@ mod departures_release_tests {
     fn held(t: DateTime<Utc>) -> serde_json::Value {
         let shown = serde_json::to_value(t).unwrap();
         serde_json::json!([shown, true, true])
+    }
+
+    /// The issue's explicit decision: a locked time beats the arrival rate program's merely proposed CFR,
+    /// whether it is later or earlier than the proposal; the proposal shows only when nothing is locked
+    /// (#732 review: no test seeded a rate program, so restoring `m.cfr.or(locked)` stayed green).
+    #[sqlx::test]
+    async fn a_locked_time_beats_the_rate_programs_proposal(pool: PgPool) {
+        // AAR 1 at KDCA meters all three, an hour apart, so each gets a proposed (unissued) CFR.
+        sqlx::query("insert into tmu.programs (icao, aar) values ('KDCA', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = test_state(pool.clone(), HashMap::new());
+        {
+            let mut feed = state.feed.write().await;
+            feed.airports = Arc::new(HashMap::from([
+                ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+                ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+            ]));
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                prefiles: ["P1", "P2", "P3"]
+                    .iter()
+                    .map(|c| Prefile {
+                        callsign: (*c).into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: "KJFK".into(),
+                            arrival: "KDCA".into(),
+                            route: "RBV WHITE SIE".into(),
+                            aircraft_short: "B738".into(),
+                            cruise_tas: "440".into(),
+                            altitude: "35000".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        }
+        let proposed = departures(&pool, &state).await;
+        for c in ["P1", "P2", "P3"] {
+            assert_eq!(proposed[c][1], false, "{c} starts with only a proposal");
+        }
+
+        let now = Utc::now().with_nanosecond(0).unwrap();
+        let fca_id = fca(&pool, true, false).await;
+        let later = now + chrono::Duration::hours(10);
+        let earlier = now - chrono::Duration::minutes(5);
+        release(&pool, &fca_id, "P2", later).await;
+        release(&pool, &fca_id, "P3", earlier).await;
+
+        let shown = departures(&pool, &state).await;
+        assert_eq!(
+            shown["P2"],
+            held(later),
+            "a later release beats the proposal"
+        );
+        assert_eq!(shown["P3"], held(earlier), "so does an earlier one");
+        // The proposal is recomputed against the clock on every read, so compare its shape, not its instant.
+        assert!(
+            shown["P1"][0].is_string(),
+            "nothing locked: the proposal still shows"
+        );
+        assert_eq!(shown["P1"][1], false, "and stays unissued");
     }
 
     /// AC1–AC3: two FCAs disagree → the later; a GDP slot later than the release → the GDP time; a
