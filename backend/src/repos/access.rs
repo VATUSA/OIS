@@ -389,6 +389,7 @@ pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
     "ACE",
     "NTMO",
     "DCC_STAFF",
+    "CONTROLLER",
 ];
 
 /// All permission names in the catalog (the assignable set for the editor).
@@ -2005,6 +2006,61 @@ mod tests {
             );
             assert!(!actual.is_empty(), "{role} must bundle something (#544)");
         }
+    }
+
+    /// #730: CONTROLLER is exactly the owner's operational baseline — equality, not containment, so a
+    /// permission slipped into it fails here. And nothing from Planning (`events.plan.*`), Historical
+    /// (`stats.*`) or any publish verb is in it, checked against the whole catalog so a permission
+    /// added to those domains later can't arrive through this group unnoticed.
+    #[sqlx::test]
+    async fn the_controller_group_is_exactly_the_operational_baseline(pool: sqlx::PgPool) {
+        use std::collections::BTreeSet;
+        let held: BTreeSet<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'CONTROLLER'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+        let expected: BTreeSet<String> = [
+            "flow.fca.read",
+            "flow.fca.update",
+            "flow.fca.delete",
+            "flow.route.update",
+            "tmu.cfr.assign",
+            "flow.runway.read",
+            "flow.runway.update",
+            "tmu.program.read",
+            "tmu.tmi.read",
+            "tmu.adv.read",
+            "tmu.ntml.read",
+            "tmu.gdp.read",
+            "tmu.groundstop.read",
+            "tmu.delays.read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(held, expected);
+
+        let off_limits: BTreeSet<String> = crate::repos::access::fetch_access_catalog_names(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|p| {
+                p.starts_with("events.plan.") || p.starts_with("stats.") || p.ends_with(".publish")
+            })
+            .collect();
+        assert!(
+            !off_limits.is_empty(),
+            "the catalog has such permissions to keep out"
+        );
+        assert!(
+            held.is_disjoint(&off_limits),
+            "CONTROLLER reaches {:?}",
+            held.intersection(&off_limits).collect::<Vec<_>>()
+        );
     }
 
     /// The baseline every signed-in user gets, now held by the `USER` group rather than copied onto

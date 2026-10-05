@@ -355,7 +355,7 @@ pub async fn apply_division(
         .await
         .map_err(|e| format!("clear departed members: {e}"))?;
     let summary = format!(
-        "{} controllers ({seeded} new); roles changed for {changed}; {departed} departed",
+        "{} controllers ({seeded} new); access changed for {changed}; {departed} departed",
         members.len()
     );
     Ok((summary, changed + departed > 0))
@@ -892,7 +892,7 @@ mod tests {
 
         let summary = apply_and_announce(&pool, &members, &hub()).await.unwrap();
         assert!(
-            summary.starts_with("1200 controllers (1200 new); roles changed for 1;"),
+            summary.starts_with("1200 controllers (1200 new); access changed for 1200;"),
             "{summary}"
         );
 
@@ -916,7 +916,7 @@ mod tests {
 
         let again = apply_and_announce(&pool, &members, &hub()).await.unwrap();
         assert!(
-            again.starts_with("1200 controllers (0 new); roles changed for 0"),
+            again.starts_with("1200 controllers (0 new); access changed for 0"),
             "{again}"
         );
         let users_after: i64 = sqlx::query_scalar("select count(*) from identity.users")
@@ -970,13 +970,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(held(&pool, 1_605_200).await.len(), 1);
+        // EC from the mapping, and CONTROLLER from the ZDC home (#730).
+        assert_eq!(held(&pool, 1_605_200).await.len(), 2);
 
         apply_and_announce(&pool, &pulled(present(), vec![]), &hub())
             .await
             .unwrap();
 
-        assert!(held(&pool, 1_605_200).await.is_empty());
+        // The mapped EC goes with the role; the roster grant stays, since they're still at ZDC.
+        assert_eq!(held(&pool, 1_605_200).await.len(), 1);
         let reason: String = sqlx::query_scalar(
             "select reason from access.audit_logs where actor_id = 'vatusa-sync' \
              order by created_at desc, id desc limit 1",
@@ -1023,7 +1025,8 @@ mod tests {
         assert!(summary.ends_with("1 departed"), "{summary}");
         assert!(stored_roles(&pool, everyone[0]).await.is_empty());
         assert!(held(&pool, everyone[0]).await.is_empty());
-        assert_eq!(held(&pool, everyone[1]).await.len(), 1);
+        // Still present: their mapped EC, and the roster CONTROLLER their ZDC home grants (#730).
+        assert_eq!(held(&pool, everyone[1]).await.len(), 2);
     }
 
     /// AC5. v3 carries no `discord_id`. The bot resolves DMs through this mapping, which sign-in
@@ -1179,8 +1182,8 @@ mod tests {
         assert_eq!(access_nudges(&mut rx), 1, "one nudge for the whole pull");
         assert_eq!(
             held(&pool, everyone[0]).await.len(),
-            1,
-            "and the access it announces is already stored"
+            2,
+            "and the access it announces is already stored (the MTR mapping, beside the roster grant)"
         );
     }
 
@@ -1271,7 +1274,8 @@ mod tests {
             assert!(refused.is_err_and(|e| e.contains("role list looks truncated")));
         }
         for cid in &everyone {
-            assert_eq!(held(&pool, *cid).await.len(), 1, "{cid} kept their access");
+            // The mapped grant and the roster grant (#730).
+            assert_eq!(held(&pool, *cid).await.len(), 2, "{cid} kept their access");
         }
 
         // The floor is half: losing a few roles is a real change, and applies.
@@ -1282,7 +1286,8 @@ mod tests {
         apply_and_announce(&pool, &pulled(roster(), most), &hub())
             .await
             .unwrap();
-        assert!(held(&pool, everyone[9]).await.is_empty());
+        // Their mapped grant went with the role; the roster grant stays, since they're still at ZDC.
+        assert_eq!(held(&pool, everyone[9]).await.len(), 1);
     }
 
     /// The one remaining v2 call is sign-in's (AC8). Counted across the whole backend source, so a

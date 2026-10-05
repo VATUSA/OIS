@@ -1,7 +1,7 @@
 //! Runway Balancer handlers — the shared per-airport board (arrivals assigned to landing
 //! runways + demand bins) and its config, computed live off the feed.
 
-use crate::auth::principal::Actor;
+use crate::auth::principal::{Actor, Principal};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -242,6 +242,25 @@ pub async fn get_runway(
     Ok(Json(build_board(&state, &icao).await?))
 }
 
+/// Refuse a runway write outside the caller's `flow.runway.update` scope (#730). The airport's ARTCC is
+/// the scope that counts, as for a CFR (`handlers::feed::require_cfr_scope`): a grant scoped to ZDC
+/// writes ZDC's airports only, and an airport OIS can't place in an ARTCC needs a national grant.
+async fn require_runway_scope(
+    state: &AppState,
+    principal: &Principal,
+    icao: &str,
+) -> Result<(), ApiError> {
+    let artcc = crate::feed::facilities::artcc_for_airport(&*state.facilities.read().await, icao);
+    let scope = principal
+        .permission_scope(state, "flow.runway.update")
+        .await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 /// Save the shared runway config (active ends, STAR rules, overrides, window) and return
 /// the recomputed board.
 #[utoipa::path(
@@ -251,7 +270,12 @@ pub async fn get_runway(
     security(("session" = ["flow.runway.update"]), ("api_key" = ["flow.runway.update"]), ("service_account" = ["flow.runway.update"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     request_body = RunwayConfigRequest,
-    responses((status = 200, body = RunwayBoard), (status = 401), (status = 503))
+    responses(
+        (status = 200, body = RunwayBoard),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.runway.update` does not cover this airport's ARTCC"),
+        (status = 503)
+    )
 )]
 pub async fn put_runway(
     State(state): State<AppState>,
@@ -260,9 +284,10 @@ pub async fn put_runway(
     Path(icao): Path<String>,
     Json(body): Json<RunwayConfigRequest>,
 ) -> Result<Json<RunwayBoard>, ApiError> {
+    let icao = icao.to_ascii_uppercase();
+    require_runway_scope(&state, &principal, &icao).await?;
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let icao = icao.to_ascii_uppercase();
     let window = body.window_min.map(|w| w.clamp(30, 240));
     runway_repo::upsert_config(
         pool,
@@ -318,7 +343,13 @@ pub async fn list_saved_configs(
         ("name" = String, Path, description = "Config name")
     ),
     request_body = SavedConfigRequest,
-    responses((status = 204), (status = 400), (status = 401), (status = 503))
+    responses(
+        (status = 204),
+        (status = 400),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.runway.update` does not cover this airport's ARTCC"),
+        (status = 503)
+    )
 )]
 pub async fn save_config(
     State(state): State<AppState>,
@@ -327,6 +358,8 @@ pub async fn save_config(
     Path((icao, name)): Path<(String, String)>,
     Json(body): Json<SavedConfigRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let icao = icao.to_ascii_uppercase();
+    require_runway_scope(&state, &principal, &icao).await?;
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let name = name.trim();
@@ -335,7 +368,7 @@ pub async fn save_config(
     }
     runway_repo::upsert_saved(
         pool,
-        &icao.to_ascii_uppercase(),
+        &icao,
         name,
         &runway_repo::SavedPayload {
             active_ends: body.active_ends,
@@ -359,19 +392,184 @@ pub async fn save_config(
         ("icao" = String, Path, description = "Airport ICAO"),
         ("name" = String, Path, description = "Config name")
     ),
-    responses((status = 204), (status = 401), (status = 404), (status = 503))
+    responses(
+        (status = 204),
+        (status = 401),
+        (status = 403, description = "The caller's `flow.runway.update` does not cover this airport's ARTCC"),
+        (status = 404),
+        (status = 503)
+    )
 )]
 pub async fn delete_config(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRunwayUpdate>,
+    Actor(principal): Actor,
     Path((icao, name)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    let icao = icao.to_ascii_uppercase();
+    require_runway_scope(&state, &principal, &icao).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if runway_repo::delete_saved(pool, &icao.to_ascii_uppercase(), name.trim()).await? {
+    if runway_repo::delete_saved(pool, &icao, name.trim()).await? {
         // Every client's runway view, on the write path (#646).
         state.publish(crate::realtime::topic::RUNWAY);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use std::collections::HashMap;
+
+    use http::{Method, StatusCode};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::repos::access::{GrantSource, set_user_role_scoped};
+    use crate::scope_test_support::{artcc, grant, seed_user, send, session_cookie, test_state};
+    use crate::state::AppState;
+
+    /// KDCA belongs to ZDC and KATL to ZTL, so a runway's airport resolves to an owning ARTCC.
+    async fn state(pool: PgPool) -> AppState {
+        let state = test_state(pool, Default::default());
+        *state.facilities.write().await = HashMap::from([
+            ("ZDC".to_string(), artcc(&["KDCA"])),
+            ("ZTL".to_string(), artcc(&["KATL"])),
+        ]);
+        state
+    }
+
+    /// A rostered controller at `artcc`: the CONTROLLER group the VATUSA sync grants (#730), which
+    /// carries `flow.runway.update`, scoped there.
+    async fn controller_at(pool: &PgPool, at: &str) -> String {
+        let user = seed_user(pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        set_user_role_scoped(
+            &mut tx,
+            &user,
+            "CONTROLLER",
+            true,
+            Some(at),
+            GrantSource::Vatusa,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        session_cookie(pool, &user).await
+    }
+
+    async fn configs(pool: &PgPool, table: &str) -> Vec<String> {
+        sqlx::query_scalar(&format!("select icao from flow.{table} order by icao"))
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// #730: runway writes are scoped to the airport's ARTCC. Before this, `flow.runway.update` was
+    /// checked by name only, so a grant scoped to one ARTCC reached every airport in the division.
+    #[sqlx::test]
+    async fn a_controller_sets_runways_only_at_their_artccs_airports(pool: PgPool) {
+        let state = state(pool.clone()).await;
+        let zdc = controller_at(&pool, "ZDC").await;
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/flow/runway/KATL",
+                &zdc,
+                Some(json!({}))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        // The ZDC airport gets past the scope check and is written (the board built after it is not
+        // what this tests).
+        let at_home = send(
+            &state,
+            Method::PUT,
+            "/api/v1/flow/runway/KDCA",
+            &zdc,
+            Some(json!({})),
+        )
+        .await;
+        assert_ne!(at_home, StatusCode::FORBIDDEN);
+        assert_eq!(configs(&pool, "runway_config").await, ["KDCA"]);
+    }
+
+    #[sqlx::test]
+    async fn a_controller_saves_and_deletes_named_configs_only_at_their_artcc(pool: PgPool) {
+        let state = state(pool.clone()).await;
+        let zdc = controller_at(&pool, "ZDC").await;
+        let body = Some(json!({ "active_ends": ["01"] }));
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/flow/runway/KATL/configs/North",
+                &zdc,
+                body.clone()
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/flow/runway/KDCA/configs/North",
+                &zdc,
+                body.clone()
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(configs(&pool, "runway_saved_config").await, ["KDCA"]);
+
+        // A ZTL config someone national saved can't be deleted from ZDC.
+        let national = seed_user(&pool).await;
+        grant(&pool, &national, "flow.runway.update", None).await;
+        let national = session_cookie(&pool, &national).await;
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/flow/runway/KATL/configs/North",
+                &national,
+                body
+            )
+            .await,
+            StatusCode::NO_CONTENT,
+            "a national holder still writes anywhere"
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::DELETE,
+                "/api/v1/flow/runway/KATL/configs/North",
+                &zdc,
+                None
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            configs(&pool, "runway_saved_config").await,
+            ["KATL", "KDCA"]
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::DELETE,
+                "/api/v1/flow/runway/KDCA/configs/North",
+                &zdc,
+                None
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(configs(&pool, "runway_saved_config").await, ["KATL"]);
     }
 }

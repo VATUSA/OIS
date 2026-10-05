@@ -87,7 +87,8 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     )
     .bind(m.cid)
     .bind(m.full_name())
-    .bind(&m.facility)
+    // Normalised as the pull's are: the roster grant (#730) joins it against org.facilities.
+    .bind(normalise_facility(&m.facility))
     .bind(m.short_rating())
     .bind(m.rating)
     .bind(m.flag_homecontroller)
@@ -142,7 +143,8 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
         .await
         .map_err(|_| ApiError::Internal)?;
     for visit in &m.visiting_facilities {
-        if visit.facility.is_empty() {
+        let facility = normalise_facility(&visit.facility);
+        if facility.is_empty() {
             continue;
         }
         sqlx::query(
@@ -150,7 +152,7 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
              on conflict (cid, facility) do nothing",
         )
         .bind(m.cid)
-        .bind(&visit.facility)
+        .bind(&facility)
         .execute(&mut *tx)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -216,34 +218,56 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     tx.commit().await.map_err(|_| ApiError::Internal)
 }
 
+/// The group every rostered controller holds at their home ARTCC and each visiting ARTCC (#730): the
+/// baseline operational set (migration 0126). Granted by the reconciler like a role mapping, with
+/// `source = 'vatusa'`, so it comes and goes with the roster and never touches a hand-made grant.
+pub const ROSTER_GROUP: &str = "CONTROLLER";
+
 /// Group grants a member's VATUSA roles call for, keyed by `(group, scope)`, each with the VATUSA
 /// roles that justify it (`DATM@ZDC`) — the audit trail names them.
 type JustifiedGrants = BTreeMap<(String, Option<String>), Vec<String>>;
 
-/// The grants `access.vatusa_role_mappings` derives from the member's current VATUSA roles (#548).
+/// The grants VATUSA justifies for a member, from two sources:
 ///
-/// Scope is the facility the VATUSA role is held at, with two cases decided in the query so the
-/// `access.user_roles` FK can never be hit: a division role (`ZHQ`, not an ARTCC) is a **national**
-/// grant, and any other facility missing from `org.facilities` is skipped.
+/// - **Role mappings** (#548): `access.vatusa_role_mappings` applied to their VATUSA roles, scoped to
+///   the facility the role is held at. A division role (`ZHQ`, not an ARTCC) is a **national** grant.
+/// - **The roster** (#730): [`ROSTER_GROUP`] at their home ARTCC and at each visiting ARTCC. Never
+///   national: a `ZHQ` home is not an ARTCC, so it grants nothing.
+///
+/// Any facility missing from `org.facilities` is skipped, so the `access.user_roles` FK is never hit.
 async fn desired_vatusa_grants(
     tx: &mut Transaction<'_, Postgres>,
     cid: i64,
 ) -> Result<JustifiedGrants, ApiError> {
     let rows = sqlx::query_as::<_, (String, Option<String>, Vec<String>)>(
         r#"
-        select m.role_name,
-               case when vr.facility = 'ZHQ' then null else f.id end as artcc_id,
-               array_agg(distinct vr.role || '@' || vr.facility
-                         order by vr.role || '@' || vr.facility) as because
-        from identity.vatusa_roles vr
-        join access.vatusa_role_mappings m
-          on m.vatusa_role = vr.role and (m.facility is null or m.facility = vr.facility)
-        left join org.facilities f on f.id = vr.facility
-        where vr.cid = $1 and (vr.facility = 'ZHQ' or f.id is not null)
+        with justified(role_name, artcc_id, because) as (
+            select m.role_name,
+                   case when vr.facility = 'ZHQ' then null else f.id end,
+                   vr.role || '@' || vr.facility
+            from identity.vatusa_roles vr
+            join access.vatusa_role_mappings m
+              on m.vatusa_role = vr.role and (m.facility is null or m.facility = vr.facility)
+            left join org.facilities f on f.id = vr.facility
+            where vr.cid = $1 and (vr.facility = 'ZHQ' or f.id is not null)
+            union all
+            select $2, f.id, 'roster home ' || f.id
+            from identity.users u
+            join org.facilities f on f.id = u.home_facility
+            where u.cid = $1
+            union all
+            select $2, f.id, 'roster visit ' || f.id
+            from identity.vatusa_visits v
+            join org.facilities f on f.id = v.facility
+            where v.cid = $1
+        )
+        select role_name, artcc_id, array_agg(distinct because order by because)
+        from justified
         group by 1, 2
         "#,
     )
     .bind(cid)
+    .bind(ROSTER_GROUP)
     .fetch_all(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -366,7 +390,9 @@ pub async fn resync(
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
-    reconcile_member(tx, cid, &BTreeMap::new()).await
+    reconcile_member(tx, cid, &BTreeMap::new())
+        .await
+        .map(|_| ())
 }
 
 /// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify. Compares
@@ -388,15 +414,15 @@ async fn reconcile_vatusa_grants(
     cid: i64,
     justified_before: &JustifiedGrants,
     justified_now: &JustifiedGrants,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     // A hand-managed member is off role sync until a Resync (#549). Every reconcile — sign-in, the
     // division pull, a mapping edit — comes through here, so this one check covers them all.
     if is_detached(tx, user_id).await? {
-        return Ok(());
+        return Ok(false);
     }
     let (grants, revokes) = pending_changes(tx, user_id, justified_now).await?;
     if grants.is_empty() && revokes.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let before = access_snapshot(tx, user_id, cid).await?;
@@ -451,7 +477,8 @@ async fn reconcile_vatusa_grants(
             ip_address: None,
         },
     )
-    .await
+    .await?;
+    Ok(true)
 }
 
 // --- Role → group mappings (#548) ---
@@ -601,7 +628,9 @@ async fn reconcile_member_access(
 ) -> Result<(), ApiError> {
     // No "before": the member's roles didn't change, a mapping did — so a removal's reason is that no
     // mapping supports the grant any more, which is what the reconciler says when it has no prior view.
-    reconcile_member(tx, cid, &BTreeMap::new()).await
+    reconcile_member(tx, cid, &BTreeMap::new())
+        .await
+        .map(|_| ())
 }
 
 /// Reconcile one member from their stored VATUSA roles, given what those roles justified before the
@@ -611,7 +640,7 @@ async fn reconcile_member(
     tx: &mut Transaction<'_, Postgres>,
     cid: i64,
     justified_before: &JustifiedGrants,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     let Some(user_id) =
         sqlx::query_scalar::<_, String>("select id from identity.users where cid = $1 for update")
             .bind(cid)
@@ -619,7 +648,7 @@ async fn reconcile_member(
             .await
             .map_err(|_| ApiError::Internal)?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let justified_now = desired_vatusa_grants(tx, cid).await?;
     reconcile_vatusa_grants(tx, &user_id, cid, justified_before, &justified_now).await
@@ -712,6 +741,14 @@ pub async fn apply_division_chunk(
     let cids: Vec<i64> = members.iter().map(|m| m.cid).collect();
     let mut tx = pool.begin().await.map_err(db)?;
 
+    // What each member's VATUSA data justified before this pull, for every member and not only those
+    // whose roles changed: the roster grant (#730) moves with their home facility and visits too. The
+    // audit names what was lost from this.
+    let mut before = BTreeMap::new();
+    for &cid in &cids {
+        before.insert(cid, desired_vatusa_grants(&mut tx, cid).await?);
+    }
+
     let seeded: Vec<bool> = sqlx::query_scalar(
         r#"
         insert into identity.users as u
@@ -768,7 +805,7 @@ pub async fn apply_division_chunk(
                 .map(move |(f, r, at)| (m.cid, f.as_str(), r.as_str(), *at))
         })
         .collect();
-    let changed = replace_roles(&mut tx, &cids, &roles).await?;
+    replace_roles(&mut tx, &cids, &roles).await?;
 
     let visits: Vec<(i64, &str)> = members
         .iter()
@@ -776,17 +813,33 @@ pub async fn apply_division_chunk(
         .collect();
     replace_visits(&mut tx, &cids, &visits).await?;
 
+    // Every member, once all their data is written, in CID order (the lock order). An unchanged
+    // member writes and audits nothing; this also grants existing members on the first pull after a
+    // new grant source ships, since nothing about them changes to trigger it.
+    let mut moved = 0;
+    for &cid in &cids {
+        if reconcile_member(&mut tx, cid, &before[&cid]).await? {
+            moved += 1;
+        }
+    }
+
     tx.commit().await.map_err(db)?;
-    Ok((seeded.iter().filter(|s| **s).count(), changed))
+    Ok((seeded.iter().filter(|s| **s).count(), moved))
 }
 
-/// Controllers who have left the division keep nothing VATUSA granted them: their stored roles go
-/// (and with them, through the reconciler, any VATUSA-mapped access). `present` is every CID in the
-/// pull. Returns how many members were cleared. Only ever called after the pull's sanity floor.
+/// Controllers who have left the division keep nothing VATUSA granted them: their stored roles, visits
+/// and home facility go, and with them, through the reconciler, any VATUSA-mapped or roster access
+/// (#730). "Departed" is anyone the pull doesn't list who still holds any of the three — a plain
+/// controller holds no roles, so roles alone would never notice them leave. `present` is every CID in
+/// the pull. Returns how many members were cleared. Only ever called after the pull's sanity floor.
 pub async fn clear_departed(pool: &PgPool, present: &[i64]) -> Result<usize, ApiError> {
     let db = |_| ApiError::Internal;
     let departed: Vec<i64> = sqlx::query_scalar(
-        "select distinct cid from identity.vatusa_roles where cid <> all($1) order by cid",
+        "select cid from ( \
+             select cid from identity.vatusa_roles \
+             union select cid from identity.vatusa_visits \
+             union select cid from identity.users where home_facility is not null \
+         ) held where cid <> all($1) order by cid",
     )
     .bind(present)
     .fetch_all(pool)
@@ -794,57 +847,37 @@ pub async fn clear_departed(pool: &PgPool, present: &[i64]) -> Result<usize, Api
     .map_err(db)?;
     for chunk in departed.chunks(500) {
         let mut tx = pool.begin().await.map_err(db)?;
+        let mut before = BTreeMap::new();
+        for &cid in chunk {
+            before.insert(cid, desired_vatusa_grants(&mut tx, cid).await?);
+        }
         replace_roles(&mut tx, chunk, &[]).await?;
         replace_visits(&mut tx, chunk, &[]).await?;
+        sqlx::query("update identity.users set home_facility = null where cid = any($1)")
+            .bind(chunk)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        for &cid in chunk {
+            reconcile_member(&mut tx, cid, &before[&cid]).await?;
+        }
         tx.commit().await.map_err(db)?;
     }
     Ok(departed.len())
 }
 
-/// Make the stored roles of `cids` exactly `roles` — deleting what's gone and inserting what's new
-/// rather than rewriting both tables daily — then re-reconcile the members whose roles changed, each
-/// with what their old roles justified so the audit names the role that was lost. Returns how many.
+/// Make the stored roles of `cids` exactly `roles`, deleting what's gone and inserting what's new
+/// rather than rewriting the table daily. Reconciling is the caller's, once every write has landed.
 async fn replace_roles(
     tx: &mut Transaction<'_, Postgres>,
     cids: &[i64],
     roles: &[(i64, &str, &str, Option<DateTime<Utc>>)],
-) -> Result<usize, ApiError> {
+) -> Result<(), ApiError> {
     let db = |_| ApiError::Internal;
     let r_cid: Vec<i64> = roles.iter().map(|r| r.0).collect();
     let r_fac: Vec<&str> = roles.iter().map(|r| r.1).collect();
     let r_role: Vec<&str> = roles.iter().map(|r| r.2).collect();
     let r_at: Vec<Option<DateTime<Utc>>> = roles.iter().map(|r| r.3).collect();
-
-    let changed: Vec<i64> = sqlx::query_scalar(
-        r#"
-        with desired(cid, facility, role) as (
-            select * from unnest($1::bigint[], $2::text[], $3::text[])
-        ), held as (
-            select cid, facility, role from identity.vatusa_roles where cid = any($4)
-        )
-        select distinct cid from (
-            (select * from desired except select * from held)
-            union all
-            (select * from held except select * from desired)
-        ) d order by cid
-        "#,
-    )
-    .bind(&r_cid)
-    .bind(&r_fac)
-    .bind(&r_role)
-    .bind(cids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(db)?;
-    if changed.is_empty() {
-        return Ok(0);
-    }
-
-    let mut before = BTreeMap::new();
-    for &cid in &changed {
-        before.insert(cid, desired_vatusa_grants(tx, cid).await?);
-    }
-
     sqlx::query(
         r#"
         delete from identity.vatusa_roles r
@@ -873,11 +906,7 @@ async fn replace_roles(
     .execute(&mut **tx)
     .await
     .map_err(db)?;
-
-    for &cid in &changed {
-        reconcile_member(tx, cid, &before[&cid]).await?;
-    }
-    Ok(changed.len())
+    Ok(())
 }
 
 /// Make the stored visits of `cids` exactly `visits` (delete what's gone, insert what's new).
@@ -1392,6 +1421,163 @@ mod tests {
         tx.commit().await.unwrap();
     }
 
+    // ---- #730: the roster grant ---------------------------------------------------------------
+
+    /// Sign-in's path: a member with this home facility and these visits, and no VATUSA roles.
+    async fn sign_in_as(pool: &PgPool, home: &str, visits: &[&str]) {
+        let visits: Vec<_> = visits
+            .iter()
+            .map(|f| serde_json::json!({ "facility": f }))
+            .collect();
+        let member: VatusaMember = serde_json::from_value(serde_json::json!({
+            "cid": CID, "facility": home, "visiting_facilities": visits, "roles": [],
+        }))
+        .unwrap();
+        upsert_member(pool, &member).await.unwrap();
+    }
+
+    /// The division pull's path, for the same member. Returns how many members' access it moved.
+    async fn pull(pool: &PgPool, home: &str, visits: &[&str]) -> usize {
+        let member = super::DivisionMember {
+            cid: CID,
+            display_name: "T".into(),
+            rating_numeric: 5,
+            rating_short: None,
+            facility: home.into(),
+            facility_join: None,
+            visits: visits.iter().map(|v| v.to_string()).collect(),
+            roles: vec![],
+        };
+        super::apply_division_chunk(pool, &[member])
+            .await
+            .unwrap()
+            .1
+    }
+
+    fn controller(artcc: &str) -> (String, Option<String>, String) {
+        vatusa("CONTROLLER", Some(artcc))
+    }
+
+    /// AC1: at home and at every visiting ARTCC, on sign-in, with no manual step.
+    #[sqlx::test]
+    async fn a_rostered_controller_is_controller_at_home_and_each_visit(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sign_in_as(&pool, " zdc ", &["ZTL", "zny"]).await;
+        assert_eq!(
+            grants(&pool, &user).await,
+            [controller("ZDC"), controller("ZNY"), controller("ZTL")],
+            "normalised like the pull's, and one grant per facility"
+        );
+    }
+
+    /// AC7, and the facilities that aren't ARTCCs: no home and no visits holds nothing beyond USER; a
+    /// division (`ZHQ`) home or an unknown facility grants nothing, never a national CONTROLLER.
+    #[sqlx::test]
+    async fn no_rostered_artcc_grants_nothing(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sign_in_as(&pool, "", &[]).await;
+        assert!(grants(&pool, &user).await.is_empty());
+        sign_in_as(&pool, "ZHQ", &["ZZZ"]).await;
+        assert!(grants(&pool, &user).await.is_empty());
+    }
+
+    /// AC3 through the pull: a transfer moves the grant, and the pull reports it moved (#644's nudge).
+    #[sqlx::test]
+    async fn a_transfer_moves_the_grant_on_the_next_pull(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        assert_eq!(pull(&pool, "ZDC", &[]).await, 1);
+        assert_eq!(grants(&pool, &user).await, [controller("ZDC")]);
+        assert_eq!(pull(&pool, "ZTL", &[]).await, 1);
+        assert_eq!(grants(&pool, &user).await, [controller("ZTL")]);
+        assert_eq!(
+            pull(&pool, "ZTL", &[]).await,
+            0,
+            "an unchanged member moves nothing"
+        );
+    }
+
+    /// AC4 through the pull — a visit-only change, which reconciled nothing before #730.
+    #[sqlx::test]
+    async fn dropping_a_visit_removes_its_grant(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        pull(&pool, "ZDC", &["ZTL"]).await;
+        assert_eq!(
+            grants(&pool, &user).await,
+            [controller("ZDC"), controller("ZTL")]
+        );
+        assert_eq!(pull(&pool, "ZDC", &[]).await, 1);
+        assert_eq!(grants(&pool, &user).await, [controller("ZDC")]);
+    }
+
+    /// A controller who leaves the division holds no VATUSA role, only a home and visits — they must
+    /// still count as departed, lose both, and lose the grant.
+    #[sqlx::test]
+    async fn a_departed_controller_loses_the_grant(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let home = || async {
+            sqlx::query_scalar::<_, Option<String>>(
+                "select home_facility from identity.users where id = $1",
+            )
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        // A home and nothing else — the plainest controller, and the one roles alone never noticed.
+        pull(&pool, "ZDC", &[]).await;
+        assert_eq!(super::clear_departed(&pool, &[]).await.unwrap(), 1);
+        assert!(grants(&pool, &user).await.is_empty());
+        assert_eq!(home().await, None);
+        // A visit and nothing else.
+        pull(&pool, "", &["ZTL"]).await;
+        assert_eq!(grants(&pool, &user).await, [controller("ZTL")]);
+        assert_eq!(super::clear_departed(&pool, &[]).await.unwrap(), 1);
+        assert!(grants(&pool, &user).await.is_empty());
+    }
+
+    /// AC5: a hand-made CONTROLLER grant — at a facility the roster never names, and at the very
+    /// facility the sync grants and later revokes — survives every reconcile.
+    #[sqlx::test]
+    async fn a_hand_made_controller_grant_survives_every_reconcile(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        for at in ["ZNY", "ZDC"] {
+            crate::repos::access::set_user_role_scoped(
+                &mut tx,
+                &user,
+                "CONTROLLER",
+                true,
+                Some(at),
+                crate::repos::access::GrantSource::Manual,
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        pull(&pool, "ZDC", &[]).await;
+        pull(&pool, "ZTL", &[]).await;
+        super::clear_departed(&pool, &[]).await.unwrap();
+        let manual: Vec<Option<String>> = sqlx::query_scalar(
+            "select artcc_id from access.user_roles \
+             where user_id = $1 and role_name = 'CONTROLLER' and source = 'manual' order by 1",
+        )
+        .bind(&user)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(manual, [Some("ZDC".to_string()), Some("ZNY".to_string())]);
+    }
+
+    /// #549: a detached member is off sync for the roster grant too.
+    #[sqlx::test]
+    async fn a_detached_member_is_not_granted_controller(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        detach(&pool, &user).await;
+        sign_in_as(&pool, "ZDC", &["ZTL"]).await;
+        pull(&pool, "ZDC", &["ZTL"]).await;
+        assert!(grants(&pool, &user).await.is_empty());
+    }
+
     /// #549 AC1 + AC4: once detached, a sync leaves the member's groups alone — though their VATUSA
     /// roles changed — while their identity details and stored VATUSA roles keep syncing.
     #[sqlx::test]
@@ -1436,7 +1622,15 @@ mod tests {
         // The preview is what a Resync would do, from the roles stored while detached…
         let (add, remove) = preview_resync(&pool, &user, CID).await.unwrap();
         let add: Vec<_> = add.into_iter().map(|(key, _)| key).collect();
-        assert_eq!(add, [("AEC".to_string(), Some("ZDC".to_string()))]);
+        // The member's home is now ZNY, so a Resync also grants the roster group there (#730); the
+        // detach above kept it from being granted until then.
+        assert_eq!(
+            add,
+            [
+                ("AEC".to_string(), Some("ZDC".to_string())),
+                ("CONTROLLER".to_string(), Some("ZNY".to_string()))
+            ]
+        );
         assert_eq!(remove, [("EC".to_string(), Some("ZDC".to_string()))]);
         // …and it wrote nothing.
         assert_eq!(grants(&pool, &user).await, [vatusa("EC", Some("ZDC"))]);
@@ -1444,7 +1638,14 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
         resync(&mut tx, &user, CID).await.unwrap();
         tx.commit().await.unwrap();
-        assert_eq!(grants(&pool, &user).await, [vatusa("AEC", Some("ZDC"))]);
+        assert_eq!(
+            grants(&pool, &user).await,
+            [
+                vatusa("AEC", Some("ZDC")),
+                vatusa("CONTROLLER", Some("ZNY"))
+            ],
+            "the Resync applies exactly the preview, roster grant included (#730)"
+        );
         assert!(detached_state(&pool, &user).await.unwrap().is_none());
     }
 

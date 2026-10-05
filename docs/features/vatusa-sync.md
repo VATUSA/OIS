@@ -130,6 +130,41 @@ unrestricted (`VATUSA_STAFF` is server-admin only). **System groups — `SERVER_
 `SERVICE_APP` — can never be mapped**, even by a server admin: `SERVER_ADMIN` has no `role_permissions`
 for the gate to check, so without that refusal VATUSA could become a source of server admins.
 
+## The roster grant: `CONTROLLER` (#730)
+
+Every signed-in user is in `USER`, which is unscoped and opens nothing operational. A rostered
+controller also gets **`CONTROLLER`**, the baseline operational group (migration 0126). It's granted
+**once per facility**: at their home ARTCC (`identity.users.home_facility`) and at each visiting ARTCC
+(`identity.vatusa_visits`).
+
+- **Same machinery as the role mappings.** `desired_vatusa_grants` adds the roster rows beside the
+  mapped ones, so sign-in, the pull, the webhook, a mapping edit and Resync all produce it. Rows carry
+  `source = 'vatusa'` and come and go with the roster. A hand-made `CONTROLLER` grant survives, and a
+  detached member (#549) is left alone. The audit names the reason: `granted CONTROLLER at ZDC (holds
+  roster home ZDC)`.
+- **Never national.** A facility missing from `org.facilities` grants nothing, and so does a `ZHQ`
+  home, which is not an ARTCC. A member with no home and no visits holds only `USER`.
+- **Lifecycle.**
+  - The pull reconciles **every** member on each run, not only those whose roles changed. So a transfer
+    or a dropped visit moves the grant on the next pull, and the first pull after a new grant source
+    ships backfills everyone.
+  - An unchanged member writes and audits nothing.
+  - A member who leaves the division loses their roles, visits **and** home facility, and with them the
+    grant. "Left" means missing from the pull while holding any of the three: a plain controller holds
+    no VATUSA role.
+- **What it grants**, each scoped to the facility:
+  - `flow.fca.read`, `flow.fca.update`, `flow.fca.delete`;
+  - `flow.route.update`;
+  - `tmu.cfr.assign`;
+  - `flow.runway.read`, `flow.runway.update`;
+  - `tmu.program.read`;
+  - `tmu.tmi.read`, `tmu.adv.read`, `tmu.ntml.read`, `tmu.gdp.read`, `tmu.groundstop.read`, `tmu.delays.read`.
+
+  Every write among them is ARTCC-scoped in its handler. Runway writes became so with this change:
+  they're checked against the airport's ARTCC, so a ZDC grant writes only ZDC's airports. There's no
+  Planning (`events.plan.*`), Historical (`stats.*`), admin or `*.publish` permission.
+  `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.
+
 ## Freshness
 
 Every controller is at most **a day** stale, whatever the division's size — the old per-member reconcile
