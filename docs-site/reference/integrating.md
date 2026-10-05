@@ -164,6 +164,7 @@ the current `ETag: "2"`: re-read the flight, decide again, and retry with `"2"`.
 | --- | --- | --- |
 | `403 forbidden` | the FCA or airport is in an ARTCC outside your credential's scope | write only where your credential is scoped |
 | `409 held_by_person` | a controller holds it | leave it; people win |
+| `409 event_fca` | the FCA belongs to an event, and only its planners write it (`events.plan.update`) | manage it through `/api/v1/events/{id}/fcas`, or leave it |
 | `409 held_by_other_machine` | another tool holds it | leave it; coordinate out of band |
 | `412 precondition_failed` | it isn't at the version you named; the current one is in `ETag` | re-read, decide, retry with the new version |
 | `428 precondition_required` | you sent no precondition | send `If-None-Match: *` or `If-Match` |

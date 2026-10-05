@@ -13860,6 +13860,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `event_fca`: an event FCA; manage it through /events/{id}/fcas */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -13902,6 +13909,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `event_fca`: an event FCA; manage it through /events/{id}/fcas */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
