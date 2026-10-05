@@ -220,6 +220,16 @@ on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb`
   name(600) + email link. Every table shows a default row cap with a "Show all" expand, then
   paginates — except live operational lists (departures, GDP flights, IDST, runway arrivals),
   which page from the first row (`rowCap={Infinity}`) so no flight is hidden behind an expand.
+- **Sector grid** — `SectorGrid` in `@ois/ui`: one row per sector, one column per 15-minute bin on a
+  rolling Zulu time axis (#724). **Not a `DataTable`, deliberately:** a `DataTable`'s columns are an
+  entity's attributes (select boxes, pills, avatars); these are up to 24 load-carrying cells over time,
+  which `DataTable`'s header, row cap and paging would only get in the way of. Its rules:
+  sector and limit columns are sticky while the time axis scrolls inside the grid (never the page);
+  each cell's figure is **`--ink`**, mono tabular, on a `--level-ok/watch/over` tint with a solid bar
+  in the same token — the colour is a non-text signal (≥ 3:1 on each theme's ground, tested), because
+  the light theme's green is too faint for small coloured text; hover carries both figures, combined
+  peak and airborne alone; the footer labels each bin's start in `HHMM` Zulu; the limit cell is
+  editable only where the viewer may edit, and is plain text with no affordance otherwise.
 - **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
   fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
   150–220ms ease-out, no bounce.
@@ -265,7 +275,7 @@ Report each miss as `file:line — rule → fix`.
 - [ ] One accent: interactive state uses `primary`/`brand`; status colours only mean status.
 - [ ] IDs, counts, times and money render `font-mono` (tabular).
 - [ ] The page renders inside the shell; its title comes from route meta, not a hand-rolled `<h1>`.
-- [ ] Tables use `DataTable`; charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
+- [ ] Tables use `DataTable` (a sector-by-time matrix uses `SectorGrid`); charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
 - [ ] Links and nav items the user can't use are not rendered.
 - [ ] Legible in both dark and light.
 - [ ] A page listed under § "Standalone pages outside the app" is exempt from the hex, shell and
