@@ -106,14 +106,12 @@ export const AREAS: readonly NavArea[] = [
           { label: "Facility Documents", to: "/admin/planning/facility-documents", icon: FileText, permission: "facilities.docs.read" },
           { label: "Airport Surface", to: "/admin/planning/airport-surface", icon: MapPinned, permission: "events.plan.read" },
           { label: "Aircraft Profiles", to: "/admin/planning/aircraft-profiles", icon: Plane, permission: "flow.aircraft_profiles.read" },
-          { label: "Monitor Alert Parameters", to: "/admin/planning/sector-maps", icon: Gauge, permission: "flow.monitor.read" },
         ],
       },
       {
         label: "Flow",
         prefix: "/admin/flow",
         items: [
-          { label: "Monitor", to: "/admin/flow/monitor", icon: Radar, permission: "flow.monitor.read" },
           { label: "Sectors", to: "/admin/flow/sectors", icon: Layers, permission: "flow.sectors.read" },
         ],
       },

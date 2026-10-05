@@ -26,8 +26,6 @@ pub mod org;
 pub mod preferences;
 pub mod public;
 pub mod runway;
-pub mod sector_consolidations;
-pub mod sector_maps;
 pub mod service_accounts;
 pub mod stats;
 pub mod taxi_insights;

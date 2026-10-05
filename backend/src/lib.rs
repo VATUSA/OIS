@@ -50,8 +50,6 @@ pub async fn run() -> color_eyre::Result<()> {
     feed::spawn_poller(state.feed.clone(), state.events.clone());
     feed::facilities::spawn_refresh(state.facilities.clone());
     feed::tracon::spawn_refresh(state.tracons.clone());
-    // vNAS sector identities and live sector staffing for the Airspace Monitor (#595).
-    feed::vnas::spawn_refresh(state.vnas.clone());
     // Airport coordinate database: fetched at startup and retried periodically (#216) — a failed
     // boot fetch no longer permanently strands the feed's airport map empty.
     jobs::spawn_airports_refresh(state.jobs.clone(), state.feed.clone());
@@ -94,23 +92,11 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.aircraft_profiles.clone(),
         );
-        // ATC sector volumes for the Airspace Monitor (#594), imported offline.
+        // ATC sector volumes (#594), imported offline; kept as a dataset when the Monitor went (#719).
         jobs::spawn_airspace_sectors_refresh(
             state.jobs.clone(),
             pool.clone(),
             state.airspace_sectors.clone(),
-        );
-        // Monitor Alert Parameter overrides, for the Airspace Monitor (#598).
-        jobs::spawn_sector_maps_refresh(
-            state.jobs.clone(),
-            pool.clone(),
-            state.sector_maps.clone(),
-        );
-        // Sector consolidations, for the Airspace Monitor (#599).
-        jobs::spawn_sector_consolidations_refresh(
-            state.jobs.clone(),
-            pool.clone(),
-            state.sector_consolidations.clone(),
         );
         // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());

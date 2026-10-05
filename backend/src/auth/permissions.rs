@@ -116,10 +116,6 @@ permission!(
 // ATC sector volumes (#594), viewed on the admin sector map (#602). Internal monitoring data, never
 // shown on a public map, so it has its own permission rather than riding on a planning one.
 permission!(FlowSectorsRead, ["flow", "sectors"], Read);
-// Airspace Monitor (#593): read sectors and their alert parameters; set a sector's MAP
-// (facility-scoped, checked in `handlers::monitor`).
-permission!(FlowMonitorRead, ["flow", "monitor"], Read);
-permission!(FlowMonitorUpdate, ["flow", "monitor"], Update);
 
 // tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
 // 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).
@@ -253,5 +249,75 @@ mod sync_tests {
                  migration"
             );
         }
+    }
+
+    /// 0125 removes the Airspace Monitor's `flow.monitor.*` permissions (#719). API-key and
+    /// service-account grants reference `access.permissions` with no cascade (0045, 0103), so on a
+    /// database where a key or an account still holds one, the migration must clear those grants first
+    /// or fail at startup. The test DB never holds such a grant when 0125 runs, so recreate one and run
+    /// the shipped SQL again.
+    #[sqlx::test]
+    async fn dropping_the_monitor_permissions_clears_key_and_account_grants_first(pool: PgPool) {
+        const DROP_MONITOR: &str = include_str!("../../migrations/0125_drop_airspace_monitor.sql");
+        let exec = |sql: &'static str| {
+            let pool = pool.clone();
+            async move { sqlx::query(sql).execute(&pool).await.unwrap() }
+        };
+        exec(
+            "insert into access.permissions (name, description) values \
+             ('flow.monitor.read', 'x'), ('flow.monitor.update', 'x')",
+        )
+        .await;
+        let owner = crate::scope_test_support::seed_user(&pool).await;
+        let key: String = sqlx::query_scalar(
+            "insert into access.api_keys (owner_user_id, name, prefix, secret_hash) \
+             values ($1, 'k', 'ois_pat_x', 'h') returning id",
+        )
+        .bind(&owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.api_key_permissions (api_key_id, permission_name) \
+             values ($1, 'flow.monitor.read')",
+        )
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let account: String = sqlx::query_scalar(
+            "insert into access.service_accounts (key, name) values ('sa', 'sa') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into access.service_account_permissions (service_account_id, permission_name) \
+             values ($1, 'flow.monitor.update')",
+        )
+        .bind(&account)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(DROP_MONITOR)
+            .execute(&pool)
+            .await
+            .expect("0125 runs over held grants");
+
+        let left: i64 = sqlx::query_scalar(
+            "select count(*) from access.permissions where name like 'flow.monitor.%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+        // The key and the account themselves survive; only the grant goes.
+        let keys: i64 = sqlx::query_scalar("select count(*) from access.api_keys where id = $1")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(keys, 1);
     }
 }

@@ -225,11 +225,10 @@ polygon in the asset**, so a controller on either shades nothing.
 - **API** — consumes the ATC and TRACON feed endpoints; adds none.
 - **Discord** — none.
 
-**ATC _sector_ data is not part of this pipeline, and does have all three.** Altitude-bounded sector
-volumes live in `flow.airspace_sector`, with Monitor Alert Parameters and consolidations beside them, and
-are gated by `flow.monitor.read` / `flow.monitor.update`. See [`monitor.md`](monitor.md). Drawing those
-sectors on a map is #602, which adds a map layer and its own permission (`flow.sectors.read`); this
-section will need its sector half rewritten when that lands.
+**ATC _sector_ data is not part of this pipeline, and has its own table, permission and API.**
+Altitude-bounded sector volumes live in `flow.airspace_sector`, and the admin sector viewer draws them
+from `GET /api/v1/flow/airspace/sectors`, gated by `flow.sectors.read`. See [`monitor.md`](monitor.md).
+(The Airspace Monitor built on them, with its alert parameters and consolidations, was removed in #719.)
 
 ## Open questions
 

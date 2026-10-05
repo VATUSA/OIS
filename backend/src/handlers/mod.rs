@@ -26,7 +26,6 @@ pub mod health;
 pub mod integration;
 pub mod jobs;
 pub mod metrics;
-pub mod monitor;
 pub mod preferences;
 pub mod public;
 pub mod release_authority;
