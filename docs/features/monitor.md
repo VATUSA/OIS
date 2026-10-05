@@ -34,6 +34,33 @@ failed refresh keeps the current table.
 floor and a flight is never in two strata at once. An unknown altitude fails open: laterally inside counts.
 It tests one altitude, the one supplied, not flow's "filed or current" rule.
 
+## Sector occupancy (#721)
+
+The engine behind the sector-forecasting epic (#720). It is pure and DB-free, reading the cached table
+above. It has no endpoint yet; #725 serves it.
+
+- **Cell value** (`feed/sector_load.rs`, `sector_loads`): for each sector and 15-minute bin, the **peak
+  one-minute concurrent occupancy**. Each minute it counts the distinct flights inside any of the sector's
+  volumes, and the cell is the busiest of the bin's fifteen minutes. It is not throughput: 40 flights
+  transiting a sector, never more than 3 at once, read 3. A boundary skim within a minute, or a crossing
+  between a sector's pieces, counts once.
+- **Bins** are absolute Zulu quarter-hours, 24 of them (6 h). The first is the quarter-hour containing now:
+  at 1407Z it starts at 1400.
+- **Two populations**, returned apart per bin. **Active** means airborne (≥ 50 kt), projected from where
+  the flight is. **Proposed** means on the ground holding a locked wheels-up, projected from it. `combined`
+  is the busiest minute of both together, never active-peak plus proposed-peak.
+- **Projection** (`feed/sector_tracks.rs`, `project_tracks`) is a read-only caller of the trajectory model.
+  It makes the same calls as the map's predicted-traffic projection, so it adds no second predictor.
+- **Wheels-up precedence** (`repos::flow::locked_wheels_up`): a flight can hold an issued CFR, a release in
+  each FCA it crosses, and a GDP slot. The engine takes the **latest** of the following:
+  - its CFR (`tmu.issued_cfrs.wheels_up`);
+  - its releases in live FCAs (enabled, not deleted);
+  - its slot EDCT in a `published` GDP.
+
+  The latest is the binding constraint, since a flight held for a later release can't satisfy an earlier
+  one. It is also the flight advisory's rule. The TMU departures list keeps its own rule: the rate-program
+  CFR first, otherwise the earliest FCA release.
+
 ## The sector dataset
 
 ### Where it comes from

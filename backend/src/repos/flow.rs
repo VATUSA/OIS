@@ -558,6 +558,39 @@ pub async fn releases_for_callsigns(
     Ok(rows.into_iter().collect())
 }
 
+/// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy
+/// engine's proposed population (#721): the **latest** of its issued CFR, its releases in live FCAs (enabled,
+/// not deleted) and its slot in a published GDP. The latest is the binding constraint — a flight held for
+/// a later release can't satisfy an earlier one — and it is the flight advisory's rule too
+/// (`handlers::flow::flight_advisory`, `edcts.max()`). The departures list keeps its own earliest-FCA rule
+/// ([`releases_for_callsigns`]).
+pub async fn locked_wheels_up(
+    pool: &PgPool,
+    callsigns: &[String],
+) -> Result<HashMap<String, i64>, ApiError> {
+    if callsigns.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "select callsign, max(t)::bigint from ( \
+             select callsign, (extract(epoch from wheels_up) * 1000)::bigint as t \
+             from tmu.issued_cfrs where callsign = any($1) \
+             union all \
+             select r.callsign, r.edct_ms from flow.fca_release r join flow.fca f on f.id = r.fca_id \
+             where f.enabled and f.deleted_at is null and r.callsign = any($1) \
+             union all \
+             select s.callsign, (extract(epoch from s.edct) * 1000)::bigint \
+             from tmu.gdp_slot s join tmu.gdp g on g.id = s.gdp_id \
+             where g.status = 'published' and s.edct is not null and s.callsign = any($1) \
+         ) locked group by callsign",
+    )
+    .bind(callsigns)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Write a release, returning its new version — or `None` when `expect` did not hold, in which case
 /// nothing was written (#585). The precondition is checked **in the write itself**, so there is no
 /// window between reading the version and changing the row.
@@ -736,5 +769,130 @@ mod fca_color_tests {
         ] {
             assert!(fca_color(Some(token)).is_ok(), "{token}");
         }
+    }
+}
+
+#[cfg(test)]
+mod locked_wheels_up_tests {
+    use chrono::{DateTime, TimeZone, Utc};
+    use sqlx::PgPool;
+
+    use super::locked_wheels_up;
+
+    fn at(h: u32, m: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 5, h, m, 0).unwrap()
+    }
+
+    async fn fca(pool: &PgPool, enabled: bool, deleted: bool) -> String {
+        sqlx::query_scalar(
+            "insert into flow.fca (enabled, deleted_at) values ($1, case when $2 then now() end) \
+             returning id",
+        )
+        .bind(enabled)
+        .bind(deleted)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn release(pool: &PgPool, fca_id: &str, callsign: &str, edct: DateTime<Utc>) {
+        sqlx::query(
+            "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, $2, $3, $3)",
+        )
+        .bind(fca_id)
+        .bind(callsign)
+        .bind(edct.timestamp_millis())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn cfr(pool: &PgPool, callsign: &str, wheels_up: DateTime<Utc>) {
+        sqlx::query(
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ($1, 'KJFK', $2)",
+        )
+        .bind(callsign)
+        .bind(wheels_up)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn gdp_slot(pool: &PgPool, status: &str, callsign: &str, edct: DateTime<Utc>) {
+        let gdp: String = sqlx::query_scalar(
+            "insert into tmu.gdp (airport, aar, start_time, end_time, status) \
+             values ('KJFK', 30, '1400', '1800', $1) returning id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into tmu.gdp_slot (gdp_id, callsign, original_eta, cta, edct) \
+             values ($1, $2, $3, $3, $3)",
+        )
+        .bind(&gdp)
+        .bind(callsign)
+        .bind(edct)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// #721 AC7: a flight holding conflicting locked times integrates from the **latest** — across two
+    /// FCAs' releases, and across a CFR, a release and a GDP slot. Disabled or deleted FCAs and unpublished
+    /// GDPs hold nothing, and a callsign with nothing locked (or not asked for) is absent.
+    #[sqlx::test]
+    async fn the_latest_locked_time_wins_across_every_source(pool: PgPool) {
+        let (a, b) = (fca(&pool, true, false).await, fca(&pool, true, false).await);
+        let disabled = fca(&pool, false, false).await;
+        let deleted = fca(&pool, true, true).await;
+
+        release(&pool, &a, "TWO", at(15, 0)).await; // two FCAs disagree
+        release(&pool, &b, "TWO", at(14, 30)).await;
+
+        cfr(&pool, "MIX", at(14, 40)).await; // CFR < release < GDP
+        release(&pool, &a, "MIX", at(14, 45)).await;
+        gdp_slot(&pool, "published", "MIX", at(15, 15)).await;
+
+        cfr(&pool, "CFR", at(15, 30)).await; // the CFR is the latest
+        release(&pool, &a, "CFR", at(15, 0)).await;
+
+        release(&pool, &a, "LIVE", at(14, 50)).await; // later times that don't count
+        release(&pool, &disabled, "LIVE", at(16, 0)).await;
+        release(&pool, &deleted, "LIVE", at(16, 30)).await;
+        gdp_slot(&pool, "draft", "LIVE", at(17, 0)).await;
+
+        release(&pool, &a, "UNASKED", at(15, 0)).await;
+
+        let asked: Vec<String> = ["TWO", "MIX", "CFR", "LIVE", "NONE"]
+            .map(String::from)
+            .into();
+        let locked = locked_wheels_up(&pool, &asked).await.unwrap();
+
+        let ms = |t: DateTime<Utc>| Some(t.timestamp_millis());
+        assert_eq!(
+            locked.get("TWO").copied(),
+            ms(at(15, 0)),
+            "the later of two FCAs' releases"
+        );
+        assert_eq!(
+            locked.get("MIX").copied(),
+            ms(at(15, 15)),
+            "the GDP slot, latest of three"
+        );
+        assert_eq!(
+            locked.get("CFR").copied(),
+            ms(at(15, 30)),
+            "the CFR, latest of two"
+        );
+        assert_eq!(
+            locked.get("LIVE").copied(),
+            ms(at(14, 50)),
+            "only the live FCA's release counts"
+        );
+        assert!(!locked.contains_key("NONE"), "nothing locked");
+        assert!(!locked.contains_key("UNASKED"), "not asked for");
+        assert!(locked_wheels_up(&pool, &[]).await.unwrap().is_empty());
     }
 }
