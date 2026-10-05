@@ -535,35 +535,11 @@ pub async fn list_releases(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Earliest frozen FCA release (EDCT, epoch-ms) per callsign for the given callsigns, across
-/// *enabled* FCAs only. Lets the departure-field view surface FCA-issued release times, so an FCA's
-/// RDY/RLSD flows to the airport departures list — not just the FCA page.
-pub async fn releases_for_callsigns(
-    pool: &PgPool,
-    callsigns: &[String],
-) -> Result<HashMap<String, i64>, ApiError> {
-    if callsigns.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let rows = sqlx::query_as::<_, (String, i64)>(
-        "select r.callsign, min(r.edct_ms) as edct \
-         from flow.fca_release r join flow.fca f on f.id = r.fca_id \
-         where f.enabled and r.callsign = any($1) \
-         group by r.callsign",
-    )
-    .bind(callsigns)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
-    Ok(rows.into_iter().collect())
-}
-
 /// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy
 /// engine's proposed population (#721): the **latest** of its issued CFR, its releases in live FCAs (enabled,
 /// not deleted) and its slot in a published GDP. The latest is the binding constraint — a flight held for
 /// a later release can't satisfy an earlier one — and it is the flight advisory's rule too
-/// (`handlers::flow::flight_advisory`, `edcts.max()`). The departures list keeps its own earliest-FCA rule
-/// ([`releases_for_callsigns`]).
+/// (`handlers::flow::flight_advisory`, `edcts.max()`). The departures list uses it too (#732).
 pub async fn locked_wheels_up(
     pool: &PgPool,
     callsigns: &[String],

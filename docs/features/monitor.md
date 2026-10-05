@@ -58,8 +58,7 @@ above. It has no endpoint yet; #725 serves it.
   - its slot EDCT in a `published` GDP.
 
   The latest is the binding constraint, since a flight held for a later release can't satisfy an earlier
-  one. It is also the flight advisory's rule. The TMU departures list keeps its own rule: the rate-program
-  CFR first, otherwise the earliest FCA release.
+  one. The flight advisory and the TMU departures list (#732) use the same rule.
 
 ## The sector dataset
 

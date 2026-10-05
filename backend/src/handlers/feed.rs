@@ -553,10 +553,12 @@ pub(crate) async fn departures_response(
 
     let pending = flow::pending_departures(&member_set, &snap.data);
 
-    // FCA-issued releases (RDY/RLSD) for these departures — so a release set on the FCA page also
-    // shows here, even when the destination has no GDP program (KSAN metered by an FCA, not a GDP).
+    // Each departure's locked wheels-up: the latest of its issued CFR, its releases in live FCAs and its
+    // published GDP slot (#732) — the time it is actually held to, and the rule the flight advisory and
+    // the sector occupancy engine use. So an FCA release shows here even when the destination has no
+    // rate program (KSAN metered by an FCA).
     let pending_callsigns: Vec<String> = pending.iter().map(|d| d.callsign.clone()).collect();
-    let fca_releases = flow_repo::releases_for_callsigns(pool, &pending_callsigns).await?;
+    let locked = flow_repo::locked_wheels_up(pool, &pending_callsigns).await?;
 
     // Metering data (by callsign) for destinations that have a program.
     let dests: HashSet<String> = pending
@@ -586,13 +588,13 @@ pub(crate) async fn departures_response(
         .into_iter()
         .map(|d| {
             let m = meta.remove(&d.callsign).unwrap_or_default();
-            // An FCA release counts as a (frozen) CFR too. Prefer the GDP-program CFR when present;
-            // otherwise fall back to the FCA's release time and mark the flight metered.
-            let fca_cfr = fca_releases
+            // A locked time wins; the rate program's merely proposed CFR shows only when nothing is
+            // locked, so a proposal can never hide the time the flight is held to (#732).
+            let locked_cfr = locked
                 .get(&d.callsign)
                 .and_then(|ms| DateTime::from_timestamp_millis(*ms));
-            let cfr = m.cfr.or(fca_cfr);
-            let has_program = metered.contains(&d.arrival) || fca_cfr.is_some();
+            let cfr = locked_cfr.or(m.cfr);
+            let has_program = metered.contains(&d.arrival) || locked_cfr.is_some();
             DepartureFlight {
                 callsign: d.callsign,
                 dep: d.dep,
@@ -605,7 +607,7 @@ pub(crate) async fn departures_response(
                 sta: m.sta,
                 delay_min: m.delay_min,
                 cfr,
-                cfr_issued: m.cfr_issued || fca_cfr.is_some(),
+                cfr_issued: m.cfr_issued || locked_cfr.is_some(),
                 cfr_version: None,
                 seq: m.seq,
             }
@@ -995,6 +997,165 @@ mod tests {
         assert_eq!(
             send(&state, Method::GET, DEMAND, &cookie, None).await,
             StatusCode::OK
+        );
+    }
+}
+
+/// #732: the departures list shows the time a flight is actually held to — the latest locked time.
+#[cfg(test)]
+mod departures_release_tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use chrono::{DateTime, TimeZone, Utc};
+    use sqlx::PgPool;
+
+    use crate::{
+        feed::vatsim::{FlightPlan, Prefile, VatsimData},
+        scope_test_support::{grant, seed_user, send_json, session_cookie, test_state},
+        state::AppState,
+    };
+
+    fn at(h: u32, m: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 5, h, m, 0).unwrap()
+    }
+
+    /// Prefiles departing KJFK for KDCA, one per callsign.
+    async fn state_with(pool: PgPool, callsigns: &[&str]) -> AppState {
+        let state = test_state(pool, HashMap::new());
+        state.feed.write().await.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            prefiles: callsigns
+                .iter()
+                .map(|c| Prefile {
+                    callsign: (*c).into(),
+                    flight_plan: Some(FlightPlan {
+                        departure: "KJFK".into(),
+                        arrival: "KDCA".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })));
+        state
+    }
+
+    async fn fca(pool: &PgPool, enabled: bool, deleted: bool) -> String {
+        sqlx::query_scalar(
+            "insert into flow.fca (enabled, deleted_at) values ($1, case when $2 then now() end) \
+             returning id",
+        )
+        .bind(enabled)
+        .bind(deleted)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn release(pool: &PgPool, fca_id: &str, callsign: &str, edct: DateTime<Utc>) {
+        sqlx::query(
+            "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, $2, $3, $3)",
+        )
+        .bind(fca_id)
+        .bind(callsign)
+        .bind(edct.timestamp_millis())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn gdp_slot(pool: &PgPool, status: &str, callsign: &str, edct: DateTime<Utc>) {
+        let gdp: String = sqlx::query_scalar(
+            "insert into tmu.gdp (airport, aar, start_time, end_time, status) \
+             values ('KDCA', 30, '1400', '1800', $1) returning id",
+        )
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into tmu.gdp_slot (gdp_id, callsign, original_eta, cta, edct) \
+             values ($1, $2, $3, $3, $3)",
+        )
+        .bind(&gdp)
+        .bind(callsign)
+        .bind(edct)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Each departure's `(cfr, cfr_issued, has_program)`, by callsign.
+    async fn departures(pool: &PgPool, state: &AppState) -> HashMap<String, serde_json::Value> {
+        let user = seed_user(pool).await;
+        grant(pool, &user, "tmu.program.read", None).await;
+        let cookie = session_cookie(pool, &user).await;
+        let (status, body) = send_json(
+            state,
+            http::Method::GET,
+            "/api/v1/tmu/departures/KJFK",
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{body}");
+        body["departures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                let view = serde_json::json!([d["cfr"], d["cfr_issued"], d["has_program"]]);
+                (d["callsign"].as_str().unwrap().to_string(), view)
+            })
+            .collect()
+    }
+
+    fn held(t: DateTime<Utc>) -> serde_json::Value {
+        let shown = serde_json::to_value(t).unwrap();
+        serde_json::json!([shown, true, true])
+    }
+
+    /// AC1–AC3: two FCAs disagree → the later; a GDP slot later than the release → the GDP time; a
+    /// disabled or deleted FCA's later release and a draft GDP's later slot move nothing; nothing locked →
+    /// no time and not issued.
+    #[sqlx::test]
+    async fn the_departures_list_shows_the_latest_locked_time(pool: PgPool) {
+        let (a, b) = (fca(&pool, true, false).await, fca(&pool, true, false).await);
+        let disabled = fca(&pool, false, false).await;
+        let deleted = fca(&pool, true, true).await;
+
+        release(&pool, &a, "TWO", at(14, 30)).await;
+        release(&pool, &b, "TWO", at(15, 0)).await;
+
+        release(&pool, &a, "GDP", at(14, 45)).await;
+        gdp_slot(&pool, "published", "GDP", at(15, 15)).await;
+
+        release(&pool, &a, "LIVE", at(14, 50)).await;
+        release(&pool, &disabled, "LIVE", at(16, 0)).await;
+        release(&pool, &deleted, "LIVE", at(16, 30)).await;
+        gdp_slot(&pool, "draft", "LIVE", at(17, 0)).await;
+
+        let state = state_with(pool.clone(), &["TWO", "GDP", "LIVE", "FREE"]).await;
+        let shown = departures(&pool, &state).await;
+
+        assert_eq!(
+            shown["TWO"],
+            held(at(15, 0)),
+            "the later of two FCAs' releases"
+        );
+        assert_eq!(
+            shown["GDP"],
+            held(at(15, 15)),
+            "the GDP slot, later than the release"
+        );
+        assert_eq!(
+            shown["LIVE"],
+            held(at(14, 50)),
+            "only the live FCA's release counts"
+        );
+        assert_eq!(
+            shown["FREE"],
+            serde_json::json!([null, false, false]),
+            "nothing locked, no program"
         );
     }
 }

@@ -250,10 +250,15 @@ releases for FCA crossings (a native port of vatflow's idst view).
 
 CFR releases stored in `flow.fca_release` (frozen `cta_ms`/`edct_ms`) also feed the TMU
 **departures** view and IDST metering, so a release set on the FCA page surfaces
-everywhere — even when the destination has no GDP program (e.g. KSAN metered by an FCA,
-not a GDP). In `departures_response` (`handlers/feed.rs`), an FCA release for a pending
-departure counts as a frozen CFR: the GDP-program CFR is preferred when present,
-otherwise the flight falls back to the FCA's release time and is marked metered.
+everywhere — even when the destination has no rate program (e.g. KSAN metered by an FCA).
+
+In `departures_response` (`handlers/feed.rs`), a pending departure's release time is its
+**latest locked time** (#732): the latest of its issued CFR, its releases in live FCAs (enabled,
+not deleted) and its slot EDCT in a published GDP (`repos::flow::locked_wheels_up`). A flight
+held by two FCAs at 14:30 and 15:00 shows 15:00, because it can't leave before then. Any locked
+time marks the flight issued and metered. Only when nothing is locked does the arrival rate
+program's **proposed** CFR show, still unissued, so a proposal never hides a binding time. The
+flight advisory and the sector occupancy engine (#721) use the same rule.
 `POST`/`DELETE /api/v1/flow/fcas/{id}/release/{callsign}` publish the `flow.release`
 realtime topic (the additive `/api/v1/ws` push hub) so those views nudge-and-refetch.
 
