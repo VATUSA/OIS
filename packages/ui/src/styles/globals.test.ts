@@ -3,6 +3,8 @@ import {resolve} from "node:path";
 
 import {beforeAll, describe, expect, it} from "vitest";
 
+import {contrastRatio} from "../lib/colour";
+
 /**
  * The stylesheet is the system's single source of tokens (DESIGN.md), and a token that is *used* but
  * never *defined* fails in the quietest way CSS has: `var(--x)` with no fallback is invalid at
@@ -68,4 +70,30 @@ describe("the token stylesheet", () => {
     // see them (#419 review). jsdom has no layout, so this is pinned in the source.
     expect(css).toMatch(/\.traffic-light\s*\{[^}]*flex:\s*0 0 12px/);
   });
+});
+
+/**
+ * The load-level colours carry a sector grid cell's meaning (#724), so each must stand out from the
+ * ground it is drawn on in both themes: 3:1, WCAG's floor for a non-text indicator. The figure in the
+ * cell is ink, so this is about the colour signal, not text. `--level-*` alias success/warning/danger.
+ */
+describe("load-level colours (#724)", () => {
+  const block = (selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    return css.slice(at, css.indexOf("}", at));
+  };
+  const value = (decls: string, name: string) => decls.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1];
+
+  for (const [theme, selector] of [["light", ":root"], ["dark", ".dark"]] as const) {
+    it(`stand out from the ${theme} ground`, () => {
+      const decls = block(selector);
+      const ground = value(decls, "ground")!;
+      expect(ground, `${theme} --ground`).toBeDefined();
+      for (const level of ["success", "warning", "danger"]) {
+        const hex = value(decls, level);
+        expect(hex, `${theme} --${level}`).toBeDefined();
+        expect(contrastRatio(hex!, ground), `${theme} --${level} on ${ground}`).toBeGreaterThanOrEqual(3);
+      }
+    });
+  }
 });
