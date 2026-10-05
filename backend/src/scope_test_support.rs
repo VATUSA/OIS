@@ -19,7 +19,7 @@ use crate::{
     auth::principal::Principal,
     feed::{
         self, airspace::Boundaries, facilities::Facility, nav::NavData, runway_db::RunwayDb,
-        trajectory::ProfileTable, winds::Winds,
+        sectors::SectorTable, trajectory::ProfileTable, winds::Winds,
     },
     state::AppState,
 };
@@ -35,6 +35,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         feed: feed::new_state(),
         facilities: Arc::new(RwLock::new(facilities)),
         tracons: feed::tracon::new_state(),
+        vnas: feed::vnas::new_state(),
         nav: Arc::new(ArcSwap::from_pointee(NavData::load())),
         airspace: Arc::new(Boundaries::load()),
         runways: Arc::new(RunwayDb::load()),
@@ -43,11 +44,15 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
         aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
+        airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
+        sector_maps: Arc::new(ArcSwap::from_pointee(Default::default())),
+        sector_consolidations: Arc::new(ArcSwap::from_pointee(Default::default())),
         nav_refreshed: Arc::new(AtomicI64::new(0)),
         winds_refreshed: Arc::new(AtomicI64::new(0)),
         data_refresh_in_flight: Arc::new(AtomicBool::new(false)),
         metar_cache: Arc::new(Mutex::new(HashMap::new())),
-        events: tokio::sync::broadcast::channel(256).0,
+        webhook_replays: Arc::default(),
+        events: crate::realtime::Events::new(None),
         jobs: Arc::new(crate::job_registry::JobRegistry::new()),
         metrics: crate::metrics::handle(),
         metrics_token: None,
@@ -86,6 +91,30 @@ pub(crate) fn principal_for(user_id: &str) -> Principal {
     })
 }
 
+/// Deny `user_id` `permission_name`, nationally (`artcc = None`) or at one ARTCC.
+///
+/// The counterpart to [`grant`], which hardcodes `granted = true` and so could not express a deny
+/// at all — which is why the scope × deny interaction went untested until #543. Note the unique
+/// index is on `(user_id, permission_name, coalesce(artcc_id, ''))`, so a deny and an allow cannot
+/// coexist at the *same* scope; a national deny beside a scoped allow is the interesting case.
+pub(crate) async fn deny_scoped(
+    pool: &PgPool,
+    user_id: &str,
+    permission_name: &str,
+    artcc: Option<&str>,
+) {
+    sqlx::query(
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, false, $3, 'manual')",
+    )
+    .bind(user_id)
+    .bind(permission_name)
+    .bind(artcc)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Grant `user_id` `permission_name`, nationally (`artcc = None`) or scoped to one ARTCC —
 /// a direct `access.user_permissions` row, deliberately bypassing roles for a minimal setup.
 pub(crate) async fn grant(
@@ -95,8 +124,8 @@ pub(crate) async fn grant(
     artcc: Option<&str>,
 ) {
     sqlx::query(
-        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-         values ($1, $2, true, $3)",
+        "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+         values ($1, $2, true, $3, 'manual')",
     )
     .bind(user_id)
     .bind(permission_name)
@@ -158,4 +187,34 @@ pub(crate) async fn send(
         .await
         .unwrap()
         .status()
+}
+
+/// [`send`], but also returning the decoded JSON body (`Null` when there isn't one).
+///
+/// For a test that has to check *what* a handler returned, not only that it answered — the wiring,
+/// rather than a helper called directly.
+pub(crate) async fn send_json(
+    state: &AppState,
+    method: http::Method,
+    uri: &str,
+    cookie: &str,
+) -> (http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+
+    let request = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
 }

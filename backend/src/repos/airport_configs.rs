@@ -5,6 +5,7 @@
 use sqlx::PgPool;
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     models::{AirportConfigBody, UpsertAirportConfigRequest},
 };
@@ -12,8 +13,9 @@ use crate::{
 const CONFIG_SELECT: &str = "select c.id, c.icao, c.name, c.aar, c.adr, c.landing_runways, \
     c.departure_runways, c.sid_rules, c.gate_rules, \
     c.wind_from_deg, c.wind_to_deg, c.calm_default, c.artcc, c.updated_at, \
-    u.display_name as updated_by \
-    from flow.airport_config c left join identity.users u on u.id = c.updated_by";
+    coalesce(u.display_name, a.display_name) as updated_by \
+    from flow.airport_config c left join identity.users u on u.id = c.updated_by \
+    left join access.actors a on a.id = c.updated_by_actor";
 
 pub async fn list_by_icao(pool: &PgPool, icao: &str) -> Result<Vec<AirportConfigBody>, ApiError> {
     sqlx::query_as::<_, AirportConfigBody>(&format!(
@@ -65,7 +67,7 @@ pub async fn create(
     icao: &str,
     req: &UpsertAirportConfigRequest,
     artcc: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AirportConfigBody, ApiError> {
     if req.calm_default {
         clear_calm(pool, icao, None).await?;
@@ -73,8 +75,8 @@ pub async fn create(
     let id: String = sqlx::query_scalar(
         "insert into flow.airport_config \
              (icao, name, aar, adr, landing_runways, departure_runways, sid_rules, gate_rules, \
-              wind_from_deg, wind_to_deg, calm_default, artcc, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning id",
+              wind_from_deg, wind_to_deg, calm_default, artcc, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning id",
     )
     .bind(icao)
     .bind(&req.name)
@@ -90,7 +92,8 @@ pub async fn create(
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
     .bind(artcc)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -102,7 +105,7 @@ pub async fn update(
     id: &str,
     icao: &str,
     req: &UpsertAirportConfigRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<Option<AirportConfigBody>, ApiError> {
     if req.calm_default {
         clear_calm(pool, icao, Some(id)).await?;
@@ -113,7 +116,7 @@ pub async fn update(
         "update flow.airport_config set \
              name = $3, aar = $4, adr = $5, landing_runways = $6, departure_runways = $7, \
              sid_rules = coalesce($8, sid_rules), gate_rules = coalesce($9, gate_rules), \
-             wind_from_deg = $10, wind_to_deg = $11, calm_default = $12, updated_by = $13 \
+             wind_from_deg = $10, wind_to_deg = $11, calm_default = $12, updated_by = $13, updated_by_actor = $14 \
          where id = $1 and icao = $2",
     )
     .bind(id)
@@ -128,7 +131,8 @@ pub async fn update(
     .bind(req.wind_from_deg)
     .bind(req.wind_to_deg)
     .bind(req.calm_default)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

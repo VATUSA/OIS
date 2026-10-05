@@ -13,29 +13,29 @@ use serde_json::Value;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::CurrentUser,
         permissions::{
             EventsDebriefCreate, EventsDiscordPublish, EventsPlanRead, EventsPlanUpdate,
             EventsRateUpdate, EventsSupportUpdate, StatsCaptureUpdate,
         },
-        principal::Principal,
+        principal::{Actor, Attribution, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed,
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
-        CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest, DccRequestBody,
-        EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody, EventStatsBody,
-        FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest, Tier1GenerateResult,
-        TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest, UpdateEventDebriefRequest,
-        UpsertAirportRateRequest, UpsertFacilitySupportRequest, UpsertFcaRequest,
-        UpsertProgramRequest,
+        CreateAdvisoryRequest, CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest,
+        DccRequestBody, EventAvailabilityBody, EventBody, EventCaptureBody, EventDebriefBody,
+        EventStatsBody, FacilitySupportBody, FcaBody, KeyCountBody, SetFcaAutoRequest,
+        Tier1GenerateResult, TmiPackageBody, UpdateDccRequest, UpdateEventCaptureRequest,
+        UpdateEventDebriefRequest, UpsertAirportRateRequest, UpsertFacilitySupportRequest,
+        UpsertFcaRequest, UpsertProgramRequest,
     },
     repos::{
-        access as access_repo, ace as ace_repo, availability as availability_repo,
-        events as events_repo, flow as flow_repo, integration as integration_repo, org as org_repo,
-        stats as stats_repo, tmu as tmu_repo,
+        ace as ace_repo, availability as availability_repo, events as events_repo,
+        flow as flow_repo, integration as integration_repo, org as org_repo, stats as stats_repo,
+        tmu as tmu_repo,
     },
     state::AppState,
 };
@@ -75,6 +75,28 @@ struct GroundStopItem {
     scope: Option<String>,
     #[serde(default)]
     until: Option<String>,
+}
+
+/// An ADVZY advisory planned for an event (#537).
+///
+/// Mirrors `RestrictionItem`: it carries the structured fields the authoring UI produces, so a
+/// planner sees the real document before the event goes live, and activation renders it through the
+/// same path `POST /tmu/advisories` uses rather than a second renderer.
+///
+/// `valid_from`/`valid_to` are the **enforceable** window, not the period printed in the document.
+/// They are required here — unlike on `CreateAdvisoryRequest`, where they are optional for the
+/// existing callers — because an advisory with no window would never be removed, and automatic
+/// removal is half of what this issue asks for.
+#[derive(Debug, Deserialize, Serialize)]
+struct AdvisoryItem {
+    facility: String,
+    kind: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    structured: Option<Value>,
+    valid_from: DateTime<Utc>,
+    valid_to: DateTime<Utc>,
 }
 
 /// Validate + normalize a package item's payload for its kind (canonical for storage).
@@ -123,8 +145,48 @@ fn normalize_item(kind: &str, payload: Value) -> Result<Value, ApiError> {
                 .filter(|s| !s.is_empty());
             serde_json::to_value(g).map_err(|_| ApiError::Internal)
         }
+        "advisory" => {
+            let mut a: AdvisoryItem =
+                serde_json::from_value(payload).map_err(|_| ApiError::BadRequest)?;
+            // Uppercased for the same reason the restriction arm uppercases its ARTCCs: the facility
+            // is matched against the facility map and scoped permission grants, both keyed uppercase.
+            a.facility = a.facility.trim().to_ascii_uppercase();
+            a.kind = a.kind.trim().to_string();
+            a.body = a.body.trim().to_string();
+            if a.facility.is_empty() || a.kind.is_empty() {
+                return Err(ApiError::BadRequest);
+            }
+            // An inverted or empty window would either never fire or fire immediately; neither is
+            // something a planner can have meant, and both are silent once the package is activated.
+            if a.valid_to <= a.valid_from {
+                return Err(ApiError::BadRequest);
+            }
+            // The document is the contract when nothing will render it — the same rule
+            // `create_advisory` applies via `derives_body`, kept consistent so a kind that renders
+            // nothing cannot be stored with an empty document (#499).
+            if !crate::repos::tmu::derives_body(&a.kind, a.structured.as_ref()) && a.body.is_empty()
+            {
+                return Err(ApiError::BadRequest);
+            }
+            serde_json::to_value(a).map_err(|_| ApiError::Internal)
+        }
         _ => Err(ApiError::BadRequest),
     }
+}
+
+/// The facility an `advisory` item will issue under, for the scope check at authoring time.
+///
+/// Returns `None` for every other kind, so a caller can gate on "is this an advisory" and the
+/// facility lookup in one step.
+fn advisory_item_facility(kind: &str, payload: &Value) -> Option<String> {
+    if kind != "advisory" {
+        return None;
+    }
+    payload
+        .get("facility")
+        .and_then(Value::as_str)
+        .map(|f| f.trim().to_ascii_uppercase())
+        .filter(|f| !f.is_empty())
 }
 
 const DCC_STATUSES: [&str; 3] = ["not_needed", "requested", "confirmed"];
@@ -161,6 +223,7 @@ fn default_dcc() -> DccRequestBody {
     get,
     path = "/api/v1/events",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     responses((status = 200, body = Vec<EventBody>), (status = 401))
 )]
 pub async fn list_events(
@@ -175,6 +238,7 @@ pub async fn list_events(
     get,
     path = "/api/v1/events/{id}",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventBody), (status = 401), (status = 404))
 )]
@@ -316,6 +380,7 @@ pub(crate) fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     get,
     path = "/api/v1/events/{id}/banner",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses(
         (status = 200, description = "The event's banner image", content_type = "image/*"),
@@ -429,6 +494,7 @@ pub(crate) async fn relay_banner(url: &str) -> Result<(String, Vec<u8>), BannerR
     get,
     path = "/api/v1/events/{id}/dcc",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = DccRequestBody), (status = 401))
 )]
@@ -449,6 +515,7 @@ pub async fn get_event_dcc(
     put,
     path = "/api/v1/events/{id}/dcc",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateDccRequest,
     responses((status = 200, body = DccRequestBody), (status = 400), (status = 401), (status = 404))
@@ -456,11 +523,11 @@ pub async fn get_event_dcc(
 pub async fn update_event_dcc(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateDccRequest>,
 ) -> Result<Json<DccRequestBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     if !DCC_STATUSES.contains(&payload.status.as_str()) {
@@ -471,7 +538,7 @@ pub async fn update_event_dcc(
     }
 
     let notes = payload.notes.unwrap_or_default();
-    events_repo::upsert_dcc(pool, id, &payload.status, notes.trim(), &user.id).await?;
+    events_repo::upsert_dcc(pool, id, &payload.status, notes.trim(), &by).await?;
     Ok(Json(
         events_repo::get_dcc(pool, id)
             .await?
@@ -483,14 +550,14 @@ pub async fn update_event_dcc(
     get,
     path = "/api/v1/events/{id}/facilities",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<FacilitySupportBody>), (status = 401), (status = 404))
 )]
 pub async fn list_event_facilities(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<FacilitySupportBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
@@ -538,11 +605,9 @@ pub async fn list_event_facilities(
     }
 
     // Editability is facility-scoped on events.support.update.
-    let principal = Principal::optional(current_user.as_ref(), current_api_key.as_ref());
-    let scope = match principal.as_ref() {
-        Some(p) => Some(p.permission_scope(&state, SUPPORT_PERMISSION).await?),
-        None => None,
-    };
+    let scope = principal
+        .permission_scope(&state, SUPPORT_PERMISSION)
+        .await?;
 
     let rows: Vec<FacilitySupportBody> = ids
         .into_iter()
@@ -554,10 +619,7 @@ pub async fn list_event_facilities(
                 .unwrap_or_default();
             airports.sort();
             let has_staffing = staffing.contains(&facility);
-            let editable = scope
-                .as_ref()
-                .map(|s| s.allows(Some(facility.as_str())))
-                .unwrap_or(false);
+            let editable = scope.allows(Some(facility.as_str()));
 
             match stored.get(&facility) {
                 Some(row) => FacilitySupportBody {
@@ -596,6 +658,7 @@ pub async fn list_event_facilities(
     put,
     path = "/api/v1/events/{id}/facilities/{facility}",
     tag = "events",
+    security(("session" = ["events.support.update"]), ("api_key" = ["events.support.update"]), ("service_account" = ["events.support.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("facility" = String, Path, description = "ARTCC/TRACON id")
@@ -606,12 +669,10 @@ pub async fn list_event_facilities(
 pub async fn upsert_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, facility)): Path<(i64, String)>,
     Json(payload): Json<UpsertFacilitySupportRequest>,
 ) -> Result<Json<FacilitySupportBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
@@ -637,7 +698,7 @@ pub async fn upsert_event_facility(
         &facility,
         &payload.level,
         notes.trim(),
-        principal.user_id(),
+        &principal.attribution(&state).await?,
     )
     .await?;
     let mut row = events_repo::get_facility_support(pool, id, &facility)
@@ -652,6 +713,7 @@ pub async fn upsert_event_facility(
     delete,
     path = "/api/v1/events/{id}/facilities/{facility}",
     tag = "events",
+    security(("session" = ["events.support.update"]), ("api_key" = ["events.support.update"]), ("service_account" = ["events.support.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("facility" = String, Path, description = "ARTCC/TRACON id")
@@ -661,11 +723,9 @@ pub async fn upsert_event_facility(
 pub async fn delete_event_facility(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsSupportUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, facility)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = normalize_facility(&facility).ok_or(ApiError::BadRequest)?;
 
@@ -692,6 +752,7 @@ pub async fn delete_event_facility(
     post,
     path = "/api/v1/events/{id}/facilities/tier1",
     tag = "events",
+    security(("session" = ["events.support.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses(
         (status = 200, body = Tier1GenerateResult),
@@ -776,26 +837,24 @@ pub async fn generate_tier1(
     get,
     path = "/api/v1/events/{id}/rates",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<AirportRateBody>), (status = 401))
 )]
 pub async fn list_event_rates(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<AirportRateBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let mut rates = events_repo::list_airport_rates(pool, id).await?;
 
     // Mark each row editable per the caller's ARTCC scope for events.rate.update.
-    if let Some(principal) = Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
-        let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
-        for r in rates.iter_mut() {
-            let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
-            r.editable = scope.allows(artcc);
-        }
+    let scope = principal.permission_scope(&state, RATE_PERMISSION).await?;
+    for r in rates.iter_mut() {
+        let artcc = (!r.artcc.is_empty()).then_some(r.artcc.as_str());
+        r.editable = scope.allows(artcc);
     }
     Ok(Json(rates))
 }
@@ -804,6 +863,7 @@ pub async fn list_event_rates(
     put,
     path = "/api/v1/events/{id}/rates/{icao}",
     tag = "events",
+    security(("session" = ["events.rate.update"]), ("api_key" = ["events.rate.update"]), ("service_account" = ["events.rate.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("icao" = String, Path, description = "Airport ICAO")
@@ -814,12 +874,10 @@ pub async fn list_event_rates(
 pub async fn upsert_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, icao)): Path<(i64, String)>,
     Json(payload): Json<UpsertAirportRateRequest>,
 ) -> Result<Json<AirportRateBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -851,7 +909,7 @@ pub async fn upsert_event_rate(
         artcc.as_deref().unwrap_or(""),
         payload.config_id.as_deref(),
         source,
-        principal.user_id(),
+        &principal.attribution(&state).await?,
     )
     .await?;
     let mut row = events_repo::get_airport_rate(pool, id, &icao)
@@ -865,6 +923,7 @@ pub async fn upsert_event_rate(
     delete,
     path = "/api/v1/events/{id}/rates/{icao}",
     tag = "events",
+    security(("session" = ["events.rate.update"]), ("api_key" = ["events.rate.update"]), ("service_account" = ["events.rate.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("icao" = String, Path, description = "Airport ICAO")
@@ -874,11 +933,9 @@ pub async fn upsert_event_rate(
 pub async fn delete_event_rate(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsRateUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((id, icao)): Path<(i64, String)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
@@ -918,6 +975,7 @@ async fn package_status(
     get,
     path = "/api/v1/events/{id}/packages",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<TmiPackageBody>), (status = 401))
 )]
@@ -934,6 +992,7 @@ pub async fn list_event_packages(
     post,
     path = "/api/v1/events/{id}/packages",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = CreatePackageRequest,
     responses((status = 200, body = Vec<TmiPackageBody>), (status = 400), (status = 401), (status = 404))
@@ -941,11 +1000,11 @@ pub async fn list_event_packages(
 pub async fn create_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<CreatePackageRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let name = payload.name.trim();
     if name.is_empty() {
@@ -954,7 +1013,7 @@ pub async fn create_event_package(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    events_repo::create_package(pool, id, name, &user.id).await?;
+    events_repo::create_package(pool, id, name, &by).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -962,6 +1021,7 @@ pub async fn create_event_package(
     delete,
     path = "/api/v1/events/{id}/packages/{package_id}",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -983,6 +1043,7 @@ pub async fn delete_event_package(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/items",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -993,6 +1054,7 @@ pub async fn delete_event_package(
 pub async fn add_event_package_item(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<AddPackageItemRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
@@ -1001,6 +1063,19 @@ pub async fn add_event_package_item(
         return Err(ApiError::Conflict); // can't edit an activated package
     }
     let canonical = normalize_item(&payload.kind, payload.payload)?;
+    // An advisory is a numbered, facility-attributed DCC document, so `EventsPlanUpdate` alone is not
+    // enough authority to plan one: without this a ZDC planner could queue an advisory to be issued
+    // in ZNY's name. `create_advisory` already enforces exactly this on the direct path, and this is
+    // the same check against the same permission (#537).
+    //
+    // It is enforced **here, at authoring**, because that is the one moment a principal is guaranteed
+    // to exist. `auto_publish` activates a package from a 60-second job with no user at all, so an
+    // activation-time check cannot be the only gate without leaving auto-publish ungated.
+    if let Some(facility) = advisory_item_facility(&payload.kind, &canonical) {
+        // `create`, not `publish`: adding an item drafts a document, it does not issue one. Issuing
+        // happens at activation, which checks `ADVISORY_ISSUE` (#537 review).
+        require_advisory_authority(&state, &principal, &facility, "tmu.adv.create").await?;
+    }
     events_repo::add_package_item(pool, &package_id, &payload.kind, &canonical).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
@@ -1009,6 +1084,7 @@ pub async fn add_event_package_item(
     delete,
     path = "/api/v1/events/{id}/packages/{package_id}/items/{item_id}",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id"),
@@ -1033,6 +1109,7 @@ pub async fn delete_event_package_item(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/activate",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1042,28 +1119,122 @@ pub async fn delete_event_package_item(
 pub async fn activate_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if package_status(pool, id, &package_id).await? != "draft" {
         return Err(ApiError::Conflict); // already activated
     }
-    activate_package(pool, id, &package_id, &user.id).await?;
+    // Re-checked here, not only when the item was added (#537). The item could have been queued by a
+    // planner whose scope has since been narrowed, and activation is the moment the document actually
+    // gets issued under a facility's name.
+    //
+    // Checked here as well as inside `activate_package` because this is where the 401/403 distinction
+    // is made; `activate_package` repeats the rule for the auto-publish job, which has no request.
+    require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
+    activate_package(pool, id, &package_id, &principal).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
+}
+
+/// `tmu.adv.create`, for `facility`, keeping this codebase's 401/403 split.
+///
+/// `handlers::tmu::require_advisory_scope` answers only "does the scope allow it", returning 403 for
+/// both "not held at all" and "held, but elsewhere" — correct there, because every one of its callers
+/// has already run `RequirePermission<TmuAdvCreate>` and so turned the first case into a 401 before
+/// it is reached. This handler cannot do that: the route serves four item kinds and only one of them
+/// needs the advisory permission, so the extractor would tighten the other three.
+///
+/// So the two cases are separated here instead: an empty scope is the permission being absent (401),
+/// and a non-empty scope that does not cover the facility is the wrong facility (403). That is the
+/// convention stated at `handlers::tmu`'s advisory tests — "401 for every absent permission, and 403
+/// is reserved for a wrong facility scope".
+async fn require_advisory_authority(
+    state: &AppState,
+    principal: &Principal,
+    facility: &str,
+    permission: &str,
+) -> Result<(), ApiError> {
+    let scope = principal.permission_scope(state, permission).await?;
+    if scope.is_empty() {
+        return Err(ApiError::Unauthorized);
+    }
+    if !scope.allows(Some(facility)) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
+}
+
+/// The permission that issuing an advisory needs, by any route (#537 review).
+///
+/// Activation does not only create the advisory — it creates **and publishes** it and enqueues the
+/// `adv_publish` post. The direct API gates those separately (`create_advisory` on `TmuAdvCreate`,
+/// `publish_advisory` on `TmuAdvPublish`) precisely so someone can draft a document without being able
+/// to issue it. Checking only `create` here let a package route collapse that split.
+const ADVISORY_ISSUE: &str = "tmu.adv.publish";
+
+/// Check the principal may issue every `advisory` item in a package.
+///
+/// Returns on the first item the principal cannot issue for, leaving the package a draft: a partial
+/// activation is worse than a refused one, so this runs before anything is materialized.
+async fn require_advisory_scope_for_package(
+    state: &AppState,
+    principal: &Principal,
+    pool: &sqlx::PgPool,
+    package_id: &str,
+) -> Result<(), ApiError> {
+    for item in events_repo::list_package_items(pool, package_id).await? {
+        if let Some(facility) = advisory_item_facility(&item.kind, &item.payload.0) {
+            require_advisory_authority(state, principal, &facility, ADVISORY_ISSUE).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The same check, made against the principal `activate_package` acts as.
+///
+/// This is what covers `auto_publish`. The lifecycle job is not principal-less: it activates as the
+/// package's `updated_by_actor`, rebuilt by [`Principal::from_actor`], so it is held to the same rule
+/// as whoever pressed Activate — a key at its owner's scope intersected with its grant, a service
+/// account at its roles' ARTCCs. Without it, a scope withdrawn between planning and the event was
+/// honoured on one activation path and ignored on the other.
+async fn require_actor_may_issue_package(
+    pool: &sqlx::PgPool,
+    principal: &Principal,
+    package_id: &str,
+) -> Result<(), ApiError> {
+    let items = events_repo::list_package_items(pool, package_id).await?;
+    let facilities: Vec<String> = items
+        .iter()
+        .filter_map(|item| advisory_item_facility(&item.kind, &item.payload.0))
+        .collect();
+    if facilities.is_empty() {
+        return Ok(());
+    }
+    let scope = principal.permission_scope_in(pool, ADVISORY_ISSUE).await?;
+    for facility in &facilities {
+        if !scope.allows(Some(facility)) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    Ok(())
 }
 
 /// Materialize a draft package's items into the live TMU tables (programs/restrictions/ground stops),
 /// recording each item's `live_ref`, then mark the package activated. Shared by the manual Activate
-/// handler and the auto-publish scheduler; `actor` is a real user id (stored as created_by/updated_by).
-/// Assumes the package is currently a draft.
+/// handler and the auto-publish scheduler, acting as `principal` — whoever pressed Activate, or whoever
+/// armed the package. Assumes the package is currently a draft.
 pub(crate) async fn activate_package(
     pool: &sqlx::PgPool,
     event_id: i64,
     package_id: &str,
-    actor: &str,
+    principal: &Principal,
 ) -> Result<(), ApiError> {
+    // Both callers — the Activate handler and the auto-publish job — come through here, so this is the
+    // one place an advisory item's issuer is checked for every path (#537 review).
+    require_actor_may_issue_package(pool, principal, package_id).await?;
+    // The TMU writes below name that principal: a person in both columns, a machine by its actor.
+    let by = principal.attribution_in(pool).await?;
     let event = events_repo::get(pool, event_id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1081,14 +1252,63 @@ pub(crate) async fn activate_package(
     )
     .await?;
 
-    // Materialize each draft item into the live TMU tables, recording a `live_ref` so the package
-    // can later be deactivated (cancelling exactly what it created).
+    // ## One transaction for the whole package (#537 review)
+    //
+    // Every item, every `live_ref` and `mark_package_activated` commit together or not at all. Each item
+    // used to commit on its own, so a failure on item N left 1…N-1 live while the package stayed a draft,
+    // and a retry published them **again**: a second numbered advisory, with the first orphaned
+    // (referenced by no item, so deactivation could never withdraw it). Auto-publish re-selects draft
+    // packages every tick, so one bad item republished everything before it on every tick.
+    //
+    // ### Pre-pass, outside the transaction
+    //
+    // Every payload is parsed and every Discord channel resolved **before** anything is written. A
+    // malformed item fails here with nothing touched. And no unrelated query runs inside the transaction,
+    // where `create_advisory_tx` holds `pg_advisory_xact_lock(facility:day)` for the advisory numbering.
+    // Those locks are now held until the package commits rather than per item — milliseconds — which only
+    // delays another advisory being created for the *same facility and day* while this one activates.
+    enum Prepared {
+        Program(ProgramItem),
+        // Boxed: it is far larger than the others (clippy::large_enum_variant).
+        Restriction(Box<RestrictionItem>),
+        GroundStop(GroundStopItem),
+        // The advisory channel is scoped to the issuing facility, as `publish_advisory` does: an
+        // advisory has exactly one owner, unlike a TMI with its requesting and providing ARTCCs.
+        Advisory(AdvisoryItem, Option<String>),
+    }
+    let mut prepared: Vec<(String, Prepared)> = Vec::with_capacity(items.len());
     for item in &items {
         let payload = item.payload.0.clone();
-        let live_ref = match item.kind.as_str() {
-            "program" => {
-                let p: ProgramItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+        let parse_err = |_| ApiError::Internal;
+        let p = match item.kind.as_str() {
+            "program" => Prepared::Program(serde_json::from_value(payload).map_err(parse_err)?),
+            "restriction" => Prepared::Restriction(Box::new(
+                serde_json::from_value(payload).map_err(parse_err)?,
+            )),
+            "ground_stop" => {
+                Prepared::GroundStop(serde_json::from_value(payload).map_err(parse_err)?)
+            }
+            "advisory" => {
+                let a: AdvisoryItem = serde_json::from_value(payload).map_err(parse_err)?;
+                let channel = integration_repo::channel_id(
+                    pool,
+                    crate::handlers::tmu::ADV_CHANNEL,
+                    Some(&a.facility),
+                )
+                .await?;
+                Prepared::Advisory(a, channel)
+            }
+            _ => continue,
+        };
+        prepared.push((item.id.clone(), p));
+    }
+
+    // Materialize each item into the live TMU tables, recording a `live_ref` so the package can later be
+    // deactivated (cancelling exactly what it created). An early `?` drops `tx`, which rolls back.
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    for (item_id, item) in prepared {
+        let live_ref = match item {
+            Prepared::Program(p) => {
                 let req = UpsertProgramRequest {
                     aar: p.aar,
                     trail: p.trail,
@@ -1100,13 +1320,12 @@ pub(crate) async fn activate_package(
                     // planned programs auto-expire an hour after the event ends
                     active_until: Some(event.end_time),
                 };
-                tmu_repo::upsert_program(pool, &p.icao, &req, &[], actor).await?;
+                tmu_repo::upsert_program(&mut *tx, &p.icao, &req, &[], &by).await?;
                 // Programs are keyed by ICAO; that's the handle for later cleanup.
                 p.icao
             }
-            "restriction" => {
-                let r: RestrictionItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+            Prepared::Restriction(r) => {
+                let r = *r;
                 let req = CreateTmiRequest {
                     requesting: r.requesting,
                     providing: r.providing,
@@ -1116,9 +1335,8 @@ pub(crate) async fn activate_package(
                     stop_time: r.stop_time,
                 };
                 // Activation goes live: create then publish so the restriction is active.
-                let tmi_id = tmu_repo::create_tmi(pool, &req, actor).await?;
-                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, actor).await?;
+                let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, &by).await?;
+                let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &by).await?;
                 if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
                     let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
                     integration_repo::enqueue_job(
@@ -1130,12 +1348,9 @@ pub(crate) async fn activate_package(
                     )
                     .await?;
                 }
-                tx.commit().await.map_err(|_| ApiError::Internal)?;
                 tmi_id
             }
-            "ground_stop" => {
-                let g: GroundStopItem =
-                    serde_json::from_value(payload).map_err(|_| ApiError::Internal)?;
+            Prepared::GroundStop(g) => {
                 let scope = g.scope.clone().unwrap_or_default();
                 let req = CreateGroundStopRequest {
                     airport: g.airport.clone(),
@@ -1143,17 +1358,51 @@ pub(crate) async fn activate_package(
                     until: g.until.clone(),
                 };
                 let gs_id =
-                    tmu_repo::create_ground_stop(pool, &req, &scope, g.until.as_deref(), actor)
+                    tmu_repo::create_ground_stop(&mut *tx, &req, &scope, g.until.as_deref(), &by)
                         .await?;
-                tmu_repo::publish_ground_stop(pool, &gs_id, actor).await?;
+                tmu_repo::publish_ground_stop(&mut *tx, &gs_id, &by).await?;
                 gs_id
             }
-            _ => continue,
+            Prepared::Advisory(a, channel) => {
+                let req = CreateAdvisoryRequest {
+                    facility: a.facility.clone(),
+                    kind: a.kind.clone(),
+                    body: a.body.clone(),
+                    structured: a.structured.clone(),
+                    decoded: None,
+                    // The planned window, carried through to the column the cleanup pass reads.
+                    valid_from: Some(a.valid_from),
+                    valid_to: Some(a.valid_to),
+                };
+                // Create, publish and enqueue together so an advisory is never live with nothing
+                // queued to announce it, or queued without being live.
+                let adv_id = tmu_repo::create_advisory_tx(&mut tx, &req, &by, None).await?;
+                if !tmu_repo::publish_advisory(&mut tx, &adv_id, &by).await? {
+                    // It was created in this transaction, so this cannot be "already published".
+                    return Err(ApiError::Internal);
+                }
+                let adv = tmu_repo::get_advisory_tx(&mut tx, &adv_id)
+                    .await?
+                    .ok_or(ApiError::Internal)?;
+                if let Some(channel_id) = channel {
+                    let job = crate::advisory::publish_job_payload(&channel_id, &adv);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "adv_publish",
+                        &job,
+                        Some("advisory"),
+                        Some(adv.id.as_str()),
+                    )
+                    .await?;
+                }
+                adv_id
+            }
         };
-        events_repo::set_item_live_ref(pool, &item.id, &live_ref).await?;
+        events_repo::set_item_live_ref(&mut *tx, &item_id, &live_ref).await?;
     }
 
-    events_repo::mark_package_activated(pool, package_id, actor).await?;
+    events_repo::mark_package_activated(&mut *tx, package_id, &by).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(())
 }
 
@@ -1161,6 +1410,7 @@ pub(crate) async fn activate_package(
     post,
     path = "/api/v1/events/{id}/packages/{package_id}/deactivate",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1170,15 +1420,15 @@ pub(crate) async fn activate_package(
 pub async fn deactivate_event_package(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if package_status(pool, id, &package_id).await? != "activated" {
         return Err(ApiError::Conflict); // only an activated package can be deactivated
     }
-    deactivate_package(pool, &package_id, &user.id).await?;
+    deactivate_package(pool, &package_id, &by).await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -1188,7 +1438,7 @@ pub async fn deactivate_event_package(
 pub(crate) async fn deactivate_package(
     pool: &sqlx::PgPool,
     package_id: &str,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<(), ApiError> {
     for item in events_repo::list_package_item_refs(pool, package_id).await? {
         let Some(reference) = item.live_ref.as_deref() else {
@@ -1199,15 +1449,66 @@ pub(crate) async fn deactivate_package(
                 tmu_repo::delete_program(pool, reference).await?;
             }
             "restriction" => {
-                tmu_repo::cancel_tmi(pool, reference).await?;
+                // Deactivation ends a TMI **before** the window its post printed. Without a correction
+                // the NTML channel keeps showing it as in force (#568). Posted only where the original
+                // was posted, only if this call is what ended it, and only if that was **early**: a
+                // TMI's natural end is printed in its window, so it gets no CNX (the owner's re-scope).
+                // `ended` alone cannot tell the two apart. The event-end archive runs every 60 s and the
+                // TMU cleanup expires a lapsed TMI only every 5 min, so a restriction planned until the
+                // event ends is usually still `published` when the archive reaches it.
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let ended = tmu_repo::cancel_tmi(&mut *tx, reference).await?;
+                if ended
+                    && let Some(channel_id) =
+                        integration_repo::published_channel_for_tmi(pool, reference).await?
+                    && let Some(tmi) = tmu_repo::get_tmi(pool, reference).await?
+                    && tmi.stop_time.is_none_or(|end| end > Utc::now())
+                {
+                    let job = crate::handlers::tmu::tmi_cancel_job(&channel_id, &tmi);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "tmi_cancel",
+                        &job,
+                        Some("tmi"),
+                        Some(reference),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
             }
             "ground_stop" => {
                 tmu_repo::cancel_ground_stop(pool, reference).await?;
             }
+            "advisory" => {
+                // `cancel_advisory` takes a transaction while the arms above take the pool. Opening
+                // one here rather than changing that signature: three other callers depend on it,
+                // and two of them cancel an advisory inside the same transaction as the program
+                // publish it belongs to, which is the property that signature exists to give them.
+                let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+                let ended = tmu_repo::cancel_advisory(&mut tx, reference).await?;
+                // Withdraw the post, as the cleanup pass does for an advisory that lapses (#537
+                // review, recorded there as belonging here — #568).
+                if ended
+                    && let Some(channel_id) =
+                        integration_repo::published_channel_for_advisory(pool, reference).await?
+                    && let Some(adv) = tmu_repo::get_advisory_tx(&mut tx, reference).await?
+                {
+                    let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
+                    integration_repo::enqueue_job(
+                        &mut tx,
+                        "adv_cancel",
+                        &job,
+                        Some("advisory"),
+                        Some(reference),
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(|_| ApiError::Internal)?;
+            }
             _ => {}
         }
     }
-    events_repo::mark_package_archived(pool, package_id, actor).await?;
+    events_repo::mark_package_archived(pool, package_id, by).await?;
     Ok(())
 }
 
@@ -1215,6 +1516,7 @@ pub(crate) async fn deactivate_package(
     put,
     path = "/api/v1/events/{id}/packages/{package_id}/auto",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("package_id" = String, Path, description = "Package id")
@@ -1225,6 +1527,7 @@ pub(crate) async fn deactivate_package(
 pub async fn set_event_package_auto(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, package_id)): Path<(i64, String)>,
     Json(payload): Json<SetFcaAutoRequest>,
 ) -> Result<Json<Vec<TmiPackageBody>>, ApiError> {
@@ -1234,7 +1537,22 @@ pub async fn set_event_package_auto(
         Some((event_id, _)) if event_id == id => {}
         _ => return Err(ApiError::NotFound),
     }
-    events_repo::set_package_auto(pool, &package_id, payload.auto_publish).await?;
+    // Arming auto-publish schedules an issuance, so it needs the authority to issue (#537 review).
+    // Otherwise someone refused a manual activation could arm the package and let the job do it.
+    // Disarming needs nothing more than the events permission: it can only prevent an issuance.
+    if payload.auto_publish {
+        require_advisory_scope_for_package(&state, &principal, pool, &package_id).await?;
+    }
+    // Recorded as the package's `updated_by_actor`, which is who the job activates as — so whoever
+    // chose automatic issuance (a person, a key at its capped scope, or a service account) is the one
+    // held to the rule, and the one the advisory is attributed to.
+    events_repo::set_package_auto(
+        pool,
+        &package_id,
+        payload.auto_publish,
+        &principal.attribution(&state).await?,
+    )
+    .await?;
     Ok(Json(events_repo::list_packages(pool, id).await?))
 }
 
@@ -1286,6 +1604,7 @@ async fn owned_event_fca(
     get,
     path = "/api/v1/events/{id}/fcas",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
 )]
@@ -1302,6 +1621,7 @@ pub async fn list_event_fcas(
     post,
     path = "/api/v1/events/{id}/fcas",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpsertFcaRequest,
     responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
@@ -1309,19 +1629,17 @@ pub async fn list_event_fcas(
 pub async fn create_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if payload.name.trim().is_empty() || payload.points.len() < 2 {
-        return Err(ApiError::BadRequest);
-    }
+    crate::handlers::flow::validate_fca(&payload)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    flow_repo::create_event_fca(pool, id, &payload, &user.id).await?;
+    flow_repo::create_event_fca(pool, id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
@@ -1329,6 +1647,7 @@ pub async fn create_event_fca(
     put,
     path = "/api/v1/events/{id}/fcas/{fca_id}",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1339,17 +1658,15 @@ pub async fn create_event_fca(
 pub async fn update_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    if payload.name.trim().is_empty() || payload.points.len() < 2 {
-        return Err(ApiError::BadRequest);
-    }
+    crate::handlers::flow::validate_fca(&payload)?;
     owned_event_fca(pool, id, &fca_id).await?;
-    flow_repo::update_fca(pool, &fca_id, &payload, &user.id).await?;
+    flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
 
@@ -1357,6 +1674,7 @@ pub async fn update_event_fca(
     delete,
     path = "/api/v1/events/{id}/fcas/{fca_id}",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1378,6 +1696,7 @@ pub async fn delete_event_fca(
     post,
     path = "/api/v1/events/{id}/fcas/{fca_id}/publish",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1403,6 +1722,7 @@ pub async fn publish_event_fca(
     post,
     path = "/api/v1/events/{id}/fcas/{fca_id}/archive",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1428,6 +1748,7 @@ pub async fn archive_event_fca(
     put,
     path = "/api/v1/events/{id}/fcas/{fca_id}/auto",
     tag = "events",
+    security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
@@ -1451,27 +1772,24 @@ pub async fn set_event_fca_auto(
     get,
     path = "/api/v1/events/{id}/capture",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventCaptureBody), (status = 401), (status = 404))
 )]
 pub async fn get_event_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<EventCaptureBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    let can_edit = match Principal::optional(current_user.as_ref(), current_api_key.as_ref()) {
-        Some(principal) => !principal
-            .permission_scope(&state, CAPTURE_PERMISSION)
-            .await?
-            .is_empty(),
-        None => false,
-    };
+    let can_edit = !principal
+        .permission_scope(&state, CAPTURE_PERMISSION)
+        .await?
+        .is_empty();
     Ok(Json(capture_body(pool, id, can_edit).await?))
 }
 
@@ -1479,6 +1797,7 @@ pub async fn get_event_capture(
     put,
     path = "/api/v1/events/{id}/capture",
     tag = "events",
+    security(("session" = ["stats.capture.update"]), ("api_key" = ["stats.capture.update"]), ("service_account" = ["stats.capture.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateEventCaptureRequest,
     responses((status = 200, body = EventCaptureBody), (status = 400), (status = 401), (status = 404))
@@ -1486,18 +1805,18 @@ pub async fn get_event_capture(
 pub async fn update_event_capture(
     State(state): State<AppState>,
     _permission: RequirePermission<StatsCaptureUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateEventCaptureRequest>,
 ) -> Result<Json<EventCaptureBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
     let pre = payload.pre_minutes.unwrap_or(30).clamp(0, 720);
     let post = payload.post_minutes.unwrap_or(30).clamp(0, 720);
-    stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &user.id).await?;
+    stats_repo::upsert_event_capture(pool, id, payload.enabled, pre, post, &by).await?;
     Ok(Json(capture_body(pool, id, true).await?))
 }
 
@@ -1505,6 +1824,7 @@ pub async fn update_event_capture(
     get,
     path = "/api/v1/events/{id}/availability",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = Vec<EventAvailabilityBody>), (status = 401))
 )]
@@ -1521,6 +1841,7 @@ pub async fn get_event_availability(
     get,
     path = "/api/v1/events/{id}/stats",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventStatsBody), (status = 401), (status = 404))
 )]
@@ -1671,23 +1992,21 @@ async fn event_stats(pool: &sqlx::PgPool, id: i64) -> Result<EventStatsBody, Api
     get,
     path = "/api/v1/events/{id}/debrief",
     tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     responses((status = 200, body = EventDebriefBody), (status = 401))
 )]
 pub async fn get_event_debrief(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
 ) -> Result<Json<EventDebriefBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let editable = match current_user.as_ref() {
-        Some(u) => access_repo::fetch_user_permission_names(pool, &u.id)
-            .await?
-            .iter()
-            .any(|p| p == "events.debrief.create"),
-        None => false,
-    };
+    let editable = !principal
+        .permission_scope(&state, "events.debrief.create")
+        .await?
+        .is_empty();
     let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
         Some((n, by, at)) => (n, by, Some(at)),
         None => (String::new(), None, None),
@@ -1704,6 +2023,7 @@ pub async fn get_event_debrief(
     put,
     path = "/api/v1/events/{id}/debrief",
     tag = "events",
+    security(("session" = ["events.debrief.create"]), ("api_key" = ["events.debrief.create"]), ("service_account" = ["events.debrief.create"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpdateEventDebriefRequest,
     responses((status = 200, body = EventDebriefBody), (status = 400), (status = 401), (status = 404))
@@ -1711,11 +2031,11 @@ pub async fn get_event_debrief(
 pub async fn update_event_debrief(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsDebriefCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateEventDebriefRequest>,
 ) -> Result<Json<EventDebriefBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     if payload.notes.len() > 20_000 {
         return Err(ApiError::BadRequest);
@@ -1723,7 +2043,7 @@ pub async fn update_event_debrief(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    events_repo::upsert_debrief(pool, id, &payload.notes, &user.id).await?;
+    events_repo::upsert_debrief(pool, id, &payload.notes, &by).await?;
     let (notes, updated_by, updated_at) = match events_repo::get_debrief(pool, id).await? {
         Some((n, by, at)) => (n, by, Some(at)),
         None => (payload.notes, None, None),
@@ -1754,6 +2074,7 @@ fn dcc_region(facility: &str) -> Option<&'static str> {
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/discord/publish", tag = "events",
+    security(("session" = ["events.discord.publish"]), ("api_key" = ["events.discord.publish"]), ("service_account" = ["events.discord.publish"])),
     params(("id" = i64, Path)),
     responses(
         (status = 202, description = "Thread creation enqueued"),
@@ -2156,5 +2477,1326 @@ mod tests {
         .unwrap();
         assert_eq!(item["requesting"], "ZDC");
         assert_eq!(item["providing"], "ZNY");
+    }
+}
+
+#[cfg(test)]
+mod advisory_package_tests {
+    //! Advisory items in an event TMI package (VATUSA/OIS#537).
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 737;
+
+    async fn seed_event(pool: &PgPool) -> String {
+        // The shared seeder rather than a hand-written insert: `identity.users` has `full_name`,
+        // not `first_name`/`last_name`, and guessing its columns is how this failed first time.
+        let user = crate::scope_test_support::seed_user(pool).await;
+        // The user these tests activate as. `activate_package` now holds its actor to
+        // `ADVISORY_ISSUE` for every advisory item, on every path (#537 review), so the actor has to
+        // be someone entitled to issue — as the real handler's caller and the auto-publish job's
+        // `updated_by` both must be.
+        crate::scope_test_support::grant(pool, &user, "tmu.adv.publish", None).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Advisory Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        user
+    }
+
+    /// A valid advisory item payload, `n` distinguishing its document text.
+    fn item(facility: &str, n: u32) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "facility": facility,
+            "kind": "reroute",
+            "body": format!("vATCSCC ADVZY {n}"),
+            "valid_from": from,
+            "valid_to": from + Duration::hours(2),
+        })
+    }
+
+    async fn package_with(pool: &PgPool, actor: &str, items: &[serde_json::Value]) -> String {
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        for it in items {
+            let canonical = normalize_item("advisory", it.clone()).unwrap();
+            events_repo::add_package_item(pool, &pkg, "advisory", &canonical)
+                .await
+                .unwrap();
+        }
+        pkg
+    }
+
+    async fn advisories(pool: &PgPool) -> Vec<(String, i32, String, String)> {
+        sqlx::query_as("select id, number, status, facility from tmu.advisories order by number")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// AC2: activation issues *and publishes* the advisory, numbered for its facility.
+    #[sqlx::test]
+    async fn activating_a_package_issues_and_publishes_the_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 1, "one advisory");
+        assert_eq!(rows[0].1, 1, "numbered from 1 for this facility and day");
+        assert_eq!(
+            rows[0].2, "published",
+            "activation publishes, not just drafts"
+        );
+        assert_eq!(rows[0].3, "DCC");
+
+        // `live_ref` is what lets deactivation cancel exactly what activation created. Read from the
+        // table rather than the API body, which does not expose it.
+        let live_ref: Option<String> = sqlx::query_scalar(
+            "select live_ref from events.tmi_package_item where package_id = $1",
+        )
+        .bind(&pkg)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            live_ref.as_deref(),
+            Some(rows[0].0.as_str()),
+            "the item points at the advisory it created"
+        );
+    }
+
+    /// AC5: several advisory items in one package all activate, each numbered, none lost. The
+    /// numbering lock is per facility-day, so these contend on the same lock by construction.
+    #[sqlx::test]
+    async fn a_package_with_several_advisories_activates_completely(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(
+            &pool,
+            &actor,
+            &[item("DCC", 1), item("DCC", 2), item("DCC", 3)],
+        )
+        .await;
+
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 3, "no item was skipped or lost to the lock");
+        let numbers: Vec<i32> = rows.iter().map(|r| r.1).collect();
+        assert_eq!(
+            numbers,
+            [1, 2, 3],
+            "each took the next number, none duplicated"
+        );
+        assert!(
+            rows.iter().all(|r| r.2 == "published"),
+            "all published, not left as drafts"
+        );
+        let unlinked: i64 = sqlx::query_scalar(
+            "select count(*) from events.tmi_package_item \
+             where package_id = $1 and live_ref is null",
+        )
+        .bind(&pkg)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unlinked, 0, "every item recorded its live_ref");
+    }
+
+    /// AC4: deactivation cancels it.
+    #[sqlx::test]
+    async fn deactivating_a_package_cancels_its_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(advisories(&pool).await[0].2, "cancelled");
+    }
+
+    /// AC4 for several: deactivation must cancel *all* of them, not just the first.
+    #[sqlx::test]
+    async fn deactivating_cancels_every_advisory_in_the_package(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1), item("DCC", 2)]).await;
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let rows = advisories(&pool).await;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.2 == "cancelled"), "both cancelled");
+    }
+
+    /// AC1: the window reaches the column the cleanup pass reads. Without this the advisory would
+    /// activate correctly and then never be removed, which is half the issue unfixed.
+    #[sqlx::test]
+    async fn the_planned_window_is_stored_on_the_advisory(pool: PgPool) {
+        let actor = seed_event(&pool).await;
+        let pkg = package_with(&pool, &actor, &[item("DCC", 1)]).await;
+
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        let (from, to): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+            sqlx::query_as("select valid_from, valid_to from tmu.advisories")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(from.is_some(), "valid_from stored");
+        let to = to.expect("valid_to stored");
+        assert!(to > Utc::now(), "and it is the planned future end");
+    }
+
+    // --- normalize_item (no DB) ---
+
+    /// The facility is matched against the facility map and scoped grants, both keyed uppercase —
+    /// the same reason the restriction arm uppercases its ARTCCs.
+    #[test]
+    fn an_advisory_items_facility_is_uppercased() {
+        let it = normalize_item("advisory", item(" dcc ", 1)).unwrap();
+        assert_eq!(it["facility"], "DCC");
+    }
+
+    /// An inverted or empty window would either never fire or fire the instant the package went
+    /// live, and both are silent once activated.
+    #[test]
+    fn an_inverted_or_empty_window_is_rejected() {
+        let now = Utc::now();
+        for (from, to) in [(now, now), (now, now - Duration::hours(1))] {
+            let bad = json!({
+                "facility": "DCC", "kind": "reroute", "body": "x",
+                "valid_from": from, "valid_to": to,
+            });
+            assert!(
+                normalize_item("advisory", bad).is_err(),
+                "valid_to <= valid_from must not be storable"
+            );
+        }
+    }
+
+    /// A window is required here even though `CreateAdvisoryRequest` leaves it optional: an advisory
+    /// with none would never be auto-removed, and removal is half of what #537 asks for.
+    #[test]
+    fn an_advisory_item_without_a_window_is_rejected() {
+        let no_window = json!({"facility": "DCC", "kind": "reroute", "body": "x"});
+        assert!(normalize_item("advisory", no_window).is_err());
+    }
+
+    /// The same rule `create_advisory` applies through `derives_body`: when nothing will render the
+    /// document, the text is the only source of it, so an empty one cannot be stored (#499).
+    #[test]
+    fn an_unrenderable_kind_still_needs_a_body() {
+        let from = Utc::now();
+        let bare = json!({
+            "facility": "DCC", "kind": "afp", "body": "   ",
+            "valid_from": from, "valid_to": from + Duration::hours(1),
+        });
+        assert!(normalize_item("advisory", bare).is_err());
+    }
+
+    /// `advisory` has to be claimed by `normalize_item` as well as by the check constraint; an
+    /// unknown kind must still be refused.
+    #[test]
+    fn an_unknown_kind_is_still_rejected() {
+        assert!(normalize_item("wat", item("DCC", 1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod advisory_permission_tests {
+    //! AC6: planning an advisory needs `tmu.adv.create` for the issuing facility, not just
+    //! `EventsPlanUpdate` (VATUSA/OIS#537).
+    //!
+    //! Driven through the real router, so the extractors and the scope check are the ones that run in
+    //! production. A missing permission is 401 and a wrong facility is 403, as everywhere else in this
+    //! codebase.
+
+    use std::collections::HashMap;
+
+    use axum::http;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    const EVENT: i64 = 738;
+
+    async fn seed(pool: &PgPool) -> (String, String, String) {
+        let user = seed_user(pool).await;
+        let cookie = session_cookie(pool, &user).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Perm Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        let pkg = crate::repos::events::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &crate::auth::principal::Attribution::for_user_id(pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        (user, cookie, pkg)
+    }
+
+    fn advisory_item(facility: &str) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "kind": "advisory",
+            "payload": {
+                "facility": facility,
+                "kind": "reroute",
+                "body": "vATCSCC ADVZY",
+                "valid_from": from,
+                "valid_to": from + Duration::hours(2),
+            }
+        })
+    }
+
+    async fn add(
+        state: &crate::state::AppState,
+        pkg: &str,
+        cookie: &str,
+        facility: &str,
+    ) -> http::StatusCode {
+        send(
+            state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/items"),
+            cookie,
+            Some(advisory_item(facility)),
+        )
+        .await
+    }
+
+    async fn item_count(pool: &PgPool, pkg: &str) -> i64 {
+        sqlx::query_scalar("select count(*) from events.tmi_package_item where package_id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The hole this closes: `EventsPlanUpdate` alone would let a planner queue a numbered DCC
+    /// document. It must not be enough on its own.
+    #[sqlx::test]
+    async fn events_plan_update_alone_cannot_plan_an_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+
+        let refused = add(&state, &pkg, &cookie, "DCC").await;
+
+        assert_eq!(refused, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            item_count(&pool, &pkg).await,
+            0,
+            "a refused add must not have written the item"
+        );
+    }
+
+    /// With both permissions nationally, it goes through.
+    #[sqlx::test]
+    async fn both_permissions_allow_planning_an_advisory(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", None).await;
+
+        let allowed = add(&state, &pkg, &cookie, "DCC").await;
+
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(item_count(&pool, &pkg).await, 1);
+    }
+
+    /// The actual escalation #537 names: a planner scoped to ZDC must not queue an advisory that
+    /// would be issued in ZNY's name. 403, because the permission is held — just not here.
+    #[sqlx::test]
+    async fn a_scoped_planner_cannot_plan_an_advisory_for_another_facility(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+
+        let refused = add(&state, &pkg, &cookie, "ZNY").await;
+        assert_eq!(refused, http::StatusCode::FORBIDDEN);
+        assert_eq!(item_count(&pool, &pkg).await, 0);
+
+        // ...but their own facility is fine, which is what makes the check a scope check rather than
+        // a blanket refusal.
+        let allowed = add(&state, &pkg, &cookie, "ZDC").await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(item_count(&pool, &pkg).await, 1);
+    }
+
+    /// The gate is specific to advisory items: a ground-stop item must still need only the events
+    /// permission, or this change would have quietly tightened the other three kinds.
+    #[sqlx::test]
+    async fn the_advisory_gate_does_not_apply_to_other_kinds(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+
+        let allowed = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/items"),
+            &cookie,
+            Some(json!({"kind": "ground_stop", "payload": {"airport": "KDCA"}})),
+        )
+        .await;
+
+        assert_eq!(
+            allowed,
+            http::StatusCode::OK,
+            "no tmu.adv.create granted, and none needed for a ground stop"
+        );
+    }
+
+    /// Activation re-checks, so an item queued while in scope cannot be issued after that scope is
+    /// withdrawn. The package stays a draft rather than partly activating.
+    #[sqlx::test]
+    async fn activation_rechecks_the_scope(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        // The grant is withdrawn between planning and activation.
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let refused = send(
+            &state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/activate"),
+            &cookie,
+            None,
+        )
+        .await;
+
+        assert_ne!(refused, http::StatusCode::OK, "activation must refuse");
+        let advisories = crate::repos::tmu::list_advisories(&pool).await.unwrap();
+        assert!(
+            advisories.is_empty(),
+            "and nothing was issued: a refused activation leaves no document behind"
+        );
+    }
+
+    async fn published_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from tmu.advisories where status = 'published'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// One pass of the event-package lifecycle job.
+    async fn run_auto_publish_pass(pool: &PgPool) {
+        // The real pass, so these tests cover how the job rebuilds whoever armed the package.
+        crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None))
+            .await
+            .unwrap();
+    }
+
+    async fn arm(
+        state: &crate::state::AppState,
+        pkg: &str,
+        cookie: &str,
+        on: bool,
+    ) -> http::StatusCode {
+        send(
+            state,
+            http::Method::PUT,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/auto"),
+            cookie,
+            Some(json!({ "auto_publish": on })),
+        )
+        .await
+    }
+
+    async fn activate(state: &crate::state::AppState, pkg: &str, cookie: &str) -> http::StatusCode {
+        send(
+            state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{pkg}/activate"),
+            cookie,
+            None,
+        )
+        .await
+    }
+
+    /// Activation creates **and publishes**, so it needs `tmu.adv.publish` — the permission the direct
+    /// `POST /tmu/advisories/{id}/publish` requires. With only `tmu.adv.create`, the package route used
+    /// to publish what the direct route refuses (#537 review).
+    #[sqlx::test]
+    async fn activation_needs_the_publish_permission_not_just_create(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        assert_eq!(
+            activate(&state, &pkg, &cookie).await,
+            http::StatusCode::UNAUTHORIZED,
+            "drafting rights do not include issuing"
+        );
+        assert_eq!(published_count(&pool).await, 0);
+
+        // ...and with the right to publish, it goes through — so the refusal above is the permission,
+        // not a broken activation.
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(activate(&state, &pkg, &cookie).await, http::StatusCode::OK);
+        assert_eq!(published_count(&pool).await, 1);
+    }
+
+    /// Arming auto-publish schedules an issuance, so someone refused a manual activation must not be
+    /// able to arm one instead and let the job issue it for them (#537 review).
+    #[sqlx::test]
+    async fn a_planner_who_cannot_issue_cannot_arm_auto_publish(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (author, author_cookie, pkg) = seed(&pool).await;
+        grant(&pool, &author, "events.plan.update", None).await;
+        grant(&pool, &author, "tmu.adv.create", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &author_cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        let planner = seed_user(&pool).await;
+        let planner_cookie = session_cookie(&pool, &planner).await;
+        grant(&pool, &planner, "events.plan.update", None).await;
+
+        assert_ne!(
+            activate(&state, &pkg, &planner_cookie).await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            arm(&state, &pkg, &planner_cookie, true).await,
+            http::StatusCode::UNAUTHORIZED,
+            "the same person may not arm what they may not activate"
+        );
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(published_count(&pool).await, 0, "and so nothing is issued");
+
+        // Disarming can only prevent an issuance, so the events permission is enough for it.
+        assert_eq!(
+            arm(&state, &pkg, &planner_cookie, false).await,
+            http::StatusCode::OK
+        );
+    }
+
+    /// The case `activation_rechecks_the_scope` covers for the Activate button, through the job: a
+    /// scope withdrawn between arming and the event stops the issuance (#537 review).
+    #[sqlx::test]
+    async fn auto_publish_rechecks_a_withdrawn_scope(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (user, cookie, pkg) = seed(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        grant(&pool, &user, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &user, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(arm(&state, &pkg, &cookie, true).await, http::StatusCode::OK);
+
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
+        )
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            published_count(&pool).await,
+            0,
+            "the job is held to the same rule"
+        );
+        let status: String =
+            sqlx::query_scalar("select status from events.tmi_package where id = $1")
+                .bind(&pkg)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            status, "draft",
+            "and the package is left a draft, not partly activated"
+        );
+    }
+
+    /// The job acts as whoever **armed** the package, not whoever wrote the item. Here the author keeps
+    /// their rights and only the armer loses theirs; the job must refuse. Without arming recording its
+    /// actor, the job would check the author, find them entitled, and issue.
+    #[sqlx::test]
+    async fn auto_publish_acts_as_the_person_who_armed_it(pool: PgPool) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let (author, author_cookie, pkg) = seed(&pool).await;
+        grant(&pool, &author, "events.plan.update", None).await;
+        grant(&pool, &author, "tmu.adv.create", Some("ZDC")).await;
+        grant(&pool, &author, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            add(&state, &pkg, &author_cookie, "ZDC").await,
+            http::StatusCode::OK
+        );
+
+        let armer = seed_user(&pool).await;
+        let armer_cookie = session_cookie(&pool, &armer).await;
+        grant(&pool, &armer, "events.plan.update", None).await;
+        grant(&pool, &armer, "tmu.adv.publish", Some("ZDC")).await;
+        assert_eq!(
+            arm(&state, &pkg, &armer_cookie, true).await,
+            http::StatusCode::OK
+        );
+
+        sqlx::query(
+            "delete from access.user_permissions \
+             where user_id = $1 and permission_name = 'tmu.adv.publish'",
+        )
+        .bind(&armer)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            published_count(&pool).await,
+            0,
+            "the armer lost the right to issue, so the job must not issue on their behalf"
+        );
+    }
+}
+
+#[cfg(test)]
+mod atomic_activation_tests {
+    //! VATUSA/OIS#537 review: activating a package must be all-or-nothing (AC5's "no partial
+    //! activation"). Each item used to commit on its own, so a failure on item N left 1…N-1 live, and a
+    //! retry republished them — a second numbered advisory, with the first orphaned.
+    //!
+    //! The failure is injected **inside** the transaction, by a trigger that refuses one marked
+    //! advisory. A malformed payload would not do: the pre-pass rejects that before anything is written,
+    //! so it would pass even with per-item commits and prove nothing about the transaction.
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 5370;
+    const BOOM: &str = "BOOM";
+
+    async fn seed(pool: &PgPool) -> String {
+        let actor = crate::scope_test_support::seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &actor, "tmu.adv.publish", None).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Atomic Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        actor
+    }
+
+    /// A failure partway through the transaction: refuse any advisory whose body is `BOOM`.
+    async fn arm_the_failure(pool: &PgPool) {
+        sqlx::raw_sql(
+            "create function t537_boom() returns trigger language plpgsql as $$ \
+             begin if new.body = 'BOOM' then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t537_boom before insert on tmu.advisories \
+             for each row execute function t537_boom();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn disarm_the_failure(pool: &PgPool) {
+        sqlx::raw_sql("drop trigger t537_boom on tmu.advisories; drop function t537_boom();")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn advisory(body: &str) -> serde_json::Value {
+        let from = Utc::now();
+        json!({
+            "facility": "DCC", "kind": "reroute", "body": body,
+            "valid_from": from, "valid_to": from + Duration::hours(2),
+        })
+    }
+
+    async fn add(pool: &PgPool, pkg: &str, kind: &str, payload: serde_json::Value) {
+        let canonical = normalize_item(kind, payload).unwrap();
+        events_repo::add_package_item(pool, pkg, kind, &canonical)
+            .await
+            .unwrap();
+    }
+
+    async fn count(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    async fn status(pool: &PgPool, pkg: &str) -> String {
+        sqlx::query_scalar("select status from events.tmi_package where id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The review's reproduction, with the failure inside the transaction.
+    #[sqlx::test]
+    async fn a_failed_activation_leaves_nothing_and_a_retry_publishes_each_item_once(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        add(&pool, &pkg, "advisory", advisory(BOOM)).await;
+        arm_the_failure(&pool).await;
+
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
+
+        // Nothing from the first attempt survives — not even item 1, which was written before item 2
+        // failed.
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 0);
+        assert_eq!(
+            count(&pool, "select count(*) from integration.outbound_jobs").await,
+            0,
+            "no publish job enqueued for anything"
+        );
+        assert_eq!(status(&pool, &pkg).await, "draft");
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from events.tmi_package_item where live_ref is not null"
+            )
+            .await,
+            0
+        );
+
+        // Repair the bad item and retry.
+        disarm_the_failure(&pool).await;
+        sqlx::query(
+            "update events.tmi_package_item set payload = jsonb_set(payload, '{body}', '\"vATCSCC ADVZY TWO\"') \
+             where payload->>'body' = $1",
+        )
+        .bind(BOOM)
+        .execute(&pool)
+        .await
+        .unwrap();
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        let numbers: Vec<i32> =
+            sqlx::query_scalar("select number from tmu.advisories order by number")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            numbers,
+            [1, 2],
+            "each item published exactly once — no duplicate"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from tmu.advisories a where not exists \
+                 (select 1 from events.tmi_package_item i where i.live_ref = a.id)"
+            )
+            .await,
+            0,
+            "no orphan: every advisory is referenced by an item, so deactivation can withdraw it"
+        );
+        assert_eq!(status(&pool, &pkg).await, "activated");
+    }
+
+    /// Two activations that both saw the package as a draft — the auto-publish tick and an Activate
+    /// click, or a double click — must not both publish. The handler's draft check runs outside the
+    /// transaction, so the guard is the status flip itself: exactly one wins, the other gets `Conflict`
+    /// and rolls back, and the package's one advisory is the one its item references.
+    #[sqlx::test]
+    async fn two_concurrent_activations_publish_once(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+
+        let principal = crate::auth::principal::Principal::for_user_id(&pool, &actor).await;
+        let (a, b) = tokio::join!(
+            activate_package(&pool, EVENT, &pkg, &principal),
+            activate_package(&pool, EVENT, &pkg, &principal),
+        );
+
+        let outcomes = [a, b];
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1, "one wins");
+        assert!(
+            outcomes
+                .iter()
+                .any(|r| matches!(r, Err(ApiError::Conflict))),
+            "the other is refused as already activated"
+        );
+        assert_eq!(
+            count(&pool, "select count(*) from tmu.advisories").await,
+            1,
+            "the loser's advisory was rolled back"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "select count(*) from tmu.advisories a where exists \
+                 (select 1 from events.tmi_package_item i where i.live_ref = a.id)"
+            )
+            .await,
+            1,
+            "and the survivor is the one the package references — nothing orphaned"
+        );
+        assert_eq!(status(&pool, &pkg).await, "activated");
+    }
+
+    /// The same guard, sequentially: activating an already-activated package changes nothing.
+    #[sqlx::test]
+    async fn activating_an_active_package_again_changes_nothing(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        activate_package(
+            &pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(&pool, &actor).await,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await,
+            Err(ApiError::Conflict)
+        ));
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 1);
+    }
+
+    /// The package's own status flip is inside the transaction too. If `mark_package_activated` ran after
+    /// the commit, a failure there would leave every item live under a package still marked draft —
+    /// which auto-publish re-selects every tick, and re-materialises.
+    #[sqlx::test]
+    async fn a_failure_marking_the_package_rolls_back_its_items(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        add(&pool, &pkg, "advisory", advisory("vATCSCC ADVZY ONE")).await;
+        sqlx::raw_sql(
+            "create function t537_mark() returns trigger language plpgsql as $$ \
+             begin if new.status = 'activated' then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t537_mark before update on events.tmi_package \
+             for each row execute function t537_mark();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
+
+        assert_eq!(count(&pool, "select count(*) from tmu.advisories").await, 0);
+        assert_eq!(status(&pool, &pkg).await, "draft");
+    }
+
+    /// Every kind is inside the transaction, not only advisories: a late failure must leave no
+    /// program, TMI or ground stop behind either.
+    #[sqlx::test]
+    async fn a_late_failure_rolls_back_every_kind_of_item(pool: PgPool) {
+        let actor = seed(&pool).await;
+        let pkg = events_repo::create_package(
+            &pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        add(&pool, &pkg, "program", json!({"icao": "KDCA", "aar": 30})).await;
+        add(
+            &pool,
+            &pkg,
+            "restriction",
+            json!({"requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                   "start_time": now, "stop_time": now + Duration::hours(2)}),
+        )
+        .await;
+        add(&pool, &pkg, "ground_stop", json!({"airport": "KIAD"})).await;
+        add(&pool, &pkg, "advisory", advisory(BOOM)).await;
+        arm_the_failure(&pool).await;
+
+        assert!(
+            activate_package(
+                &pool,
+                EVENT,
+                &pkg,
+                &crate::auth::principal::Principal::for_user_id(&pool, &actor).await
+            )
+            .await
+            .is_err()
+        );
+
+        for table in [
+            "tmu.programs",
+            "tmu.tmis",
+            "tmu.ground_stops",
+            "tmu.advisories",
+        ] {
+            assert_eq!(
+                count(&pool, &format!("select count(*) from {table}")).await,
+                0,
+                "{table} kept a row from a failed activation"
+            );
+        }
+        assert_eq!(status(&pool, &pkg).await, "draft");
+    }
+}
+
+#[cfg(test)]
+mod deactivation_correction_tests {
+    //! VATUSA/OIS#568 (as re-scoped): deactivating a package ends its TMIs and advisories **before** the
+    //! end their posts printed, so it must post a correction. Driven through real activation, so the
+    //! channel a correction goes to is the one the original publish job recorded.
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const EVENT: i64 = 568;
+    const NTML: &str = "900000000000000568";
+    const ADV: &str = "900000000000000569";
+
+    /// An actor entitled to issue advisories (activation checks it, #537), an event, and — when
+    /// `post` — a guild mapping both logical channels, so activation actually posts.
+    async fn seed(pool: &PgPool, post: bool) -> String {
+        let actor = crate::scope_test_support::seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &actor, "tmu.adv.publish", None).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Deactivation Test', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .bind(EVENT)
+        .execute(pool)
+        .await
+        .unwrap();
+        if post {
+            let config: String = sqlx::query_scalar(
+                "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            for (name, channel) in [
+                (crate::handlers::tmu::NTML_CHANNEL, NTML),
+                (crate::handlers::tmu::ADV_CHANNEL, ADV),
+            ] {
+                sqlx::query(
+                    "insert into integration.discord_channels (config_id, name, channel_id) \
+                     values ($1, $2, $3)",
+                )
+                .bind(&config)
+                .bind(name)
+                .bind(channel)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        actor
+    }
+
+    /// A package with one restriction and one advisory, activated.
+    async fn activated(pool: &PgPool, actor: &str) -> String {
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        let now = Utc::now();
+        let restriction = normalize_item(
+            "restriction",
+            json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                "start_time": now, "stop_time": now + Duration::hours(2),
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "restriction", &restriction)
+            .await
+            .unwrap();
+        let advisory = normalize_item(
+            "advisory",
+            json!({
+                "facility": "DCC", "kind": "reroute", "body": "vATCSCC ADVZY",
+                "valid_from": now, "valid_to": now + Duration::hours(2),
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "advisory", &advisory)
+            .await
+            .unwrap();
+        activate_package(
+            pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(pool, actor).await,
+        )
+        .await
+        .unwrap();
+        pkg
+    }
+
+    /// `(job_type, channel_id)` of every correction enqueued.
+    async fn corrections(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select job_type, payload->>'channel_id' from integration.outbound_jobs \
+             where job_type in ('tmi_cancel', 'adv_cancel') order by job_type",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The fix. Each item ended early gets exactly one correction, in the channel its post went to.
+    #[sqlx::test]
+    async fn deactivating_a_package_posts_a_correction_for_each_item(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+        assert!(
+            corrections(&pool).await.is_empty(),
+            "nothing corrected before deactivation"
+        );
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            corrections(&pool).await,
+            [
+                ("adv_cancel".to_string(), ADV.to_string()),
+                ("tmi_cancel".to_string(), NTML.to_string()),
+            ]
+        );
+    }
+
+    /// The TMI correction is the same NTML cancellation line the manual cancel posts, not a bespoke
+    /// one — so the log reads the same whichever path ended it.
+    #[sqlx::test]
+    async fn the_tmi_correction_is_the_ntml_cancellation_line(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let ntml: String = sqlx::query_scalar(
+            "select payload->>'ntml' from integration.outbound_jobs where job_type = 'tmi_cancel'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let restriction: String = sqlx::query_scalar("select restriction from tmu.tmis")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let expected =
+            crate::tmi::ntml_cancel_line(Utc::now(), &restriction, Some("ZDC"), Some("ZNY"));
+        // The timestamp prefix differs by the seconds between the two calls; the rest must match.
+        let tail = |s: &str| s.split_once(' ').map(|(_, rest)| rest.to_string());
+        assert_eq!(tail(&ntml), tail(&expected));
+    }
+
+    /// Nothing posted means nothing to correct — never a CNX for something that never went out.
+    #[sqlx::test]
+    async fn an_item_that_was_never_posted_gets_no_correction(pool: PgPool) {
+        let actor = seed(&pool, false).await;
+        let pkg = activated(&pool, &actor).await;
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
+    }
+
+    /// A package with one restriction running `start..stop`, activated. `stop = None` is open-ended.
+    async fn activated_restriction(
+        pool: &PgPool,
+        actor: &str,
+        start: chrono::DateTime<Utc>,
+        stop: Option<chrono::DateTime<Utc>>,
+    ) -> String {
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        let restriction = normalize_item(
+            "restriction",
+            json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": "20 MIT",
+                "start_time": start, "stop_time": stop,
+            }),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "restriction", &restriction)
+            .await
+            .unwrap();
+        activate_package(
+            pool,
+            EVENT,
+            &pkg,
+            &crate::auth::principal::Principal::for_user_id(pool, actor).await,
+        )
+        .await
+        .unwrap();
+        pkg
+    }
+
+    /// A TMI whose printed window has already closed ended on schedule, not early — even when the
+    /// archive reaches it before the 5-minute cleanup has marked it expired, which is the usual case
+    /// for a restriction planned until the event ends. Its post already says when it ended.
+    #[sqlx::test]
+    async fn a_tmi_past_its_printed_end_gets_no_correction(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let now = Utc::now();
+        let pkg = activated_restriction(
+            &pool,
+            &actor,
+            now - Duration::hours(3),
+            Some(now - Duration::minutes(1)),
+        )
+        .await;
+        let status: String = sqlx::query_scalar("select status from tmu.tmis")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "published", "the cleanup has not expired it yet");
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
+    }
+
+    /// An open-ended TMI printed no end at all, so any deactivation ends it early.
+    #[sqlx::test]
+    async fn an_open_ended_tmi_is_corrected(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated_restriction(&pool, &actor, Utc::now(), None).await;
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            corrections(&pool).await,
+            [("tmi_cancel".to_string(), NTML.to_string())]
+        );
+    }
+
+    /// Only an item **this** deactivation ends is corrected. One already over — expired on schedule,
+    /// with its end printed, or cancelled by hand — must not get a second, late cancellation.
+    #[sqlx::test]
+    async fn an_item_already_ended_is_not_corrected_again(pool: PgPool) {
+        let actor = seed(&pool, true).await;
+        let pkg = activated(&pool, &actor).await;
+        sqlx::query("update tmu.tmis set status = 'expired'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("update tmu.advisories set status = 'cancelled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        deactivate_package(
+            &pool,
+            &pkg,
+            &Attribution::for_user_id(&pool, &actor).await.unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(corrections(&pool).await.is_empty());
     }
 }

@@ -1,11 +1,12 @@
 import {useEffect, useState} from "react";
-import {Button, cn, Input, SegmentedControl, Textarea} from "@ois/ui";
+import {Button, ColorSwatches, Input, SegmentedControl, Textarea} from "@ois/ui";
 
 import {useValidateFixes} from "@/lib/fca";
 import type {Fca} from "@/lib/fca";
 import type {MapRoute} from "@/lib/route";
 import {lineNm, type LatLng} from "@/components/map/lib/geo";
-import {readFcaColors, readRouteColors, useFcaColors, useRouteColors} from "@/components/map/lib/colors";
+import {readFcaColors, readRouteColors, useRouteColors} from "@/components/map/lib/colors";
+import {colorLabel, usePalette} from "@/lib/palette";
 
 // --- FCA draft model ---
 
@@ -107,34 +108,6 @@ function Field({ label, help, children }: { label: string; help?: string; childr
   );
 }
 
-/** Colour swatches from the token palette; a saved colour outside it still shows (titled with its hex). */
-function Swatches({ colors, value, onChange }: { colors: string[]; value: string; onChange: (c: string) => void }) {
-  const known = colors.some((c) => c.toLowerCase() === value.toLowerCase());
-  const all = known || !value ? colors : [...colors, value];
-  return (
-    <div className="flex flex-col gap-1">
-      <span className="text-xs font-semibold uppercase tracking-wide text-ink-3">Color</span>
-      <div className="flex flex-wrap gap-1.5">
-        {all.map((c) => {
-          const on = c.toLowerCase() === value.toLowerCase();
-          return (
-            <button
-              key={c}
-              type="button"
-              title={c}
-              aria-label={`Color ${c}`}
-              aria-pressed={on}
-              onClick={() => onChange(c)}
-              className={cn("size-6 rounded-full", on && "ring-2 ring-ring ring-offset-2 ring-offset-panel")}
-              style={{ background: c }}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 /** Route-fixes input that flags entries which aren't real nav fixes (typos silently exclude traffic). */
 function FixesField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [debounced, setDebounced] = useState(value);
@@ -194,7 +167,13 @@ export function RouteEditor({
           <Input className="font-mono uppercase" maxLength={4} placeholder="KBOS" value={form.arr} onChange={(e) => set("arr", e.target.value)} />
         </Field>
       </div>
-      <Swatches colors={colors} value={form.color} onChange={(c) => set("color", c)} />
+      <ColorSwatches
+        label="Color"
+        swatches={colors.map((hex) => ({ hex, label: colorLabel(hex) }))}
+        value={form.color}
+        onChange={(c) => set("color", c)}
+        labelFor={colorLabel}
+      />
       <div className="flex gap-2 pt-1">
         <Button className="flex-1" onClick={onSave} disabled={!form.name.trim() || !form.route.trim() || saving}>
           Save route
@@ -228,7 +207,7 @@ export function DraftEditor({
   saving: boolean;
 }) {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => onChange({ ...draft, [k]: v });
-  const colors = useFcaColors();
+  const palette = usePalette();
   return (
     <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-3">
       <div className="text-sm font-semibold text-brand-ink">
@@ -288,7 +267,14 @@ export function DraftEditor({
         )}
       </div>
 
-      <Swatches colors={colors} value={draft.color} onChange={(c) => set("color", c)} />
+      <ColorSwatches
+        label="Color"
+        swatches={palette}
+        value={draft.color}
+        onChange={(c) => set("color", c)}
+        labelFor={colorLabel}
+        allowCustom
+      />
 
       <div className="mt-auto flex flex-col gap-2 pt-2">
         <div className="flex gap-2">

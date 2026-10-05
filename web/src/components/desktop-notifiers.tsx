@@ -9,6 +9,7 @@ import {hasPermission} from "@/lib/permissions";
 import {can} from "@/lib/platform";
 import {hhmmZulu} from "@/lib/time";
 import {useSetting} from "@/lib/settings";
+import {SOCKET_FALLBACK_MS} from "@/lib/realtime";
 
 /**
  * The notification detectors that don't already have one (#348).
@@ -293,6 +294,7 @@ export function EventReminderNotifier() {
       const {data} = await ois.GET("/api/v1/me/ace-claims");
       return data ?? [];
     },
+    refetchInterval: SOCKET_FALLBACK_MS,
   });
 
   // Whether a claim is due depends on the clock as much as on the data, and a refetch that returns

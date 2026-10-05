@@ -14,16 +14,23 @@
 //! - tray, hotkeys and the rest — #349-#354
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
-// appear behind them. Debug builds keep it — that's where our logs go.
+// appear behind them. Logs go to the log file either way (see `logging`); debug builds also print them
+// to this console.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod diagnostics;
+mod logging;
 mod notify;
 mod popout;
+mod redact;
 mod window_shape;
 
 fn main() {
+    logging::log_panics();
     tauri::Builder::default()
+        // The log file (#629). First, so everything after it can log.
+        .plugin(logging::plugin())
         // Launch at login (#351). Registered always; whether it is *enabled* is this computer's
         // login item, read and written from the settings page — never an account setting.
         .plugin(tauri_plugin_autostart::init(
@@ -33,9 +40,6 @@ fn main() {
         // Global shortcuts (#352). Registration is driven from the frontend, where the user's
         // configured accelerators live.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        // Native notifications (#348). The frontend decides what is worth notifying about and
-        // whether the user asked for it; this is delivery.
-        .plugin(tauri_plugin_notification::init())
         // Signed auto-update (#347). The plugin checks the endpoint in tauri.conf.json and will not
         // apply a package whose signature doesn't verify against the configured public key; the
         // frontend drives when that happens (`web/src/lib/desktop-update.ts`) so the app never
@@ -64,6 +68,7 @@ fn main() {
             auth::delete_token,
             auth::begin_login,
             notify::notify,
+            diagnostics::send_diagnostics,
         ])
         .build(tauri::generate_context!())
         .expect("failed to start the OIS desktop shell")
@@ -80,8 +85,10 @@ fn main() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
                 if let Some(window) = tauri::Manager::get_webview_window(_app, "main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    // A failure here leaves the user with no way back into the app, so it is logged.
+                    if let Err(e) = window.show().and_then(|()| window.set_focus()) {
+                        log::warn!("could not bring the main window back on reopen: {e}");
+                    }
                 }
             }
         });

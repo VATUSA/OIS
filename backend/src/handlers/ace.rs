@@ -3,6 +3,7 @@
 //! and keeps a national roster. Create/claim/release enqueue Discord jobs (`ace_request_post` /
 //! `ace_request_notify`) in the same tx as the state change; enqueue is skipped when no channel is set.
 
+use crate::auth::principal::Actor;
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
@@ -252,6 +253,7 @@ pub struct RequestsQuery {
     get,
     path = "/api/v1/me/ace-claims",
     tag = "ace",
+    security(("session" = ["ace.requests.claim"])),
     responses((status = 200, body = Vec<MyAceClaim>), (status = 401), (status = 403))
 )]
 /// The signed-in user's claimed ACE positions for events still to come.
@@ -272,6 +274,7 @@ pub async fn my_ace_claims(
 
 #[utoipa::path(
     get, path = "/api/v1/events/{id}/ace", tag = "ace",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("id" = i64, Path), ("status" = Option<String>, Query, description = "Filter by status")),
     responses((status = 200, body = Vec<AceRequestBody>), (status = 401))
 )]
@@ -289,6 +292,7 @@ pub async fn list_requests(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace", tag = "ace",
+    security(("session" = ["ace.requests.create"])),
     params(("id" = i64, Path)), request_body = CreateAceRequestRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404))
 )]
@@ -331,6 +335,8 @@ pub async fn create_request(
     )
     .await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &id)
         .await?
@@ -376,6 +382,7 @@ pub(crate) async fn create_one(
 
 #[utoipa::path(
     delete, path = "/api/v1/events/{id}/ace/{req}", tag = "ace",
+    security(("session" = ["ace.requests.decide"]), ("api_key" = ["ace.requests.decide"]), ("service_account" = ["ace.requests.decide"])),
     params(("id" = i64, Path), ("req" = String, Path)),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -385,6 +392,8 @@ pub async fn delete_request(
     Path((_event_id, req)): Path<(i64, String)>,
 ) -> Result<StatusCode, ApiError> {
     if ace_repo::delete_request(pool(&state)?, &req).await? {
+        // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+        state.publish(crate::realtime::topic::ACE);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -393,6 +402,7 @@ pub async fn delete_request(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace/{req}/claim", tag = "ace",
+    security(("session" = ["ace.requests.claim"])),
     params(("id" = i64, Path), ("req" = String, Path)), request_body = ClaimAceRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404), (status = 409))
 )]
@@ -436,6 +446,8 @@ pub async fn claim_request(
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
     enqueue_claim_dm(&mut tx, p, &req, &user.id).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &req)
         .await?
@@ -445,6 +457,7 @@ pub async fn claim_request(
 
 #[utoipa::path(
     delete, path = "/api/v1/events/{id}/ace/{req}/claim", tag = "ace",
+    security(("session" = ["ace.requests.claim"])),
     params(("id" = i64, Path), ("req" = String, Path)),
     responses((status = 200, body = AceRequestBody), (status = 401), (status = 404))
 )]
@@ -461,6 +474,8 @@ pub async fn release_claim(
     let (slots, count) = ace_repo::release_claim(&mut tx, &req, &user.id).await?;
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
 
     ace_repo::get_request(p, &req)
         .await?
@@ -470,22 +485,25 @@ pub async fn release_claim(
 
 #[utoipa::path(
     post, path = "/api/v1/events/{id}/ace/{req}/decide", tag = "ace",
+    security(("session" = ["ace.requests.decide"]), ("api_key" = ["ace.requests.decide"]), ("service_account" = ["ace.requests.decide"])),
     params(("id" = i64, Path), ("req" = String, Path)), request_body = DecideAceRequestRequest,
     responses((status = 200, body = AceRequestBody), (status = 400), (status = 401), (status = 404), (status = 409))
 )]
 pub async fn decide_request(
     State(state): State<AppState>,
     _permission: RequirePermission<AceRequestsDecide>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((_event_id, req)): Path<(i64, String)>,
     Json(payload): Json<DecideAceRequestRequest>,
 ) -> Result<Json<AceRequestBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let p = pool(&state)?;
     if !matches!(payload.outcome.as_str(), "completed" | "cancelled") {
         return Err(ApiError::BadRequest);
     }
-    ace_repo::decide_request(p, &req, &user.id, &payload.outcome).await?;
+    ace_repo::decide_request(p, &req, &by, &payload.outcome).await?;
+    // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
+    state.publish(crate::realtime::topic::ACE);
     ace_repo::get_request(p, &req)
         .await?
         .map(Json)

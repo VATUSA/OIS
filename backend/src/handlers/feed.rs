@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,16 +16,18 @@ use utoipa::ToSchema;
 
 use crate::{
     auth::{
-        context::CurrentUser,
         permissions::{TmuCfrAssign, TmuProgramRead},
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
     feed::taxi,
+    handlers::release_authority,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
     repos::airport_configs as config_repo,
+    repos::flow::Expect,
     repos::{flow as flow_repo, tmu as tmu_repo},
     state::AppState,
 };
@@ -48,6 +50,7 @@ pub struct FeedStatusBody {
     get,
     path = "/api/v1/feed/status",
     tag = "feed",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     responses((status = 200, body = FeedStatusBody), (status = 401))
 )]
 pub async fn feed_status(
@@ -171,6 +174,7 @@ pub(crate) async fn flow_for(
     get,
     path = "/api/v1/tmu/flow/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("icao" = String, Path, description = "Arrival airport ICAO")),
     responses((status = 200, body = crate::feed::flow::Flow), (status = 401), (status = 503))
 )]
@@ -194,6 +198,7 @@ pub struct AadcQuery {
     get,
     path = "/api/v1/tmu/flow/{icao}/aadc",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(
         ("icao" = String, Path, description = "Arrival airport ICAO"),
         ("bucket_min" = Option<i32>, Query, description = "Bucket width in minutes: 15, 30, or 60"),
@@ -287,6 +292,7 @@ fn effective_aar(
     get,
     path = "/api/v1/tmu/demand",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     responses(
         (status = 200, body = Vec<crate::models::AirportDemandBody>),
         (status = 401),
@@ -468,6 +474,7 @@ pub async fn airport_demand(
     get,
     path = "/api/v1/tmu/taxi/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 200, body = crate::feed::taxi::TaxiField), (status = 401))
 )]
@@ -494,6 +501,7 @@ pub async fn taxi_stats(
     get,
     path = "/api/v1/tmu/departures/{dep}",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     params(("dep" = String, Path, description = "Departure field: airport, TRACON, or ARTCC")),
     responses((status = 200, body = crate::models::DeparturesResponse), (status = 401), (status = 503))
 )]
@@ -598,10 +606,16 @@ pub(crate) async fn departures_response(
                 delay_min: m.delay_min,
                 cfr,
                 cfr_issued: m.cfr_issued || fca_cfr.is_some(),
+                cfr_version: None,
                 seq: m.seq,
             }
         })
         .collect();
+    // Each issued CFR's version, so a writer can send `If-Match` without provoking a 412 (#585 QA).
+    let versions = tmu_repo::issued_cfr_versions(pool).await?;
+    for d in &mut departures {
+        d.cfr_version = versions.get(&d.callsign).copied();
+    }
     // Metered (with a CFR) first, ordered by release; unmetered fall to the bottom.
     departures.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));
 
@@ -636,20 +650,48 @@ struct MeteredCfr {
     seq: Option<i64>,
 }
 
+/// Refuse a CFR write at an airport outside the caller's `tmu.cfr.assign` scope (#626). An airport
+/// with no known owning ARTCC is writable only nationally.
+async fn require_cfr_scope(
+    state: &AppState,
+    principal: &Principal,
+    airport: &str,
+) -> Result<(), ApiError> {
+    let artcc = facilities::artcc_for_airport(&*state.facilities.read().await, airport);
+    let scope = principal.permission_scope(state, "tmu.cfr.assign").await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/tmu/cfr",
     tag = "tmu",
+    security(("session" = ["tmu.cfr.assign"]), ("api_key" = ["tmu.cfr.assign"]), ("service_account" = ["tmu.cfr.assign"])),
+    params(
+        ("If-Match" = Option<String>, Header, description = "Re-issue only this CFR version (#585)"),
+        ("If-None-Match" = Option<String>, Header, description = "`*`: issue only if the flight holds no CFR (#585)")
+    ),
     request_body = IssueCfrRequest,
-    responses((status = 200, body = IssuedCfrBody), (status = 400), (status = 401))
+    responses(
+        (status = 200, body = IssuedCfrBody, description = "Issued; `ETag` is the new version"),
+        (status = 400), (status = 401),
+        (status = 403, description = "The airport's ARTCC is outside the caller's scope"),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
+    )
 )]
 pub async fn issue_cfr(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuCfrAssign>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
+    headers: HeaderMap,
     Json(payload): Json<IssueCfrRequest>,
-) -> Result<Json<IssuedCfrBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let callsign = payload.callsign.trim().to_ascii_uppercase();
@@ -657,6 +699,16 @@ pub async fn issue_cfr(
     if callsign.is_empty() || airport.len() < 3 {
         return Err(ApiError::BadRequest);
     }
+    // In scope for the airport it is issued at and, on a re-issue, the one it is moved from (#626).
+    require_cfr_scope(&state, &principal, &airport).await?;
+    if let Some(existing) = tmu_repo::get_issued_cfr(pool, &callsign).await? {
+        require_cfr_scope(&state, &principal, &existing.airport).await?;
+    }
+    // Who may issue it, and on what condition, before any slot computation (#585).
+    let expect = release_authority::precondition(&headers, &principal)?;
+    let by = principal.attribution(&state).await?;
+    let holder = tmu_repo::cfr_holder(pool, &callsign).await?;
+    release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
 
     // With a ready time, lock the closest open runway slot at or after it. Otherwise
     // lock the flight's currently proposed wheels-up (or now if it has none).
@@ -719,31 +771,68 @@ pub async fn issue_cfr(
         }
     };
 
-    tmu_repo::upsert_issued_cfr(pool, &callsign, &airport, wheels_up, &user.id).await?;
+    let Some(version) =
+        tmu_repo::upsert_issued_cfr(pool, &callsign, &airport, wheels_up, &by, expect).await?
+    else {
+        let now = tmu_repo::cfr_holder(pool, &callsign).await?;
+        return Err(ApiError::PreconditionFailed {
+            etag: now.map(|h| h.version),
+        });
+    };
     state.publish(crate::realtime::topic::CFR);
     let _ = tmu_repo::prune_stale_cfrs(pool).await;
     let cfr = tmu_repo::get_issued_cfr(pool, &callsign)
         .await?
         .ok_or(ApiError::Internal)?;
-    Ok(Json(cfr))
+    Ok((release_authority::etag(version), Json(cfr)))
 }
 
 #[utoipa::path(
     delete,
     path = "/api/v1/tmu/cfr/{callsign}",
     tag = "tmu",
-    params(("callsign" = String, Path, description = "Flight callsign")),
-    responses((status = 204), (status = 401), (status = 404))
+    security(("session" = ["tmu.cfr.assign"]), ("api_key" = ["tmu.cfr.assign"]), ("service_account" = ["tmu.cfr.assign"])),
+    params(
+        ("callsign" = String, Path, description = "Flight callsign"),
+        ("If-Match" = Option<String>, Header, description = "Release only this CFR version (#585)")
+    ),
+    responses(
+        (status = 204), (status = 400), (status = 401),
+        (status = 403, description = "The airport's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not release it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent no `If-Match`")
+    )
 )]
 pub async fn release_cfr(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuCfrAssign>,
+    Actor(principal): Actor,
     Path(callsign): Path<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let callsign = callsign.trim().to_ascii_uppercase();
-    if !tmu_repo::delete_issued_cfr(pool, &callsign).await? {
+    // A machine may release only its own CFR, at the version it last saw (#585).
+    let version = match release_authority::precondition(&headers, &principal)? {
+        Some(Expect::Absent) => return Err(ApiError::BadRequest),
+        Some(Expect::Version(v)) => Some(v),
+        None => None,
+    };
+    let (Some(holder), Some(cfr)) = (
+        tmu_repo::cfr_holder(pool, &callsign).await?,
+        tmu_repo::get_issued_cfr(pool, &callsign).await?,
+    ) else {
         return Err(ApiError::NotFound);
+    };
+    require_cfr_scope(&state, &principal, &cfr.airport).await?;
+    let by = principal.attribution(&state).await?;
+    release_authority::authorize(&principal, by.actor_id.as_deref(), Some(&holder))?;
+    if !tmu_repo::delete_issued_cfr(pool, &callsign, version, &by).await? {
+        return Err(ApiError::PreconditionFailed {
+            etag: Some(holder.version),
+        });
     }
     state.publish(crate::realtime::topic::CFR);
     Ok(StatusCode::NO_CONTENT)

@@ -1,28 +1,33 @@
 //! Flow handlers — FCA CRUD + a lightweight live-traffic feed for the FCA map.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 
 use axum::{
     Json,
+    body::Bytes,
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
+        context::{CurrentApiKey, CurrentServiceAccount, CurrentUser},
+        middleware::ensure_permission,
         permissions::{
-            FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete, FlowRouteUpdate, StatsRead,
+            EventsPlanRead, FlowFcaDelete, FlowFcaRead, FlowFcaUpdate, FlowRouteDelete,
+            FlowRouteUpdate, StatsRead,
         },
-        principal::Principal,
-        require_permission::RequirePermission,
+        principal::{Actor, Principal},
+        require_permission::{Permission, RequirePermission},
     },
     errors::ApiError,
     feed::{
+        TrafficCache,
         airports::{Airport, AirportDb},
         airspace::Boundaries,
         facilities, fca, flow as feed_flow,
@@ -34,6 +39,7 @@ use crate::{
         vatsim::VatsimData,
         winds::Winds,
     },
+    handlers::release_authority,
     jobs,
     models::{
         AircraftRoute, AirportGateBody, DataStatus, FcaBody, FcaFlight, FixPrediction,
@@ -239,10 +245,34 @@ fn altitude_matches(
     }
 }
 
-fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
+/// Refuse an FCA write unless the caller holds `permission` for every ARTCC in `artccs` (#636) — the
+/// same gate the shared-route writes use. An empty `artcc` normalises to none, so an FCA with no ARTCC is
+/// writable only nationally, like a global route. Before this, the FCA's `artcc` was only a sidebar
+/// filter: any holder could create, edit, reorder or delete another facility's FCA.
+async fn require_fca_write_scope(
+    state: &AppState,
+    principal: &Principal,
+    permission: &str,
+    artccs: &[&str],
+) -> Result<(), ApiError> {
+    let scope = principal.permission_scope(state, permission).await?;
+    if artccs
+        .iter()
+        .all(|artcc| scope.allows(flow_repo::norm_artcc(Some(artcc)).as_deref()))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
+/// points check, so a bad `mode` or `color` reached the table through them.
+pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
+    flow_repo::fca_color(req.color.as_deref())?;
     if let Some(m) = &req.mode
         && m != "rate"
         && m != "mit"
@@ -256,8 +286,9 @@ fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     get,
     path = "/api/v1/flow/fcas",
     tag = "flow",
-    responses((status = 200, body = Vec<FcaBody>), (status = 401))
+    responses((status = 200, body = Vec<FcaBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) lists FCAs signed out.
 pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     Ok(Json(flow_repo::list_fcas(pool).await?))
@@ -267,19 +298,21 @@ pub async fn list_fcas(State(state): State<AppState>) -> Result<Json<Vec<FcaBody
     post,
     path = "/api/v1/flow/fcas",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = FcaBody), (status = 400), (status = 401))
+    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
-    let id = flow_repo::create_fca(pool, &payload, &user.id).await?;
+    require_fca_write_scope(&state, &principal, "flow.fca.update", &[&payload.artcc]).await?;
+    let id = flow_repo::create_fca(pool, &payload, &by).await?;
     state.publish(crate::realtime::topic::FCA);
     flow_repo::get_fca(pool, &id)
         .await?
@@ -291,21 +324,34 @@ pub async fn create_fca(
     put,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertFcaRequest>,
 ) -> Result<Json<FcaBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_fca(&payload)?;
-    if !flow_repo::update_fca(pool, &id, &payload, &user.id).await? {
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    // As it is AND where it's headed — so an FCA can't be taken from, or moved into, an ARTCC the
+    // caller doesn't hold (relabelling a ZNY FCA as ZDC would otherwise open its releases, #626).
+    require_fca_write_scope(
+        &state,
+        &principal,
+        "flow.fca.update",
+        &[&existing.artcc, &payload.artcc],
+    )
+    .await?;
+    if !flow_repo::update_fca(pool, &id, &payload, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
@@ -319,15 +365,23 @@ pub async fn update_fca(
     delete,
     path = "/api/v1/flow/fcas/{id}",
     tag = "flow",
+    security(("session" = ["flow.fca.delete"]), ("api_key" = ["flow.fca.delete"]), ("service_account" = ["flow.fca.delete"])),
     params(("id" = String, Path, description = "FCA id")),
-    responses((status = 204), (status = 401), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaDelete>,
+    // Any credential holding the permission could delete before #636, so this takes the `Actor` rather
+    // than narrowing it to a person.
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_write_scope(&state, &principal, "flow.fca.delete", &[&existing.artcc]).await?;
     if flow_repo::delete_fca(pool, &id).await? {
         state.publish(crate::realtime::topic::FCA);
         Ok(StatusCode::NO_CONTENT)
@@ -368,6 +422,24 @@ fn resolve_route_body(nav: &NavData, airports: &AirportDb, row: flow_repo::Route
 /// Permission names for route edit/delete scope checks (the caller must hold these for the route's ARTCC).
 const ROUTE_UPDATE_PERM: &str = "flow.route.update";
 const ROUTE_DELETE_PERM: &str = "flow.route.delete";
+/// The release writes' permission, checked against the FCA's owning ARTCC (#626).
+const FCA_UPDATE_PERM: &str = "flow.fca.update";
+
+/// Refuse a release write on an FCA outside the caller's `flow.fca.update` scope (#626). An FCA with
+/// no `artcc` is writable only nationally, as a global shared route is.
+async fn require_fca_scope(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    let artcc = flow_repo::norm_artcc(Some(&fca.artcc));
+    let scope = principal.permission_scope(state, FCA_UPDATE_PERM).await?;
+    if scope.allows(artcc.as_deref()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
 
 /// Protective margin added to the separation when **issuing** a release (#356).
 ///
@@ -390,8 +462,9 @@ pub struct RoutesQuery {
     path = "/api/v1/flow/routes",
     tag = "flow",
     params(("artcc" = Option<String>, Query, description = "Scope to one ARTCC (+ global routes)")),
-    responses((status = 200, body = Vec<RouteBody>), (status = 401))
+    responses((status = 200, body = Vec<RouteBody>))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw routes signed out.
 pub async fn list_routes(
     State(state): State<AppState>,
     Query(q): Query<RoutesQuery>,
@@ -428,17 +501,16 @@ async fn route_response(state: &AppState, id: &str) -> Result<Json<RouteBody>, A
     post,
     path = "/api/v1/flow/routes",
     tag = "flow",
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"]), ("service_account" = ["flow.route.update"])),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401))
 )]
 pub async fn create_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     // Facility scope: the caller must hold flow.route.update for the route's ARTCC (or nationally —
@@ -450,7 +522,7 @@ pub async fn create_route(
     if !scope.allows(artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    let id = flow_repo::create_route(pool, &payload, principal.user_id()).await?;
+    let id = flow_repo::create_route(pool, &payload, &principal.attribution(&state).await?).await?;
     route_response(&state, &id).await
 }
 
@@ -458,6 +530,7 @@ pub async fn create_route(
     put,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
+    security(("session" = ["flow.route.update"]), ("api_key" = ["flow.route.update"]), ("service_account" = ["flow.route.update"])),
     params(("id" = String, Path, description = "Route id")),
     request_body = UpsertRouteRequest,
     responses((status = 200, body = RouteBody), (status = 400), (status = 401), (status = 404))
@@ -465,12 +538,10 @@ pub async fn create_route(
 pub async fn update_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpsertRouteRequest>,
 ) -> Result<Json<RouteBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate_route(&payload)?;
     let existing = flow_repo::get_route(pool, &id)
@@ -485,7 +556,7 @@ pub async fn update_route(
     if !scope.allows(existing.artcc.as_deref()) || !scope.allows(new_artcc.as_deref()) {
         return Err(ApiError::Forbidden);
     }
-    if !flow_repo::update_route(pool, &id, &payload, principal.user_id()).await? {
+    if !flow_repo::update_route(pool, &id, &payload, &principal.attribution(&state).await?).await? {
         return Err(ApiError::NotFound);
     }
     route_response(&state, &id).await
@@ -495,17 +566,16 @@ pub async fn update_route(
     delete,
     path = "/api/v1/flow/routes/{id}",
     tag = "flow",
+    security(("session" = ["flow.route.delete"]), ("api_key" = ["flow.route.delete"]), ("service_account" = ["flow.route.delete"])),
     params(("id" = String, Path, description = "Route id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
 pub async fn delete_route(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowRouteDelete>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let existing = flow_repo::get_route(pool, &id)
         .await?
@@ -528,8 +598,9 @@ pub async fn delete_route(
     get,
     path = "/api/v1/flow/counts",
     tag = "flow",
-    responses((status = 200, body = std::collections::HashMap<String, i64>), (status = 401))
+    responses((status = 200, body = std::collections::HashMap<String, i64>))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows FCA counts signed out.
 pub async fn fca_counts(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, i64>>, ApiError> {
@@ -621,8 +692,9 @@ pub async fn fca_counts(
     path = "/api/v1/flow/aircraft/{callsign}/route",
     tag = "flow",
     params(("callsign" = String, Path, description = "Aircraft callsign")),
-    responses((status = 200, body = AircraftRoute), (status = 401), (status = 404))
+    responses((status = 200, body = AircraftRoute), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview and facility map draw a selected flight's route signed out.
 pub async fn aircraft_route(
     State(state): State<AppState>,
     Path(callsign): Path<String>,
@@ -724,6 +796,7 @@ pub async fn aircraft_route(
     post,
     path = "/api/v1/flow/resolve-routes",
     tag = "flow",
+    security(("session" = ["stats.data.read"]), ("api_key" = ["stats.data.read"]), ("service_account" = ["stats.data.read"])),
     request_body = Vec<ResolveRouteRequest>,
     responses((status = 200, body = Vec<ResolvedRoute>), (status = 401))
 )]
@@ -782,8 +855,9 @@ fn build_data_status(state: &AppState) -> DataStatus {
     get,
     path = "/api/v1/flow/data-status",
     tag = "flow",
-    responses((status = 200, body = DataStatus), (status = 401))
+    responses((status = 200, body = DataStatus))
 )]
+/// Public by design, no credential (#586): the public FCA overview shows data freshness signed out.
 pub async fn data_status(State(state): State<AppState>) -> Json<DataStatus> {
     Json(build_data_status(&state))
 }
@@ -1004,6 +1078,7 @@ pub(crate) async fn build_flight_advisory(
     get,
     path = "/api/v1/me/flight",
     tag = "public",
+    security(("session" = [])),
     responses((status = 200, body = FlightImpact), (status = 401))
 )]
 pub async fn my_flight(
@@ -1036,8 +1111,9 @@ pub async fn my_flight(
     get,
     path = "/api/v1/flow/route-coverage",
     tag = "flow",
-    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 401), (status = 503))
+    responses((status = 200, body = crate::feed::coverage::CoverageReport), (status = 503))
 )]
+/// Public by design, no credential (#586): the public FCA overview's coverage panel renders signed out.
 pub async fn route_coverage(
     State(state): State<AppState>,
 ) -> Result<Json<crate::feed::coverage::CoverageReport>, ApiError> {
@@ -1060,6 +1136,7 @@ pub struct ValidateFixesQuery {
 /// typos (e.g. `MLLETT` for `MLLET`) that would silently exclude matching traffic.
 #[utoipa::path(
     get, path = "/api/v1/flow/validate-fixes", tag = "flow",
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(("fixes" = Option<String>, Query, description = "Space/comma-separated fix tokens")),
     responses((status = 200, body = FixValidationBody), (status = 401))
 )]
@@ -1117,6 +1194,7 @@ impl Drop for DataRefreshClaim<'_> {
     post,
     path = "/api/v1/flow/data-refresh",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     responses((status = 200, body = DataStatus), (status = 401), (status = 409))
 )]
 pub async fn data_refresh(
@@ -1147,16 +1225,40 @@ pub async fn data_refresh(
     get,
     path = "/api/v1/flow/traffic",
     tag = "flow",
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>))
 )]
-pub async fn list_traffic(State(state): State<AppState>) -> Json<Vec<TrafficAircraft>> {
-    let snapshot = state.feed.read().await.snapshot.clone();
+/// Public by design, no credential (#586): live traffic on the public FCA overview, facility map and /pilot, signed out.
+pub async fn list_traffic(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let (snapshot, cache) = {
+        let feed = state.feed.read().await;
+        (feed.snapshot.clone(), feed.traffic_cache.clone())
+    };
+    let Some(snapshot) = snapshot else {
+        return Ok(json_body(Bytes::from_static(b"[]")));
+    };
     let exclusions = state.flight_exclusions.load_full();
-    let aircraft = snapshot
+    // Held while building, so concurrent misses after a snapshot swap build once and the rest reuse it.
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(hit) = cache
         .as_ref()
-        .map(|snap| traffic_from(&snap.data, exclusions.as_ref()))
-        .unwrap_or_default();
-    Json(aircraft)
+        .filter(|c| Arc::ptr_eq(&c.snapshot, &snapshot) && Arc::ptr_eq(&c.exclusions, &exclusions))
+    {
+        return Ok(json_body(hit.body.clone()));
+    }
+    let body = Bytes::from(
+        serde_json::to_vec(&traffic_from(&snapshot.data, &exclusions))
+            .map_err(|_| ApiError::Internal)?,
+    );
+    *cache = Some(TrafficCache {
+        snapshot,
+        exclusions,
+        body: body.clone(),
+    });
+    Ok(json_body(body))
+}
+
+fn json_body(body: Bytes) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1170,8 +1272,9 @@ pub struct ProjectQuery {
     path = "/api/v1/flow/traffic/projected",
     tag = "flow",
     params(("offset_sec" = i64, Query, description = "Seconds ahead to project (0-5400)")),
-    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400), (status = 401))
+    responses((status = 200, body = Vec<TrafficAircraft>), (status = 400))
 )]
+/// Public by design, no credential (#586): the public FCA overview's time slider projects traffic signed out.
 pub async fn projected_traffic(
     State(state): State<AppState>,
     Query(q): Query<ProjectQuery>,
@@ -1598,6 +1701,7 @@ fn fca_flight(
         seq: 0,
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
+        release_version: None,
         groundspeed: gs,
         altitude: alt,
         heading: hdg,
@@ -2015,6 +2119,17 @@ fn finalize(
     flights
 }
 
+/// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
+/// beside the metering input, never from it: provenance cannot move a time.
+fn annotate_releases(
+    flights: &mut [FcaFlight],
+    holders: &HashMap<String, flow_repo::ReleaseHolder>,
+) {
+    for f in flights {
+        f.release_version = holders.get(&f.callsign).map(|h| h.version);
+    }
+}
+
 async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiError> {
     Ok(flow_repo::list_releases(pool, id)
         .await?
@@ -2092,10 +2207,19 @@ pub struct TrafficQuery {
         ("id" = String, Path, description = "FCA id"),
         ("debug" = Option<bool>, Query, description = "Include per-flight ETA/metering debug detail")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaFlight>), (status = 404))
 )]
+/// Public by design, no credential (#586): the public FCA overview (/advisories/fcas) shows each FCA's traffic signed out.
+///
+/// Public only for an FCA the public list shows. An unpublished event FCA is served to a planner
+/// (`events.plan.read`, the gate on `GET /events/{id}/fcas`, whose FCAs tab counts its crossings), and a
+/// deleted one to any signed-in caller (historical replay can still select it). Anyone else gets 404,
+/// not 403, so the route never confirms that a hidden FCA exists.
 pub async fn fca_traffic(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Extension(current_service_account): Extension<Option<CurrentServiceAccount>>,
+    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
     Path(id): Path<String>,
     Query(q): Query<TrafficQuery>,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
@@ -2103,11 +2227,32 @@ pub async fn fca_traffic(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let signed_in =
+        current_user.is_some() || current_service_account.is_some() || current_api_key.is_some();
+    if flow_repo::fca_is_deleted(pool, &id).await? && !signed_in {
+        return Err(ApiError::NotFound);
+    }
+    let unpublished_event =
+        fca.event_id.is_some() && fca.event_status.as_deref() != Some("published");
+    if unpublished_event
+        && ensure_permission(
+            &state,
+            current_user.as_ref(),
+            current_service_account.as_ref(),
+            current_api_key.as_ref(),
+            EventsPlanRead::path(),
+        )
+        .await
+        .is_err()
+    {
+        return Err(ApiError::NotFound);
+    }
     let releases = load_releases(pool, &id).await?;
+    let holders = flow_repo::release_holders(pool, &id).await?;
     let now = Utc::now();
-    Ok(Json(
-        metered_flights(&state, fca, releases, now, q.debug).await?,
-    ))
+    let mut flights = metered_flights(&state, fca, releases, now, q.debug).await?;
+    annotate_releases(&mut flights, &holders);
+    Ok(Json(flights))
 }
 
 /// Scope for the IDST board — comma-separated airport, TRACON, and ARTCC codes.
@@ -2131,6 +2276,7 @@ fn split_codes(s: &Option<String>) -> Vec<String> {
     get,
     path = "/api/v1/flow/idst",
     tag = "flow",
+    security(("session" = ["flow.fca.read"]), ("api_key" = ["flow.fca.read"]), ("service_account" = ["flow.fca.read"])),
     params(
         ("airports" = Option<String>, Query, description = "Comma-separated airport ICAOs"),
         ("tracons" = Option<String>, Query, description = "Comma-separated TRACON ids"),
@@ -2175,14 +2321,19 @@ pub async fn list_idst(
     // Gather each enabled FCA with its releases (async DB) first, then hand the whole per-FCA metering
     // loop to a blocking thread — it resolves every ground departure's route for every FCA, which is
     // heavy CPU that must stay off the async workers (see `metered_flights`).
-    let mut fca_releases: Vec<(FcaBody, ReleaseMap)> = Vec::new();
+    let mut fca_releases: Vec<(
+        FcaBody,
+        ReleaseMap,
+        HashMap<String, flow_repo::ReleaseHolder>,
+    )> = Vec::new();
     for fca in flow_repo::list_fcas(pool)
         .await?
         .into_iter()
         .filter(|f| f.enabled && f.points.0.len() >= 2)
     {
         let releases = load_releases(pool, &fca.id).await?;
-        fca_releases.push((fca, releases));
+        let holders = flow_repo::release_holders(pool, &fca.id).await?;
+        fca_releases.push((fca, releases, holders));
     }
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
     // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
@@ -2211,7 +2362,7 @@ pub async fn list_idst(
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
-        for (fca, releases) in &fca_releases {
+        for (fca, releases, holders) in &fca_releases {
             let (flights, metas) = build_candidates(
                 fca,
                 &snap.data,
@@ -2252,6 +2403,11 @@ pub async fn list_idst(
                 let pick = predicted
                     .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
                     .cloned();
+                // Provenance for the controller (#585 AC4): a machine-issued release names it.
+                let released_by_machine = holders
+                    .get(&f.callsign)
+                    .and_then(|h| h.machine.as_ref())
+                    .map(|(_, name)| name.clone());
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2265,6 +2421,7 @@ pub async fn list_idst(
                     cross_time: f.cross_time,
                     edct,
                     released: f.released,
+                    released_by_machine,
                     runway: pick.as_ref().map(|(r, _)| r.clone()),
                     runway_source: pick.as_ref().map(|(_, s)| s.clone()),
                 };
@@ -2300,26 +2457,43 @@ pub async fn list_idst(
     post,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Replace only this release version (#585)"),
+        ("If-None-Match" = Option<String>, Header, description = "`*`: create only if the flight holds no release (#585)")
     ),
     request_body = ReleaseRequest,
-    responses((status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
+        (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
+    )
 )]
 pub async fn mark_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(payload): Json<ReleaseRequest>,
-) -> Result<Json<Vec<FcaFlight>>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
+    // Who may write it, and on what condition, before any metering work (#585).
+    let expect = release_authority::precondition(&headers, &principal)?;
+    let by = principal.attribution(&state).await?;
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
@@ -2365,36 +2539,76 @@ pub async fn mark_release(
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
     let edct = cta - (eta_ms - now_ms);
-    flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &user.id).await?;
+    let Some(version) =
+        flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by, expect).await?
+    else {
+        let now = flow_repo::release_holder(pool, &id, &callsign).await?;
+        return Err(ApiError::PreconditionFailed {
+            etag: now.map(|h| h.version),
+        });
+    };
     state.publish(crate::realtime::topic::RELEASE);
 
     // Reflect the new release and re-meter without another snapshot read.
     metas[ti].frozen_ms = Some(cta);
     flights[ti].released = true;
     flights[ti].edct = DateTime::from_timestamp_millis(edct);
-    Ok(Json(finalize(&fca, flights, &metas)))
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok((release_authority::etag(version), Json(flights)))
 }
 
 #[utoipa::path(
     delete,
     path = "/api/v1/flow/fcas/{id}/release/{callsign}",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(
         ("id" = String, Path, description = "FCA id"),
-        ("callsign" = String, Path, description = "Aircraft callsign")
+        ("callsign" = String, Path, description = "Aircraft callsign"),
+        ("If-Match" = Option<String>, Header, description = "Clear only this release version (#585)")
     ),
-    responses((status = 200, body = Vec<FcaFlight>), (status = 401), (status = 404))
+    responses(
+        (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not clear it"),
+        (status = 412, description = "The precondition failed; `ETag` is the current version"),
+        (status = 428, description = "A machine sent no `If-Match`")
+    )
 )]
 pub async fn clear_release(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
+    Actor(principal): Actor,
     Path((id, callsign)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<FcaFlight>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    flow_repo::delete_release(pool, &id, &callsign.to_ascii_uppercase()).await?;
+    require_fca_scope(&state, &principal, &fca).await?;
+    let callsign = callsign.to_ascii_uppercase();
+    // A machine may clear only its own release, and only the version it last saw (#585). "Clear if
+    // absent" means nothing, so `If-None-Match` is refused rather than read as a no-op.
+    let version = match release_authority::precondition(&headers, &principal)? {
+        Some(flow_repo::Expect::Absent) => return Err(ApiError::BadRequest),
+        Some(flow_repo::Expect::Version(v)) => Some(v),
+        None => None,
+    };
+    let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
+    let by = principal.attribution(&state).await?;
+    if holder.is_some() {
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
+    // The read above gives the caller a precise refusal; the delete enforces it (#585 review).
+    let deleted = flow_repo::delete_release(pool, &id, &callsign, version, &by).await?;
+    if !deleted && version.is_some() {
+        return Err(ApiError::PreconditionFailed {
+            etag: holder.map(|h| h.version),
+        });
+    }
     state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
@@ -2424,7 +2638,11 @@ pub async fn clear_release(
     let Some((flights, metas)) = built else {
         return Ok(Json(Vec::new()));
     };
-    Ok(Json(finalize(&fca, flights, &metas)))
+    // The other flights' versions, as `mark_release` and the traffic list return them: a writer
+    // reading this list must not see a released flight with `release_version: null` (#585 QA).
+    let mut flights = finalize(&fca, flights, &metas);
+    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    Ok(Json(flights))
 }
 
 /// Trade two flights' release times.
@@ -2448,18 +2666,25 @@ pub async fn clear_release(
     post,
     path = "/api/v1/flow/fcas/{id}/swap",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = SwapReleaseRequest,
-    responses((status = 200), (status = 400), (status = 401), (status = 404))
+    responses(
+        (status = 200), (status = 400), (status = 401),
+        (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
+        (status = 404),
+        (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it. \
+            `departure_unknown` / `different_departure` / `runway_unassigned` / `different_runway`: the two \
+            flights must share a departure airport and an assigned departure runway (#56)"),
+    )
 )]
 pub async fn swap_releases(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<SwapReleaseRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let a = payload.a.trim().to_ascii_uppercase();
     let b = payload.b.trim().to_ascii_uppercase();
@@ -2468,35 +2693,105 @@ pub async fn swap_releases(
     if a.is_empty() || b.is_empty() || a == b {
         return Err(ApiError::BadRequest);
     }
+    let fca = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_scope(&state, &principal, &fca).await?;
+    // A swap changes both releases, so a machine needs authority over both (#585). It takes no
+    // precondition: it trades two current times rather than writing one the caller computed.
+    let by = principal.attribution(&state).await?;
+    for callsign in [&a, &b] {
+        let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+        release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+    }
+    same_departure_slot(&state, pool, &a, &b).await?;
     // `false` means at least one of them holds no release: there is no time to trade, and inventing
     // one is what this must not do.
-    if !flow_repo::swap_releases(pool, &id, &a, &b, &user.id).await? {
+    if !flow_repo::swap_releases(pool, &id, &a, &b, &by).await? {
+        // For a machine the write also required it to hold both. If someone took one over between
+        // the check above and the write, say so rather than claiming there is no release (#585 review).
+        if by.machine_actor().is_some() {
+            for callsign in [&a, &b] {
+                let holder = flow_repo::release_holder(pool, &id, callsign).await?;
+                release_authority::authorize(&principal, by.actor_id.as_deref(), holder.as_ref())?;
+            }
+        }
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::RELEASE);
     Ok(StatusCode::OK)
 }
 
+/// Two flights may trade release times only off the same airport and the same departure runway (#56):
+/// otherwise each would be handed a slot sequenced for a different runway. Runways are the ones IDST
+/// shows (#511's assignments). Anything that can't be shown to match is refused rather than guessed:
+/// a flight no longer in the feed has no known departure, and an airport with no SID, gate or config
+/// rule assigns no runway.
+async fn same_departure_slot(
+    state: &AppState,
+    pool: &sqlx::PgPool,
+    a: &str,
+    b: &str,
+) -> Result<(), ApiError> {
+    let (snapshot, _) = feed_view(state).await;
+    let departure = |callsign: &str| -> Option<String> {
+        let data = &snapshot.as_ref()?.data;
+        let plan = data
+            .pilots
+            .iter()
+            .find(|p| p.callsign.eq_ignore_ascii_case(callsign))
+            .and_then(|p| p.flight_plan.as_ref())
+            .or_else(|| {
+                data.prefiles
+                    .iter()
+                    .find(|p| p.callsign.eq_ignore_ascii_case(callsign))
+                    .and_then(|p| p.flight_plan.as_ref())
+            })?;
+        let dep = plan.departure.trim().to_ascii_uppercase();
+        (!dep.is_empty()).then_some(dep)
+    };
+    let (Some(dep_a), Some(dep_b)) = (departure(a), departure(b)) else {
+        return Err(ApiError::ConflictReason("departure_unknown"));
+    };
+    if dep_a != dep_b {
+        return Err(ApiError::ConflictReason("different_departure"));
+    }
+    let runway_a = departure_runway_repo::get(pool, &dep_a, a).await?;
+    let runway_b = departure_runway_repo::get(pool, &dep_b, b).await?;
+    let (Some(runway_a), Some(runway_b)) = (runway_a, runway_b) else {
+        return Err(ApiError::ConflictReason("runway_unassigned"));
+    };
+    if runway_a.runway != runway_b.runway {
+        return Err(ApiError::ConflictReason("different_runway"));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     put,
     path = "/api/v1/flow/fcas/{id}/order",
     tag = "flow",
+    security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
-    responses((status = 204), (status = 401), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn reorder_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<ReorderRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let existing = flow_repo::get_fca(pool, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    require_fca_write_scope(&state, &principal, "flow.fca.update", &[&existing.artcc]).await?;
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();
-    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &user.id).await? {
+    if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &by).await? {
         return Err(ApiError::NotFound);
     }
     state.publish(crate::realtime::topic::FCA);
@@ -2676,6 +2971,70 @@ mod project_traffic_tests {
         assert!(
             super::traffic_from(&data, &excluded_elsewhere).is_empty(),
             "the global traffic surface hides a callsign any facility removed"
+        );
+    }
+
+    /// #588 AC3: `/flow/traffic` serves the same list to every caller until the poller swaps the
+    /// snapshot or the exclusions change, so it is built once per change — not once per request.
+    #[tokio::test]
+    async fn live_traffic_is_built_once_per_snapshot_and_exclusion_change() {
+        use super::list_traffic;
+        use axum::{extract::State, response::Response};
+        use std::sync::Arc;
+
+        let state = crate::state::AppState::without_db();
+        let snapshot = |pilots| {
+            Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots,
+                ..Default::default()
+            })))
+        };
+        state.feed.write().await.snapshot = snapshot(vec![airborne_pilot()]);
+        let built = || async {
+            let cache = state.feed.read().await.traffic_cache.clone();
+            let cache = cache.lock().unwrap();
+            cache.as_ref().map(|c| c.body.as_ptr()).unwrap()
+        };
+        let body = |response: Response| async {
+            axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+        };
+
+        let first = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        let first_build = built().await;
+        let again = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(first, again);
+        assert_eq!(
+            built().await,
+            first_build,
+            "an unchanged feed reuses the built body"
+        );
+        assert!(
+            String::from_utf8_lossy(&first).contains("TEST1"),
+            "sanity: the aircraft is in the list"
+        );
+
+        state.feed.write().await.snapshot = snapshot(vec![]);
+        let swapped = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(
+            &swapped[..],
+            b"[]",
+            "a new snapshot is rebuilt, not served stale"
+        );
+
+        state.feed.write().await.snapshot = snapshot(vec![airborne_pilot()]);
+        let before_exclusion = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert!(String::from_utf8_lossy(&before_exclusion).contains("TEST1"));
+        state.flight_exclusions.store(Arc::new(HashMap::from([(
+            "ZNY".to_string(),
+            std::collections::HashSet::from(["TEST1".to_string()]),
+        )])));
+        let excluded = body(list_traffic(State(state.clone())).await.unwrap()).await;
+        assert_eq!(
+            &excluded[..],
+            b"[]",
+            "an exclusion change is rebuilt, not served stale"
         );
     }
 
@@ -4359,6 +4718,7 @@ mod release_swap_tests {
 
     use sqlx::PgPool;
 
+    use crate::auth::principal::Attribution;
     use crate::repos::flow as flow_repo;
     use crate::scope_test_support::{seed_user, send, session_cookie, test_state};
 
@@ -4388,15 +4748,31 @@ mod release_swap_tests {
     async fn two_releases_trade_their_times(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
-            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+            flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
                 .await
                 .unwrap()
         );
@@ -4416,12 +4792,20 @@ mod release_swap_tests {
             ("UAL2", 2_000, 1_900),
             ("DAL3", 3_000, 2_900),
         ] {
-            flow_repo::upsert_release(&pool, &id, cs, cta, edct, &user)
-                .await
-                .unwrap();
+            flow_repo::upsert_release(
+                &pool,
+                &id,
+                cs,
+                cta,
+                edct,
+                &Attribution::user_only(&user),
+                None,
+            )
+            .await
+            .unwrap();
         }
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4438,14 +4822,30 @@ mod release_swap_tests {
     async fn neither_flight_ends_up_later_than_the_later_original(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4466,14 +4866,30 @@ mod release_swap_tests {
     async fn the_swap_does_not_touch_the_manual_order(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
 
-        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &user)
+        flow_repo::swap_releases(&pool, &id, "AAL1", "UAL2", &Attribution::user_only(&user))
             .await
             .unwrap();
 
@@ -4498,12 +4914,20 @@ mod release_swap_tests {
     async fn a_swap_with_one_unreleased_flight_is_rejected_and_writes_nothing(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
-            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &user)
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "NOPE9", &Attribution::user_only(&user))
                 .await
                 .unwrap()
         );
@@ -4526,12 +4950,20 @@ mod release_swap_tests {
     async fn the_repo_refuses_to_swap_a_flight_with_itself(pool: PgPool) {
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(
-            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &user)
+            !flow_repo::swap_releases(&pool, &id, "AAL1", "AAL1", &Attribution::user_only(&user))
                 .await
                 .unwrap(),
             "one matched row is not a swap"
@@ -4546,12 +4978,28 @@ mod release_swap_tests {
         let state = test_state(pool.clone(), HashMap::new());
         let user = seed_user(&pool).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
-        flow_repo::upsert_release(&pool, &id, "UAL2", 2_000, 1_900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "UAL2",
+            2_000,
+            1_900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
         let cookie = session_cookie(&pool, &user).await;
 
         let status = send(
@@ -4575,9 +5023,17 @@ mod release_swap_tests {
         let user = seed_user(&pool).await;
         crate::scope_test_support::grant(&pool, &user, "flow.fca.update", None).await;
         let id = fca(&pool).await;
-        flow_repo::upsert_release(&pool, &id, "AAL1", 1_000, 900, &user)
-            .await
-            .unwrap();
+        flow_repo::upsert_release(
+            &pool,
+            &id,
+            "AAL1",
+            1_000,
+            900,
+            &Attribution::user_only(&user),
+            None,
+        )
+        .await
+        .unwrap();
         let cookie = session_cookie(&pool, &user).await;
 
         let status = send(
@@ -4594,5 +5050,663 @@ mod release_swap_tests {
             "case-insensitively the same flight"
         );
         assert_eq!(times(&pool, &id, "AAL1").await, Some((1_000, 900)));
+    }
+
+    // ---- #56: only flights off the same airport and the same runway may trade ----
+
+    /// `(callsign, departure)` prefiles in the feed, two released flights (AAL1 1000/900, UAL2
+    /// 2000/1900) and a user who may swap. Returns the state, the FCA and the user's cookie.
+    async fn swap_case(
+        pool: &PgPool,
+        flights: &[(&str, &str)],
+    ) -> (crate::state::AppState, String, String) {
+        use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
+        let state = test_state(pool.clone(), HashMap::new());
+        state.feed.write().await.snapshot =
+            Some(std::sync::Arc::new(crate::feed::Snapshot::of(VatsimData {
+                prefiles: flights
+                    .iter()
+                    .map(|(callsign, dep)| Prefile {
+                        callsign: (*callsign).into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: (*dep).into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        let user = seed_user(pool).await;
+        crate::scope_test_support::grant(pool, &user, "flow.fca.update", None).await;
+        let id = fca(pool).await;
+        for (callsign, cta, edct) in [("AAL1", 1_000, 900), ("UAL2", 2_000, 1_900)] {
+            flow_repo::upsert_release(
+                pool,
+                &id,
+                callsign,
+                cta,
+                edct,
+                &Attribution::user_only(&user),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let cookie = session_cookie(pool, &user).await;
+        (state, id, cookie)
+    }
+
+    async fn runway(pool: &PgPool, icao: &str, callsign: &str, runway: &str) {
+        crate::repos::departure_runway::assign(
+            pool,
+            icao,
+            callsign,
+            runway,
+            crate::repos::departure_runway::RunwaySource::Config,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// POST the swap through the real router; the status and the error code, if any.
+    async fn swap(
+        state: &crate::state::AppState,
+        id: &str,
+        cookie: &str,
+    ) -> (http::StatusCode, Option<String>) {
+        use tower::ServiceExt;
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("/api/v1/flow/fcas/{id}/swap"))
+            .header(http::header::COOKIE, cookie)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"a":"AAL1","b":"UAL2"}"#))
+            .unwrap();
+        let response = crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let code = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string));
+        (status, code)
+    }
+
+    /// AC2: two departures off the same airport and runway trade their times, and it persists.
+    #[sqlx::test]
+    async fn the_same_airport_and_runway_swap(pool: PgPool) {
+        let (state, id, cookie) = swap_case(&pool, &[("AAL1", "KJFK"), ("UAL2", "KJFK")]).await;
+        runway(&pool, "KJFK", "AAL1", "31L").await;
+        runway(&pool, "KJFK", "UAL2", "31L").await;
+
+        assert_eq!(swap(&state, &id, &cookie).await.0, http::StatusCode::OK);
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// The common IDST release is an aircraft connected at the gate, which the feed lists under
+    /// `pilots`, not `prefiles`; its departure must be found there too, or every connected flight's
+    /// swap is refused as `departure_unknown` (#56 review).
+    #[sqlx::test]
+    async fn two_connected_departures_on_one_runway_swap(pool: PgPool) {
+        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+        let (state, id, cookie) = swap_case(&pool, &[]).await;
+        state.feed.write().await.snapshot =
+            Some(std::sync::Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: ["AAL1", "UAL2"]
+                    .into_iter()
+                    .map(|callsign| Pilot {
+                        callsign: callsign.into(),
+                        flight_plan: Some(FlightPlan {
+                            departure: "KJFK".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })));
+        runway(&pool, "KJFK", "AAL1", "31L").await;
+        runway(&pool, "KJFK", "UAL2", "31L").await;
+
+        assert_eq!(swap(&state, &id, &cookie).await.0, http::StatusCode::OK);
+        assert_eq!(times(&pool, &id, "AAL1").await, Some((2_000, 1_900)));
+        assert_eq!(times(&pool, &id, "UAL2").await, Some((1_000, 900)));
+    }
+
+    /// Each refusal names why, and writes nothing.
+    #[sqlx::test]
+    async fn a_swap_across_runways_or_airports_is_refused_and_writes_nothing(pool: PgPool) {
+        // (feed flights as callsign → departure, runway assignments as icao/callsign/runway, code)
+        type Flights = &'static [(&'static str, &'static str)];
+        type Runways = &'static [(&'static str, &'static str, &'static str)];
+        let cases: [(Flights, Runways, &str); 4] = [
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KJFK")],
+                &[("KJFK", "AAL1", "31L"), ("KJFK", "UAL2", "4L")],
+                "different_runway",
+            ),
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KLGA")],
+                &[("KJFK", "AAL1", "31L"), ("KLGA", "UAL2", "31L")],
+                "different_departure",
+            ),
+            (
+                &[("AAL1", "KJFK"), ("UAL2", "KJFK")],
+                &[("KJFK", "AAL1", "31L")],
+                "runway_unassigned",
+            ),
+            (
+                &[("AAL1", "KJFK")],
+                &[("KJFK", "AAL1", "31L"), ("KJFK", "UAL2", "31L")],
+                "departure_unknown",
+            ),
+        ];
+        for (flights, runways, expected) in cases {
+            let (state, id, cookie) = swap_case(&pool, flights).await;
+            for (icao, callsign, rwy) in runways {
+                runway(&pool, icao, callsign, rwy).await;
+            }
+            assert_eq!(
+                swap(&state, &id, &cookie).await,
+                (http::StatusCode::CONFLICT, Some(expected.to_string())),
+                "{expected}"
+            );
+            assert_eq!(
+                times(&pool, &id, "AAL1").await,
+                Some((1_000, 900)),
+                "{expected}"
+            );
+            assert_eq!(
+                times(&pool, &id, "UAL2").await,
+                Some((2_000, 1_900)),
+                "{expected}"
+            );
+            sqlx::query("delete from flow.departure_runway_assignment")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+/// #636: FCA writes are gated on the FCA's ARTCC, through the real router.
+#[cfg(test)]
+mod fca_scope_tests {
+    use http::{Method, StatusCode};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use crate::repos::flow as flow_repo;
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    fn fca(artcc: &str) -> serde_json::Value {
+        json!({ "name": format!("{artcc} FCA"), "artcc": artcc, "points": [[0.0, 0.0], [1.0, 1.0]] })
+    }
+
+    async fn seed_fca(pool: &PgPool, owner: &str, artcc: &str) -> String {
+        let req = serde_json::from_value(fca(artcc)).unwrap();
+        let by = crate::auth::principal::Attribution {
+            user_id: Some(owner.to_string()),
+            actor_id: None,
+        };
+        flow_repo::create_fca(pool, &req, &by).await.unwrap()
+    }
+
+    async fn artcc_of(pool: &PgPool, id: &str) -> Option<String> {
+        flow_repo::get_fca(pool, id).await.unwrap().map(|f| f.artcc)
+    }
+
+    /// A holder of both FCA permissions at `artcc` (or nationally for `None`), as a session cookie.
+    async fn holder(pool: &PgPool, artcc: Option<&str>) -> String {
+        let user = seed_user(pool).await;
+        grant(pool, &user, "flow.fca.update", artcc).await;
+        grant(pool, &user, "flow.fca.delete", artcc).await;
+        session_cookie(pool, &user).await
+    }
+
+    /// AC1 + AC4: create.
+    #[sqlx::test]
+    async fn a_scoped_holder_creates_fcas_only_in_its_artcc(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let uri = "/api/v1/flow/fcas";
+
+        assert_eq!(
+            send(&state, Method::POST, uri, &zdc, Some(fca("ZNY"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::POST, uri, &zdc, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+        let count: i64 = sqlx::query_scalar("select count(*) from flow.fca")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the refused FCA was not created");
+    }
+
+    /// AC1 + AC2 + AC4: edit checks the FCA as it is and as it would become.
+    #[sqlx::test]
+    async fn a_scoped_holder_can_neither_edit_nor_relabel_across_artccs(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let put = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        // Taking a ZNY FCA by relabelling it ZDC — the #626 bypass.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zny_fca), &zdc, Some(fca("ZDC"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(artcc_of(&pool, &zny_fca).await.as_deref(), Some("ZNY"));
+        // Pushing a ZDC FCA out to ZNY.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zdc_fca), &zdc, Some(fca("ZNY"))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(artcc_of(&pool, &zdc_fca).await.as_deref(), Some("ZDC"));
+        // Its own FCA, staying put.
+        assert_eq!(
+            send(&state, Method::PUT, &put(&zdc_fca), &zdc, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+    }
+
+    /// AC1 + AC4: reorder.
+    #[sqlx::test]
+    async fn a_scoped_holder_reorders_only_its_artccs_fcas(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let order = Some(json!({ "order": ["AAL1", "DAL2"] }));
+        let uri = |id: &str| format!("/api/v1/flow/fcas/{id}/order");
+
+        assert_eq!(
+            send(&state, Method::PUT, &uri(&zny_fca), &zdc, order.clone()).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &uri(&zdc_fca), &zdc, order).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// AC1 + AC4: delete.
+    #[sqlx::test]
+    async fn a_scoped_holder_deletes_only_its_artccs_fcas(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let zdc_fca = seed_fca(&pool, &owner, "ZDC").await;
+        let uri = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        assert_eq!(
+            send(&state, Method::DELETE, &uri(&zny_fca), &zdc, None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            artcc_of(&pool, &zny_fca).await.is_some(),
+            "the refused FCA still exists"
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &uri(&zdc_fca), &zdc, None).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// AC3: a national holder may do all of it, anywhere; an FCA with no ARTCC is national-only.
+    #[sqlx::test]
+    async fn a_national_holder_is_unaffected_and_an_unscoped_fca_is_national_only(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let national = holder(&pool, None).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny_fca = seed_fca(&pool, &owner, "ZNY").await;
+        let global = seed_fca(&pool, &owner, "").await;
+        let one = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &zdc,
+                Some(fca(""))
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &one(&global), &zdc, Some(fca(""))).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &one(&global), &zdc, None).await,
+            StatusCode::FORBIDDEN
+        );
+
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &national,
+                Some(fca(""))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &one(&zny_fca),
+                &national,
+                Some(fca("ZDC"))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &format!("{}/order", one(&zny_fca)),
+                &national,
+                Some(json!({ "order": [] }))
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &one(&global), &national, None).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+}
+
+/// Every FCA write path validates and normalises the colour (#698): the two flow routes and the two
+/// event-FCA routes, which used to repeat only part of `validate_fca`.
+#[cfg(test)]
+mod fca_color_route_tests {
+    use std::collections::HashMap;
+
+    use axum::http;
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
+    use crate::state::AppState;
+
+    async fn call(
+        state: &AppState,
+        method: http::Method,
+        uri: &str,
+        cookie: &str,
+        body: Value,
+    ) -> (http::StatusCode, Value) {
+        use tower::ServiceExt;
+        let request = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(http::header::COOKIE, cookie)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn fca(color: Option<&str>) -> Value {
+        let mut body = json!({ "name": "T698", "artcc": "ZDC",
+                               "points": [[38.0, -77.0], [39.0, -77.0], [39.0, -76.0]] });
+        if let Some(c) = color {
+            body["color"] = json!(c);
+        }
+        body
+    }
+
+    async fn stored(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select color from flow.fca order by created_at")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    const REFUSED: [&str; 4] = ["red", "#abc", "#000000", "#08080a"];
+
+    /// Runs one write path: a mixed-case colour is stored lowercase, no colour gets the default, and each
+    /// refused value is a 400 that stores nothing.
+    async fn exercise(
+        pool: &PgPool,
+        state: &AppState,
+        cookie: &str,
+        create: &str,
+        update: impl Fn(&str) -> String,
+    ) {
+        let (status, body) = call(
+            state,
+            http::Method::POST,
+            create,
+            cookie,
+            fca(Some("#EFC14D")),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK, "{create}: {body}");
+        assert_eq!(stored(pool).await, ["#efc14d"]);
+        let id: String = sqlx::query_scalar("select id from flow.fca")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+        for bad in REFUSED {
+            let (status, _) = call(state, http::Method::POST, create, cookie, fca(Some(bad))).await;
+            assert_eq!(
+                status,
+                http::StatusCode::BAD_REQUEST,
+                "create {create} with {bad}"
+            );
+            let (status, _) = call(
+                state,
+                http::Method::PUT,
+                &update(&id),
+                cookie,
+                fca(Some(bad)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                http::StatusCode::BAD_REQUEST,
+                "update {create} with {bad}"
+            );
+        }
+        assert_eq!(
+            stored(pool).await,
+            ["#efc14d"],
+            "nothing refused was stored"
+        );
+
+        let (status, _) = call(
+            state,
+            http::Method::PUT,
+            &update(&id),
+            cookie,
+            fca(Some(" #5EC8E5 ")),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(stored(pool).await, ["#5ec8e5"]);
+        let (status, _) = call(state, http::Method::POST, create, cookie, fca(None)).await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(
+            stored(pool).await,
+            ["#5ec8e5", "#efc14d"],
+            "no colour gets the default"
+        );
+    }
+
+    /// Migration 0123 brings rows written before validation into the shape the map draws: trimmed and
+    /// lowercase, with anything still not `#rrggbb` reset to the default.
+    #[sqlx::test]
+    async fn legacy_colours_are_normalised_by_the_migration(pool: PgPool) {
+        for color in ["#EFC14D", " #5ec8e5 ", "red", "#fff"] {
+            sqlx::query(
+                "insert into flow.fca (name, color, artcc, points) values ('L', $1, 'ZDC', '[]'::jsonb)",
+            )
+            .bind(color)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let migration = include_str!("../../migrations/0123_fca_color_normalised.sql");
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        assert_eq!(
+            stored(&pool).await,
+            ["#efc14d", "#5ec8e5", "#efc14d", "#efc14d"]
+        );
+    }
+
+    #[sqlx::test]
+    async fn the_flow_fca_routes_validate_the_colour(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "flow.fca.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        let state = test_state(pool.clone(), HashMap::new());
+        exercise(&pool, &state, &cookie, "/api/v1/flow/fcas", |id| {
+            format!("/api/v1/flow/fcas/{id}")
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    async fn the_event_fca_routes_validate_the_colour(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        grant(&pool, &user, "events.plan.update", None).await;
+        let cookie = session_cookie(&pool, &user).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values (6980, 'T698', now(), now() + interval '2 hours', 'ZDC')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = test_state(pool.clone(), HashMap::new());
+        exercise(&pool, &state, &cookie, "/api/v1/events/6980/fcas", |id| {
+            format!("/api/v1/events/6980/fcas/{id}")
+        })
+        .await;
+    }
+}
+
+/// #586: `GET /flow/fcas/{id}/traffic` is public, but only for an FCA the public list shows. Hidden ones
+/// (an unpublished event FCA, a deleted FCA) are 404 to an anonymous caller, through the real router.
+#[cfg(test)]
+mod fca_traffic_visibility_tests {
+    use std::collections::HashMap;
+
+    use http::{Method, StatusCode};
+    use sqlx::PgPool;
+
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+    async fn seed(pool: &PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (586, 'Visibility event', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, enabled, deleted_at, event_id, event_status) values \
+               ('v-live',     'Live',            true, null,  null, null), \
+               ('v-pubevent', 'Published event', true, null,  586,  'published'), \
+               ('v-planned',  'Planned event',   true, null,  586,  'planned'), \
+               ('v-archived', 'Archived event',  true, null,  586,  'archived'), \
+               ('v-deleted',  'Soft-deleted',    true, now(), null, null)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn uri(id: &str) -> String {
+        format!("/api/v1/flow/fcas/{id}/traffic")
+    }
+
+    #[sqlx::test]
+    async fn an_anonymous_caller_sees_only_what_the_public_list_shows(pool: PgPool) {
+        seed(&pool).await;
+        let state = test_state(pool, HashMap::new());
+        for id in ["v-live", "v-pubevent"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::OK,
+                "{id} is on the public list, so its traffic is public"
+            );
+        }
+        for id in ["v-planned", "v-archived", "v-deleted"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), "", None).await,
+                StatusCode::NOT_FOUND,
+                "{id} is hidden from the public list, so it doesn't exist to an anonymous caller"
+            );
+        }
+    }
+
+    /// The two signed-in readers the hidden FCAs still have: the event manager's FCAs tab counts a
+    /// planned FCA's crossings, and historical replay can still select a since-deleted FCA.
+    #[sqlx::test]
+    async fn planners_see_unpublished_event_fcas_and_signed_in_callers_see_deleted_ones(
+        pool: PgPool,
+    ) {
+        seed(&pool).await;
+        let planner = seed_user(&pool).await;
+        grant(&pool, &planner, "events.plan.read", None).await;
+        let planner = session_cookie(&pool, &planner).await;
+        let other = seed_user(&pool).await;
+        let other = session_cookie(&pool, &other).await;
+        let state = test_state(pool, HashMap::new());
+
+        for id in ["v-planned", "v-archived"] {
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &planner, None).await,
+                StatusCode::OK,
+                "a planner reads {id}"
+            );
+            assert_eq!(
+                send(&state, Method::GET, &uri(id), &other, None).await,
+                StatusCode::NOT_FOUND,
+                "signed in without events.plan.read, {id} still doesn't exist"
+            );
+        }
+        assert_eq!(
+            send(&state, Method::GET, &uri("v-deleted"), &other, None).await,
+            StatusCode::OK,
+            "any signed-in caller reads a deleted FCA (historical replay)"
+        );
     }
 }

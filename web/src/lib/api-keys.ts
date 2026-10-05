@@ -187,6 +187,23 @@ export function useAdminDisableKey() {
   });
 }
 
+/** Admin: set or clear one key's rate limit (#611); `null` restores the deployment default. */
+export function useAdminSetKeyRateLimit() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async (args: { id: string; perMin: number | null }): Promise<void> => {
+      const { error } = await ois.PUT("/api/v1/admin/api-keys/{id}/rate-limit", {
+        params: { path: { id: args.id } },
+        body: { rate_limit_per_min: args.perMin },
+      });
+      if (error) throw new Error("set rate limit failed");
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ALL }),
+    onError: () => toast.error("Couldn’t set the rate limit"),
+  });
+}
+
 /** Admin: permanently delete any user's key. */
 export function useAdminDeleteKey() {
   const qc = useQueryClient();

@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
@@ -10,14 +10,13 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{
             TmuAdvCreate, TmuAdvPublish, TmuAdvRead, TmuAdvUpdate, TmuGroundStopCreate,
             TmuGroundStopDelete, TmuGroundStopPublish, TmuGroundStopRead, TmuProgramDelete,
             TmuProgramRead, TmuProgramUpdate, TmuTmiCreate, TmuTmiDelete, TmuTmiPublish,
             TmuTmiRead, TmuTmiUpdate,
         },
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -85,6 +84,23 @@ fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
 /// they previously built this object separately. A corrected row must be assembled exactly like the
 /// original; the two drifting is how the channel ends up showing a line the row never had. The bot
 /// stays a dumb renderer: everything about NTML's shape is decided here (#436).
+/// The `tmi_cancel` job payload: the NTML cancellation line, stamped now.
+///
+/// Shared by the manual cancel and event-package deactivation (#568), so a TMI ended early reads the
+/// same in the NTML log whichever path ended it.
+pub(crate) fn tmi_cancel_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
+    json!({
+        "channel_id": channel_id,
+        "tmi_id": tmi.id,
+        "ntml": crate::tmi::ntml_cancel_line(
+            chrono::Utc::now(),
+            &tmi.restriction,
+            Some(&tmi.requesting),
+            Some(&tmi.providing),
+        ),
+    })
+}
+
 pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Value {
     json!({
         "channel_id": channel_id,
@@ -98,35 +114,6 @@ pub(crate) fn tmi_publish_job(channel_id: &str, tmi: &TmiBody) -> serde_json::Va
             Some(&tmi.requesting),
             Some(&tmi.providing),
         ),
-    })
-}
-
-/// The `adv_publish` job payload: the rendered document plus what the bot needs to post it.
-///
-/// The document is the **stored** `body`, not a re-render. It is what was reviewed and published, and
-/// re-rendering here would let the post differ from the row — the same reason `tmi_publish_job`
-/// assembles the row in one place. The bot stays a dumb renderer: it fences and splits, and decides
-/// nothing about content (#436's invariant, VATUSA/OIS#459).
-pub(crate) fn advisory_publish_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": adv.body,
-    })
-}
-
-/// The `adv_cancel` job payload: a short correction, not a re-post of the document.
-pub(crate) fn advisory_cancel_job(channel_id: &str, adv: &AdvisoryBody) -> serde_json::Value {
-    json!({
-        "channel_id": channel_id,
-        "advisory_id": adv.id,
-        "document": crate::advisory::render_cancellation(&crate::advisory::AdvisoryIdent {
-            facility: adv.facility.clone(),
-            number: adv.number,
-            issued_day: adv.issued_day,
-            // Stamped now: this is the moment the cancellation is being logged.
-            signed_at: chrono::Utc::now(),
-        }),
     })
 }
 
@@ -165,6 +152,7 @@ impl TmiListQuery {
     get,
     path = "/api/v1/tmu/tmis",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.read"]), ("api_key" = ["tmu.tmi.read"]), ("service_account" = ["tmu.tmi.read"])),
     params(
         ("status" = Option<String>, Query, description = "Filter by status (draft|published|expired|cancelled)"),
         ("type" = Option<String>, Query, description = "Filter by structured restriction kind (MIT, MINIT, STOP, …); excludes raw-typed TMIs"),
@@ -189,16 +177,17 @@ pub async fn list_tmis(
     post,
     path = "/api/v1/tmu/tmis",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.create"]), ("api_key" = ["tmu.tmi.create"]), ("service_account" = ["tmu.tmi.create"])),
     request_body = CreateTmiRequest,
     responses((status = 200, body = TmiBody), (status = 400), (status = 401))
 )]
 pub async fn create_tmi(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuTmiCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(mut payload): Json<CreateTmiRequest>,
 ) -> Result<Json<TmiBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     payload.requesting = payload.requesting.trim().to_ascii_uppercase();
@@ -218,7 +207,7 @@ pub async fn create_tmi(
         return Err(ApiError::BadRequest);
     }
 
-    let id = tmu_repo::create_tmi(pool, &payload, &user.id).await?;
+    let id = tmu_repo::create_tmi(pool, &payload, &by).await?;
     let mut tmi = tmu_repo::get_tmi(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -230,6 +219,7 @@ pub async fn create_tmi(
     patch,
     path = "/api/v1/tmu/tmis/{id}",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.update"]), ("api_key" = ["tmu.tmi.update"]), ("service_account" = ["tmu.tmi.update"])),
     params(("id" = String, Path, description = "TMI id")),
     request_body = UpdateTmiRequest,
     responses((status = 200, body = TmiBody), (status = 400), (status = 401), (status = 404))
@@ -298,16 +288,17 @@ pub async fn update_tmi(
     post,
     path = "/api/v1/tmu/tmis/{id}/publish",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.publish"]), ("api_key" = ["tmu.tmi.publish"]), ("service_account" = ["tmu.tmi.publish"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 200, body = TmiBody), (status = 401), (status = 409))
 )]
 pub async fn publish_tmi(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuTmiPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<TmiBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     // Resolve the target channel before the tx; no config just means "don't post" (skip enqueue).
@@ -315,7 +306,7 @@ pub async fn publish_tmi(
     // channel may be network-wide rather than per-facility (#194).
     let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &user.id)
+    let mut tmi = tmu_repo::publish_tmi(&mut tx, &id, &by)
         .await?
         .ok_or(ApiError::Conflict)?; // not a draft (or absent)
     if let Some(channel_id) = channel {
@@ -340,6 +331,7 @@ pub async fn publish_tmi(
     post,
     path = "/api/v1/tmu/tmis/{id}/cancel",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.publish"]), ("api_key" = ["tmu.tmi.publish"]), ("service_account" = ["tmu.tmi.publish"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 200, body = TmiBody), (status = 401), (status = 409))
 )]
@@ -372,16 +364,7 @@ pub async fn cancel_tmi(
         // A cancel is its own NTML row rather than an edit of the original (#436): the channel is a
         // chronological log, and the original entry did happen. Enqueued in the same tx as the
         // cancel, so the post can't exist for a TMI that is still live.
-        let job = json!({
-            "channel_id": channel_id,
-            "tmi_id": tmi.id,
-            "ntml": crate::tmi::ntml_cancel_line(
-                chrono::Utc::now(),
-                &tmi.restriction,
-                Some(&tmi.requesting),
-                Some(&tmi.providing),
-            ),
-        });
+        let job = tmi_cancel_job(&channel_id, &tmi);
         integration_repo::enqueue_job(&mut tx, "tmi_cancel", &job, Some("tmi"), Some(&tmi.id))
             .await?;
     } else {
@@ -396,6 +379,7 @@ pub async fn cancel_tmi(
     delete,
     path = "/api/v1/tmu/tmis/{id}",
     tag = "tmu",
+    security(("session" = ["tmu.tmi.delete"]), ("api_key" = ["tmu.tmi.delete"]), ("service_account" = ["tmu.tmi.delete"])),
     params(("id" = String, Path, description = "TMI id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -476,6 +460,7 @@ fn normalize_program(payload: &mut UpsertProgramRequest) -> Result<Vec<GateRule>
     get,
     path = "/api/v1/tmu/programs",
     tag = "tmu",
+    security(("session" = ["tmu.program.read"]), ("api_key" = ["tmu.program.read"]), ("service_account" = ["tmu.program.read"])),
     responses((status = 200, body = Vec<ProgramBody>), (status = 401))
 )]
 pub async fn list_programs(
@@ -492,6 +477,7 @@ pub async fn list_programs(
     put,
     path = "/api/v1/tmu/programs/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.update"]), ("api_key" = ["tmu.program.update"]), ("service_account" = ["tmu.program.update"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     request_body = UpsertProgramRequest,
     responses((status = 200, body = ProgramBody), (status = 400), (status = 401))
@@ -499,17 +485,17 @@ pub async fn list_programs(
 pub async fn upsert_program(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuProgramUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(mut payload): Json<UpsertProgramRequest>,
 ) -> Result<Json<ProgramBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     let gates = normalize_program(&mut payload)?;
 
-    tmu_repo::upsert_program(pool, &icao, &payload, &gates, &user.id).await?;
+    tmu_repo::upsert_program(pool, &icao, &payload, &gates, &by).await?;
     let mut program = tmu_repo::get_program(pool, &icao)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -521,6 +507,7 @@ pub async fn upsert_program(
     delete,
     path = "/api/v1/tmu/programs/{icao}",
     tag = "tmu",
+    security(("session" = ["tmu.program.delete"]), ("api_key" = ["tmu.program.delete"]), ("service_account" = ["tmu.program.delete"])),
     params(("icao" = String, Path, description = "Airport ICAO")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -579,6 +566,7 @@ fn normalize_until(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     get,
     path = "/api/v1/tmu/ground-stops",
     tag = "tmu",
+    security(("session" = ["tmu.groundstop.read"]), ("api_key" = ["tmu.groundstop.read"]), ("service_account" = ["tmu.groundstop.read"])),
     responses((status = 200, body = Vec<GroundStopBody>), (status = 401))
 )]
 pub async fn list_ground_stops(
@@ -595,16 +583,17 @@ pub async fn list_ground_stops(
     post,
     path = "/api/v1/tmu/ground-stops",
     tag = "tmu",
+    security(("session" = ["tmu.groundstop.create"]), ("api_key" = ["tmu.groundstop.create"]), ("service_account" = ["tmu.groundstop.create"])),
     request_body = CreateGroundStopRequest,
     responses((status = 200, body = GroundStopBody), (status = 400), (status = 401))
 )]
 pub async fn create_ground_stop(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGroundStopCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Json(mut payload): Json<CreateGroundStopRequest>,
 ) -> Result<Json<GroundStopBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     payload.airport = payload
@@ -619,8 +608,7 @@ pub async fn create_ground_stop(
     let scope = normalize_scope(payload.scope.as_deref());
     let until = normalize_until(payload.until.as_deref())?;
 
-    let id =
-        tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &user.id).await?;
+    let id = tmu_repo::create_ground_stop(pool, &payload, &scope, until.as_deref(), &by).await?;
     let mut gs = tmu_repo::get_ground_stop(pool, &id)
         .await?
         .ok_or(ApiError::Internal)?;
@@ -632,6 +620,7 @@ pub async fn create_ground_stop(
     post,
     path = "/api/v1/tmu/ground-stops/{id}/publish",
     tag = "tmu",
+    security(("session" = ["tmu.groundstop.publish"]), ("api_key" = ["tmu.groundstop.publish"]), ("service_account" = ["tmu.groundstop.publish"])),
     params(("id" = String, Path, description = "Ground stop id")),
     request_body(
         content = Option<PublishGroundStopRequest>,
@@ -643,11 +632,11 @@ pub async fn create_ground_stop(
 pub async fn publish_ground_stop(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuGroundStopPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     editorial: Option<Json<PublishGroundStopRequest>>,
 ) -> Result<Json<GroundStopBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let editorial = editorial.map(|Json(e)| e).unwrap_or_default();
     let now = Utc::now();
@@ -660,7 +649,7 @@ pub async fn publish_ground_stop(
     // a stop that did not publish, or the reverse. Simpler than the GDP path -- a ground stop has no
     // slot table, so there is no feed work to keep outside the transaction.
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    if !tmu_repo::publish_ground_stop(&mut *tx, &id, &user.id).await? {
+    if !tmu_repo::publish_ground_stop(&mut *tx, &id, &by).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
     let mut gs = tmu_repo::get_ground_stop(&mut *tx, &id)
@@ -677,11 +666,17 @@ pub async fn publish_ground_stop(
         body: String::new(),
         structured: Some(serde_json::to_value(&doc).map_err(|_| ApiError::Internal)?),
         decoded: None,
+        // No window (#537). A generated advisory's life is the program's life, and that is already
+        // enforced through `gdp_id`/`ground_stop_id`: the cleanup pass cancels it when the source
+        // expires. Setting `valid_to` here as well would be a second mechanism claiming the same
+        // expiry, which is the drift `ground_stop_until_ts` is used above to avoid.
+        valid_from: None,
+        valid_to: None,
     };
     tmu_repo::create_advisory_tx(
         &mut tx,
         &req,
-        &user.id,
+        &by,
         Some(tmu_repo::AdvisoryProgram::GroundStop(&id)),
     )
     .await?;
@@ -695,6 +690,7 @@ pub async fn publish_ground_stop(
     post,
     path = "/api/v1/tmu/ground-stops/{id}/cancel",
     tag = "tmu",
+    security(("session" = ["tmu.groundstop.publish"]), ("api_key" = ["tmu.groundstop.publish"]), ("service_account" = ["tmu.groundstop.publish"])),
     params(("id" = String, Path, description = "Ground stop id")),
     responses((status = 200, body = GroundStopBody), (status = 401), (status = 409))
 )]
@@ -718,6 +714,7 @@ pub async fn cancel_ground_stop(
     delete,
     path = "/api/v1/tmu/ground-stops/{id}",
     tag = "tmu",
+    security(("session" = ["tmu.groundstop.delete"]), ("api_key" = ["tmu.groundstop.delete"]), ("service_account" = ["tmu.groundstop.delete"])),
     params(("id" = String, Path, description = "Ground stop id")),
     responses((status = 204), (status = 401), (status = 404))
 )]
@@ -1059,8 +1056,10 @@ mod tests {
                 body: "vATCSCC ADVZY".into(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap()
@@ -1437,7 +1436,7 @@ mod tests {
             },
             "ZHU ZME",
             until,
-            author,
+            &crate::auth::principal::Attribution::user_only(author),
         )
         .await
         .unwrap()
@@ -1478,7 +1477,7 @@ mod tests {
             },
             "ZAK",
             Some("2315"),
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1886,7 +1885,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap();
@@ -1940,7 +1939,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &author,
+            &crate::auth::principal::Attribution::user_only(&author),
         )
         .await
         .unwrap();
@@ -2039,6 +2038,7 @@ mod tests {
 
 #[utoipa::path(
     get, path = "/api/v1/tmu/advisories", tag = "tmu",
+    security(("session" = ["tmu.adv.read"]), ("api_key" = ["tmu.adv.read"]), ("service_account" = ["tmu.adv.read"])),
     responses((status = 200, body = Vec<AdvisoryBody>), (status = 401))
 )]
 pub async fn list_advisories(
@@ -2051,6 +2051,7 @@ pub async fn list_advisories(
 
 #[utoipa::path(
     get, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("session" = ["tmu.adv.read"]), ("api_key" = ["tmu.adv.read"]), ("service_account" = ["tmu.adv.read"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
 )]
@@ -2073,7 +2074,7 @@ pub async fn get_advisory(
 /// `tmu.adv.update` and `tmu.adv.publish` are graded separately everywhere else, but the *scope*
 /// question is the same one for both: is this principal allowed to act for this facility at all.
 /// Checking the permission the caller was already gated on keeps the two answers from diverging.
-async fn require_advisory_scope(
+pub(crate) async fn require_advisory_scope(
     state: &AppState,
     principal: &Principal,
     permission: &str,
@@ -2104,18 +2105,17 @@ async fn advisory_facility(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiE
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories", tag = "tmu",
+    security(("session" = ["tmu.adv.create"]), ("api_key" = ["tmu.adv.create"]), ("service_account" = ["tmu.adv.create"])),
     request_body = CreateAdvisoryRequest,
     responses((status = 200, body = AdvisoryBody), (status = 400), (status = 401))
 )]
 pub async fn create_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvCreate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Json(payload): Json<CreateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     // `body` is only the source of truth when nothing will derive it: for a structured reroute the
     // document is rendered in `repos::tmu::create_advisory`, so demanding one here forced the caller to
@@ -2140,7 +2140,7 @@ pub async fn create_advisory(
         &payload.facility.trim().to_ascii_uppercase(),
     )
     .await?;
-    let id = tmu_repo::create_advisory(pool, &payload, &user.id).await?;
+    let id = tmu_repo::create_advisory(pool, &payload, &by).await?;
     tmu_repo::get_advisory(pool, &id)
         .await?
         .map(Json)
@@ -2149,18 +2149,17 @@ pub async fn create_advisory(
 
 #[utoipa::path(
     patch, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("session" = ["tmu.adv.update"]), ("api_key" = ["tmu.adv.update"]), ("service_account" = ["tmu.adv.update"])),
     params(("id" = String, Path)), request_body = UpdateAdvisoryRequest,
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
 )]
 pub async fn update_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(payload): Json<UpdateAdvisoryRequest>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;
@@ -2175,18 +2174,17 @@ pub async fn update_advisory(
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
+    security(("session" = ["tmu.adv.publish"]), ("api_key" = ["tmu.adv.publish"]), ("service_account" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
 )]
 pub async fn publish_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
+    let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
@@ -2195,7 +2193,7 @@ pub async fn publish_advisory(
     // requesting and a providing ARTCC and so no single owner. An advisory has exactly one.
     let channel = integration_repo::channel_id(pool, ADV_CHANNEL, Some(&facility)).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    if !tmu_repo::publish_advisory(&mut tx, &id, &user.id).await? {
+    if !tmu_repo::publish_advisory(&mut tx, &id, &by).await? {
         return Err(ApiError::Conflict); // not a draft (or absent)
     }
     let adv = tmu_repo::get_advisory_tx(&mut tx, &id)
@@ -2204,7 +2202,7 @@ pub async fn publish_advisory(
     if let Some(channel_id) = channel {
         // In the same tx as the publish: a post must not exist for an advisory that did not publish,
         // and an advisory must not go live with nothing queued to announce it.
-        let job = advisory_publish_job(&channel_id, &adv);
+        let job = crate::advisory::publish_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(
             &mut tx,
             "adv_publish",
@@ -2222,17 +2220,16 @@ pub async fn publish_advisory(
 
 #[utoipa::path(
     post, path = "/api/v1/tmu/advisories/{id}/cancel", tag = "tmu",
+    security(("session" = ["tmu.adv.publish"]), ("api_key" = ["tmu.adv.publish"]), ("service_account" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
     responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
 )]
 pub async fn cancel_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvPublish>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<Json<AdvisoryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.publish", &facility).await?;
@@ -2252,7 +2249,7 @@ pub async fn cancel_advisory(
         .await?
         .ok_or(ApiError::NotFound)?;
     if let Some(channel_id) = channel {
-        let job = advisory_cancel_job(&channel_id, &adv);
+        let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
         integration_repo::enqueue_job(&mut tx, "adv_cancel", &job, Some("advisory"), Some(&adv.id))
             .await?;
     } else {
@@ -2268,17 +2265,16 @@ pub async fn cancel_advisory(
 /// `repos::tmu::delete_advisory`).
 #[utoipa::path(
     delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
+    security(("session" = ["tmu.adv.update"]), ("api_key" = ["tmu.adv.update"]), ("service_account" = ["tmu.adv.update"])),
     params(("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 409))
 )]
 pub async fn delete_advisory(
     State(state): State<AppState>,
     _permission: RequirePermission<TmuAdvUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility = advisory_facility(pool, &id).await?;
     require_advisory_scope(&state, &principal, "tmu.adv.update", &facility).await?;

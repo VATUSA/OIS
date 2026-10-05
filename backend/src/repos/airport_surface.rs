@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 
 use crate::{
+    auth::principal::Attribution,
     errors::ApiError,
     models::{
         AirportGateBody, AirportRampAreaBody, AirportRunwayBody, AirportTaxiwayBody,
@@ -18,8 +19,8 @@ use crate::{
 
 // ---- gates ----------------------------------------------------------------
 
-const GATE_SELECT: &str =
-    "select id, icao, name, lat, lon, source, kind, updated_at from flow.airport_gate";
+const GATE_SELECT: &str = "select id, icao, name, lat, lon, source, kind, heading, size_code, \
+     operation_type, aircraft_classes, airline_codes, updated_at from flow.airport_gate";
 
 pub async fn list_gates(pool: &PgPool, icao: &str) -> Result<Vec<AirportGateBody>, ApiError> {
     sqlx::query_as::<_, AirportGateBody>(&format!("{GATE_SELECT} where icao = $1 order by name"))
@@ -58,17 +59,18 @@ pub async fn create_gate(
     pool: &PgPool,
     icao: &str,
     req: &UpsertAirportGateRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AirportGateBody, ApiError> {
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_gate (icao, name, lat, lon, source, updated_by) \
-         values ($1, $2, $3, $4, 'manual', $5) returning id",
+        "insert into flow.airport_gate (icao, name, lat, lon, source, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4, 'manual', $5, $6) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(req.lat)
     .bind(req.lon)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -80,10 +82,10 @@ pub async fn update_gate(
     id: &str,
     icao: &str,
     req: &UpsertAirportGateRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<Option<AirportGateBody>, ApiError> {
     let r = sqlx::query(
-        "update flow.airport_gate set name = $3, lat = $4, lon = $5, updated_by = $6 \
+        "update flow.airport_gate set name = $3, lat = $4, lon = $5, updated_by = $6, updated_by_actor = $7 \
          where id = $1 and icao = $2",
     )
     .bind(id)
@@ -91,7 +93,8 @@ pub async fn update_gate(
     .bind(&req.name)
     .bind(req.lat)
     .bind(req.lon)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -144,18 +147,19 @@ pub async fn create_ramp_area(
     pool: &PgPool,
     icao: &str,
     req: &UpsertAirportRampAreaRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AirportRampAreaBody, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_ramp_area (icao, name, kind, rings, source, updated_by) \
-         values ($1, $2, $3, $4, 'manual', $5) returning id",
+        "insert into flow.airport_ramp_area (icao, name, kind, rings, source, updated_by, updated_by_actor) \
+         values ($1, $2, $3, $4, 'manual', $5, $6) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(&req.kind)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -167,11 +171,11 @@ pub async fn update_ramp_area(
     id: &str,
     icao: &str,
     req: &UpsertAirportRampAreaRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<Option<AirportRampAreaBody>, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let r = sqlx::query(
-        "update flow.airport_ramp_area set name = $3, kind = $4, rings = $5, updated_by = $6 \
+        "update flow.airport_ramp_area set name = $3, kind = $4, rings = $5, updated_by = $6, updated_by_actor = $7 \
          where id = $1 and icao = $2",
     )
     .bind(id)
@@ -179,7 +183,8 @@ pub async fn update_ramp_area(
     .bind(&req.name)
     .bind(&req.kind)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -226,17 +231,18 @@ pub async fn create_taxiway(
     pool: &PgPool,
     icao: &str,
     req: &UpsertAirportTaxiwayRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AirportTaxiwayBody, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_taxiway (icao, name, rings, source, updated_by) \
-         values ($1, $2, $3, 'manual', $4) returning id",
+        "insert into flow.airport_taxiway (icao, name, rings, source, updated_by, updated_by_actor) \
+         values ($1, $2, $3, 'manual', $4, $5) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -248,18 +254,19 @@ pub async fn update_taxiway(
     id: &str,
     icao: &str,
     req: &UpsertAirportTaxiwayRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<Option<AirportTaxiwayBody>, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let r = sqlx::query(
-        "update flow.airport_taxiway set name = $3, rings = $4, updated_by = $5 \
+        "update flow.airport_taxiway set name = $3, rings = $4, updated_by = $5, updated_by_actor = $6 \
          where id = $1 and icao = $2",
     )
     .bind(id)
     .bind(icao)
     .bind(&req.name)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -306,17 +313,18 @@ pub async fn create_runway(
     pool: &PgPool,
     icao: &str,
     req: &UpsertAirportRunwayRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<AirportRunwayBody, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let id: String = sqlx::query_scalar(
-        "insert into flow.airport_runway (icao, name, rings, source, updated_by) \
-         values ($1, $2, $3, 'manual', $4) returning id",
+        "insert into flow.airport_runway (icao, name, rings, source, updated_by, updated_by_actor) \
+         values ($1, $2, $3, 'manual', $4, $5) returning id",
     )
     .bind(icao)
     .bind(&req.name)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .fetch_one(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -328,18 +336,19 @@ pub async fn update_runway(
     id: &str,
     icao: &str,
     req: &UpsertAirportRunwayRequest,
-    actor: &str,
+    by: &Attribution,
 ) -> Result<Option<AirportRunwayBody>, ApiError> {
     let rings = sqlx::types::Json(&req.rings);
     let r = sqlx::query(
-        "update flow.airport_runway set name = $3, rings = $4, updated_by = $5 \
+        "update flow.airport_runway set name = $3, rings = $4, updated_by = $5, updated_by_actor = $6 \
          where id = $1 and icao = $2",
     )
     .bind(id)
     .bind(icao)
     .bind(&req.name)
     .bind(rings)
-    .bind(actor)
+    .bind(&by.user_id)
+    .bind(&by.actor_id)
     .execute(pool)
     .await
     .map_err(|_| ApiError::Internal)?;

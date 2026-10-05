@@ -120,6 +120,14 @@ OIS_OPENAPI_URL=http://127.0.0.1:3001/docs/api/v1/openapi.json \
 New handlers must be registered in **both** `router.rs` (the route) and `openapi.rs` (the path +
 any new schema), or they won't appear in the generated client.
 
+**A `///` doc comment on a `ToSchema` model or field is contract, not prose** (#591): utoipa emits it as the
+schema `description`, so editing it changes the OpenAPI document. Regenerate the client, or only CI's
+`client-drift` will notice. From 1.0, an edit on the supported surface (`docs/architecture/api-surface.md`)
+is a contract edit and gets a changelog entry like any other.
+
+**Record contract changes** in `docs-site/reference/api-changelog.md` (#591). Before 1.0 the entries are
+informational; nothing is stable.
+
 The one deliberate exception is **`GET /metrics`** (#382): Prometheus text exposition, not JSON the
 SPA consumes, so it is registered in `router.rs` only and there is **no client regen** for it.
 Adding another endpoint outside the spec needs the same kind of justification — "the generated
@@ -255,7 +263,7 @@ just test-js       # pnpm test
 just desktop-build # bundle the Tauri app for the host platform
 
 # the full local gate (run before calling anything done)
-just ci            # fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
+just ci            # migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
 ```
 
 First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`. `.env` is read
@@ -293,10 +301,30 @@ idempotent-friendly and numbered sequentially).
 ## Conventions & gotchas
 
 - **Migrations** are `backend/migrations/NNNN_name.sql`, embedded via `sqlx::migrate!` and applied on
-  startup. Number sequentially after the current highest; never renumber or edit an applied
-  migration — add a new one. Text UUID PKs (`gen_random_uuid()::text`), `created_at`/`updated_at`
-  timestamptz with a `platform.touch_updated_at()` trigger, check-constrained status enums, FK
-  cascade where a child can't outlive its parent.
+  startup. Never renumber or edit an *applied* migration — add a new one. Text UUID PKs
+  (`gen_random_uuid()::text`), `created_at`/`updated_at` timestamptz with a
+  `platform.touch_updated_at()` trigger, check-constrained status enums, FK cascade where a child
+  can't outlive its parent.
+- **Picking a migration number is contended while several PRs are open.** Each picks "the next free
+  number" against a view that goes stale, and a duplicate does not fail cleanly: sqlx applies both
+  files and the second violates `_sqlx_migrations`' primary key, leaving the database half-migrated
+  (#569). Pick a number **above the highest on `next` _and_ in every open PR** — this lists the open
+  PRs' claims:
+
+  ```bash
+  gh pr list --state open --json number --jq '.[].number' | xargs -I{} gh pr view {} --json files --jq '.files[].path' | grep -o 'migrations/[0-9]*' | sort -u
+  ```
+
+  A gap in the sequence is harmless; a repeat is fatal. If your unmerged PR collides, renumber it
+  *upward* past every open claim — not into a gap someone else may also take.
+
+  Three guards catch a duplicate, and they fail at different moments. The
+  `migration_versions_are_unique` test (`backend/src/lib.rs`) names the colliding files as soon as
+  both are in one tree, needing no database. `just check-migrations` (part of `just ci`) and the
+  `migrations` CI job run the same check against the PR's merge ref, so GitHub's "merge into base"
+  view catches a collision the branch alone cannot see. The image build then `needs: migrations`, so
+  a duplicate that slipped in behind a later merge can never be tagged and deployed. None of them can
+  see across two open branches, so the number you pick is still yours to get right.
 - **Config that must reach the feed** (aircraft profiles, e.g.) is cached in `AppState` behind
   `ArcSwap` and refreshed by a `jobs.rs` worker; the write handler also force-reloads the cache so
   edits apply immediately. Mirror that pattern for any new feed-visible config.
@@ -333,6 +361,10 @@ Three independent axes — they are not the same number:
   allowed on it (regen the typed client, move internal callers) rather than spinning up `/v2` for
   every early change, since only the internal `@ois/api-client` consumes it today. Freeze `v1` at
   product `1.0`.
+- **Stability starts at 1.0, and only for the supported surface** (#591). Before 1.0 nothing is stable,
+  and a change needs no deprecation. From 1.0, the operations in `docs/architecture/api-surface.md` are
+  retired only after at least **30 days** of `Deprecation` and `Sunset` headers on their responses
+  (`backend/src/deprecation.rs`) plus a changelog entry. Everything outside that list stays internal.
 - **Monorepo strategy** — one version for the whole deployed unit; backend, web, and docs always
   ship from the same commit under the same `VERSION`+sha tag. Internal, never-published
   crates/packages (`ois-core`, `ois-client`, `discord`, `packages/ui`, `packages/api-client`) stay
@@ -349,7 +381,9 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
   `VATSIM_REDIRECT_URI`, `VATSIM_DEV_MODE`.
 - **Server admin bootstrap**: `OIS_SERVER_ADMIN_CID` (comma-separated CIDs) — the only way to grant
   `SERVER_ADMIN`.
-- **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`.
+- **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`, and
+  `OIS_SECRET_KEY` (32 base64 bytes; encrypts the webhook secret — without it there is no webhook, the
+  daily division pull still runs). See `docs/features/vatusa-sync.md`.
 - **Discord bot** (optional): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN`, `OIS_POLL_SECS`.
 - **Web/Vite dev**: `VITE_OIS_API_URL`, `OIS_OPENAPI_URL` (codegen source) — in `web/.env.local`.
 - **Observability** (optional, second compose file): `METRICS_TOKEN` gates `GET /metrics` when set;

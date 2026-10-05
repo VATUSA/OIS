@@ -11,6 +11,7 @@ surface, and its Discord touchpoints.
 |--------------------------------------------------|----------------------|---------------------------------|
 | [access-control.md](access-control.md)           | access               | built                           |
 | [api-keys.md](api-keys.md)                        | access (api_keys)    | built                           |
+| [vatusa-sync.md](vatusa-sync.md)                 | access, identity     | built                           |
 | [stats-replay.md](stats-replay.md)               | stats                | built                           |
 | [events-workflow.md](events-workflow.md)         | events               | built (diverged from original spec) |
 | [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md)       | tmu                  | built (diverged from original spec) |
@@ -20,7 +21,9 @@ surface, and its Discord touchpoints.
 | [aadc.md](aadc.md)                               | flow                 | built |
 | [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
-| [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — no data model, permissions, API or Discord of its own) |
+| [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — the overlay has no data model, permissions, API or Discord of its own; sector data is in monitor.md) |
+| [monitor.md](monitor.md)                         | flow                 | core built; live loads, page and map layer pending (#701, #601, #602) |
+| [diagnostics.md](diagnostics.md)                 | diagnostics          | built |
 
 Every spec above is built. The "diverged from original spec" ones have live migrations,
 handlers, and routes, but the shipped shape differs from the original design — each doc

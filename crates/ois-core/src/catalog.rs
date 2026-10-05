@@ -16,6 +16,7 @@ pub const DOMAINS: &[&str] = &[
     "api_keys",
     "audit",
     "auth",
+    "diagnostics",
     "discord",
     "emails",
     "events",
@@ -70,6 +71,8 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "access.catalog.read",
         "access.users.read",
         "access.users.update",
+        "access.groups.read",
+        "access.groups.update",
         // --- users: directory (ported from osmium) ---
         "users.directory.read",
         // --- audit log (ported from osmium) ---
@@ -94,8 +97,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "events.debrief.read",             // read the post-event debrief
         "events.debrief.create",           // write a post-event debrief entry
         "events.availability.update",      // indicate availability on a DCC event thread
-        // --- tmu: NTML / ADV / TMI (ntml/adv/delays were never implemented — see
-        // docs/features/tmu-ntml-adv-tmi.md; program/groundstop/cfr are the real, live ones) ---
+        // --- tmu: NTML / ADV / TMI (see docs/features/tmu-ntml-adv-tmi.md). `tmu.adv.*` are live as
+        // of #457-#461 and gate the ADVZY handlers; `tmu.ntml.*` and `tmu.delays.read` are still
+        // seeded-but-unused. program/groundstop/cfr are live. ---
         "tmu.ntml.read",
         "tmu.ntml.create",
         "tmu.ntml.update",
@@ -147,6 +151,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.surface_data.update", // manage an airport's gates/ramp areas/taxiways (facility-scoped)
         "flow.aircraft_profiles.read", // view aircraft performance profiles
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
+        "flow.sectors.read",        // view ATC sector volumes on the admin sector map
+        "flow.monitor.read",        // view Airspace Monitor sectors and their alert parameters
+        "flow.monitor.update",      // set a sector's Monitor Alert Parameter (facility-scoped)
         // --- system: background-jobs viewer (read status; update = trigger a run) ---
         "system.jobs.read",
         "system.jobs.update",
@@ -154,6 +161,9 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "stats.data.read",
         "stats.capture.update",
         "stats.capture.delete",
+        // --- diagnostics: desktop "Send diagnostics" reports (#629) ---
+        "diagnostics.reports.read",
+        "diagnostics.reports.delete",
         // --- discord / integration: outbound-job queue (the bot) + guild config mapping ---
         "discord.config.read",
         "discord.config.update",

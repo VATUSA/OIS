@@ -3,14 +3,12 @@
 //! access" validation used when a key is created or edited. The capped effective set (key grants ∩
 //! owner's current access) is assembled in `auth::acl::fetch_api_key_access`.
 
-use std::collections::HashSet;
-
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::{
     errors::ApiError,
-    models::{ApiKeyBody, ApiKeyPermissionBody},
+    models::{ApiKeyBody, ApiKeyPermissionBody, CredentialUsageBody, GrantablePermissionBody},
     repos::access::{self as access_repo, PermissionScope},
 };
 
@@ -19,10 +17,23 @@ use crate::{
 /// the permission's first segment (its domain).
 pub const API_KEY_FORBIDDEN_DOMAINS: &[&str] = &["api_keys"];
 
+/// Permission domains a service account may NEVER hold (#584): like a key, a machine must not be able
+/// to mint credentials — of either kind.
+pub const SERVICE_ACCOUNT_FORBIDDEN_DOMAINS: &[&str] = &["api_keys", "service_accounts"];
+
+fn domain_in(permission_name: &str, domains: &[&str]) -> bool {
+    let domain = permission_name.split('.').next().unwrap_or("");
+    domains.contains(&domain)
+}
+
 /// Whether `permission_name` is off-limits for API keys (its domain is in the denylist).
 pub fn is_forbidden_for_key(permission_name: &str) -> bool {
-    let domain = permission_name.split('.').next().unwrap_or("");
-    API_KEY_FORBIDDEN_DOMAINS.contains(&domain)
+    domain_in(permission_name, API_KEY_FORBIDDEN_DOMAINS)
+}
+
+/// Whether `permission_name` is off-limits for service accounts.
+pub fn is_forbidden_for_service_account(permission_name: &str) -> bool {
+    domain_in(permission_name, SERVICE_ACCOUNT_FORBIDDEN_DOMAINS)
 }
 
 #[cfg(test)]
@@ -78,7 +89,7 @@ pub async fn key_granted_scope(
     .map_err(|_| ApiError::Internal)?;
 
     if rows.iter().any(Option::is_none) {
-        Ok(PermissionScope::National)
+        Ok(PermissionScope::national())
     } else {
         Ok(PermissionScope::Facilities(
             rows.into_iter().flatten().collect(),
@@ -96,25 +107,71 @@ pub async fn validate_subset(
     owner_user_id: &str,
     requested: &[(String, Option<String>)],
 ) -> Result<(), ApiError> {
-    let owner_names: HashSet<String> =
-        access_repo::fetch_user_permission_names(pool, owner_user_id)
-            .await?
-            .into_iter()
-            .collect();
+    validate_grants(pool, owner_user_id, requested, is_forbidden_for_key).await
+}
+
+/// [`validate_subset`] with the denylist as a parameter: every requested grant must be within
+/// `granter_user_id`'s live authority and not `forbidden`. A service account has no owner, so its
+/// grants are checked against the admin making them, on every write (#584).
+pub async fn validate_grants(
+    pool: &PgPool,
+    granter_user_id: &str,
+    requested: &[(String, Option<String>)],
+    forbidden: fn(&str) -> bool,
+) -> Result<(), ApiError> {
+    // One resolution for the whole request (#543): `scope.allows` now carries the deny semantics
+    // that the separate name-set check used to supply, so there is nothing left to cross-check.
+    let granter = access_repo::fetch_effective_permissions(pool, granter_user_id).await?;
 
     for (permission_name, artcc_id) in requested {
-        if is_forbidden_for_key(permission_name) {
+        if forbidden(permission_name) {
             return Err(ApiError::BadRequest);
         }
-        if !owner_names.contains(permission_name) {
+        let Some(scope) = granter.get(permission_name) else {
             return Err(ApiError::Forbidden);
-        }
-        let scope = access_repo::permission_scope(pool, owner_user_id, permission_name).await?;
+        };
         if !scope.allows(artcc_id.as_deref()) {
             return Err(ApiError::Forbidden);
         }
     }
     Ok(())
+}
+
+/// What `user_id` may delegate: everything they effectively hold that isn't `forbidden`, with the
+/// scope they hold it at (national ⇒ any ARTCC). The picker's source for both API keys and service
+/// accounts, so it offers exactly what [`validate_grants`] accepts.
+pub async fn grantable_for(
+    pool: &PgPool,
+    user_id: &str,
+    forbidden: fn(&str) -> bool,
+) -> Result<Vec<GrantablePermissionBody>, ApiError> {
+    let held = access_repo::fetch_effective_permissions(pool, user_id).await?;
+    let mut out = Vec::new();
+    for (permission, scope) in held {
+        // Denied down to nothing is not held, so there is nothing to delegate.
+        if forbidden(&permission) || scope.is_empty() {
+            continue;
+        }
+        let (national, artccs) = match scope {
+            // `GrantablePermissionBody` has no way to say "national except ZDC", so a holder
+            // carrying a scoped deny is reported as non-national with no ARTCCs: it under-offers
+            // rather than inviting them to delegate where they are denied (VATUSA/OIS#543).
+            PermissionScope::National { except } if except.is_empty() => (true, Vec::new()),
+            PermissionScope::National { .. } => (false, Vec::new()),
+            PermissionScope::Facilities(set) => {
+                let mut v: Vec<String> = set.into_iter().collect();
+                v.sort();
+                (false, v)
+            }
+        };
+        out.push(GrantablePermissionBody {
+            permission,
+            national,
+            artccs,
+        });
+    }
+    out.sort_by(|a, b| a.permission.cmp(&b.permission));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -133,8 +190,8 @@ mod validate_subset_tests {
 
     async fn deny(pool: &PgPool, user_id: &str, perm: &str) {
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             values ($1, $2, false)",
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             values ($1, $2, false, 'manual')",
         )
         .bind(user_id)
         .bind(perm)
@@ -144,12 +201,14 @@ mod validate_subset_tests {
     }
 
     async fn assign_role(pool: &PgPool, user_id: &str, role: &str) {
-        sqlx::query("insert into access.user_roles (user_id, role_name) values ($1, $2)")
-            .bind(user_id)
-            .bind(role)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, $2, 'manual')",
+        )
+        .bind(user_id)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     #[sqlx::test]
@@ -246,7 +305,7 @@ mod validate_subset_tests {
         const ROLE_PERM: &str = "ace.requests.decide";
         let user = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, artcc_id) values ($1, 'ACE', 'ZDC')",
+            "insert into access.user_roles (user_id, role_name, artcc_id, source) values ($1, 'ACE', 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
@@ -268,8 +327,12 @@ mod validate_subset_tests {
         ));
     }
 
-    /// Isolates the owner-holds check: the ZDC grant still gives a ZDC scope (`permission_scope`
-    /// doesn't read denies), so only the effective-permission name check rejects it.
+    /// A national deny beats the ZDC allow, so the owner holds nothing to delegate.
+    ///
+    /// This used to pass for a different reason, and the old comment said so: `permission_scope`
+    /// did not read denies, so the ZDC scope survived and only a separate name check rejected the
+    /// request. Since #543 the single resolver subtracts the deny itself, so the scope is empty and
+    /// the rejection comes from the scope check — which is why that name check could be removed.
     #[sqlx::test]
     async fn a_denied_permission_is_forbidden_even_where_its_scope_would_allow(pool: PgPool) {
         let user = seed_user(&pool).await;
@@ -313,11 +376,25 @@ struct ApiKeyRow {
     last_used_ip: Option<String>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    rate_limit_per_min: Option<i32>,
+    requests_this_hour: i64,
+    requests_last_day: i64,
+    refused_last_day: i64,
 }
 
 const SELECT: &str = "select k.id, k.name, k.description, k.prefix, k.status, \
     u.cid as owner_cid, u.display_name as owner_display_name, \
-    k.expires_at, k.last_used_at, k.last_used_ip::text as last_used_ip, k.revoked_at, k.created_at \
+    k.expires_at, k.last_used_at, k.last_used_ip::text as last_used_ip, k.revoked_at, k.created_at, \
+    k.rate_limit_per_min, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour >= date_trunc('hour', now()))::bigint as requests_this_hour, \
+    (select coalesce(sum(requests), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour > now() - interval '24 hours')::bigint as requests_last_day, \
+    (select coalesce(sum(refused), 0) from access.credential_usage cu \
+     where cu.kind = 'api_key' and cu.credential_id = k.id \
+       and cu.hour > now() - interval '24 hours')::bigint as refused_last_day \
     from access.api_keys k join identity.users u on u.id = k.owner_user_id";
 
 async fn row_into_body(pool: &PgPool, row: ApiKeyRow) -> Result<ApiKeyBody, ApiError> {
@@ -336,6 +413,12 @@ async fn row_into_body(pool: &PgPool, row: ApiKeyRow) -> Result<ApiKeyBody, ApiE
         last_used_ip: row.last_used_ip,
         revoked_at: row.revoked_at,
         created_at: row.created_at,
+        rate_limit_per_min: row.rate_limit_per_min,
+        usage: CredentialUsageBody {
+            requests_this_hour: row.requests_this_hour,
+            requests_last_day: row.requests_last_day,
+            refused_last_day: row.refused_last_day,
+        },
     })
 }
 
@@ -408,6 +491,23 @@ pub async fn list_all_keys(
     .await
     .map_err(|_| ApiError::Internal)?;
     rows_into_bodies(pool, rows).await
+}
+
+/// Set or clear one key's rate limit override (#611). `false` if there is no such key.
+pub async fn set_rate_limit(
+    pool: &PgPool,
+    id: &str,
+    per_min: Option<i32>,
+) -> Result<bool, ApiError> {
+    sqlx::query(
+        "update access.api_keys set rate_limit_per_min = $2, updated_at = now() where id = $1",
+    )
+    .bind(id)
+    .bind(per_min)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected() > 0)
+    .map_err(|_| ApiError::Internal)
 }
 
 pub async fn get_key(pool: &PgPool, id: &str) -> Result<Option<ApiKeyBody>, ApiError> {

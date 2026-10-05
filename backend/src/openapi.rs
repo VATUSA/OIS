@@ -1,13 +1,58 @@
 //! OpenAPI document for the OIS API. Emitted at `/docs/api/v1/openapi.json`; the web
 //! + desktop clients are generated from it (see docs/architecture/api-conventions.md).
 
-use utoipa::OpenApi;
+use utoipa::{
+    Modify, OpenApi,
+    openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme},
+};
 
+/// The three credentials the document describes (#587), one scheme each, because not every path takes
+/// every kind. Each gated path lists, as alternatives, exactly the schemes its handler accepts — all
+/// three for an `Actor` (or bare `RequirePermission`) handler, `session` + `api_key` for
+/// `Principal::require`, `session` alone for `CurrentUser` — with the permission it requires as the
+/// scope. `handlers/auth_annotation_tests.rs` derives that set from each handler and holds the
+/// annotation to it, so a key or service-account token is never promised a path that would 401 it.
+struct CredentialSchemes;
+
+impl Modify for CredentialSchemes {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        let bearer = |description: &str| {
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(description.to_string()))
+                    .build(),
+            )
+        };
+        components.add_security_scheme(
+            "session",
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                "ois_session",
+                "A signed-in person: the `ois_session` cookie set by VATSIM sign-in. The desktop app \
+                 sends the same session as `Authorization: Bearer ois_dsk_…`.",
+            ))),
+        );
+        components.add_security_scheme(
+            "api_key",
+            bearer(
+                "A personal API key: `Authorization: Bearer ois_pat_…`. Capped by its owner's live \
+                 access as well as the permissions granted to the key.",
+            ),
+        );
+        components.add_security_scheme(
+            "service_account",
+            bearer("A service account: `Authorization: Bearer ois_sa_…`."),
+        );
+    }
+}
+
+// `info.version` is left to utoipa's default, `CARGO_PKG_VERSION` — the release version — so a
+// published spec names the build it describes.
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "OIS API",
-        version = "0.1.0",
         description = "VATUSA Event Operational Information System API"
     ),
     paths(
@@ -41,6 +86,8 @@ use utoipa::OpenApi;
         crate::handlers::facility_documents::update_facility_document,
         crate::handlers::facility_documents::delete_facility_document,
         crate::handlers::public::get_board,
+        crate::handlers::airports::get_airport,
+        crate::handlers::desktop::download,
         crate::handlers::flow::flight_advisory,
         crate::handlers::flow::my_flight,
         crate::handlers::access::get_access_catalog,
@@ -48,6 +95,18 @@ use utoipa::OpenApi;
         crate::handlers::access::list_users,
         crate::handlers::access::get_user_access,
         crate::handlers::access::update_user_access,
+        crate::handlers::access::get_user_vatusa,
+        crate::handlers::access::resync_user_vatusa,
+        crate::handlers::access::list_groups,
+        crate::handlers::access::create_group,
+        crate::handlers::access::update_group,
+        crate::handlers::access::delete_group,
+        crate::handlers::access::list_group_members,
+        crate::handlers::access::add_group_member,
+        crate::handlers::access::remove_group_member,
+        crate::handlers::access::list_vatusa_role_mappings,
+        crate::handlers::access::create_vatusa_role_mapping,
+        crate::handlers::access::delete_vatusa_role_mapping,
         crate::handlers::tmu::list_tmis,
         crate::handlers::tmu::create_tmi,
         crate::handlers::tmu::update_tmi,
@@ -153,6 +212,7 @@ use utoipa::OpenApi;
         crate::handlers::aircraft_profiles::list_profiles,
         crate::handlers::aircraft_profiles::upsert_profile,
         crate::handlers::aircraft_profiles::delete_profile,
+        crate::handlers::airspace_sectors::list_sectors,
         crate::handlers::flow::list_fcas,
         crate::handlers::flow::create_fca,
         crate::handlers::flow::update_fca,
@@ -163,6 +223,14 @@ use utoipa::OpenApi;
         crate::handlers::flight_exclusions::list_flight_exclusions,
         crate::handlers::flight_exclusions::exclude_flight,
         crate::handlers::flight_exclusions::restore_flight,
+        crate::handlers::monitor::monitor_table,
+        crate::handlers::monitor::monitor_neighbours,
+        crate::handlers::monitor::list_sector_maps,
+        crate::handlers::monitor::set_sector_map,
+        crate::handlers::monitor::list_consolidations,
+        crate::handlers::monitor::consolidate_sector,
+        crate::handlers::monitor::consolidate_all_sectors,
+        crate::handlers::monitor::release_sector,
         crate::handlers::flow::clear_release,
         crate::handlers::flow::reorder_fca,
         crate::handlers::flow::fca_counts,
@@ -228,6 +296,10 @@ use utoipa::OpenApi;
         crate::handlers::ace::decide_request,
         crate::handlers::admin::get_admin_summary,
         crate::handlers::audit::list_audit_logs,
+        crate::handlers::diagnostics::list_reports,
+        crate::handlers::diagnostics::get_report,
+        crate::handlers::diagnostics::get_report_logs,
+        crate::handlers::diagnostics::delete_report,
         crate::handlers::jobs::list_jobs,
         crate::handlers::jobs::run_job,
         crate::handlers::service_accounts::list_service_accounts,
@@ -236,6 +308,9 @@ use utoipa::OpenApi;
         crate::handlers::service_accounts::disable_service_account,
         crate::handlers::service_accounts::list_service_account_roles,
         crate::handlers::service_accounts::set_service_account_roles,
+        crate::handlers::service_accounts::set_service_account_rate_limit,
+        crate::handlers::service_accounts::grantable_service_account_permissions,
+        crate::handlers::service_accounts::set_service_account_permissions,
         crate::handlers::api_keys::list_my_keys,
         crate::handlers::api_keys::grantable_permissions,
         crate::handlers::api_keys::create_key,
@@ -247,6 +322,7 @@ use utoipa::OpenApi;
         crate::handlers::api_keys::key_audit,
         crate::handlers::api_keys::admin_list_keys,
         crate::handlers::api_keys::admin_disable_key,
+        crate::handlers::api_keys::admin_set_key_rate_limit,
         crate::handlers::api_keys::admin_delete_key,
     ),
     components(schemas(
@@ -274,10 +350,23 @@ use utoipa::OpenApi;
         crate::models::UpsertFacilityDocumentRequest,
         crate::models::AccessCatalogBody,
         crate::models::SelfAccessBody,
+        crate::models::HeldGroupBody,
         crate::models::UserAccessBody,
+        crate::models::UserVatusaBody,
+        crate::models::VatusaGrantChange,
+        crate::models::VatusaResyncRequest,
         crate::models::ScopeAccess,
         crate::models::UpdateUserAccessRequest,
         crate::models::ScopeUpdate,
+        crate::models::GroupBody,
+        crate::models::CreateGroupRequest,
+        crate::models::VatusaRoleMappingBody,
+        crate::models::VatusaRoleMappingList,
+        crate::models::CreateVatusaRoleMappingRequest,
+        crate::models::UpdateGroupRequest,
+        crate::models::GroupMemberBody,
+        crate::models::GroupMemberPage,
+        crate::models::GroupMemberRequest,
         crate::models::TmiBody,
         crate::models::AdvisoryBody,
         crate::models::RerouteAdvisory,
@@ -320,6 +409,19 @@ use utoipa::OpenApi;
         crate::models::AirportConfigBody,
         crate::models::FlightExclusionBody,
         crate::models::FlightExclusionsBody,
+        crate::models::SectorMapBody,
+        crate::models::SectorMapsBody,
+        crate::models::MonitorTableBody,
+        crate::models::MonitorNeighboursBody,
+        crate::models::MonitorRowBody,
+        crate::models::MonitorBinBody,
+        crate::feed::monitor_alert::SectorAlert,
+        crate::models::SetSectorMapRequest,
+        crate::models::SectorConsolidationBody,
+        crate::models::SectorConsolidationsBody,
+        crate::models::ConsolidateSectorRequest,
+        crate::models::BulkConsolidateRequest,
+        crate::models::BulkConsolidateMode,
         crate::models::ExcludeFlightRequest,
         crate::models::UpsertAirportConfigRequest,
         crate::models::AirportGateBody,
@@ -333,6 +435,7 @@ use utoipa::OpenApi;
         crate::models::AirportSurfaceBody,
         crate::models::FaaRepullResult,
         crate::models::AircraftProfileBody,
+        crate::models::SectorVolumeBody,
         crate::models::UpsertAircraftProfileRequest,
         crate::models::AirportForecastBody,
         crate::models::TmiPackageBody,
@@ -372,6 +475,7 @@ use utoipa::OpenApi;
         crate::models::FixValidationBody,
         crate::models::ReleaseRequest,
         crate::models::ReorderRequest,
+        crate::handlers::airports::AirportPositionBody,
         crate::models::SwapReleaseRequest,
         crate::models::AircraftRoute,
         crate::models::RouteWaypoint,
@@ -443,6 +547,9 @@ use utoipa::OpenApi;
         crate::models::Tier1GenerateResult,
         crate::models::AuditLogEntry,
         crate::models::AuditLogPage,
+        crate::models::DiagnosticsReportSummary,
+        crate::models::DiagnosticsReportPage,
+        crate::models::DiagnosticsReport,
         crate::models::AdminSummaryBody,
         crate::models::DailySeries,
         crate::models::DailyCount,
@@ -454,6 +561,10 @@ use utoipa::OpenApi;
         crate::job_registry::JobStatus,
         crate::models::CreateServiceAccountRequest,
         crate::models::SetServiceAccountRolesRequest,
+        crate::models::SetRateLimitRequest,
+        crate::models::CredentialUsageBody,
+        crate::models::SetServiceAccountPermissionsRequest,
+        crate::models::RotateServiceAccountRequest,
         crate::models::ServiceAccountBody,
         crate::models::ServiceAccountTokenBody,
         crate::models::ApiKeyPermissionInput,
@@ -490,11 +601,54 @@ use utoipa::OpenApi;
         (name = "ace", description = "ACE support requests + team roster"),
         (name = "integration", description = "Discord integration — outbound jobs + config"),
         (name = "audit", description = "Audit log"),
+        (name = "diagnostics", description = "Desktop diagnostics reports (staff)"),
         (name = "service-accounts", description = "Machine client credentials"),
         (name = "api-keys", description = "User-owned API keys (personal access tokens)")
-    )
+    ),
+    modifiers(&CredentialSchemes, &RateLimited)
 )]
 pub struct ApiDoc;
+
+/// Every `/api/` operation can answer `429` once the caller's allowance is spent (`rate_limit`,
+/// #588). Added here rather than on each `#[utoipa::path]` so a new endpoint cannot leave it out.
+struct RateLimited;
+
+impl utoipa::Modify for RateLimited {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{ResponseBuilder, header::HeaderBuilder};
+
+        let retry_after = HeaderBuilder::new()
+            .description(Some("Seconds until the next request will be accepted."))
+            .build();
+        let response = ResponseBuilder::new()
+            .description(
+                "Rate limit exceeded: back off for `Retry-After` seconds. Every limited response \
+                 carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.",
+            )
+            .header("Retry-After", retry_after)
+            .build();
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !path.starts_with("/api/") {
+                continue;
+            }
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                operation
+                    .responses
+                    .responses
+                    .insert("429".to_string(), response.clone().into());
+            }
+        }
+    }
+}
 
 /// A CI utility, not a real test: dumps the current OpenAPI document to a file so the
 /// client-drift check (`.github/workflows/ci.yml`'s `client-drift` job) can regenerate

@@ -4,16 +4,15 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 use reqwest::Url;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{FacilitiesDocsRead, FacilitiesDocsUpdate},
-        principal::Principal,
+        principal::Actor,
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -54,17 +53,16 @@ fn validate(req: &UpsertFacilityDocumentRequest) -> Result<(), ApiError> {
 
 #[utoipa::path(
     get, path = "/api/v1/facilities/{facility_id}/documents", tag = "facilities",
+    security(("session" = ["facilities.docs.read"]), ("api_key" = ["facilities.docs.read"]), ("service_account" = ["facilities.docs.read"])),
     params(("facility_id" = String, Path)),
     responses((status = 200, body = Vec<FacilityDocumentBody>), (status = 401))
 )]
 pub async fn list_facility_documents(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(facility_id): Path<String>,
 ) -> Result<Json<Vec<FacilityDocumentBody>>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 
@@ -81,18 +79,17 @@ pub async fn list_facility_documents(
 
 #[utoipa::path(
     post, path = "/api/v1/facilities/{facility_id}/documents", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"]), ("service_account" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path)), request_body = UpsertFacilityDocumentRequest,
     responses((status = 200, body = FacilityDocumentBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(facility_id): Path<String>,
     Json(req): Json<UpsertFacilityDocumentRequest>,
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -111,6 +108,7 @@ pub async fn create_facility_document(
 
 #[utoipa::path(
     put, path = "/api/v1/facilities/{facility_id}/documents/{id}", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"]), ("service_account" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path), ("id" = String, Path)),
     request_body = UpsertFacilityDocumentRequest,
     responses((status = 200, body = FacilityDocumentBody), (status = 400), (status = 401), (status = 403), (status = 404))
@@ -118,12 +116,10 @@ pub async fn create_facility_document(
 pub async fn update_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((facility_id, id)): Path<(String, String)>,
     Json(req): Json<UpsertFacilityDocumentRequest>,
 ) -> Result<Json<FacilityDocumentBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -144,17 +140,16 @@ pub async fn update_facility_document(
 
 #[utoipa::path(
     delete, path = "/api/v1/facilities/{facility_id}/documents/{id}", tag = "facilities",
+    security(("session" = ["facilities.docs.update"]), ("api_key" = ["facilities.docs.update"]), ("service_account" = ["facilities.docs.update"])),
     params(("facility_id" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_facility_document(
     State(state): State<AppState>,
     _permission: RequirePermission<FacilitiesDocsUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((facility_id, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let facility_id = normalize_facility(&facility_id).ok_or(ApiError::BadRequest)?;
 
@@ -231,8 +226,8 @@ mod tests {
         assert!(zdc_scope.allows(Some("ZDC")));
         assert!(!zdc_scope.allows(Some("ZAU")));
 
-        assert!(PermissionScope::National.allows(Some("ZDC")));
-        assert!(PermissionScope::National.allows(Some("ZAU")));
+        assert!(PermissionScope::national().allows(Some("ZDC")));
+        assert!(PermissionScope::national().allows(Some("ZAU")));
 
         let empty_scope = PermissionScope::Facilities(HashSet::new());
         assert!(!empty_scope.allows(Some("ZDC")));

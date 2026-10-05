@@ -5,15 +5,14 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
 };
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{EventsPlanRead, FlowSurfaceDataUpdate},
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -111,17 +110,16 @@ async fn refresh_gates_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<()
 
 #[utoipa::path(
     get, path = "/api/v1/airports/{icao}/surface", tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("icao" = String, Path)),
     responses((status = 200, body = AirportSurfaceBody), (status = 401))
 )]
 pub async fn get_airport_surface(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
 ) -> Result<Json<AirportSurfaceBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
 
@@ -154,24 +152,24 @@ pub async fn get_airport_surface(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/gates", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportGateRequest,
     responses((status = 200, body = AirportGateBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_airport_gate(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportGateRequest>,
 ) -> Result<Json<AirportGateBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_gate(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_gate(pool, &icao, &req, principal.user_id()).await?;
+    let mut row =
+        surface_repo::create_gate(pool, &icao, &req, &principal.attribution(&state).await?).await?;
     refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
@@ -179,26 +177,31 @@ pub async fn create_airport_gate(
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/gates/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportGateRequest,
     responses((status = 200, body = AirportGateBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_airport_gate(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportGateRequest>,
 ) -> Result<Json<AirportGateBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_gate(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_gate(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_gate(
+        pool,
+        &id,
+        &icao,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     refresh_gates_cache(&state, pool).await?;
     row.editable = true;
     Ok(Json(row))
@@ -206,17 +209,16 @@ pub async fn update_airport_gate(
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/gates/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_airport_gate(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -233,67 +235,72 @@ pub async fn delete_airport_gate(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/ramp-areas", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportRampAreaRequest,
     responses((status = 200, body = AirportRampAreaBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_airport_ramp_area(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportRampAreaRequest>,
 ) -> Result<Json<AirportRampAreaBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_ramp_area(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_ramp_area(pool, &icao, &req, principal.user_id()).await?;
+    let mut row =
+        surface_repo::create_ramp_area(pool, &icao, &req, &principal.attribution(&state).await?)
+            .await?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/ramp-areas/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportRampAreaRequest,
     responses((status = 200, body = AirportRampAreaBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_airport_ramp_area(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportRampAreaRequest>,
 ) -> Result<Json<AirportRampAreaBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_ramp_area(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_ramp_area(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_ramp_area(
+        pool,
+        &id,
+        &icao,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/ramp-areas/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_airport_ramp_area(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -309,67 +316,72 @@ pub async fn delete_airport_ramp_area(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/taxiways", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportTaxiwayRequest,
     responses((status = 200, body = AirportTaxiwayBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_airport_taxiway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportTaxiwayRequest>,
 ) -> Result<Json<AirportTaxiwayBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_taxiway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_taxiway(pool, &icao, &req, principal.user_id()).await?;
+    let mut row =
+        surface_repo::create_taxiway(pool, &icao, &req, &principal.attribution(&state).await?)
+            .await?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/taxiways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportTaxiwayRequest,
     responses((status = 200, body = AirportTaxiwayBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_airport_taxiway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportTaxiwayRequest>,
 ) -> Result<Json<AirportTaxiwayBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_taxiway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_taxiway(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_taxiway(
+        pool,
+        &id,
+        &icao,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/taxiways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_airport_taxiway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -385,67 +397,72 @@ pub async fn delete_airport_taxiway(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/runways", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportRunwayRequest,
     responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_airport_runway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportRunwayRequest>,
 ) -> Result<Json<AirportRunwayBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_runway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::create_runway(pool, &icao, &req, principal.user_id()).await?;
+    let mut row =
+        surface_repo::create_runway(pool, &icao, &req, &principal.attribution(&state).await?)
+            .await?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     put, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportRunwayRequest,
     responses((status = 200, body = AirportRunwayBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_airport_runway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportRunwayRequest>,
 ) -> Result<Json<AirportRunwayBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate_runway(&req)?;
     require_edit(&state, &principal, &icao).await?;
 
-    let mut row = surface_repo::update_runway(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = surface_repo::update_runway(
+        pool,
+        &id,
+        &icao,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     delete, path = "/api/v1/airports/{icao}/runways/{id}", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_airport_runway(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -461,6 +478,7 @@ pub async fn delete_airport_runway(
 
 #[utoipa::path(
     post, path = "/api/v1/airports/{icao}/surface/repull-faa", tag = "events",
+    security(("session" = ["flow.surface_data.update"]), ("api_key" = ["flow.surface_data.update"]), ("service_account" = ["flow.surface_data.update"])),
     params(("icao" = String, Path)),
     responses(
         (status = 200, body = FaaRepullResult), (status = 401), (status = 403),
@@ -470,11 +488,9 @@ pub async fn delete_airport_runway(
 pub async fn repull_faa_surface(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowSurfaceDataUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
 ) -> Result<Json<FaaRepullResult>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -539,9 +555,16 @@ mod tests {
             lat: 38.85,
             lon: -77.04,
         };
-        let created = surface_repo::create_gate(&pool, "KTST", &req, &user)
-            .await
-            .unwrap();
+        let created = surface_repo::create_gate(
+            &pool,
+            "KTST",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(created.icao, "KTST");
         assert_eq!(created.source, "manual");
 
@@ -553,16 +576,32 @@ mod tests {
             lat: 38.86,
             lon: -77.05,
         };
-        let updated = surface_repo::update_gate(&pool, &created.id, "KTST", &update_req, &user)
-            .await
-            .unwrap()
-            .unwrap();
+        let updated = surface_repo::update_gate(
+            &pool,
+            &created.id,
+            "KTST",
+            &update_req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(updated.name, "A2");
 
         // Wrong icao scoping: no row affected.
-        let wrong_scope = surface_repo::update_gate(&pool, &created.id, "KJFK", &update_req, &user)
-            .await
-            .unwrap();
+        let wrong_scope = surface_repo::update_gate(
+            &pool,
+            &created.id,
+            "KJFK",
+            &update_req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(wrong_scope.is_none());
 
         assert!(
@@ -596,9 +635,16 @@ mod tests {
                 [38.85, -77.04],
             ]],
         };
-        let created = surface_repo::create_ramp_area(&pool, "KTST", &req, &user)
-            .await
-            .unwrap();
+        let created = surface_repo::create_ramp_area(
+            &pool,
+            "KTST",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(created.kind, "apron");
         assert_eq!(created.rings.0.len(), 1);
 
@@ -688,9 +734,16 @@ mod tests {
             ]],
         };
         assert!(validate_taxiway(&req).is_ok());
-        let created = surface_repo::create_taxiway(&pool, "KTST", &req, &user)
-            .await
-            .unwrap();
+        let created = surface_repo::create_taxiway(
+            &pool,
+            "KTST",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(created.rings.0, req.rings);
 
         let listed = surface_repo::list_taxiways(&pool, "KTST").await.unwrap();
@@ -733,24 +786,47 @@ mod tests {
                 [38.85, -77.04],
             ]],
         };
-        let created = surface_repo::create_runway(&pool, "KTST", &req, &user)
-            .await
-            .unwrap();
+        let created = surface_repo::create_runway(
+            &pool,
+            "KTST",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(created.rings.0, req.rings);
         assert_eq!(created.source, "manual");
 
         req.name = "01L/19R".to_string();
-        let updated = surface_repo::update_runway(&pool, &created.id, "KTST", &req, &user)
-            .await
-            .unwrap()
-            .expect("the runway exists");
+        let updated = surface_repo::update_runway(
+            &pool,
+            &created.id,
+            "KTST",
+            &req,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the runway exists");
         assert_eq!(updated.name, "01L/19R");
         // Scoped by airport: the same id under another ICAO isn't found.
         assert!(
-            surface_repo::update_runway(&pool, &created.id, "KXXX", &req, &user)
-                .await
-                .unwrap()
-                .is_none()
+            surface_repo::update_runway(
+                &pool,
+                &created.id,
+                "KXXX",
+                &req,
+                &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                    .await
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
 
         assert_eq!(
@@ -823,8 +899,8 @@ mod tests {
         .unwrap();
         let user = seed_user(&pool).await;
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             values ($1, 'events.config.update', false, 'ZDC')",
+            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id, source) \
+             values ($1, 'events.config.update', false, 'ZDC', 'manual')",
         )
         .bind(&user)
         .execute(&pool)
@@ -841,10 +917,15 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted, artcc_id) \
-             select user_id, 'flow.surface_data.update', granted, artcc_id \
+            // Two deliberate differences from 0068's literal text, both from #547 adding `source`:
+            // the copied row inherits the provenance of the row it is derived from, and the conflict
+            // target is the current unique index (which now keys on source too). 0068 itself is
+            // unchanged and still correct — it runs before 0098, when neither existed.
+            "insert into access.user_permissions \
+                 (user_id, permission_name, granted, artcc_id, source) \
+             select user_id, 'flow.surface_data.update', granted, artcc_id, source \
              from access.user_permissions where permission_name = 'events.config.update' \
-             on conflict (user_id, permission_name, (coalesce(artcc_id, ''))) do nothing",
+             on conflict (user_id, permission_name, (coalesce(artcc_id, '')), source) do nothing",
         )
         .execute(&pool)
         .await

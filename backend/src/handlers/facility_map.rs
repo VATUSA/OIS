@@ -5,14 +5,13 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
 };
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::FlowFacilityMapUpdate,
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -90,8 +89,7 @@ async fn require_edit(
 )]
 pub async fn get_config(
     State(state): State<AppState>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    actor: Option<Actor>,
     Path(id): Path<String>,
 ) -> Result<Json<FacilityMapConfigBody>, ApiError> {
     let facility_id = normalize_facility(&id).ok_or(ApiError::BadRequest)?;
@@ -100,7 +98,7 @@ pub async fn get_config(
     let (rules, default_color) = config_repo::get(pool, &facility_id)
         .await?
         .unwrap_or_default();
-    let principal = Principal::optional(current_user.as_ref(), current_api_key.as_ref());
+    let principal = actor.map(|Actor(principal)| principal);
     let editable = can_edit(&state, principal.as_ref(), &facility_id).await?;
     Ok(Json(FacilityMapConfigBody {
         facility_id,
@@ -112,24 +110,29 @@ pub async fn get_config(
 
 #[utoipa::path(
     put, path = "/api/v1/facility-map/{id}/config", tag = "flow",
+    security(("session" = ["flow.facility_map.update"]), ("api_key" = ["flow.facility_map.update"]), ("service_account" = ["flow.facility_map.update"])),
     params(("id" = String, Path)), request_body = UpsertFacilityMapConfigRequest,
     responses((status = 200, body = FacilityMapConfigBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn put_config(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFacilityMapUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(id): Path<String>,
     Json(req): Json<UpsertFacilityMapConfigRequest>,
 ) -> Result<Json<FacilityMapConfigBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let facility_id = normalize_facility(&id).ok_or(ApiError::BadRequest)?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     validate(&req)?;
     require_edit(&state, &principal, &facility_id).await?;
 
-    config_repo::upsert(pool, &facility_id, &req, principal.user_id()).await?;
+    config_repo::upsert(
+        pool,
+        &facility_id,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?;
     Ok(Json(FacilityMapConfigBody {
         facility_id,
         rules: req.rules,

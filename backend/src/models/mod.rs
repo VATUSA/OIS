@@ -1,3 +1,10 @@
+//! Request and response bodies, and the OpenAPI schemas generated from them.
+//!
+//! **A `///` doc comment on a `ToSchema` model or field is contract, not prose** (#591). utoipa emits
+//! it as the schema's `description`, so editing one changes `packages/api-client`'s generated types:
+//! regenerate the client in the same change, or CI's `client-drift` fails. See `AGENTS.md`
+//! § "The API contract → typed client".
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -77,6 +84,35 @@ pub struct VatusaRoleEntry {
     pub role: String,
 }
 
+/// A member's VATUSA side in the admin access editor (#549).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserVatusaBody {
+    /// Set while the member is off VATUSA role sync because an admin edited their access by hand.
+    /// `None` = synced.
+    pub detached_at: Option<DateTime<Utc>>,
+    /// Who first detached them (display name), if still known.
+    pub detached_by: Option<String>,
+    /// Their VATUSA details and roles, or `None` if never synced.
+    pub profile: Option<VatusaProfile>,
+    /// Group grants a Resync would add (VATUSA-sourced).
+    pub resync_grants: Vec<VatusaGrantChange>,
+    /// VATUSA-sourced group grants a Resync would remove. Hand-made grants are never removed.
+    pub resync_revokes: Vec<VatusaGrantChange>,
+}
+
+/// One group grant a Resync would change. `artcc_id` `None` = national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaGrantChange {
+    pub group: String,
+    pub artcc_id: Option<String>,
+}
+
+/// Put a hand-managed member back on VATUSA role sync. The reason is recorded in the audit log.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VatusaResyncRequest {
+    pub reason: String,
+}
+
 /// A lightweight user match for the directory search.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct UserSummary {
@@ -92,7 +128,16 @@ pub struct AdminUserRow {
     pub cid: i64,
     pub display_name: String,
     pub rating: Option<String>,
+    /// Bare role names, scope flattened away. Kept as-is so nothing parsing it breaks.
     pub roles: Vec<String>,
+    /// The same memberships *with* their scope — `EC` for national, `EC:ZDC` for a facility grant.
+    ///
+    /// Added rather than changing `roles`' format (#546): a national `EC` and an `EC@ZDC` used to
+    /// render identically, which actively misled, but silently reinterpreting a `Vec<String>` would
+    /// have broken any consumer without the schema type moving to warn them.
+    pub scoped_roles: Vec<String>,
+    /// Set while the user is off VATUSA role sync because an admin edited their access by hand (#549).
+    pub vatusa_detached_at: Option<DateTime<Utc>>,
 }
 
 /// A page of the access-admin user browser.
@@ -150,6 +195,24 @@ pub struct SelfAccessBody {
     pub role_names: Vec<String>,
     #[schema(value_type = Object)]
     pub permissions: Value,
+    /// The groups the caller holds, each with the permissions it grants (#550).
+    ///
+    /// This is what an API key is templated from now that presets are gone. It lists only the
+    /// caller's own groups, so it needs nothing beyond `access.self.read` — unlike the admin group
+    /// listing, which needs `access.groups.read` and so would have left most key creators with no bulk
+    /// path at all.
+    pub groups: Vec<HeldGroupBody>,
+}
+
+/// One group the caller holds, as a template for an API key's permissions (#550).
+///
+/// No scope: `role_permissions` carries none — scope lives on the membership — and a key is capped by
+/// its owner's live access when it is created, so expanding a template cannot grant more than its
+/// owner holds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeldGroupBody {
+    pub name: String,
+    pub permissions: Vec<String>,
 }
 
 /// A target user's editable access: direct permission grants + role assignments,
@@ -170,6 +233,99 @@ pub struct ScopeAccess {
     /// Direct permission grants at this scope, as the nested checkbox tree.
     #[schema(value_type = Object)]
     pub permissions: Value,
+}
+
+/// One group as the group editor lists it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupBody {
+    pub name: String,
+    pub description: Option<String>,
+    /// Flat list — `role_permissions` carries no ARTCC scope; scope lives on the membership.
+    pub permissions: Vec<String>,
+    /// True for the groups code depends on, which cannot be edited or deleted here.
+    pub system: bool,
+    pub user_count: i64,
+    pub service_account_count: i64,
+}
+
+/// One holder of a group, at one scope. `artcc_id` null is national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberBody {
+    pub cid: i64,
+    pub display_name: String,
+    pub rating: Option<String>,
+    pub artcc_id: Option<String>,
+}
+
+/// A page of a group's holders.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GroupMemberPage {
+    pub items: Vec<GroupMemberBody>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// Add or remove one membership, at one scope.
+///
+/// `artcc_id` is required on **removal** as well as addition: a user can hold the same group
+/// nationally and at an ARTCC, so "remove EC from this user" is ambiguous without it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GroupMemberRequest {
+    pub cid: i64,
+    #[serde(default)]
+    pub artcc_id: Option<String>,
+    pub reason: String,
+}
+
+/// One VATUSA role → OIS group mapping (#548). A member holding `vatusa_role` — at `facility`, or at
+/// any facility when it is null — is granted `role_name`, scoped to where they hold the VATUSA role.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingBody {
+    pub id: i64,
+    pub vatusa_role: String,
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub created_at: DateTime<Utc>,
+    /// How many synced members hold this VATUSA role (at `facility`, or anywhere) right now. `0` means
+    /// the mapping grants nobody.
+    pub holders: i64,
+}
+
+/// Every mapping, plus the VATUSA roles actually seen in synced members — the editor offers those
+/// rather than free text, so a role name that would never match can't be entered.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VatusaRoleMappingList {
+    pub mappings: Vec<VatusaRoleMappingBody>,
+    pub known_vatusa_roles: Vec<String>,
+}
+
+/// Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
+/// required and audited.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateVatusaRoleMappingRequest {
+    pub vatusa_role: String,
+    #[serde(default)]
+    pub facility: Option<String>,
+    pub role_name: String,
+    pub reason: String,
+}
+
+/// Create a group. Its permission set is set by a follow-up `PUT`, which is also what runs the
+/// no-escalation gate over the contents.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub reason: String,
+}
+
+/// Replace a group's permission set. `reason` is required and audited, matching the user editor.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateGroupRequest {
+    pub permissions: Vec<String>,
+    pub reason: String,
 }
 
 /// The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
@@ -258,6 +414,62 @@ pub struct AuditLogPage {
     pub total: i64,
     pub page: i64,
     pub page_size: i64,
+}
+
+// --- desktop diagnostics reports (#629) ---
+
+/// One desktop diagnostics report in the admin list: who sent it and from what, without the note,
+/// the metadata or the logs. The person is the session's user, not anything the bundle claimed.
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReportSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    /// The sender's VATUSA home facility, when synced.
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    /// `main`, a route window (`window-…`) or a pop-out (`popout-…`).
+    pub window_label: String,
+    pub route: String,
+    pub has_note: bool,
+    /// Size of the gzipped logs.
+    pub logs_bytes: i32,
+}
+
+/// A page of diagnostics reports, newest first.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticsReportPage {
+    pub items: Vec<DiagnosticsReportSummary>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+/// One report in full, apart from the logs (downloaded separately as gzip).
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct DiagnosticsReport {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub user_cid: i64,
+    pub user_display_name: String,
+    pub user_artcc: Option<String>,
+    pub app_version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    pub webview_version: String,
+    pub window_label: String,
+    pub route: String,
+    pub note: String,
+    /// Everything the desktop sent (redacted on the device): capabilities, realtime history, the
+    /// webview's log tail, WebGL2 availability, updater status.
+    #[schema(value_type = Object)]
+    pub meta: Value,
+    pub logs_bytes: i32,
 }
 
 // --- taxi insights (#183): browsable history over raw observations + derived estimates ---
@@ -683,6 +895,14 @@ pub struct AdvisoryBody {
     pub structured: Option<sqlx::types::Json<Value>>,
     pub decoded: Option<String>,
     pub status: String,
+    /// The enforceable validity window (#537).
+    ///
+    /// Distinct from the period printed inside the document: this is set once at authoring from the
+    /// same input and is never re-derived by parsing the document text, which is why the rendered
+    /// period can stay verbatim `DDHHMM` as it always has. `None` for advisories authored before
+    /// #537 and for any kind with no window, and such an advisory is never auto-cancelled.
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -763,6 +983,12 @@ pub struct CreateAdvisoryRequest {
     pub structured: Option<Value>,
     #[serde(default)]
     pub decoded: Option<String>,
+    /// The enforceable window (#537). Optional, so every existing caller is unaffected: an advisory
+    /// without one simply never auto-cancels, which is the behaviour before #537.
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -817,6 +1043,10 @@ pub struct DepartureFlight {
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
+    /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
+    /// is issued for this callsign.
+    #[serde(default)]
+    pub cfr_version: Option<i64>,
     pub seq: Option<i64>,
 }
 
@@ -1158,6 +1388,20 @@ pub struct AirportGateBody {
     /// X-Plane stand type (`gate` | `tie_down` | `misc` | `hangar`) for imported stands; `None` for
     /// hand-entered ones. Read-only: an operator adding a stand has no X-Plane type to declare.
     pub kind: Option<String>,
+    /// Stand heading, degrees true, normalised into `[0, 360)`. `None` for hand-entered stands and
+    /// for imported ones whose pack predates VATUSA/OIS#541. Read-only, like the rest of the X-Plane
+    /// detail below: these describe the source's data, not an operator's intent.
+    pub heading: Option<f64>,
+    /// ICAO aerodrome reference code letter (`A`..`F`) — the widest aircraft the stand takes.
+    pub size_code: Option<String>,
+    /// How the stand is operated, e.g. `airline`, `cargo`, `general_aviation`. Community-contributed
+    /// free text, so treat an unfamiliar value as information rather than an error.
+    pub operation_type: Option<String>,
+    /// Aircraft classes the stand accepts, e.g. `["heavy", "jets"]`. `None` where the source recorded
+    /// no restriction — which is not the same as accepting nothing.
+    pub aircraft_classes: Option<Vec<String>>,
+    /// Airline codes associated with the stand, e.g. `["aal", "dal"]`.
+    pub airline_codes: Option<Vec<String>>,
     pub updated_at: DateTime<Utc>,
     /// Whether the requesting user may edit this airport's surface data (per their ARTCC scope).
     #[sqlx(default)]
@@ -1274,6 +1518,24 @@ pub struct FaaRepullResult {
     pub osm_gates_retired: usize,
 }
 
+/// One ATC sector volume as the admin sector map draws it (#602): a stored row of
+/// `flow.airspace_sector` (#594), straight from the in-memory cache.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorVolumeBody {
+    pub artcc: String,
+    pub sector_id: String,
+    /// The source's id for this piece; a sector can be several volumes.
+    pub volume_id: String,
+    pub name: Option<String>,
+    /// `low`, `high`, `ultra_high` or `approach`.
+    pub tier: String,
+    pub base_alt_ft: i32,
+    pub top_alt_ft: i32,
+    /// Closed `[lat, lon]` rings, one per polygon part.
+    #[schema(value_type = Vec<Vec<Vec<f64>>>)]
+    pub rings: Vec<Vec<[f64; 2]>>,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
@@ -1339,7 +1601,7 @@ pub struct AirportForecastBody {
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct TmiPackageItemBody {
     pub id: String,
-    /// program | restriction | ground_stop
+    /// program | restriction | ground_stop | advisory
     pub kind: String,
     #[schema(value_type = Object)]
     pub payload: sqlx::types::Json<Value>,
@@ -2032,6 +2294,8 @@ pub struct FcaBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpsertFcaRequest {
     pub name: String,
+    /// `#rrggbb`, stored lowercase; defaults to `#efc14d`. It must contrast at least 3:1 with the dark
+    /// ground (`#08080a`), so an FCA can't be drawn invisible; anything else is a 400.
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
@@ -2147,6 +2411,9 @@ pub struct FcaFlight {
     pub edct: Option<DateTime<Utc>>,
     /// True when this aircraft has a frozen (issued) CFR release.
     pub released: bool,
+    /// The release's version, for `If-Match` (#585); null when not released.
+    #[serde(default)]
+    pub release_version: Option<i64>,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
@@ -2261,6 +2528,9 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released; null while unscheduled.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
+    /// The display name of the service account or API key that issued this release, or null when a
+    /// person did (or it is not released) — so a controller can see a time came from a tool (#585).
+    pub released_by_machine: Option<String>,
     /// The predicted departure runway (#511), or null when nothing could predict one — no airport
     /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
     /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
@@ -2614,6 +2884,16 @@ pub struct CreateServiceAccountRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Credential lifetime in days: default 90, at most 365.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
+}
+
+/// Rotating issues a fresh credential with its own lifetime (default 90 days, at most 365).
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct RotateServiceAccountRequest {
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -2621,7 +2901,15 @@ pub struct SetServiceAccountRolesRequest {
     pub role_names: Vec<String>,
 }
 
-/// A service account as listed (no secret). `roles` are its granted role names.
+/// A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetServiceAccountPermissionsRequest {
+    pub permissions: Vec<ApiKeyPermissionInput>,
+}
+
+/// A service account as listed (no secret). `roles` are its granted role names; `permissions` its
+/// direct grants. `expires_at` is the live credential's expiry; `stale` means that credential has not
+/// been used (or, if never used, issued) in 30 days.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceAccountBody {
     pub id: String,
@@ -2630,8 +2918,32 @@ pub struct ServiceAccountBody {
     pub description: Option<String>,
     pub status: String,
     pub roles: Vec<String>,
+    pub permissions: Vec<ApiKeyPermissionBody>,
     pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub stale: bool,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this account may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
+}
+
+/// A credential's recent request volume (#611), summed across replicas from hourly counts. Up to a
+/// minute behind: each replica records its counts once a minute.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CredentialUsageBody {
+    /// Requests in the current clock hour.
+    pub requests_this_hour: i64,
+    /// Requests in the last 24 hours.
+    pub requests_last_day: i64,
+    /// Of those, how many were refused with `429`.
+    pub refused_last_day: i64,
+}
+
+/// Set or clear one credential's rate limit (#611). `null` restores the deployment default.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRateLimitRequest {
+    pub rate_limit_per_min: Option<i32>,
 }
 
 /// Returned once on create/rotate — the plaintext bearer token is never stored or
@@ -2704,6 +3016,9 @@ pub struct ApiKeyBody {
     pub last_used_ip: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Requests per minute this key may make; `None` is the deployment default (#611).
+    pub rate_limit_per_min: Option<i32>,
+    pub usage: CredentialUsageBody,
 }
 
 /// Returned once on create/rotate — the plaintext `ois_pat_…` token is never stored or shown again.
@@ -3026,4 +3341,117 @@ pub struct FlightExclusionsBody {
 pub struct ExcludeFlightRequest {
     #[serde(default)]
     pub reason: String,
+}
+
+/// One Airspace Monitor sector and the alert parameter its count is coloured against (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    /// The sector's Monitor Alert Parameter: its override, or the default.
+    pub map: i32,
+    /// Whether `map` is a stored override rather than the default.
+    pub overridden: bool,
+}
+
+/// One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
+/// against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorBinBody {
+    /// The bin's start, an absolute Zulu quarter-hour.
+    pub start: DateTime<Utc>,
+    pub active: i64,
+    pub proposed: i64,
+    pub combined: i64,
+    pub alert: crate::feed::monitor_alert::SectorAlert,
+}
+
+/// One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorRowBody {
+    pub sector_id: String,
+    pub name: Option<String>,
+    pub map: i32,
+    /// The sectors worked at this one; non-empty marks a combined row.
+    pub consolidated: Vec<String>,
+    /// Someone is working this sector now (vNAS). Shown, never used to hide a row.
+    pub staffed: bool,
+    /// Six hours of bins, the first being the quarter-hour that contains `as_of`.
+    pub bins: Vec<MonitorBinBody>,
+}
+
+/// An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorNeighboursBody {
+    pub artcc: String,
+    /// Directly bordering ARTCCs that OIS runs, sorted.
+    pub neighbours: Vec<String>,
+}
+
+/// An ARTCC's Airspace Monitor (#701), computed from the live feed on request.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorTableBody {
+    pub artcc: String,
+    /// Whether the caller may change this ARTCC's MAPs and consolidations.
+    pub editable: bool,
+    pub as_of: DateTime<Utc>,
+    pub rows: Vec<MonitorRowBody>,
+}
+
+/// An ARTCC's sectors with their Monitor Alert Parameters (#598).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorMapsBody {
+    /// Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped).
+    pub editable: bool,
+    /// What a sector reads until overridden.
+    pub default_map: i32,
+    pub sectors: Vec<SectorMapBody>,
+}
+
+/// Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetSectorMapRequest {
+    pub map: i32,
+}
+
+/// A sector worked at another sector's position (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationBody {
+    pub sector_id: String,
+    pub target_sector_id: String,
+}
+
+/// An ARTCC's sector consolidations (#599).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SectorConsolidationsBody {
+    /// Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
+    /// or scoped).
+    pub editable: bool,
+    /// Sorted by sector.
+    pub consolidations: Vec<SectorConsolidationBody>,
+}
+
+/// Work a sector at another sector's position in the same ARTCC.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorRequest {
+    pub target_sector_id: String,
+}
+
+/// Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BulkConsolidateRequest {
+    /// The sector everything is worked at.
+    pub target_sector_id: String,
+    pub mode: BulkConsolidateMode,
+}
+
+/// Which sectors a bulk consolidation moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkConsolidateMode {
+    /// Every other sector, and the target gets its own row back if it was worked elsewhere.
+    All,
+    /// Only sectors in no consolidation: neither worked elsewhere nor worked at by others. Refused if
+    /// the target is itself worked elsewhere.
+    ExceptConsolidated,
 }

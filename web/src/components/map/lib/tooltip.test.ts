@@ -4,7 +4,7 @@ import {describe, expect, it} from "vitest";
 import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
 import type {AtcAnchor} from "../layers/atc";
 import type {MatchedFlight} from "../layers/matched";
-import {mapTooltip, tooltipFor} from "./tooltip";
+import {flightLevel, mapTooltip, nearerIsAircraft, sectorHtml, sectorTooltip, tooltipFor} from "./tooltip";
 import type {NormAircraft} from "./types";
 
 const pick = (layerId: string, object: unknown) => ({ layer: { id: layerId }, object }) as unknown as PickingInfo;
@@ -18,6 +18,18 @@ const pickOver = (layerId: string, object: unknown, under: unknown) =>
     layer: { id: layerId, context: { deck: { pickObject: () => (under ? { object: under } : null) } } },
   }) as unknown as PickingInfo;
 const html = (r: ReturnType<ReturnType<typeof mapTooltip>>) => (r ? r.html : null);
+
+/**
+ * Like {@link pickOver}, with a viewport that projects `[lon, lat]` straight to pixel `[x, y]`, so a
+ * test places the cursor, the aircraft and the pill on one plane (#555).
+ */
+const pickNear = (layerId: string, object: unknown, under: unknown, cursor: [number, number]) =>
+  ({
+    ...(pickOver(layerId, object, under) as object),
+    x: cursor[0],
+    y: cursor[1],
+    viewport: { project: ([lon, lat]: [number, number]) => [lon, lat] },
+  }) as unknown as PickingInfo;
 
 const plane: NormAircraft = {
   id: "AAL1", callsign: "AAL1", actype: "B738", dep: "KDFW", arr: "KORD",
@@ -100,6 +112,39 @@ describe("mapTooltip", () => {
     expect(html(tooltip(pickOver("matched", matched, tower)))).toContain("ORD_TWR");
   });
 
+  /** #555: an aircraft on a staffed badge — the nearer of the two wins, so both stay reachable. */
+  describe("when an aircraft overlaps an ATC pill", () => {
+    // Plane at (100, 100), pill at (110, 100) in pixels.
+    const here = { ...plane, lon: 100, lat: 100 };
+    const pill = { ...tower, lon: 110, lat: 100 };
+
+    it("shows the aircraft card when the cursor is nearer the aircraft", () => {
+      expect(html(tooltip(pickNear("aircraft", here, pill, [102, 100])))).toContain("AAL1");
+      expect(
+        html(tooltip(pickNear("matched", { ...matched, lon: 100, lat: 100 }, pill, [101, 100]))),
+      ).toContain("UAL2");
+    });
+
+    it("shows the ATC card when the cursor is nearer the pill", () => {
+      expect(html(tooltip(pickNear("aircraft", here, pill, [108, 100])))).toContain("ORD_TWR");
+    });
+
+    it("gives a tie to the pill", () => {
+      expect(html(tooltip(pickNear("aircraft", here, pill, [105, 100])))).toContain("ORD_TWR");
+    });
+
+    it("shows the pill when aircraft cards are off, however near the aircraft", () => {
+      const atcOnly = mapTooltip({ aircraft: false });
+      expect(html(atcOnly(pickNear("aircraft", here, pill, [100, 100])))).toContain("ORD_TWR");
+    });
+  });
+
+  it("measures distance in screen pixels from the cursor", () => {
+    expect(nearerIsAircraft([0, 0], [3, 4], [6, 0])).toBe(true);
+    expect(nearerIsAircraft([0, 0], [6, 0], [3, 4])).toBe(false);
+    expect(nearerIsAircraft([0, 0], [5, 0], [0, 5])).toBe(false);
+  });
+
   it("still shows the aircraft card when no pill is underneath", () => {
     // The pill only wins where there actually is one; an aircraft in open airspace is unaffected.
     expect(html(tooltip(pickOver("aircraft", plane, null)))).toContain("AAL1");
@@ -124,5 +169,53 @@ describe("tooltipFor", () => {
     const t = tooltipFor({ tooltips: true, aircraft: true })!;
     expect(html(t(pick("aircraft", plane)))).toContain("AAL1");
     expect(html(t(pick("atc-hover", tower)))).toContain("ORD_TWR");
+  });
+});
+
+describe("sectorTooltip (#602)", () => {
+  const volume = {
+    artcc: "ZDC",
+    sector_id: "32",
+    volume_id: "03201",
+    name: "Gordonsville 32",
+    tier: "high",
+    base_alt_ft: 24_000,
+    top_alt_ft: 35_000,
+    rings: [],
+  };
+
+  it("names the sector, its tier and vertical band", () => {
+    const card = sectorTooltip()(pick("airspace-sectors", { volume }));
+    expect(card?.html).toContain("ZDC 32 · High");
+    expect(card?.html).toContain("Gordonsville 32");
+    expect(card?.html).toContain("FL240–FL350");
+  });
+
+  /** The name comes from imported data and the card is rendered as html. */
+  it("escapes a sector name that contains markup", () => {
+    const html = sectorHtml({ ...volume, name: '<img src=x onerror="alert(1)">' });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
+  /**
+   * Every imported text field reaches the html card, not just the name: the sector id and ARTCC come from
+   * the same source data. (The tier is safe — the database constrains it to four values.)
+   */
+  it.each(["sector_id", "artcc"] as const)("escapes markup in the %s too", (field) => {
+    const html = sectorHtml({ ...volume, [field]: '<img src=x onerror="alert(1)">' });
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+
+  it("answers only for the sector layer", () => {
+    expect(sectorTooltip()(pick("surface-gates", { volume }))).toBeNull();
+    expect(sectorTooltip()(pick("airspace-sectors", {}))).toBeNull();
+  });
+
+  it("calls a floor at the surface SFC and pads flight levels", () => {
+    expect(flightLevel(0)).toBe("SFC");
+    expect(flightLevel(5_000)).toBe("FL050");
+    expect(flightLevel(60_000)).toBe("FL600");
   });
 });

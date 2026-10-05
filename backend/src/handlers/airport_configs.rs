@@ -4,7 +4,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono::{DateTime, TimeZone, Utc};
@@ -12,9 +12,8 @@ use serde::Deserialize;
 
 use crate::{
     auth::{
-        context::{CurrentApiKey, CurrentUser},
         permissions::{EventsConfigUpdate, EventsPlanRead},
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::RequirePermission,
     },
     errors::ApiError,
@@ -37,6 +36,7 @@ pub struct ForecastQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/forecast/{icao}", tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("icao" = String, Path), ("at" = Option<i64>, Query)),
     responses((status = 200, body = AirportForecastBody), (status = 401))
 )]
@@ -193,17 +193,16 @@ pub struct ConfigListQuery {
 
 #[utoipa::path(
     get, path = "/api/v1/airport-configs", tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("artcc" = Option<String>, Query, description = "Scope to one owning ARTCC")),
     responses((status = 200, body = Vec<AirportConfigBody>), (status = 401))
 )]
 pub async fn list_all_airport_configs(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Query(q): Query<ConfigListQuery>,
 ) -> Result<Json<Vec<AirportConfigBody>>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let artcc = q
         .artcc
@@ -245,17 +244,16 @@ fn annotate_and_filter(
 
 #[utoipa::path(
     get, path = "/api/v1/airport-configs/{icao}", tag = "events",
+    security(("session" = ["events.plan.read"]), ("api_key" = ["events.plan.read"]), ("service_account" = ["events.plan.read"])),
     params(("icao" = String, Path)),
     responses((status = 200, body = Vec<AirportConfigBody>), (status = 401))
 )]
 pub async fn list_airport_configs(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanRead>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
 ) -> Result<Json<Vec<AirportConfigBody>>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
 
@@ -269,18 +267,17 @@ pub async fn list_airport_configs(
 
 #[utoipa::path(
     post, path = "/api/v1/airport-configs/{icao}", tag = "events",
+    security(("session" = ["events.config.update"]), ("api_key" = ["events.config.update"]), ("service_account" = ["events.config.update"])),
     params(("icao" = String, Path)), request_body = UpsertAirportConfigRequest,
     responses((status = 200, body = AirportConfigBody), (status = 400), (status = 401), (status = 403))
 )]
 pub async fn create_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path(icao): Path<String>,
     Json(req): Json<UpsertAirportConfigRequest>,
 ) -> Result<Json<AirportConfigBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -292,7 +289,7 @@ pub async fn create_airport_config(
         &icao,
         &req,
         artcc.as_deref().unwrap_or(""),
-        principal.user_id(),
+        &principal.attribution(&state).await?,
     )
     .await?;
     row.editable = true;
@@ -301,18 +298,17 @@ pub async fn create_airport_config(
 
 #[utoipa::path(
     put, path = "/api/v1/airport-configs/{icao}/{id}", tag = "events",
+    security(("session" = ["events.config.update"]), ("api_key" = ["events.config.update"]), ("service_account" = ["events.config.update"])),
     params(("icao" = String, Path), ("id" = String, Path)), request_body = UpsertAirportConfigRequest,
     responses((status = 200, body = AirportConfigBody), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
     Json(req): Json<UpsertAirportConfigRequest>,
 ) -> Result<Json<AirportConfigBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     validate(&req)?;
@@ -335,26 +331,31 @@ pub async fn update_airport_config(
         }
     }
 
-    let mut row = config_repo::update(pool, &id, &icao, &req, principal.user_id())
-        .await?
-        .ok_or(ApiError::NotFound)?;
+    let mut row = config_repo::update(
+        pool,
+        &id,
+        &icao,
+        &req,
+        &principal.attribution(&state).await?,
+    )
+    .await?
+    .ok_or(ApiError::NotFound)?;
     row.editable = true;
     Ok(Json(row))
 }
 
 #[utoipa::path(
     delete, path = "/api/v1/airport-configs/{icao}/{id}", tag = "events",
+    security(("session" = ["events.config.update"]), ("api_key" = ["events.config.update"]), ("service_account" = ["events.config.update"])),
     params(("icao" = String, Path), ("id" = String, Path)),
     responses((status = 204), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_airport_config(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsConfigUpdate>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
     Path((icao, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let icao = normalize_icao(&icao).ok_or(ApiError::BadRequest)?;
     require_edit(&state, &principal, &icao).await?;
@@ -418,7 +419,9 @@ mod tests {
                 ..upsert("JFK south")
             },
             "ZNY",
-            &user,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -438,7 +441,9 @@ mod tests {
                 departure_runways: vec!["13R".into()],
                 ..upsert("JFK south")
             },
-            &user,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
         )
         .await
         .unwrap()
@@ -454,15 +459,39 @@ mod tests {
     #[sqlx::test]
     async fn list_all_scopes_and_filters_by_the_live_artcc_not_the_stored_one(pool: PgPool) {
         let user = seed_user(&pool).await;
-        config_repo::create(&pool, "KDCA", &upsert("DCA calm"), "ZDC", &user)
-            .await
-            .unwrap();
-        config_repo::create(&pool, "KORD", &upsert("ORD calm"), "ZDC", &user)
-            .await
-            .unwrap(); // stale: stored ZDC, live (below) is ZAU
-        config_repo::create(&pool, "KXXX", &upsert("XXX calm"), "", &user)
-            .await
-            .unwrap();
+        config_repo::create(
+            &pool,
+            "KDCA",
+            &upsert("DCA calm"),
+            "ZDC",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        config_repo::create(
+            &pool,
+            "KORD",
+            &upsert("ORD calm"),
+            "ZDC",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap(); // stale: stored ZDC, live (below) is ZAU
+        config_repo::create(
+            &pool,
+            "KXXX",
+            &upsert("XXX calm"),
+            "",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         let facilities = FacilityMap::from([
             (
@@ -507,7 +536,7 @@ mod tests {
         // though KORD's *stored* value also says ZDC.
         let rows = config_repo::list_all(&pool).await.unwrap();
         let filtered =
-            annotate_and_filter(rows, &facilities, &PermissionScope::National, Some("ZDC"));
+            annotate_and_filter(rows, &facilities, &PermissionScope::national(), Some("ZDC"));
         assert_eq!(
             filtered.iter().map(|r| r.icao.as_str()).collect::<Vec<_>>(),
             ["KDCA"]
@@ -617,9 +646,17 @@ mod tests {
     ) -> (crate::state::AppState, String, [(Method, String); 3]) {
         let req: crate::models::UpsertAirportConfigRequest =
             serde_json::from_value(config_json()).unwrap();
-        let existing = config_repo::create(&pool, "KDCA", &req, "ZDC", user)
-            .await
-            .unwrap();
+        let existing = config_repo::create(
+            &pool,
+            "KDCA",
+            &req,
+            "ZDC",
+            &crate::auth::principal::Attribution::for_user_id(&pool, user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let cookie = session_cookie(&pool, user).await;
         let state = test_state(
             pool,
@@ -686,9 +723,17 @@ mod tests {
     #[sqlx::test]
     async fn a_config_with_no_rules_is_unchanged(pool: PgPool) {
         let user = scope_test_support::seed_user(&pool).await;
-        let created = config_repo::create(&pool, "KJFK", &upsert("South"), "ZNY", &user)
-            .await
-            .unwrap();
+        let created = config_repo::create(
+            &pool,
+            "KJFK",
+            &upsert("South"),
+            "ZNY",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(created.sid_rules.0.is_empty());
         assert!(created.gate_rules.0.is_empty());
     }
@@ -702,19 +747,35 @@ mod tests {
         let mut req = upsert("South");
         req.departure_runways = vec!["31L".into()];
         req.sid_rules = Some(rules(&[("CAMRN", "31L")]));
-        let created = config_repo::create(&pool, "KJFK", &req, "ZNY", &user)
-            .await
-            .unwrap();
+        let created = config_repo::create(
+            &pool,
+            "KJFK",
+            &req,
+            "ZNY",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         // An unrelated edit, in the shape an older client sends: no rule fields at all.
         let mut later = upsert("South");
         later.departure_runways = vec!["31L".into()];
         later.aar = 44;
         assert!(later.sid_rules.is_none() && later.gate_rules.is_none());
-        let updated = config_repo::update(&pool, &created.id, "KJFK", &later, &user)
-            .await
-            .unwrap()
-            .unwrap();
+        let updated = config_repo::update(
+            &pool,
+            &created.id,
+            "KJFK",
+            &later,
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
 
         assert_eq!(updated.aar, 44, "the edit applied");
         assert_eq!(
@@ -732,9 +793,17 @@ mod tests {
         req.departure_runways = vec!["31L".into(), "04L".into()];
         req.sid_rules = Some(rules(&[("CAMRN", "31L")]));
         req.gate_rules = Some(rules(&[("CAMRN", "04L")]));
-        let row = config_repo::create(&pool, "KJFK", &req, "ZNY", &user)
-            .await
-            .unwrap();
+        let row = config_repo::create(
+            &pool,
+            "KJFK",
+            &req,
+            "ZNY",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             row.sid_rules.0.get("CAMRN").map(String::as_str),
@@ -770,9 +839,17 @@ mod tests {
         let mut req = upsert("South");
         req.departure_runways = vec!["31L".into(), "04L".into()];
         req.sid_rules = Some(rules(&[("CAMRN", "04L")]));
-        let created = config_repo::create(&pool, "KDCA", &req, "ZDC", &user)
-            .await
-            .unwrap();
+        let created = config_repo::create(
+            &pool,
+            "KDCA",
+            &req,
+            "ZDC",
+            &crate::auth::principal::Attribution::for_user_id(&pool, &user)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         // Drop 04L, saying nothing about the rules — the shape a pre-#512 client sends. The stored
         // CAMRN→04L rule would be left pointing at a runway the config no longer has.

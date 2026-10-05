@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use utoipa::OpenApi;
@@ -9,18 +13,25 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, api_keys, atc,
-        audit, auth, dashboards, docs, events, facilities, facility_documents, facility_map, feed,
-        flight_exclusions, flow, gdp, health, integration, jobs as jobs_handler,
-        metrics as metrics_handler, preferences, public, runway, service_accounts, stats,
-        taxi_insights, tmu, users, webhooks,
+        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
+        airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
+        events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
+        health, integration, jobs as jobs_handler, metrics as metrics_handler, monitor,
+        preferences, public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
+    rate_limit::{self, RateLimits},
     realtime,
     state::AppState,
 };
 
+/// The router with rate limits from the environment. Startup uses [`build_router_with_limits`] so it
+/// can also prune the buckets; this is for callers that build a throwaway router (tests).
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_limits(state, Arc::new(RateLimits::from_env()))
+}
+
+pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Router {
     Router::new()
         .route("/health", get(health::health))
         // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
@@ -28,7 +39,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler::metrics))
         .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
         // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
-        // hit the real endpoints and obey their auth (session cookie or bearer token).
+        // hit the real endpoints: they carry the same-origin session cookie, or an API-key or
+        // service-account token entered through Authorize (the spec's `api_key` / `service_account`
+        // schemes, offered only on paths that accept them, #587).
         .merge(SwaggerUi::new("/docs/swagger").url("/docs/swagger/openapi.json", ApiDoc::openapi()))
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
@@ -101,15 +114,23 @@ pub fn build_router(state: AppState) -> Router {
         // Public advisories — read-only, no auth (active TMIs). The FCA overview
         // reuses the now-public GET /api/v1/flow/fcas via the shared map.
         .route("/api/v1/public/board", get(public::get_board))
+        // Airport coordinates (#540): the positions were always in memory for ETA maths but no
+        // route returned them, so anything needing to point a map at an arbitrary airport had
+        // nothing to ask. Public, like the other reference reads.
+        .route("/api/v1/public/airports/{icao}", get(airports::get_airport))
+        // Desktop installers (#534): resolves the current release asset server-side and redirects,
+        // so the browser never calls api.github.com — which the desktop CSP blocks and GitHub rate
+        // limits at 60/hr per IP. Public: you download the app before you can sign in.
+        .route(
+            "/api/v1/public/desktop/download/{platform}",
+            get(desktop::download),
+        )
         .route(
             "/api/v1/public/flight/{callsign}",
             get(flow::flight_advisory),
         )
         // Inbound VATUSA roster-change webhook — no session; verified by HMAC signature.
-        .route(
-            "/api/v1/webhooks/vatusa/{facility}",
-            post(webhooks::vatusa_webhook),
-        )
+        .route("/api/v1/webhooks/vatusa", post(webhooks::vatusa_webhook))
         // Access editor
         .route("/api/v1/access/catalog", get(access::get_access_catalog))
         .route("/api/v1/access/self", get(access::get_self_access))
@@ -117,6 +138,39 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/users/{cid}/access",
             get(access::get_user_access).post(access::update_user_access),
+        )
+        // A member's VATUSA side, and putting them back on VATUSA role sync — #549
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa",
+            get(access::get_user_vatusa),
+        )
+        .route(
+            "/api/v1/admin/users/{cid}/vatusa/resync",
+            post(access::resync_user_vatusa),
+        )
+        // Group (role) management — #545
+        .route(
+            "/api/v1/admin/groups",
+            get(access::list_groups).post(access::create_group),
+        )
+        .route(
+            "/api/v1/admin/groups/{name}",
+            put(access::update_group).delete(access::delete_group),
+        )
+        .route(
+            "/api/v1/admin/groups/{name}/members",
+            get(access::list_group_members)
+                .post(access::add_group_member)
+                .delete(access::remove_group_member),
+        )
+        // VATUSA role → group mappings — #548
+        .route(
+            "/api/v1/admin/vatusa-role-mappings",
+            get(access::list_vatusa_role_mappings).post(access::create_vatusa_role_mapping),
+        )
+        .route(
+            "/api/v1/admin/vatusa-role-mappings/{id}",
+            delete(access::delete_vatusa_role_mapping),
         )
         // TMU — Traffic Management Initiatives
         .route(
@@ -365,6 +419,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/flow/aircraft-profiles/{kind}/{key}",
             put(aircraft_profiles::upsert_profile).delete(aircraft_profiles::delete_profile),
         )
+        // ATC sector volumes for the admin sector map (#602), from the in-memory cache
+        .route(
+            "/api/v1/flow/airspace/sectors",
+            get(airspace_sectors::list_sectors),
+        )
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))
         .route("/api/v1/stats/airports/top", get(stats::airports_top))
@@ -445,6 +504,27 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
+        )
+        .route("/api/v1/flow/monitor/{artcc}", get(monitor::monitor_table))
+        .route(
+            "/api/v1/flow/monitor/{artcc}/neighbours",
+            get(monitor::monitor_neighbours),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps",
+            get(monitor::list_sector_maps),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/maps/{sector_id}",
+            put(monitor::set_sector_map),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations",
+            get(monitor::list_consolidations).post(monitor::consolidate_all_sectors),
+        )
+        .route(
+            "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
+            put(monitor::consolidate_sector).delete(monitor::release_sector),
         )
         // Shared named map routes (polylines)
         .route(
@@ -581,10 +661,30 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/api-keys/{id}",
             delete(api_keys::admin_delete_key),
         )
+        .route(
+            "/api/v1/admin/api-keys/{id}/rate-limit",
+            put(api_keys::admin_set_key_rate_limit),
+        )
         // Admin landing summary (per-permission sections)
         .route("/api/v1/admin/summary", get(admin::get_admin_summary))
         // Audit log
         .route("/api/v1/admin/audit", get(audit::list_audit_logs))
+        // Desktop diagnostics reports (#629): the desktop's own upload, capped per route (`Multipart`
+        // has no implicit limit), and the staff view.
+        .route(
+            "/api/v1/diagnostics/reports",
+            post(diagnostics::upload_report)
+                .layer(DefaultBodyLimit::max(diagnostics::MAX_UPLOAD_BYTES)),
+        )
+        .route("/api/v1/admin/diagnostics", get(diagnostics::list_reports))
+        .route(
+            "/api/v1/admin/diagnostics/{id}",
+            get(diagnostics::get_report).delete(diagnostics::delete_report),
+        )
+        .route(
+            "/api/v1/admin/diagnostics/{id}/logs",
+            get(diagnostics::get_report_logs),
+        )
         // Background-tasks viewer (job status + manual trigger)
         .route("/api/v1/admin/jobs", get(jobs_handler::list_jobs))
         .route("/api/v1/admin/jobs/{name}/run", post(jobs_handler::run_job))
@@ -610,12 +710,28 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/admin/service-accounts/{id}/roles",
             put(service_accounts::set_service_account_roles),
         )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/rate-limit",
+            put(service_accounts::set_service_account_rate_limit),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/grantable-permissions",
+            get(service_accounts::grantable_service_account_permissions),
+        )
+        .route(
+            "/api/v1/admin/service-accounts/{id}/permissions",
+            put(service_accounts::set_service_account_permissions),
+        )
         // Innermost app layer: records every successful mutation to the audit log. Added
         // before resolve_current_user so it runs *after* it inbound and sees CurrentUser.
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::audit::audit_mutations,
         ))
+        // Rate limiting (#588). Inside resolve_current_user, so the caller is known and choosing the
+        // bucket costs no query; inside reqlog, metrics and CORS, so a 429 is logged, counted and still
+        // readable cross-origin.
+        .layer(middleware::from_fn_with_state(limits, rate_limit::enforce))
         // Dev request log — one line per request. Outside audit (so its latency covers the
         // whole request), inside resolve_current_user (so it can name the actor).
         .layer(middleware::from_fn(crate::reqlog::log_requests))

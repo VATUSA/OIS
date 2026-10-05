@@ -4,11 +4,15 @@ pub mod admin;
 pub mod aircraft_profiles;
 pub mod airport_configs;
 pub mod airport_surface;
+pub mod airports;
+pub mod airspace_sectors;
 pub mod api_keys;
 pub mod atc;
 pub mod audit;
 pub mod auth;
 pub mod dashboards;
+pub mod desktop;
+pub mod diagnostics;
 pub mod docs;
 pub mod events;
 pub mod facilities;
@@ -22,8 +26,10 @@ pub mod health;
 pub mod integration;
 pub mod jobs;
 pub mod metrics;
+pub mod monitor;
 pub mod preferences;
 pub mod public;
+pub mod release_authority;
 pub mod restriction_artcc;
 pub mod runway;
 pub mod service_accounts;
@@ -32,3 +38,15 @@ pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod webhooks;
+
+#[cfg(test)]
+mod topic_publish_tests;
+
+#[cfg(test)]
+mod actor_ratchet_tests;
+#[cfg(test)]
+mod auth_annotation_tests;
+#[cfg(test)]
+mod machine_actor_tests;
+#[cfg(test)]
+mod service_account_grant_tests;

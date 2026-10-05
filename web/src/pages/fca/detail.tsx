@@ -6,6 +6,7 @@ import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy,} f
 import {CSS} from "@dnd-kit/utilities";
 import {GripVertical, PictureInPicture2, RotateCcw, Trash2, X} from "lucide-react";
 
+import {swatchCss} from "@/components/map/lib/colors";
 import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {
   useExcludeFlight,
@@ -256,7 +257,7 @@ export function FcaDetail({
     >
       <div className="flex items-center gap-2 border-b border-line px-4 py-3">
         {/* The FCA's colour is user data. */}
-        <span className="size-3 rounded-full" style={{ background: fca.color }} />
+        <span className="size-3 rounded-full" style={{ background: swatchCss(fca.color) }} />
         <span className="font-mono font-semibold">{fca.name}</span>
         <StatusPill tone="neutral" className="font-mono">
           {fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}
@@ -307,7 +308,7 @@ export function FcaDetail({
                 </Button>
               )}
             </div>
-            <Ladder flights={list} now={now} />
+            <Ladder flights={list} now={now} name={fca.name} />
           </div>
 
           <DndContext

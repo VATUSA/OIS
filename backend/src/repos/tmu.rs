@@ -1,5 +1,7 @@
 //! TMU persistence — Traffic Management Initiatives (TMIs).
 
+use crate::auth::principal::Attribution;
+use crate::repos::flow::{Expect, ReleaseHolder};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use std::collections::HashMap;
@@ -17,8 +19,9 @@ use crate::{
 
 const SELECT: &str = "select t.id, t.requesting, t.providing, t.restriction, \
     t.start_time, t.stop_time, t.status, t.published_at, t.created_at, \
-    u.display_name as author, t.structured, t.decoded \
-    from tmu.tmis t left join identity.users u on u.id = t.created_by";
+    coalesce(u.display_name, a.display_name) as author, t.structured, t.decoded \
+    from tmu.tmis t left join identity.users u on u.id = t.created_by \
+    left join access.actors a on a.id = t.created_by_actor";
 
 /// Optional filters for the TMI list. Every field `None` → every TMI.
 #[derive(Debug, Default)]
@@ -79,17 +82,20 @@ pub async fn list_tmis_at(pool: &PgPool, at: DateTime<Utc>) -> Result<Vec<TmiBod
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn create_tmi(
-    pool: &PgPool,
+pub async fn create_tmi<'e, E>(
+    executor: E,
     req: &CreateTmiRequest,
-    created_by: &str,
-) -> Result<String, ApiError> {
+    by: &Attribution,
+) -> Result<String, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     // A structured TMI stores its parsed fields + the decoded English; a raw one leaves both null.
     let decoded = req.structured.as_ref().map(crate::tmi::render_english);
     sqlx::query_scalar::<_, String>(
         "insert into tmu.tmis \
-         (requesting, providing, restriction, structured, decoded, start_time, stop_time, created_by) \
-         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8) returning id",
+         (requesting, providing, restriction, structured, decoded, start_time, stop_time, created_by, created_by_actor) \
+         values ($1, $2, $3, $4, $5, coalesce($6, now()), $7, $8, $9) returning id",
     )
     .bind(&req.requesting)
     .bind(&req.providing)
@@ -98,8 +104,10 @@ pub async fn create_tmi(
     .bind(decoded)
     .bind(req.start_time)
     .bind(req.stop_time)
-    .bind(created_by)
-    .fetch_one(pool)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
+    .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -217,14 +225,16 @@ async fn get_tmi_tx(
 pub async fn publish_tmi(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<Option<TmiBody>, ApiError> {
     let result = sqlx::query(
-        "update tmu.tmis set status = 'published', published_by = $2, published_at = now() \
+        "update tmu.tmis set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -303,8 +313,9 @@ pub(crate) async fn delete_or_retain(
 
 const PROGRAM_SELECT: &str = "select p.icao, p.aar, p.trail, p.mit, p.gates, \
     p.exclude_wake, p.exclude_types, p.jets_only, p.active_until, p.updated_at, \
-    u.display_name as updated_by \
-    from tmu.programs p left join identity.users u on u.id = p.updated_by";
+    coalesce(u.display_name, a.display_name) as updated_by \
+    from tmu.programs p left join identity.users u on u.id = p.updated_by \
+    left join access.actors a on a.id = p.updated_by_actor";
 
 pub async fn list_programs(pool: &PgPool) -> Result<Vec<ProgramBody>, ApiError> {
     sqlx::query_as::<_, ProgramBody>(&format!("{PROGRAM_SELECT} order by p.icao"))
@@ -322,22 +333,25 @@ pub async fn get_program(pool: &PgPool, icao: &str) -> Result<Option<ProgramBody
 }
 
 /// Creates or replaces the program for an airport (vatflow "SET PROGRAM").
-pub async fn upsert_program(
-    pool: &PgPool,
+pub async fn upsert_program<'e, E>(
+    executor: E,
     icao: &str,
     req: &UpsertProgramRequest,
     gates: &[GateRule],
-    actor: &str,
-) -> Result<(), ApiError> {
+    by: &Attribution,
+) -> Result<(), ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         "insert into tmu.programs \
-         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) \
+         (icao, aar, trail, mit, gates, exclude_wake, exclude_types, jets_only, active_until, created_by, updated_by, created_by_actor, updated_by_actor) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $11) \
          on conflict (icao) do update set \
             aar = excluded.aar, trail = excluded.trail, mit = excluded.mit, \
             gates = excluded.gates, exclude_wake = excluded.exclude_wake, \
             exclude_types = excluded.exclude_types, jets_only = excluded.jets_only, \
-            active_until = excluded.active_until, updated_by = excluded.updated_by",
+            active_until = excluded.active_until, updated_by = excluded.updated_by, updated_by_actor = excluded.updated_by_actor",
     )
     .bind(icao)
     .bind(req.aar)
@@ -348,8 +362,10 @@ pub async fn upsert_program(
     .bind(&req.exclude_types)
     .bind(req.jets_only)
     .bind(req.active_until)
-    .bind(actor)
-    .execute(pool)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
+    .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(())
@@ -367,8 +383,9 @@ pub async fn delete_program(pool: &PgPool, icao: &str) -> Result<bool, ApiError>
 // --- ground stops ---
 
 const GS_SELECT: &str = "select g.id, g.airport, g.scope, g.until, g.status, \
-    g.published_at, g.updated_at, u.display_name as updated_by \
-    from tmu.ground_stops g left join identity.users u on u.id = g.updated_by";
+    g.published_at, g.updated_at, coalesce(u.display_name, a.display_name) as updated_by \
+    from tmu.ground_stops g left join identity.users u on u.id = g.updated_by \
+    left join access.actors a on a.id = g.updated_by_actor";
 
 pub async fn list_ground_stops(pool: &PgPool) -> Result<Vec<GroundStopBody>, ApiError> {
     sqlx::query_as::<_, GroundStopBody>(&format!(
@@ -432,22 +449,27 @@ pub(crate) async fn ground_stop_until_instant(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn create_ground_stop(
-    pool: &PgPool,
+pub async fn create_ground_stop<'e, E>(
+    executor: E,
     req: &CreateGroundStopRequest,
     scope: &str,
     until: Option<&str>,
-    actor: &str,
-) -> Result<String, ApiError> {
+    by: &Attribution,
+) -> Result<String, ApiError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar::<_, String>(
-        "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by) \
-         values ($1, $2, $3, $4, $4) returning id",
+        "insert into tmu.ground_stops (airport, scope, until, created_by, updated_by, created_by_actor, updated_by_actor) \
+         values ($1, $2, $3, $4, $4, $5, $5) returning id",
     )
     .bind(&req.airport)
     .bind(scope)
     .bind(until)
-    .bind(actor)
-    .fetch_one(pool)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
+    .fetch_one(executor)
     .await
     .map_err(|_| ApiError::Internal)
 }
@@ -456,17 +478,19 @@ pub async fn create_ground_stop(
 pub async fn publish_ground_stop<'e, E>(
     executor: E,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
     let result = sqlx::query(
-        "update tmu.ground_stops set status = 'published', published_by = $2, published_at = now() \
+        "update tmu.ground_stops set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(executor)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -519,28 +543,84 @@ pub async fn all_issued_cfrs(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Every issued CFR's version (callsign -> version), for the departures list's `cfr_version`.
+pub async fn issued_cfr_versions(pool: &PgPool) -> Result<HashMap<String, i64>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64)>("select callsign, version from tmu.issued_cfrs")
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Issue (or re-issue) a CFR, returning its new version — or `None` when `expect` did not hold and
+/// nothing was written (#585). Same contract as `flow_repo::upsert_release`.
 pub async fn upsert_issued_cfr(
     pool: &PgPool,
     callsign: &str,
     airport: &str,
     wheels_up: DateTime<Utc>,
-    actor: &str,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by) \
-         values ($1, $2, $3, $4) \
-         on conflict (callsign) do update set \
-            airport = excluded.airport, wheels_up = excluded.wheels_up, \
-            issued_by = excluded.issued_by, issued_at = now()",
+    by: &Attribution,
+    expect: Option<Expect>,
+) -> Result<Option<i64>, ApiError> {
+    let sql = match expect {
+        None => {
+            "insert into tmu.issued_cfrs as c (callsign, airport, wheels_up, issued_by, issued_by_actor) \
+             values ($1, $2, $3, $4, $5) \
+             on conflict (callsign) do update set \
+                airport = excluded.airport, wheels_up = excluded.wheels_up, \
+                issued_by = excluded.issued_by, issued_by_actor = excluded.issued_by_actor, \
+                issued_at = now(), version = c.version + 1 \
+             returning c.version"
+        }
+        Some(Expect::Absent) => {
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up, issued_by, issued_by_actor) \
+             values ($1, $2, $3, $4, $5) \
+             on conflict (callsign) do nothing \
+             returning version"
+        }
+        Some(Expect::Version(_)) => {
+            "update tmu.issued_cfrs set \
+                airport = $2, wheels_up = $3, issued_by = $4, issued_by_actor = $5, \
+                issued_at = now(), version = version + 1 \
+             where callsign = $1 and version = $6 \
+               and ($7::text is null or issued_by_actor = $7) \
+             returning version"
+        }
+    };
+    let query = sqlx::query_scalar::<_, i64>(sql)
+        .bind(callsign)
+        .bind(airport)
+        .bind(wheels_up)
+        .bind(&by.user_id)
+        .bind(&by.actor_id);
+    // `$7` is the machine that must already hold the CFR (#585 review).
+    let query = match expect {
+        Some(Expect::Version(v)) => query.bind(v).bind(by.machine_actor()),
+        _ => query,
+    };
+    query
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Who holds a CFR now, and at what version — see `flow_repo::ReleaseHolder` (#585).
+pub async fn cfr_holder(pool: &PgPool, callsign: &str) -> Result<Option<ReleaseHolder>, ApiError> {
+    let row = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+        "select c.version, \
+            case when a.actor_type in ('service_account', 'api_key') then a.id end, \
+            case when a.actor_type in ('service_account', 'api_key') then a.display_name end \
+         from tmu.issued_cfrs c left join access.actors a on a.id = c.issued_by_actor \
+         where c.callsign = $1",
     )
     .bind(callsign)
-    .bind(airport)
-    .bind(wheels_up)
-    .bind(actor)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
-    Ok(())
+    Ok(row.map(|(version, id, name)| ReleaseHolder {
+        version,
+        machine: id.map(|id| (id, name.unwrap_or_default())),
+    }))
 }
 
 pub async fn get_issued_cfr(
@@ -548,8 +628,10 @@ pub async fn get_issued_cfr(
     callsign: &str,
 ) -> Result<Option<IssuedCfrBody>, ApiError> {
     sqlx::query_as::<_, IssuedCfrBody>(
-        "select c.callsign, c.airport, c.wheels_up, u.display_name as issued_by, c.issued_at \
+        "select c.callsign, c.airport, c.wheels_up, \
+                coalesce(u.display_name, a.display_name) as issued_by, c.issued_at \
          from tmu.issued_cfrs c left join identity.users u on u.id = c.issued_by \
+         left join access.actors a on a.id = c.issued_by_actor \
          where c.callsign = $1",
     )
     .bind(callsign)
@@ -558,12 +640,25 @@ pub async fn get_issued_cfr(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn delete_issued_cfr(pool: &PgPool, callsign: &str) -> Result<bool, ApiError> {
-    let result = sqlx::query("delete from tmu.issued_cfrs where callsign = $1")
-        .bind(callsign)
-        .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+/// Release (delete) a CFR, only at `version` when given and, for a machine, only if it already
+/// holds it (#585). The holder comes from `by`, not the caller, for the reason `delete_release`
+/// gives. Returns whether a row was removed.
+pub async fn delete_issued_cfr(
+    pool: &PgPool,
+    callsign: &str,
+    version: Option<i64>,
+    by: &Attribution,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "delete from tmu.issued_cfrs where callsign = $1 and ($2::bigint is null or version = $2) \
+           and ($3::text is null or issued_by_actor = $3)",
+    )
+    .bind(callsign)
+    .bind(version)
+    .bind(by.machine_actor())
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -582,6 +677,9 @@ pub async fn prune_stale_cfrs(pool: &PgPool) -> Result<(), ApiError> {
 pub struct CleanupStats {
     pub expired: u64,
     pub deleted: u64,
+    /// Advisories cancelled by this pass (#537) — counted separately because an advisory is neither
+    /// expired nor deleted: it is cancelled, which is a document state the others do not have.
+    pub advisories_cancelled: u64,
 }
 
 /// Auto-expire finished restrictions/ground stops, then delete anything that ended (or was
@@ -665,12 +763,90 @@ pub async fn run_cleanup(pool: &PgPool) -> Result<CleanupStats, ApiError> {
     .await
     .map_err(internal)?;
 
+    // 3. Advisories (#537). Cancelled rather than deleted or soft-dismissed: the docs already state
+    // the rule — "A published advisory is never edited — it is cancelled and reissued" — and
+    // cancelling is what fires the `adv_cancel` job, so the standing Discord post gets corrected
+    // instead of being left asserting a restriction that has lapsed.
+    //
+    // Two reasons an advisory stops being current, kept as separate statements because they are
+    // genuinely different facts rather than one rule with a branch.
+
+    // (a) Its own window has passed, plus a grace period. `GRACE` is the "about 30 minutes" the
+    // request asked for; the pass runs every `TMU_CLEANUP_INTERVAL`, so the real removal lands in
+    // [30, 35) minutes. Only advisories that actually carry a window are touched — a NULL `valid_to`
+    // means "no window", and must not read as "infinitely overdue".
+    // Both statements run in one transaction with the Discord corrections they imply, so a crash can
+    // never leave an advisory cancelled here while its post still stands there.
+    let mut tx = pool.begin().await.map_err(internal)?;
+    let mut cancelled: Vec<String> = sqlx::query_scalar(
+        "update tmu.advisories set status = 'cancelled' \
+         where status in ('draft', 'published') \
+           and valid_to is not null \
+           and valid_to < now() - interval '30 minutes' \
+         returning id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal)?;
+    // (b) The program it was generated from is over. `cancel_program_advisory_tx` only ever runs on a
+    // *user* revising or cancelling a program, so a GDP or ground stop that simply timed out left its
+    // advisory `published` forever — a real pre-existing bug, folded in here because this is the pass
+    // that would otherwise expire some advisories and not these.
+    //
+    // Safe to run after the deletes above despite `gdp_id`/`ground_stop_id` being
+    // `on delete set null`: both deletes require `published_at is null`, and an advisory is only
+    // generated for a *published* program, so no program with an advisory is reachable by them.
+    cancelled.extend(
+        sqlx::query_scalar::<_, String>(
+            "update tmu.advisories a set status = 'cancelled' \
+             where a.status in ('draft', 'published') \
+               and (exists (select 1 from tmu.gdp g \
+                             where g.id = a.gdp_id \
+                               and g.status in ('expired', 'cancelled')) \
+                 or exists (select 1 from tmu.ground_stops s \
+                             where s.id = a.ground_stop_id \
+                               and s.status in ('expired', 'cancelled'))) \
+             returning a.id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(internal)?,
+    );
+
+    // Withdraw what was posted, beside the post it corrects (#537 review). The cancellation is only
+    // worth anything if Discord stops asserting the advisory, and `adv_cancel` is otherwise enqueued
+    // by nothing but the manual cancel handler. The channel is the one the publish went to, not one
+    // re-derived from today's facility map — the reason `handlers::tmu::cancel_advisory` gives. The
+    // `adv_publish` record is also what answers *whether* anything was posted: a draft never has one,
+    // and neither does an advisory published while Discord was unconfigured.
+    for id in &cancelled {
+        let Some(channel_id) =
+            crate::repos::integration::published_channel_for_advisory(pool, id).await?
+        else {
+            continue;
+        };
+        let Some(adv) = get_advisory_tx(&mut tx, id).await? else {
+            continue;
+        };
+        let job = crate::advisory::cancel_job_payload(&channel_id, &adv);
+        crate::repos::integration::enqueue_job(
+            &mut tx,
+            "adv_cancel",
+            &job,
+            Some("advisory"),
+            Some(id),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(internal)?;
+
     Ok(CleanupStats {
         expired: e_tmi.rows_affected() + e_gs.rows_affected() + e_gdp.rows_affected(),
         deleted: d_tmi.rows_affected()
             + d_gs.rows_affected()
             + d_pgm.rows_affected()
             + d_gdp.rows_affected(),
+        advisories_cancelled: cancelled.len() as u64,
     })
 }
 
@@ -697,7 +873,7 @@ pub async fn prune_history(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, 
 // --- advisories (ADVZY documents, #457) ---
 
 const ADVISORY_SELECT: &str = "select id, facility, issued_day, number, kind, body, structured, \
-    decoded, status, published_at, created_at from tmu.advisories";
+    decoded, status, valid_from, valid_to, published_at, created_at from tmu.advisories";
 
 /// Take the next advisory number for `facility` on today's **Zulu** day.
 ///
@@ -833,10 +1009,10 @@ fn advisory_body(
 pub async fn create_advisory(
     pool: &PgPool,
     req: &CreateAdvisoryRequest,
-    created_by: &str,
+    by: &Attribution,
 ) -> Result<String, ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let id = create_advisory_tx(&mut tx, req, created_by, None).await?;
+    let id = create_advisory_tx(&mut tx, req, by, None).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(id)
 }
@@ -860,7 +1036,7 @@ pub(crate) enum AdvisoryProgram<'a> {
 pub(crate) async fn create_advisory_tx(
     tx: &mut Transaction<'_, Postgres>,
     req: &CreateAdvisoryRequest,
-    created_by: &str,
+    by: &Attribution,
     program: Option<AdvisoryProgram<'_>>,
 ) -> Result<String, ApiError> {
     let facility = req.facility.trim().to_ascii_uppercase();
@@ -887,9 +1063,9 @@ pub(crate) async fn create_advisory_tx(
     };
     let id = sqlx::query_scalar::<_, String>(
         "insert into tmu.advisories \
-         (facility, issued_day, number, kind, body, structured, decoded, created_by, \
-          gdp_id, ground_stop_id) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) returning id",
+         (facility, issued_day, number, kind, body, structured, decoded, created_by, created_by_actor, \
+          gdp_id, ground_stop_id, valid_from, valid_to) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning id",
     )
     .bind(&facility)
     .bind(day)
@@ -898,9 +1074,15 @@ pub(crate) async fn create_advisory_tx(
     .bind(&body)
     .bind(req.structured.as_ref().map(sqlx::types::Json))
     .bind(req.decoded.as_deref())
-    .bind(created_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .bind(gdp_id)
     .bind(ground_stop_id)
+    // Stored verbatim from the request, never derived from `body`. The printed period stays the
+    // document's own text; this is the window a job may act on (#537).
+    .bind(req.valid_from)
+    .bind(req.valid_to)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1067,15 +1249,17 @@ pub async fn update_advisory(
 pub async fn publish_advisory(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
-    published_by: &str,
+    by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
         "update tmu.advisories \
-         set status = 'published', published_by = $2, published_at = now() \
+         set status = 'published', published_by = $2, published_by_actor = $3, published_at = now() \
          where id = $1 and status = 'draft'",
     )
     .bind(id)
-    .bind(published_by)
+    .bind(&by.user_id)
+
+    .bind(&by.actor_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -1159,8 +1343,10 @@ mod tests {
                 body: "vATCSCC ADVZY".to_string(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1206,8 +1392,10 @@ mod tests {
                 body: "vATCSCC ADVZY 001 REROUTE".to_string(),
                 structured: Some(serde_json::json!({"routes": [{"from": "JFK", "to": "BOS"}]})),
                 decoded: Some("JFK to BOS reroute".to_string()),
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1249,8 +1437,10 @@ mod tests {
                     "period": "141415-142315",
                 })),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1319,8 +1509,10 @@ mod tests {
                     "period": "141430-141630",
                 })),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1433,8 +1625,10 @@ mod tests {
                 body: String::new(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -1629,7 +1823,13 @@ mod tests {
 
     async fn create(pool: &PgPool, req: CreateAdvisoryRequest) -> AdvisoryBody {
         let user = seed_user(pool).await;
-        let id = create_advisory(pool, &req, &user).await.unwrap();
+        let id = create_advisory(
+            pool,
+            &req,
+            &crate::auth::principal::Attribution::user_only(&user),
+        )
+        .await
+        .unwrap();
         get_advisory(pool, &id).await.unwrap().unwrap()
     }
 
@@ -1647,6 +1847,8 @@ mod tests {
                 body: "IGNORE ME".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1677,6 +1879,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1688,6 +1892,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1709,6 +1915,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1723,6 +1931,8 @@ mod tests {
                 body: structured.body.clone(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1746,6 +1956,8 @@ mod tests {
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1764,8 +1976,10 @@ mod tests {
                 body: "x".into(),
                 structured: Some(serde_json::json!({"nope": true})),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await;
         assert!(matches!(err, Err(ApiError::BadRequest)), "{err:?}");
@@ -1783,6 +1997,8 @@ mod tests {
                 body: "x".into(),
                 structured: Some(reroute_structured()),
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1826,6 +2042,8 @@ mod tests {
                 body: "SOME OTHER DOCUMENT".into(),
                 structured: None,
                 decoded: None,
+                valid_from: None,
+                valid_to: None,
             },
         )
         .await;
@@ -1886,6 +2104,8 @@ mod tests {
             body: "vATCSCC ADVZY".to_string(),
             structured: None,
             decoded: None,
+            valid_from: None,
+            valid_to: None,
         };
 
         // Spawned, not just awaited together: each create needs its own task to contend for a
@@ -1894,7 +2114,12 @@ mod tests {
         for _ in 0..CONCURRENCY {
             let (pool, req, user) = (pool.clone(), request(), user.clone());
             tasks.push(tokio::spawn(async move {
-                create_advisory(&pool, &req, &user).await
+                create_advisory(
+                    &pool,
+                    &req,
+                    &crate::auth::principal::Attribution::user_only(&user),
+                )
+                .await
             }));
         }
 
@@ -1963,9 +2188,13 @@ mod tests {
         // Transactional since #459, so the Discord enqueue is atomic with the state change.
         let mut tx = pool.begin().await.unwrap();
         assert!(
-            publish_advisory(&mut tx, &published.id, &user)
-                .await
-                .unwrap()
+            publish_advisory(
+                &mut tx,
+                &published.id,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
         );
         tx.commit().await.unwrap();
 
@@ -2010,7 +2239,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2145,7 +2374,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2173,7 +2402,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            &user,
+            &crate::auth::principal::Attribution::user_only(&user),
         )
         .await
         .unwrap();
@@ -2196,7 +2425,7 @@ mod tests {
                 start_time: None,
                 stop_time: None,
             },
-            user,
+            &crate::auth::principal::Attribution::user_only(user),
         )
         .await
         .unwrap()
@@ -2347,5 +2576,323 @@ mod tests {
         let listed = crate::repos::gdp::list_gdps(&pool).await.unwrap();
         assert!(!listed.iter().any(|g| g.id == id));
         assert!(row_exists(&pool, "tmu.gdp", &id).await);
+    }
+
+    // --- advisory expiry (#537) -------------------------------------------------------------------
+
+    /// The grace period `run_cleanup` applies after `valid_to`, as minutes. Named so the fixtures
+    /// below can straddle it without being *derived* from it: a fixture computed off this constant
+    /// would move with it and pass for any value, which is exactly how a widened constant gets
+    /// shipped unnoticed.
+    const GRACE_MIN: i64 = 30;
+
+    /// Create an advisory with an explicit window, `age_min` minutes past its `valid_to`.
+    async fn advisory_ending_min_ago(pool: &PgPool, age_min: i64) -> String {
+        let user = seed_user(pool).await;
+        let valid_to = Utc::now() - chrono::Duration::minutes(age_min);
+        create_advisory(
+            pool,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "reroute".to_string(),
+                body: "vATCSCC ADVZY".to_string(),
+                structured: None,
+                decoded: None,
+                valid_from: Some(valid_to - chrono::Duration::hours(1)),
+                valid_to: Some(valid_to),
+            },
+            &crate::auth::principal::Attribution::user_only(&user),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("select status from tmu.advisories where id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Absolute ages straddling the documented grace period, not ages derived from `GRACE_MIN` — plus
+    /// a guard that fails loudly if the constant moves out from between them.
+    const INSIDE_GRACE_MIN: i64 = 20;
+    const PAST_GRACE_MIN: i64 = 40;
+
+    // Checked at compile time rather than in a test: all three are constants, so this can fail the
+    // build instead of waiting for someone to run the suite — and clippy correctly refuses a runtime
+    // assertion over a constant comparison.
+    const _: () = assert!(
+        INSIDE_GRACE_MIN < GRACE_MIN && GRACE_MIN < PAST_GRACE_MIN,
+        "the advisory grace period is no longer between the two expiry fixtures — update \
+         INSIDE_GRACE_MIN and PAST_GRACE_MIN, and the SQL interval in run_cleanup that they test"
+    );
+
+    /// AC3/AC7: past the window plus the grace period, the advisory is cancelled.
+    #[sqlx::test]
+    async fn cleanup_cancels_an_advisory_past_its_window(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "cancelled");
+        assert_eq!(stats.advisories_cancelled, 1, "and it is counted");
+    }
+
+    /// AC7's other half: inside the grace period it is left alone. Without this, widening the
+    /// interval to zero would still look correct.
+    #[sqlx::test]
+    async fn cleanup_spares_an_advisory_inside_the_grace_period(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, INSIDE_GRACE_MIN).await;
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "draft", "still within grace");
+        assert_eq!(stats.advisories_cancelled, 0);
+    }
+
+    /// A still-current advisory must not be touched at all — the case a bad `>`/`<` would break.
+    #[sqlx::test]
+    async fn cleanup_spares_an_advisory_whose_window_is_open(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, -60).await; // ends in an hour
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "draft");
+    }
+
+    /// NULL `valid_to` means "no window", which must not read as "infinitely overdue". Every advisory
+    /// written before #537 is in this state, so getting it wrong would cancel the lot on first boot.
+    #[sqlx::test]
+    async fn cleanup_never_touches_an_advisory_with_no_window(pool: PgPool) {
+        let adv = draft(&pool, "DCC").await;
+        assert!(adv.valid_to.is_none(), "the fixture has no window");
+
+        let stats = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv.id).await, "draft");
+        assert_eq!(stats.advisories_cancelled, 0);
+    }
+
+    /// A cancelled advisory must not be re-counted on every later pass — the count drives a log line,
+    /// and a pass that claims work it did not do is worse than a quiet one.
+    #[sqlx::test]
+    async fn cleanup_does_not_recount_an_already_cancelled_advisory(pool: PgPool) {
+        advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        assert_eq!(run_cleanup(&pool).await.unwrap().advisories_cancelled, 1);
+
+        let second = run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(second.advisories_cancelled, 0, "nothing left to cancel");
+    }
+
+    /// Create a published ground stop and the advisory generated from it, linked as the real publish
+    /// path links them.
+    async fn published_gs_with_advisory(pool: &PgPool) -> (String, String) {
+        let user = seed_user(pool).await;
+        let gs_id = sqlx::query_scalar::<_, String>(
+            "insert into tmu.ground_stops (airport, scope, status, published_at, created_by) \
+             values ('KDCA', 'ALL', 'published', now(), $1) returning id",
+        )
+        .bind(&user)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        let adv_id = create_advisory_tx(
+            &mut tx,
+            &CreateAdvisoryRequest {
+                facility: "DCC".to_string(),
+                kind: "reroute".to_string(),
+                body: "vATCSCC ADVZY".to_string(),
+                structured: None,
+                decoded: None,
+                // A generated advisory carries no window of its own — its life is the program's.
+                valid_from: None,
+                valid_to: None,
+            },
+            &crate::auth::principal::Attribution::user_only(&user),
+            Some(AdvisoryProgram::GroundStop(&gs_id)),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        (gs_id, adv_id)
+    }
+
+    /// The pre-existing bug this change folds in: `cancel_program_advisory_tx` only ever ran on a
+    /// *user* revising or cancelling a program, so a ground stop that simply timed out left its
+    /// advisory `published` forever.
+    #[sqlx::test]
+    async fn cleanup_cancels_the_advisory_of_an_expired_ground_stop(pool: PgPool) {
+        let (gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "cancelled");
+        // And the program row is still there, which is what makes the link usable: `run_cleanup`'s
+        // deletes require `published_at is null`, and this one published.
+        let gs_left: i64 =
+            sqlx::query_scalar("select count(*) from tmu.ground_stops where id = $1")
+                .bind(&gs_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            gs_left, 1,
+            "a published program survives the cleanup deletes"
+        );
+    }
+
+    /// Publish `adv_id` and record its `adv_publish` post the way `handlers::tmu::publish_advisory`
+    /// does. The outbound job is the only record of whether — and where — an advisory was posted.
+    async fn post_advisory(pool: &PgPool, adv_id: &str, channel: &str) {
+        let user = crate::scope_test_support::seed_user(pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            publish_advisory(
+                &mut tx,
+                adv_id,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
+        );
+        let adv = get_advisory_tx(&mut tx, adv_id).await.unwrap().unwrap();
+        crate::repos::integration::enqueue_job(
+            &mut tx,
+            "adv_publish",
+            &crate::advisory::publish_job_payload(channel, &adv),
+            Some("advisory"),
+            Some(adv_id),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// The channels of every `adv_cancel` correction enqueued for `adv_id`.
+    async fn cancel_jobs(pool: &PgPool, adv_id: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select coalesce(payload->>'channel_id', '') from integration.outbound_jobs \
+             where job_type = 'adv_cancel' and subject_type = 'advisory' and subject_id = $1",
+        )
+        .bind(adv_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A posted advisory the cleanup cancels is withdrawn from Discord, in the channel it was posted to
+    /// (#537 review). Before, the status changed and the post stood indefinitely, asserting an advisory
+    /// that had lapsed — the outcome cancellation was chosen over a soft-dismiss to avoid.
+    #[sqlx::test]
+    async fn cleanup_withdraws_a_posted_advisory_from_discord(pool: PgPool) {
+        let id = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        post_advisory(&pool, &id, "chan-posted").await;
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &id).await, "cancelled");
+        assert_eq!(
+            cancel_jobs(&pool, &id).await,
+            vec!["chan-posted".to_string()],
+            "exactly one correction, beside the post it corrects"
+        );
+
+        // The next pass finds nothing left to cancel, so it posts nothing again.
+        run_cleanup(&pool).await.unwrap();
+        assert_eq!(cancel_jobs(&pool, &id).await.len(), 1);
+    }
+
+    /// Nothing was posted, so there is nothing to withdraw — for a draft, and for a published advisory
+    /// whose post was never enqueued (Discord unconfigured). A correction to a post that does not
+    /// exist would be noise in the channel.
+    #[sqlx::test]
+    async fn cleanup_posts_nothing_for_an_advisory_that_was_never_posted(pool: PgPool) {
+        let draft = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        let unposted = advisory_ending_min_ago(&pool, PAST_GRACE_MIN).await;
+        let user = crate::scope_test_support::seed_user(&pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            publish_advisory(
+                &mut tx,
+                &unposted,
+                &crate::auth::principal::Attribution::user_only(&user)
+            )
+            .await
+            .unwrap()
+        );
+        tx.commit().await.unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        for id in [&draft, &unposted] {
+            assert_eq!(status_of(&pool, id).await, "cancelled");
+            assert!(
+                cancel_jobs(&pool, id).await.is_empty(),
+                "no post, so no correction"
+            );
+        }
+    }
+
+    /// The program arm withdraws too: a ground stop that simply timed out has its posted advisory
+    /// corrected, not just its row.
+    #[sqlx::test]
+    async fn cleanup_withdraws_the_posted_advisory_of_an_expired_ground_stop(pool: PgPool) {
+        let (gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+        post_advisory(&pool, &adv_id, "chan-gs").await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "cancelled");
+        assert_eq!(
+            cancel_jobs(&pool, &adv_id).await,
+            vec!["chan-gs".to_string()]
+        );
+    }
+
+    /// While the program is live, its advisory must stay live — otherwise the pass would cancel every
+    /// generated advisory on the first tick after it was issued.
+    #[sqlx::test]
+    async fn cleanup_spares_the_advisory_of_a_live_ground_stop(pool: PgPool) {
+        let (_gs_id, adv_id) = published_gs_with_advisory(&pool).await;
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(status_of(&pool, &adv_id).await, "draft");
+    }
+
+    /// A hand-authored advisory has no program link, so the program arm must not reach it. Without
+    /// this, a `left join` written instead of `exists` would cancel everything.
+    #[sqlx::test]
+    async fn the_program_arm_ignores_a_hand_authored_advisory(pool: PgPool) {
+        let (gs_id, _) = published_gs_with_advisory(&pool).await;
+        let unlinked = draft(&pool, "DCC").await;
+        sqlx::query("update tmu.ground_stops set status = 'expired' where id = $1")
+            .bind(&gs_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_cleanup(&pool).await.unwrap();
+
+        assert_eq!(
+            status_of(&pool, &unlinked.id).await,
+            "draft",
+            "no gdp_id and no ground_stop_id means no program expiry applies"
+        );
     }
 }

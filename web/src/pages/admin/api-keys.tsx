@@ -16,7 +16,9 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
 import {timeAgo} from "@/lib/time";
-import {type ApiKey, useAdminDeleteKey, useAdminDisableKey, useAllKeys} from "@/lib/api-keys";
+import {type ApiKey, useAdminDeleteKey, useAdminDisableKey, useAdminSetKeyRateLimit, useAllKeys} from "@/lib/api-keys";
+import {usageLabel} from "@/lib/rate-limits";
+import {RateLimitCell} from "@/components/credential-rate-limit";
 import {KeyActivity} from "@/pages/api-keys";
 
 const SUBTITLE =
@@ -34,6 +36,7 @@ const shortDate = (iso: string) => new Date(iso).toLocaleDateString();
 export function AdminApiKeys() {
   const { data: me } = useMe();
   const canRevoke = hasPermission(me, "api_keys.key.delete");
+  const setLimit = useAdminSetKeyRateLimit();
   const [cidInput, setCidInput] = useState("");
   const [ownerCid, setOwnerCid] = useState<number | undefined>(undefined);
   const [activityFor, setActivityFor] = useState<ApiKey | null>(null);
@@ -108,6 +111,25 @@ export function AdminApiKeys() {
         },
       },
       {
+        id: "usage",
+        header: "Usage",
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{usageLabel(c.row.original.usage)}</span>,
+      },
+      {
+        id: "rate_limit",
+        header: "Limit",
+        mono: true,
+        cell: (c) => (
+          <RateLimitCell
+            label={c.row.original.name}
+            value={c.row.original.rate_limit_per_min}
+            editable={canRevoke}
+            onSave={(perMin) => setLimit.mutate({id: c.row.original.id, perMin})}
+          />
+        ),
+      },
+      {
         accessorKey: "last_used_at",
         header: "Last used",
         icon: Clock,
@@ -171,7 +193,7 @@ export function AdminApiKeys() {
         },
       },
     ],
-    [canRevoke, disableKey, deleteKey],
+    [canRevoke, disableKey, deleteKey, setLimit],
   );
 
   return (

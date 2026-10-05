@@ -1,13 +1,12 @@
 //! The Admin page's landing summary (#292).
 
-use axum::{Extension, Json, extract::State};
+use axum::{Json, extract::State};
 
 use crate::{
     auth::{
         acl::{self, PermissionPath},
-        context::{CurrentApiKey, CurrentUser},
         permissions::{AccessUsersRead, AuditLogsRead, SystemJobsRead},
-        principal::Principal,
+        principal::{Actor, Principal},
         require_permission::Permission,
     },
     errors::ApiError,
@@ -20,14 +19,13 @@ use crate::{
     get,
     path = "/api/v1/admin/summary",
     tag = "system",
+    security(("session" = []), ("api_key" = []), ("service_account" = [])),
     responses((status = 200, body = AdminSummaryBody), (status = 401))
 )]
 pub async fn get_admin_summary(
     State(state): State<AppState>,
-    Extension(current_user): Extension<Option<CurrentUser>>,
-    Extension(current_api_key): Extension<Option<CurrentApiKey>>,
+    Actor(principal): Actor,
 ) -> Result<Json<AdminSummaryBody>, ApiError> {
-    let principal = Principal::require(current_user.as_ref(), current_api_key.as_ref())?;
     Ok(Json(build_summary(&state, &principal).await?))
 }
 
@@ -42,6 +40,9 @@ async fn build_summary(
     let (_, effective) = match principal {
         Principal::User(u) => acl::fetch_user_access(Some(pool), &u.id).await?,
         Principal::ApiKey(k) => acl::fetch_api_key_access(Some(pool), k).await?,
+        Principal::ServiceAccount(sa) => {
+            acl::fetch_service_account_access(Some(pool), &sa.id).await?
+        }
     };
     let holds = |permission: PermissionPath| effective.contains(&permission);
 
@@ -79,6 +80,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::auth::context::CurrentApiKey;
     use crate::scope_test_support::{grant, principal_for, seed_user, test_state};
 
     #[sqlx::test]
@@ -141,6 +143,7 @@ mod tests {
             owner_user_id: user,
             prefix: "ois_pat_test".to_string(),
             name: "summary-test".to_string(),
+            rate_limit_per_min: None,
         });
 
         let body = build_summary(&state, &key).await.unwrap();
@@ -171,6 +174,7 @@ mod tests {
             owner_user_id: user,
             prefix: "ois_pat_test".to_string(),
             name: "summary-test".to_string(),
+            rate_limit_per_min: None,
         });
 
         let body = build_summary(&state, &key).await.unwrap();
@@ -189,15 +193,15 @@ mod tests {
             sqlx::query(sql).execute(pool).await.unwrap();
         }
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name) values ($1, 'SUMMARY_TEST')",
+            "insert into access.user_roles (user_id, role_name, source) values ($1, 'SUMMARY_TEST', 'manual')",
         )
         .bind(user)
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "insert into access.user_permissions (user_id, permission_name, granted) \
-             select $1, name, false from access.permissions \
+            "insert into access.user_permissions (user_id, permission_name, granted, source) \
+             select $1, name, false, 'manual' from access.permissions \
              where name in ('audit.logs.read', 'access.users.read', 'system.jobs.read')",
         )
         .bind(user)

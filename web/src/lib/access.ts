@@ -9,6 +9,15 @@ export type UpdateBody = components["schemas"]["UpdateUserAccessRequest"];
 export type UserMatch = components["schemas"]["UserSummary"];
 export type AdminUserRow = components["schemas"]["AdminUserRow"];
 
+/**
+ * One `scoped_roles` entry — `EC` for a national membership, `EC:ZDC` for one at a facility — split
+ * into its parts. Group names are uppercase letters and underscores, so the first `:` is the split.
+ */
+export function splitScopedRole(entry: string): {role: string; artcc: string | null} {
+  const at = entry.indexOf(":");
+  return at < 0 ? {role: entry, artcc: null} : {role: entry.slice(0, at), artcc: entry.slice(at + 1)};
+}
+
 /** A page of all OIS users (name/CID/rating + role names), filtered by `q`. Access-admin only. */
 export function useAllUsers(page: number, pageSize: number, q: string) {
   return useQuery({
@@ -128,8 +137,59 @@ export function useSaveUserAccess() {
     },
     onSuccess: (data, variables) => {
       queryClient.setQueryData(["user-access", variables.cid], data);
+      // A save takes the user off VATUSA role sync (#549): refresh that state and the user list's flag.
+      void queryClient.invalidateQueries({ queryKey: ["user-vatusa", variables.cid] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
       toast.success("Access saved", { description: `CID ${variables.cid}` });
     },
     onError: () => toast.error("Couldn’t save access changes"),
+  });
+}
+
+/** A user's VATUSA side for the access editor: role-sync state, VATUSA roles, and what a Resync would change (#549). */
+export function useUserVatusa(cid: number | undefined) {
+  return useQuery({
+    enabled: cid != null,
+    retry: false,
+    queryKey: ["user-vatusa", cid],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/admin/users/{cid}/vatusa", {
+        params: { path: { cid: cid! } },
+      });
+      if (error || !data) throw new Error("failed to load VATUSA state");
+      return data;
+    },
+  });
+}
+
+/** Put a hand-managed user back on VATUSA role sync and reconcile them now (#549). */
+export function useVatusaResync() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ cid, reason }: { cid: number; reason: string }) => {
+      const { data, error, response } = await ois.POST("/api/v1/admin/users/{cid}/vatusa/resync", {
+        params: { path: { cid } },
+        body: { reason },
+      });
+      if (error || !data) {
+        const err = new Error("resync failed") as Error & { status?: number };
+        err.status = response?.status;
+        throw err;
+      }
+      return data;
+    },
+    onSuccess: (data, { cid }) => {
+      queryClient.setQueryData(["user-vatusa", cid], data);
+      void queryClient.invalidateQueries({ queryKey: ["user-access", cid] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      toast.success("Back on VATUSA sync", { description: `CID ${cid}` });
+    },
+    onError: (err: Error & { status?: number }) =>
+      toast.error(
+        err.status === 403
+          ? "Resync needs national access.users.update"
+          : "Couldn’t resync from VATUSA",
+      ),
   });
 }

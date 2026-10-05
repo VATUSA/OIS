@@ -17,6 +17,10 @@ use crate::{
 /// Retry backoff cap and the max attempts before a job is parked as `failed`.
 const MAX_ATTEMPTS: i32 = 8;
 
+/// The consumer every job enqueued here belongs to: the Discord bot, which leases with
+/// `?consumer=discord`. A lease sees only its own consumer's jobs (#590).
+pub const DISCORD_CONSUMER: &str = "discord";
+
 /// Enqueue an outbound job **inside the caller's transaction**, so the side-effect is atomic with
 /// the state change that triggered it (no job without the change, no change without the job).
 pub async fn enqueue_job(
@@ -28,13 +32,14 @@ pub async fn enqueue_job(
 ) -> Result<String, ApiError> {
     let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
     sqlx::query_scalar::<_, String>(
-        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id) \
-         values ($1, $2::jsonb, $3, $4) returning id",
+        "insert into integration.outbound_jobs (job_type, payload, subject_type, subject_id, consumer) \
+         values ($1, $2::jsonb, $3, $4, $5) returning id",
     )
     .bind(job_type)
     .bind(payload)
     .bind(subject_type)
     .bind(subject_id)
+    .bind(DISCORD_CONSUMER)
     .fetch_one(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)
@@ -51,15 +56,20 @@ struct LeaseRow {
     created_at: DateTime<Utc>,
 }
 
-/// Atomically lease up to `limit` due jobs: flip them `pending → in_progress`, bump `attempt_count`,
-/// and hand them over. `for update skip locked` lets multiple bot instances lease without collisions.
-pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody>, ApiError> {
+/// Atomically lease up to `limit` of `consumer`'s due jobs: flip them `pending → in_progress`, bump
+/// `attempt_count`, and hand them over. `for update skip locked` lets multiple bot instances lease
+/// without collisions; the `consumer` filter keeps a second consumer off the bot's jobs (#590).
+pub async fn lease_jobs(
+    pool: &PgPool,
+    consumer: &str,
+    limit: i64,
+) -> Result<Vec<OutboundJobBody>, ApiError> {
     let rows = sqlx::query_as::<_, LeaseRow>(
         "update integration.outbound_jobs j \
          set status = 'in_progress', attempt_count = j.attempt_count + 1, last_attempt_at = now() \
          from ( \
              select id from integration.outbound_jobs \
-             where status = 'pending' and next_attempt_at <= now() \
+             where status = 'pending' and consumer = $2 and next_attempt_at <= now() \
              order by next_attempt_at for update skip locked limit $1 \
          ) d \
          where j.id = d.id \
@@ -67,6 +77,7 @@ pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody
                    j.attempt_count, j.created_at",
     )
     .bind(limit.clamp(1, 100))
+    .bind(consumer)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -105,11 +116,15 @@ pub async fn lease_jobs(pool: &PgPool, limit: i64) -> Result<Vec<OutboundJobBody
 /// That is deliberate: a required value would reject every ack from an old bot during the window
 /// between deploying the two halves.
 ///
-/// Returns false when nothing was updated: the id doesn't exist, or the ack is stale. The caller logs
-/// that rather than discarding it, because a stale ack means a worker ran past its lease.
+/// Only `consumer`'s job is touched (#590), so one consumer can't complete or fail another's.
+///
+/// Returns false when nothing was updated: the id doesn't exist, it is another consumer's, or the ack
+/// is stale. The caller logs that rather than discarding it, because a stale ack means a worker ran
+/// past its lease.
 pub async fn ack_job(
     pool: &PgPool,
     id: &str,
+    consumer: &str,
     success: bool,
     result: Option<&Value>,
     error: Option<&str>,
@@ -121,12 +136,13 @@ pub async fn ack_job(
         sqlx::query(
             "update integration.outbound_jobs \
              set status = 'succeeded', result = $2::jsonb, error = null \
-             where id = $1 and status = 'in_progress' \
+             where id = $1 and status = 'in_progress' and consumer = $4 \
                and ($3::int is null or attempt_count = $3)",
         )
         .bind(id)
         .bind(result)
         .bind(attempt)
+        .bind(consumer)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -136,13 +152,14 @@ pub async fn ack_job(
              set status = case when attempt_count >= $2 then 'failed' else 'pending' end, \
                  next_attempt_at = now() + (interval '30 seconds' * least(attempt_count, 10)), \
                  error = $3 \
-             where id = $1 and status = 'in_progress' \
+             where id = $1 and status = 'in_progress' and consumer = $5 \
                and ($4::int is null or attempt_count = $4)",
         )
         .bind(id)
         .bind(MAX_ATTEMPTS)
         .bind(error)
         .bind(attempt)
+        .bind(consumer)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?
@@ -244,17 +261,46 @@ pub async fn role_id(
     resolve_scoped_id(pool, "discord_roles", "role_id", name, facility).await
 }
 
+/// The group whose holders get pinged as a facility's EC(s).
+///
+/// A literal, and now a load-bearing one: since #545 an admin can create and delete groups, so this
+/// name is a dependency on runtime data rather than on a migration. `group_exists_ec` logs when it is
+/// missing, because the alternative is indistinguishable from "nobody assigned" — see below.
+const EC_ROLE: &str = "EC";
+
 /// Discord user ids of a facility's EC(s): OIS users holding the `EC` role scoped to that ARTCC (set
 /// via Access Control) who have a VATUSA-linked Discord. Empty if none assigned or none linked.
+///
+/// **An empty result used to be silent and ambiguous** (#545 AC7). The single caller
+/// (`handlers/events.rs`) publishes the event thread with no EC ping and no warning, so a renamed or
+/// deleted `EC` group looked exactly like a facility that simply has no EC assigned — a coordination
+/// failure discovered only when nobody turns up. The group's absence is now logged distinctly.
 pub async fn ec_discord_ids(pool: &PgPool, facility: &str) -> Result<Vec<String>, ApiError> {
+    let role_exists =
+        sqlx::query_scalar::<_, bool>("select exists(select 1 from access.roles where name = $1)")
+            .bind(EC_ROLE)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+    if !role_exists {
+        tracing::warn!(
+            role = EC_ROLE,
+            facility,
+            "the EC group does not exist, so no facility EC can be notified — was it renamed or \
+             deleted? (VATUSA/OIS#545)"
+        );
+        return Ok(Vec::new());
+    }
+
     sqlx::query_scalar::<_, String>(
         "select m.external_id \
          from access.user_roles ur \
          join integration.external_sync_mappings m \
            on m.system_code = 'discord' and m.entity_type = 'user' and m.local_id = ur.user_id \
-         where ur.role_name = 'EC' and ur.artcc_id = $1",
+         where ur.role_name = $2 and ur.artcc_id = $1",
     )
     .bind(facility)
+    .bind(EC_ROLE)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
@@ -989,7 +1035,9 @@ mod tests {
         assert_eq!(status_of(&pool, &id).await, "pending");
 
         assert!(
-            !ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap(),
             "a stale success must not apply; the bool is what lets the handler log it"
         );
         assert_eq!(
@@ -999,9 +1047,17 @@ mod tests {
         );
 
         assert!(
-            !ack_job(&pool, &id, false, None, Some("stale"), None)
-                .await
-                .unwrap()
+            !ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                false,
+                None,
+                Some("stale"),
+                None
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "pending");
 
@@ -1012,13 +1068,17 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            lease_jobs(&pool, 10)
+            lease_jobs(&pool, DISCORD_CONSUMER, 10)
                 .await
                 .unwrap()
                 .iter()
                 .any(|j| j.id == id)
         );
-        assert!(ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert!(
+            ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap()
+        );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
     }
 
@@ -1039,7 +1099,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let b = lease_jobs(&pool, 10)
+        let b = lease_jobs(&pool, DISCORD_CONSUMER, 10)
             .await
             .unwrap()
             .into_iter()
@@ -1051,7 +1111,7 @@ mod tests {
         // A's success arrives late. Unfenced this marked the job delivered while B was mid-flight,
         // and B's own ack — carrying the real message id — was then refused.
         assert!(
-            !ack_job(&pool, &id, true, None, None, Some(1))
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, Some(1))
                 .await
                 .unwrap(),
             "a predecessor's success must not apply to its successor's lease"
@@ -1061,18 +1121,34 @@ mod tests {
         // A's failure is refused too: unfenced it returned a job B was holding to `pending`, so a
         // third worker could take it while B was still running.
         assert!(
-            !ack_job(&pool, &id, false, None, Some("stale"), Some(1))
-                .await
-                .unwrap()
+            !ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                false,
+                None,
+                Some("stale"),
+                Some(1)
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "in_progress");
 
         // B's ack still applies, and its result is the one recorded.
         let result = serde_json::json!({"message_id": "123"});
         assert!(
-            ack_job(&pool, &id, true, Some(&result), None, Some(2))
-                .await
-                .unwrap()
+            ack_job(
+                &pool,
+                &id,
+                DISCORD_CONSUMER,
+                true,
+                Some(&result),
+                None,
+                Some(2)
+            )
+            .await
+            .unwrap()
         );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
         let stored: Option<Value> =
@@ -1095,7 +1171,9 @@ mod tests {
         let id = stranded_job(&pool, 10, 1).await;
         assert_eq!(status_of(&pool, &id).await, "in_progress");
         assert!(
-            ack_job(&pool, &id, true, None, None, None).await.unwrap(),
+            ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap(),
             "an old bot sends no attempt and must keep working"
         );
         assert_eq!(status_of(&pool, &id).await, "succeeded");
@@ -1111,7 +1189,11 @@ mod tests {
             .unwrap();
         assert_eq!(status_of(&pool, &id).await, "failed");
 
-        assert!(!ack_job(&pool, &id, true, None, None, None).await.unwrap());
+        assert!(
+            !ack_job(&pool, &id, DISCORD_CONSUMER, true, None, None, None)
+                .await
+                .unwrap()
+        );
         assert_eq!(status_of(&pool, &id).await, "failed");
     }
 

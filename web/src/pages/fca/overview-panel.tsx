@@ -2,6 +2,7 @@ import {useMemo, useState} from "react";
 import {type DataColumn, DataTable, SegmentedControl, Sheet, StatusPill, toneText, type Tone} from "@ois/ui";
 import {ChevronDown, ChevronRight} from "lucide-react";
 
+import {swatchCss} from "@/components/map/lib/colors";
 import {type Fca, type FcaFlight} from "@/lib/fca";
 import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
@@ -179,7 +180,7 @@ function OverviewGroupSection({
           <ChevronDown className="size-3.5 shrink-0 text-ink-3" />
         )}
         {/* The FCA's colour is user data. */}
-        <span className="size-2.5 shrink-0 rounded-full" style={{ background: fca.color }} />
+        <span className="size-2.5 shrink-0 rounded-full" style={{ background: swatchCss(fca.color) }} />
         <span className="truncate font-mono text-sm font-semibold">{fca.name}</span>
         <StatusPill tone="neutral" className="font-mono">
           {modeLabel(fca)}

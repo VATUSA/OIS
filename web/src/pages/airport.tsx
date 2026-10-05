@@ -24,6 +24,9 @@ import {hhmmZulu} from "@/lib/time";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
+import {TguiLadder} from "@/components/ladder/TguiLadder";
+import type {TguiColumn} from "@/components/ladder/tgui";
+import {useSetting} from "@/lib/settings";
 
 type Sub = "summary" | "aircraft" | "ladder" | "demand" | "departures" | "taxi";
 
@@ -374,8 +377,60 @@ function measureTagWidth(f: FlowFlight): number {
   return 12 /* connector tick */ + 24 /* pill padding + border */ + 6 /* dot */ + gaps + chars * LADDER_CH;
 }
 
+/** Where the ladder plots a flight: its metered STA when there is one, else its raw ETA. */
+const ladderTimeOf = (f: FlowFlight) => f.sta ?? f.eta;
+
+/**
+ * What the arrival ladder plots, in either style: live, unexcluded arrivals with a time, passing the
+ * include-filters. One builder for both, so the classic and TGUI ladders cannot show different
+ * sequences (#349, #557 AC5).
+ */
+export function airportLadderItems(flow: Flow, filters: LadderFilters | undefined, now: number) {
+  return flow.flights
+    .filter((f) => f.status !== "arrived" && !f.excluded && ladderTimeOf(f) && passesLadderFilters(f, filters))
+    .map((f) => ({
+      key: f.callsign,
+      min: minutesUntil(ladderTimeOf(f), now)!,
+      time: ladderTimeOf(f) as string,
+      data: f,
+    }));
+}
+
+/**
+ * The arrival ladder as TGUI columns (#557): one per arrival gate (a meter fix), in the order the
+ * gates first appear in the sequence, with gateless arrivals in a last "OTHER" column. The schedule
+ * rail is the classic ladder's own time; no STA means no delay label, never an invented one.
+ */
+export function airportTguiColumns(items: ReturnType<typeof airportLadderItems>, now: number): TguiColumn[] {
+  const byGate = new Map<string, TguiColumn>();
+  const sorted = [...items].sort((a, b) => a.min - b.min);
+  for (const { key, min, time, data: f } of sorted) {
+    const gate = summaryGateName(f.gate) ?? "OTHER";
+    let column = byGate.get(gate);
+    if (!column) {
+      column = { id: gate, name: gate, kind: "MFX", items: [] };
+      byGate.set(gate, column);
+    }
+    column.items.push({
+      key,
+      callsign: f.callsign,
+      etaMin: minutesUntil(f.eta, now),
+      etaTime: f.eta ?? null,
+      staMin: min,
+      staTime: time,
+      delayMin: f.sta ? f.delay_min : null,
+      committed: f.cfr_issued,
+      wake: f.category ?? null,
+    });
+  }
+  const columns = [...byGate.values()];
+  // Gateless traffic is the residue, not a stream; it goes last.
+  return [...columns.filter((c) => c.id !== "OTHER"), ...columns.filter((c) => c.id === "OTHER")];
+}
+
 export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
   const [win, setWin] = useState(60);
+  const style = useSetting<string>("ladder.style", "classic");
   const now = Date.now();
   const step = win <= 90 ? 10 : win <= 180 ? 15 : 30;
   const tokens = gateTokenMap(flow.flights);
@@ -384,11 +439,8 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
     return gname && tokens[gname] ? `var(--${tokens[gname]})` : flightColor(f.status);
   };
 
-  // Position by metered STA when available, else raw ETA.
-  const timeOf = (f: FlowFlight) => f.sta ?? f.eta;
-  const items = flow.flights
-    .filter((f) => f.status !== "arrived" && !f.excluded && timeOf(f) && passesLadderFilters(f, filters))
-    .map((f) => ({ key: f.callsign, min: minutesUntil(timeOf(f), now)!, time: timeOf(f) as string, data: f }));
+  const timeOf = ladderTimeOf;
+  const items = airportLadderItems(flow, filters, now);
 
   // Despite the name, this is "is any filter category active" — not literally "no match" (that's
   // only true once it's also combined with an empty `items`). Drives both the empty-state message
@@ -426,6 +478,15 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
           </Button>
         </div>
       </div>
+      {/* Nothing until the style is known, rather than the classic ladder flashing first. */}
+      {style.isLoading ? null : style.value === "tgui" ? (
+        <TguiLadder
+          columns={airportTguiColumns(items, now)}
+          now={now}
+          win={win}
+          emptyMessage={noMatch ? "No matching arrivals" : "No ETAs in window"}
+        />
+      ) : (
       <ArrivalLadder
         items={items}
         now={now}
@@ -451,6 +512,7 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
           </span>
         )}
       />
+      )}
     </Card>
   );
 }
