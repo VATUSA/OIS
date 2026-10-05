@@ -5425,6 +5425,22 @@ mod fca_scope_tests {
             .await,
             StatusCode::NOT_FOUND
         );
+        // The same through `PUT`: the event check runs before the ARTCC scope check there too, or the
+        // scope's 403 would confirm the planned FCA exists.
+        for id in ["ev-planned", "no-such-fca"] {
+            assert_eq!(
+                send(
+                    &state,
+                    Method::PUT,
+                    &format!("/api/v1/flow/fcas/{id}"),
+                    &cookie,
+                    Some(fca("ZDC"))
+                )
+                .await,
+                StatusCode::NOT_FOUND,
+                "PUT {id}"
+            );
+        }
     }
 
     /// A planner keeps both routes: the event route, and the plain route for an event FCA.
