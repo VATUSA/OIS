@@ -129,7 +129,7 @@ Relates to #N / Duplicate of #N.                    ← after a duplicate search
 Two OIS-specific habits in that footer:
 
 - **Blast radius.** OIS has a few changes that reach further than they look — the single
-  trajectory/ETA model in `feed/trajectory.rs` (three callers), the permission/role
+  trajectory/ETA model in `feed/trajectory.rs` (several callers; `AGENTS.md` lists them), the permission/role
   "three-places-in-sync" invariants, and the OpenAPI→client contract (needs a regen). If the issue
   touches one, say so; if it touches none, say "none." (This is OIS's analog of AvioDeck's
   "Data path" line.)

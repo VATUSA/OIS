@@ -41,7 +41,7 @@ When reviewing & testing, this is what you're after — go further where sensibl
 * Code for its own sake; undocumented scope creep.
 * Missing happy/sad-path tests, or tests for scenarios that could bite.
 * Test against multiple personas from the work or the issue detail.
-* How it affects other processes: the trajectory/ETA model has three callers (FCA metering, airport-flow demand, runway ETE) — a change hits all three. Test each path, not the happy one.
+* How it affects other processes: the trajectory/ETA model has several callers (listed in AGENTS.md) — a change hits each. Test each path, not the happy one.
 * If it touched the API contract, confirm the client was regenerated or the web typecheck is lying against a stale contract.
 * Prove releasing to prod won't regress data flows or system logic, & that the ACs are met.
 

@@ -55,8 +55,8 @@ From `AGENTS.md`, repeated here only as a checklist because missing one fails si
   + `insert into access.permissions` migration. All three.
 - A **new assignable role** → `access.roles` migration + `default_roles()` + `ASSIGNABLE_USER_ROLES`.
 - A **new endpoint** → `router.rs` route + `openapi.rs` path (+ schema) + regenerated client.
-- The **trajectory model** (`feed/trajectory.rs`) has three callers (FCA metering, airport-flow
-  demand, runway ETE) — a change reaches all three; verify each.
+- The **trajectory model** (`feed/trajectory.rs`) is shared by every ETA surface — a change reaches
+  all of its callers (`AGENTS.md` § The trajectory / ETA model lists them); verify each.
 - The **feed subsystem has no DB handle** — it reads `AppState` `ArcSwap` caches, never queries
   inline. New feed-visible config follows the "cache + refresh job + force-reload on write" pattern.
 

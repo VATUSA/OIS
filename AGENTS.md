@@ -137,9 +137,18 @@ client could not use it if it wanted to" — not merely "the SPA doesn't call it
 
 `backend/src/feed/trajectory.rs` is the **single** ETA predictor — a vertical-profile integrator
 (climb/cruise/descent schedules, ISA Mach↔TAS, top-of-descent, service-ceiling cap) plus configurable
-per-aircraft `AircraftProfile`s resolved by exact type → wake class → default. It is shared by FCA
-metering (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`), and runway ETE
-(`feed/runway.rs`). A change here reaches all three — verify each, don't reason about one.
+per-aircraft `AircraftProfile`s resolved by exact type → wake class → default. Its callers:
+
+- **Run the model:** FCA metering (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`), runway
+  ETE (`feed/runway.rs`), sector occupancy (`feed/sector_tracks.rs`), and the shared prediction
+  service (`feed/predict.rs`), which builds the `VerticalProfile` the others time against.
+- **Reached through `feed/predict.rs`:** `feed/fca.rs` and `feed/taxi_estimate.rs`.
+- **Carry the `ProfileTable` only:** `state.rs` (the cache), `jobs.rs` (its refresh),
+  `repos/aircraft_profiles.rs` (loading it) and `scope_test_support.rs` (a test fixture).
+
+A change here reaches every one of them — verify each, don't reason about one. The list goes stale:
+re-derive it with `git grep 'trajectory::' -- backend/src` and `git grep 'predict::' -- backend/src`
+before relying on it.
 
 ### The live feed subsystem (`feed/`)
 
@@ -200,8 +209,9 @@ one-offs.
 
 1. **What did I check vs. assume?** Name them separately. "The profile falls back to X", "the
    response looks like Y" are assumptions until you read the resolved value or capture the bytes.
-2. **What else touches what I changed?** The trajectory model has three callers; a shared repo
-   query has many; a permission rename cascades to grants. Grep the other readers and name them.
+2. **What else touches what I changed?** The trajectory model has several callers (§ The
+   trajectory / ETA model); a shared repo query has many; a permission rename cascades to grants.
+   Grep the other readers and name them.
 3. **If my verification is lying, how would I know?** For anything crossing the Rust↔TS boundary,
    the honest check is: regenerate the client and run `pnpm typecheck` — not "it should match".
 
