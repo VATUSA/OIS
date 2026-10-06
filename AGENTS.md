@@ -284,7 +284,7 @@ by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both
   are structured so the pure logic is testable without the network.
 - **The web gates are `pnpm lint` and `pnpm typecheck`.** Lint is ESLint (root `eslint.config.mjs`)
   over `web` and `@ois/ui`: `react-hooks/rules-of-hooks` and `@typescript-eslint/no-unused-vars` are
-  errors, `react-hooks/exhaustive-deps` is a warning. Typecheck only tells the truth after the client
+  errors, and so is `react-hooks/exhaustive-deps` (since #329). Typecheck only tells the truth after the client
   is regenerated for any contract change (see codegen above).
 - **DB-touching repo logic** can be covered by a `#[sqlx::test]` (real Postgres, one throwaway
   database per test, migrations applied automatically — no `migrations = "..."` attribute needed,

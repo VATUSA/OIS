@@ -121,8 +121,10 @@ The first review almost never finds the sibling sites.
 ## Never remove a check to make it pass
 
 Don't delete a failing test, weaken an assertion, add `#[allow(...)]` or `eslint-disable` without
-a stated reason, or skip a hook with `--no-verify`. Fix the error. The one exception is a failure
-you have confirmed is pre-existing on `origin/next`, and you say so in the PR.
+a stated reason, or skip a hook with `--no-verify`. Fix the error. There are two exceptions: a
+failure you have confirmed is pre-existing on `origin/next`, which you say so in the PR; and the QA
+reviewer's rework push, which `ois-agent-goals.txt` (REVIEW TICKETS) makes with `--no-verify`
+because the build agent re-gates that branch before it reaches a PR.
 
 ## Review priority
 

@@ -103,7 +103,7 @@ against it can fail with "migration N was previously applied but is missing". Cr
 database and point the backend at it on a spare port:
 
 ```bash
-psql postgres://ois:ois@127.0.0.1:5432/postgres -c 'create database ois_tmp;'
+docker exec ois-postgres-1 psql -U ois -d postgres -c 'create database ois_tmp;'
 DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois_tmp BIND_ADDR=127.0.0.1:3407 \
   ./target/debug/ois-backend
 ```

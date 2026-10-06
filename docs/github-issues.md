@@ -288,7 +288,8 @@ before you post.** `wc -c` counts bytes, and `—` or `→` is three of them. Ma
 that stops the post, not a message printed above it:
 
 ```bash
-python3 -c 'import sys; n = len(open("body.md").read().rstrip()); print(n); sys.exit(n > 1200)' \
+LIMIT=1200   # the row's budget: 600 for a plan, 400 for a spec correction
+python3 -c 'import sys; n = len(open("body.md").read().rstrip()); print(n); sys.exit(n > int(sys.argv[1]))' "$LIMIT" \
   && printf '%s\n\n🤖 Drafted by Claude Code\n' "$(cat body.md)" > comment.md \
   && gh issue comment <n> --repo VATUSA/OIS --body-file comment.md
 ```

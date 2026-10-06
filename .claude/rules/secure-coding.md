@@ -19,11 +19,9 @@ Sources: ported from the general sections of the house secure-coding rule; OIS l
 
 ## Access control
 
-- **Every handler that mutates state declares `RequirePermission<P>`.** A missing extractor is a
-  visible gap in the signature, so look for it in review.
-- **The extractor is the floor, not the whole check.** Ownership, "is this request still open",
-  and ARTCC scope (`access_repo::permission_scope(...).allows(...)`,
-  `backend/src/repos/access.rs:867` and `:1002`) are checked in the handler on top of it.
+- **Every mutating handler declares `RequirePermission<P>`, and the data-dependent checks sit on
+  top of it** (`AGENTS.md` § Permissions). In review, look for the missing extractor and for an
+  ownership or ARTCC-scope check that a new path skips.
 - **Scope first, then authorize.** Resolve a child record through its parent in the same query
   (`where artcc = $1 and id = $2`), so a foreign id is simply not found. An authorization check
   on the parent passes for an actor who legitimately holds the parent, and the write to someone

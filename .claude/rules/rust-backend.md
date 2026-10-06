@@ -30,9 +30,11 @@ Run `cargo clippy --workspace --all-targets -- -D warnings` on every Rust change
 
 ## Running the Rust tests
 
-- Use `just test-rust`, not bare `cargo test --workspace`. The recipe passes `--test-threads=1`
-  (`justfile:66-67`) because parallel `#[sqlx::test]` databases collide. CI uses nextest with its
-  own profile; locally the single thread is what keeps the harness honest.
+- Locally, use `just test-rust`, not bare `cargo test --workspace`. The recipe passes
+  `--test-threads=1` (`justfile:66-67`): many threads in one `cargo test` process have collided on
+  `#[sqlx::test]` databases (`_sqlx_test_… already exists`, 2026-09-30). `cargo nextest run`, which
+  CI uses, runs each test in its own process and is safe in parallel (`.config/nextest.toml`,
+  `AGENTS.md` § Testing & verification).
 - Classifying harness flakes versus real failures is in `test-quality.md` § Flake or regression.
 
 ## Handlers and repos
@@ -41,15 +43,15 @@ Run `cargo clippy --workspace --all-targets -- -D warnings` on every Rust change
   see `secure-coding.md`.
 - **SQL lives in `repos/`** and binds every value; see `database-postgres.md`.
 - **Heavy CPU off the async workers.** Route resolution, metering, and similar work run under
-  `tokio::task::spawn_blocking` (`backend/src/handlers/flow.rs:621`). Holding a runtime worker
+  `tokio::task::spawn_blocking` (`fca_counts` in `backend/src/handlers/flow.rs`). Holding a runtime worker
   for long CPU work stalls every request on it.
 - **No silent skips.** `if let Some(x) = lookup { … }` with no `else` turns misconfiguration into
   a quiet no-op; on #436 that was a 200 with nothing enqueued and nothing logged. Log the `else`
   with `tracing::warn!` and decide whether the caller should see an error.
 - **To test a handler's logic**, split it into a thin `get_x` that holds the extractors and an
   `x(pool, …)` that holds the logic, then `#[sqlx::test]` the latter. Never add a test-only
-  constructor to a permission marker. For authz gates, `scope_test_support::send`
-  (`backend/src/scope_test_support.rs:162`) drives the real router and returns only a status code.
+  constructor to a permission marker. `scope_test_support::send` (`backend/src/scope_test_support.rs:162`)
+  drives the real router and returns the status; `send_json` (`:193`) also returns the body.
 
 ## Background jobs (`jobs.rs`)
 

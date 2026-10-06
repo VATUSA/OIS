@@ -34,7 +34,8 @@ handling, doc comments.
 Run and make green, in the changed workspaces:
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` (read `test result:`, not the exit code)
+- `just test-rust` (read `test result:`, not the exit code; bare `cargo test --workspace` runs many
+  threads and collides on `#[sqlx::test]` databases)
 - If the API contract moved (an endpoint or a `#[derive(ToSchema)]` model): **regenerate the client
   first** — `OIS_OPENAPI_URL=<running backend>/docs/api/v1/openapi.json pnpm --filter @ois/api-client codegen` — then `pnpm typecheck`.
 

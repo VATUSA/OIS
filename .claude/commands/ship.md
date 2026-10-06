@@ -27,7 +27,8 @@ re-gate.
   this repo are authored solely as the user; never add `Co-Authored-By`, a session link, or any
   agent/AI credit (see `CLAUDE.md`).
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
-  `git diff origin/next..HEAD --name-only` (lists every intended file).
+  `git diff origin/next...HEAD --name-only` (three dots: lists every intended file, and nothing that
+  merged into `next` after you forked).
 
 ## Step 4 — Review the committed HEAD
 Run `/review-before-shipping` to completion against this commit. If it applies a fix, commit it,

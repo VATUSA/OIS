@@ -43,8 +43,10 @@ failure shapes that look like real ones.
   `pgrep rustc | wc -l`, and `uptime`.
 - **The `#[sqlx::test]` harness flakes under contention.** The panic sits inside `sqlx-core`
   (`database "_sqlx_test_…" does not exist`, `PoolTimedOut`, `already exists`), never in an
-  assertion, and it lands on a different unrelated test each run. Use `just test-rust`, which runs
-  with `--test-threads=1` for this reason (`justfile:66-67`).
+  assertion, and it lands on a different unrelated test each run. Locally, use `just test-rust`,
+  which runs with `--test-threads=1` (`justfile:66-67`); `cargo nextest run`, as CI does, is safe
+  in parallel because each test gets its own process. Most contention comes from other worktrees
+  gating on the same Postgres at once.
 - **Classify by isolation.** Re-run each named failure on its own. A flake does not survive
   isolation; a real failure repeats and sits in code you touched. Say in the PR which failures
   were flakes and that you re-ran them.
@@ -106,8 +108,9 @@ stays green, the test does not defend the fix. Four shapes have precedent:
   thin `get_x` and an `x(pool, …)` that holds the logic; never add a test-only constructor to a
   permission type.
 - **A real request through the real router** with `scope_test_support::send`
-  (`backend/src/scope_test_support.rs:162`). It returns a `StatusCode` only, so it covers authz
-  gates, not response bodies.
+  (`backend/src/scope_test_support.rs:162`), which returns the status for an authz gate, or
+  `send_json` (`:193`), which also returns the response body when the test must check what the
+  handler returned.
 - **A test on the `jobs.rs` pass itself** when a background job is the writer. The private
   `*_once` functions are the recurring blind spot; `mod ace_reminder_tests`
   (`backend/src/jobs.rs:1711`) is the precedent. Anchor times on `Utc::now()`, not a calendar date.
