@@ -87,7 +87,7 @@ export function SectorGrid({
               </th>
               <td className={cn(STICKY, "left-28 w-14 min-w-14 border-r border-line-soft px-1 py-1 text-right text-ink-2")}>
                 {onLimitChange ? (
-                  <LimitInput sectorId={row.id} limit={row.limit} onCommit={onLimitChange} />
+                  <SectorLimitInput sectorId={row.id} limit={row.limit} onCommit={onLimitChange} />
                 ) : (
                   <span className="px-1">{row.limit}</span>
                 )}
@@ -130,7 +130,7 @@ export function SectorGrid({
 }
 
 /** The editable limit: commits a positive whole number on Enter or blur, reverts on Escape. */
-function LimitInput({
+export function SectorLimitInput({
   sectorId,
   limit,
   onCommit,

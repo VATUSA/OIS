@@ -53,6 +53,7 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "events.reminder": [["my-ace-claims"]],
   "events.ace": [["event-ace"], ["my-ace-claims"]],
   "flow.runway": [["runway"], ["runway-configs"]],
+  "flow.sector_limits": [["sector-limits"]],
 };
 
 /**

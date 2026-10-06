@@ -2108,6 +2108,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/sector-limits/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s sectors, each with its limit. An ARTCC with no sector data answers with no sectors, so
+         *     the page can name the gap rather than draw an empty table.
+         */
+        get: operations["list_sector_limits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-limits/{artcc}/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set one sector's limit. Only a positive whole number that differs from the stored value is written:
+         *     zero or negative is refused (400) and leaves any override in place, and the stored value is a no-op
+         *     (200, nothing written). Setting the default removes the override. There is no delete.
+         */
+        put: operations["set_sector_limit"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/traffic": {
         parameters: {
             query?: never;
@@ -6555,6 +6596,41 @@ export interface components {
             permissions: Record<string, never>;
             role_names?: string[] | null;
         };
+        /** @description One sector and the occupancy limit its counts are judged against (#722). */
+        SectorLimitBody: {
+            /**
+             * Format: int32
+             * @description The sector's limit: its override, or the default.
+             */
+            limit: number;
+            /** @description Whether `limit` is a stored override rather than the default. */
+            overridden: boolean;
+            sector_id: string;
+            /** @description The sector's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume. */
+            tier: string;
+        };
+        /** @description An ARTCC's sectors with their occupancy limits (#722). An ARTCC with no sector data has no sectors. */
+        SectorLimitsBody: {
+            artcc: string;
+            /**
+             * Format: int32
+             * @description What a sector reads until it is overridden.
+             */
+            default_limit: number;
+            /**
+             * @description Whether the caller may set this ARTCC's limits (`flow.sector_limits.update`, nationally or for
+             *     this ARTCC).
+             */
+            editable: boolean;
+            /** @description Ordered by `sector_id`. */
+            sectors: components["schemas"]["SectorLimitBody"][];
+        };
+        /**
+         * @description A bin's load against its sector's limit, drawn as `--level-ok` / `--level-watch` / `--level-over`
+         *     (`SectorGrid`'s `LoadLevel` in `@ois/ui`).
+         * @enum {string}
+         */
+        SectorLoadLevel: "ok" | "watch" | "over";
         /**
          * @description One ATC sector volume as the admin sector map draws it (#602): a stored row of
          *     `flow.airspace_sector` (#594), straight from the in-memory cache.
@@ -6636,6 +6712,11 @@ export interface components {
         SetRateLimitRequest: {
             /** Format: int32 */
             rate_limit_per_min?: number | null;
+        };
+        /** @description Set a sector's occupancy limit: a positive whole number. Setting the default removes the override. */
+        SetSectorLimitRequest: {
+            /** Format: int32 */
+            limit: number;
         };
         /** @description A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national. */
         SetServiceAccountPermissionsRequest: {
@@ -14910,6 +14991,121 @@ export interface operations {
                 };
                 content?: never;
             };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sector_limits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorLimitsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_sector_limit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSectorLimitRequest"];
+            };
+        };
+        responses: {
+            /** @description The sector's limit after the request, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorLimitBody"];
+                };
+            };
+            /** @description `limit` is not a positive whole number; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_limits.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_limits.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such sector in this ARTCC */
             404: {
                 headers: {
                     [name: string]: unknown;
