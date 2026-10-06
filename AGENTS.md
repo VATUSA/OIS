@@ -100,8 +100,10 @@ extractor.
 2. `default_roles()` in `crates/ois-core/src/catalog.rs`
 3. `ASSIGNABLE_USER_ROLES` in `backend/src/repos/access.rs`
 
-Baseline access every signed-in member gets is a **hybrid**: a per-login direct-grant seed
-(`BASELINE_SELF_SERVICE_PERMISSIONS` in `handlers/auth.rs`) plus the `USER` role's `role_permissions`.
+Baseline access every signed-in member gets is the **`USER` group** (`BASELINE_ROLE` in
+`backend/src/handlers/auth.rs`), granted at sign-in. Its content is the group's
+`access.role_permissions` rows (seeded by `0094_seed_role_permissions.sql`), so changing the baseline
+needs no backfill (#544).
 
 ### The API contract → typed client
 
@@ -277,20 +279,21 @@ by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both
 
 ## Testing & verification
 
-- **Rust tests are self-contained and run in parallel** (`cargo nextest run`, no shared global
-  state). Pure logic (the trajectory model, permission tree, metering) has unit tests; add tests
+- **Rust tests are self-contained** (no shared global state). CI runs them in parallel under
+  `cargo nextest run`; locally use `just test-rust` (`justfile`), because threads sharing one
+  `cargo test` process collide in the sqlx test harness. Pure logic (the trajectory model, permission tree, metering) has unit tests; add tests
   alongside such code.
 - **Never hit real external APIs in tests** (VATSIM, VATUSA, Open-Meteo, AWC). The feed and clients
   are structured so the pure logic is testable without the network.
 - **The web gates are `pnpm lint` and `pnpm typecheck`.** Lint is ESLint (root `eslint.config.mjs`)
   over `web` and `@ois/ui`: `react-hooks/rules-of-hooks` and `@typescript-eslint/no-unused-vars` are
-  errors, `react-hooks/exhaustive-deps` is a warning. Typecheck only tells the truth after the client
+  errors, and so is `react-hooks/exhaustive-deps` (since #329). Typecheck only tells the truth after the client
   is regenerated for any contract change (see codegen above).
 - **DB-touching repo logic** can be covered by a `#[sqlx::test]` (real Postgres, one throwaway
   database per test, migrations applied automatically — no `migrations = "..."` attribute needed,
   it auto-discovers `backend/migrations`). CI provisions a `postgres:17` service for the `rust` job
   and exports `DATABASE_URL` to it; to run the same tests locally, point `DATABASE_URL` at your dev
-  Postgres (`just up` starts it) and run `cargo test` as usual — no other setup. Since the repo
+  Postgres (`just up` starts it) and run `just test-rust` — no other setup. Since the repo
   layer uses runtime queries (no compile-time `sqlx` macros), the DB need not be present to
   *compile*, only to *run* a `#[sqlx::test]`. Handler-level / end-to-end behavior is still generally
   verified by running the full stack (`just up && just backend`) and exercising the endpoint.
