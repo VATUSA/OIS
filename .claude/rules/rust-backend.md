@@ -10,9 +10,10 @@ paths:
 
 Loads when you read or edit Rust workspace files. The architecture (handler → repo → model, the
 permission markers and their three-in-sync rule, the API contract and client regeneration, the
-trajectory model's three callers, the feed's no-DB rule, realtime, auditing) is in `AGENTS.md`
-§ Architecture, and the error envelope and auth model are in § Conventions & gotchas. Read those;
-this file adds what has bitten Rust changes and does not repeat them.
+trajectory model and every caller it reaches, the feed's no-DB rule, realtime, auditing) is in
+`AGENTS.md` § Architecture, with the callers listed under § The trajectory / ETA model, and the
+error envelope and auth model are in § Conventions & gotchas. Read those; this file adds what has
+bitten Rust changes and does not repeat them.
 
 Sources: OIS lessons from #433, #436, #457, #508, #591, #537, and the `just ci` / CI comparison
 in `AGENTS.md` § Commands.

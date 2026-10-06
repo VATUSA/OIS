@@ -27,9 +27,10 @@ affect someone (what an operator, controller, or pilot would see), and the risk 
 
 **When you explain how data moves, draw a data-flow diagram inline in the terminal.** Not
 optional. A described flow is harder to check than a drawn one, and most OIS questions are flow
-questions: the VATSIM feed into the `AppState` caches and on to the trajectory model's three
-callers, or a handler enqueueing to `integration.outbound_jobs` for the bot to lease. Never create
-or publish a file or artifact for a diagram.
+questions: the VATSIM feed into the `AppState` caches and on to the trajectory model's callers
+(listed in `AGENTS.md` § The trajectory / ETA model), or a handler enqueueing to
+`integration.outbound_jobs` for the bot to lease. Never create or publish a file or artifact for a
+diagram.
 
 **Name an issue as `#123 [short summary] (Status)`, never a bare number.** The canonical rule,
 including where the status comes from, is in `docs/github-issues.md` § Referring to an issue.
