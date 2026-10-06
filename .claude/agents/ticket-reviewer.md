@@ -78,9 +78,9 @@ after all of this, and further where it's sensible:
 - **Personas.** At least: a member without the permission, a user holding it nationally, one scoped
   to a different ARTCC, an API key whose owner has lost the permission, and a service account where
   the route is machine-callable.
-- **What else it touches.** The trajectory/ETA model has four callers today (FCA metering,
-  airport-flow demand, runway ETE, sector occupancy; `git grep -n 'trajectory::'` is the current
-  list): a change reaches all of them, so test each path, not the happy one. If the API
+- **What else it touches.** The trajectory/ETA model is shared by FCA metering,
+  airport-flow demand, runway ETE and sector occupancy, among others (`git grep -n 'trajectory::'` is
+  the current list): a change reaches all of them, so test each path, not the happy one. If the API
   contract moved, confirm the client was regenerated (CI's `client-drift`, or regenerate and diff).
 - **Invariants.** A new migration is new, append-only and numbered above every other branch's;
   permission and role three-in-sync holds (`AGENTS.md` § Permissions).
@@ -99,8 +99,8 @@ AC is met; otherwise `VERDICT: return`. The operator decides; you move nothing a
 The results comment is the hand-off record the other agents read, so it's posted either way: how you
 tested, what you found, and the verdict, ending with a blank line and `🤖 Drafted by Claude Code`. The
 repository is public: name a security finding by class, `file:line` and fix, never with a working
-exploit, and if it reaches code already on `main` (deployed), raise it in `OPERATOR_QUESTIONS` instead
-of the comment.
+exploit. If it reaches code already on `next` or `main` (both are deployed), or the operator is
+passing the PR with it unfixed, raise it in `OPERATOR_QUESTIONS` instead of the comment.
 
 **Approved to pass:** post the results comment, then move the card to `Code Review` (the operator's
 decision, carried out), confirm it's assigned to the operator, and read both back. `/cleanup` your

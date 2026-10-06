@@ -35,14 +35,14 @@ handler reached through the router, not only the helper it calls).
 | Kind | Where it lives | Test it with |
 | --- | --- | --- |
 | Pure logic: trajectory, permission tree, parsers | `backend/src/feed/`, `crates/ois-core/` | a `#[cfg(test)] mod tests` unit test beside the code |
-| FCA metering | `backend/src/handlers/flow.rs` | unit tests on its pure steps, plus a router-level test |
+| FCA metering | `backend/src/feed/fca.rs` (pure steps), `backend/src/handlers/flow.rs` (orchestration) | unit tests on the steps, plus a router-level test |
 | SQL | `backend/src/repos/` | `#[sqlx::test]` against a real throwaway database |
 | Handlers and routes | `backend/src/handlers/`, `router.rs` | a router-level test through `build_router` |
 | Migrations | `backend/migrations/` | a `#[sqlx::test]` that exercises the new schema (migrations apply automatically) |
 | The feed | `backend/src/feed/` | a unit test on the pure function over an in-memory snapshot and caches |
-| Jobs | `backend/src/jobs.rs` | `#[sqlx::test]` on the `*_once` pass the scheduler calls |
+| Jobs | `backend/src/jobs.rs` | `#[sqlx::test]` on the job's `*_once` pass (extract one if the logic is inline) |
 | Bot | `discord/src/jobs/`, `discord/src/interactions/` | `#[cfg(test)]` unit tests on the pure payload and parsing logic; nothing talks to Discord |
-| Web | `web/src/`, `packages/ui/` | vitest `*.test.ts(x)`; DOM tests are `*.dom.test.tsx` and opt in with `// @vitest-environment jsdom` |
+| Web | `web/src/`, `packages/ui/` | vitest `*.test.ts(x)`; DOM tests opt in with a `// @vitest-environment jsdom` first line and are usually named `*.dom.test.ts(x)` |
 | "X never happens" (nothing stores a token, no route calls Y) | anywhere | a source-scan guard (`*.guard.test.ts`), proven by planting the forbidden call in a throwaway file |
 
 Read what each file actually changed, not just its name.
@@ -79,8 +79,8 @@ predicate, or a test against a one-row table passes for a query that deletes eve
 
 **Handlers** — drive the real router: `crate::router::build_router(state).oneshot(request)`.
 `backend/src/scope_test_support.rs` has a minimal `test_state`, `seed_user`, `grant`, `deny_scoped`,
-`session_cookie`, and `send` (any method, returns the status) and `send_json` (a GET, returns the status
-and the body). Assert the status **and** what changed: the body for a read, the database for a write.
+`session_cookie`, and `send` (any method and JSON body, returns the status) and `send_json` (any
+method, no request body, returns the status and the decoded body). Assert the status **and** what changed: the body for a read, the database for a write.
 For a permissioned route, three tests at least: allowed, missing permission, and (for ARTCC-scoped
 data) the permission at the wrong ARTCC. For those handlers a missing permission is 401 and a wrong
 facility 403; assert which one fired.
@@ -89,14 +89,18 @@ facility 403; assert which one fired.
 caches. For a cache-plus-refresh-job pattern, test the write handler's force-reload too, not just the
 loader.
 
-**Jobs** — a `jobs.rs` worker's logic lives in a private `*_once(pool, …)` pass, and that pass is
-where OIS fixes have gone untested before. Test the pass itself with `#[sqlx::test]`, times anchored
-on `Utc::now()`; `mod ace_reminder_tests` in `backend/src/jobs.rs` is the model.
+**Jobs** — test the code the scheduler actually runs, not only the repo function it calls; that gap
+is where OIS fixes have gone untested before. Many jobs have a `*_once` pass; test it with
+`#[sqlx::test]`, times anchored on `Utc::now()` (`mod ace_reminder_tests` in `backend/src/jobs.rs` is
+the model). Others keep their logic, cutoff arithmetic included, inline in the `spawn_*` closure:
+move it into a `*_once` pass first, taking `now` as a parameter so a boundary test can fix the time
+(`diagnostics_report_prune_once` is the shape), then test that.
 
 **Web** — vitest. Seed the TanStack Query cache with `queryClient.setQueryData(...)` rather than
 stubbing `fetch`: `web/src/test/no-network.ts` blocks the network, and the generated client captures
 `fetch` when it loads, so a stub in the test is too late. To assert what is sent, mock the client
-module (`vi.mock("@/lib/api", …)`, as `web/src/components/event-banner.dom.test.tsx` does). Use the
+module (`vi.mock("@/lib/api", …)`) and assert the call, as
+`web/src/pages/admin/service-accounts.dom.test.tsx` does for a write. Use the
 generated client's types for fixtures so a contract change breaks the test at compile time. Assert
 what the user sees and what is sent, not component internals.
 

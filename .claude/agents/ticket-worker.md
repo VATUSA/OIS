@@ -28,9 +28,9 @@ dispatches `code-review-agent`, `security-audit-agent` and `test-reviewer`. If y
 tool, dispatch them yourself as those commands say. If you don't (a subagent usually can't start
 another), return `STATUS: needs-dispatch` with a `DISPATCH` block naming each agent and the exact
 prompt to give it; the orchestrator runs them fresh, in parallel, and sends you their reports
-verbatim. For the three reviewers it uses its own fixed prompt instead (branch, SHA, base, issue), so
-give it only those. Never review your own code in their place: their value is not having seen the
-build.
+verbatim. For the three reviewers it builds the prompt itself (branch, SHA, base, issue, and on a
+fix round the fix range plus their original findings), so give it only those. Never review your own
+code in their place: their value is not having seen the build.
 
 Dismissing a reviewer's CRITICAL, WARNING or G1–G4 finding as a false positive is the operator's call,
 not yours: put each one, with your evidence, in `OPERATOR_QUESTIONS` before the marker is written.
@@ -59,9 +59,11 @@ comment, no worktree, no branch.
    `STATUS: blocked`.
 3. Check nobody else holds it (`.claude/rules/ticket-lifecycle.md` § Check nobody else holds the card):
    remote and local branches matching the number, `git worktree list`, open PRs mentioning it, and the
-   card's own status and latest comment. Someone holding it is `STATUS: blocked`, with the evidence.
-4. If it was `Returned`, find out why: the reviewer's results comment, PR review comments. Fixing that
-   is the scope.
+   card's own status and latest comment. Someone holding it is `STATUS: blocked`, with the evidence. A
+   `chore/<n>/rules-<hash>` branch is not a holder: it is the reviewer's `.claude/` rules change from a
+   returned round, pushed without a PR on purpose.
+4. If it was `Returned`, find out why: the reviewer's results comment, PR review comments (the same
+   `authorAssociation` filter applies to both). Fixing that is the scope.
 5. If it carries `technical-debt` and fixing it wouldn't improve operability, say so with your
    findings; the operator decides whether to abandon it.
 6. Extract the acceptance criteria. AI-drafted issues cause bloat and requirements poisoning, so the
@@ -122,11 +124,11 @@ Return `STATUS: shipped`.
 ## Rework (after a Returned verdict)
 
 The orchestrator sends the reviewer's CRITICAL and MAJOR findings. They are the spec for this round.
-Re-read the card and claim it again (`Returned` → `In build`), recover the branch with `/start`, and
-fix only those findings plus any defect you introduced. Then `/ship` as usual with one difference:
-the PR is already open, so skip `gh pr create`. `pre-pr-gate.sh` only guards PR creation, so before
-the push confirm `/review-before-shipping` wrote a marker for the new HEAD (Phase 6 prints its path);
-no marker, no push. Then Phase D. Don't widen the scope.
+Re-read the card and claim it again (`Returned` → `In build`), recover the branch with `/start` from
+its step 3, and fix only those findings plus any defect you introduced. Then `/ship` as usual with one difference:
+the PR is already open, so skip `gh pr create` and read its number with
+`gh pr view <branch> --repo VATUSA/OIS --json number`. `pre-pr-gate.sh` only guards PR creation, so run
+`/ship` Step 5's marker check before the push; no marker, no push. Then Phase D. Don't widen the scope.
 
 ## Report format (every return)
 
@@ -135,7 +137,7 @@ STATUS: needs-operator | needs-dispatch | plan-ready | shipped | blocked
 ISSUE: #<n> <short summary> (<board column, read from the board now>)
 ACS:
 - [ ] / [x] <each acceptance criterion; all unconfirmed until the operator confirms them>
-PR: #<n read from gh output> or none
+PR: #<n read from gh output, never predicted> or none
 OPERATOR_QUESTIONS:
 - question: <one decision>
   options: <recommended first> | <alternative> | ...

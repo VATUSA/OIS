@@ -32,7 +32,8 @@ worker returns an `OPERATOR_QUESTIONS` block instead and waits for the relayed a
 - Check nobody else holds it (`.claude/rules/ticket-lifecycle.md` § Check nobody else holds the card):
   `git fetch origin`, then `git branch -r --list "*$ARGUMENTS*"`, `git branch --list "*/$ARGUMENTS/*"`,
   `git worktree list`,
-  and the card's own status read just now.
+  and the card's own status read just now. A `chore/<n>/rules-<hash>` branch with no PR is a
+  reviewer's `.claude/` rules change from a returned round, not a holder.
 - On **yes**, immediately claim it so a concurrent agent doesn't:
   `.claude/scripts/board-status.sh $ARGUMENTS "In build"`.
 

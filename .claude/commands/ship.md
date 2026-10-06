@@ -50,14 +50,19 @@ fresh review agents, fixes CRITICAL/MAJOR findings as new commits, and writes th
 for the final HEAD. If you commit anything after it finished, HEAD moved: run it again.
 
 ## Step 5 — Push, and prove it
+**Rework on an open PR:** a push updates the PR directly and `pre-pr-gate.sh` only guards PR creation,
+so first prove HEAD has a fresh marker, the same test the hook makes:
+```bash
+bash -c 'm="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/markers/review-shipping/$(git rev-parse HEAD)"
+[[ -f "$m" ]] && (( $(date +%s) - $(cat "$m") <= 7200 )) && echo "marker ok" || { echo "BLOCKER: no fresh marker for HEAD"; exit 1; }'
+```
+No `marker ok`, no push: run `/review-before-shipping`.
 ```bash
 git push -u origin {branch}
 git ls-remote origin refs/heads/{branch}   # must print exactly the SHA below
 git rev-parse HEAD
 ```
-Compare the two SHAs yourself. **Rework on an open PR:** a push updates the PR directly and
-`pre-pr-gate.sh` only guards PR creation, so before pushing confirm the marker for HEAD exists (the
-path `/review-before-shipping` Phase 6 printed); no marker, no push. A push has failed silently before (`.claude/rules/git-and-worktrees.md`
+Compare the two SHAs yourself. A push has failed silently before (`.claude/rules/git-and-worktrees.md`
 § A push isn't done until the remote says so); nothing after this step happens until they match.
 Chain later steps on the push with `&&`, never `;`.
 
@@ -76,9 +81,10 @@ EOF
 )"
 ```
 `pre-pr-gate.sh` refuses this unless HEAD carries a fresh review marker; if it blocks, go back to
-Step 4. **Rework on an open PR:** skip `gh pr create`; the Step 5 push already updated the PR. **Read the PR number from `gh`'s output** (the `/pull/<n>` URL it prints). Never predict it:
-concurrent sessions take "the next number". If the branch is stacked on another open PR, say so on the
-body's first line.
+Step 4. **Rework on an open PR:** skip `gh pr create`; the Step 5 push already updated the PR. Read
+its number with `gh pr view {branch} --repo VATUSA/OIS --json number`. **Read the PR number from
+`gh`'s output** (the `/pull/<n>` URL it prints). Never predict it: concurrent sessions take "the
+next number". If the branch is stacked on another open PR, say so on the body's first line.
 
 OIS **has** CI (`.github/workflows/ci.yml`), and it runs checks `just ci-full` can't (the desktop
 matrix). Before you report a gate green, read the PR's check-runs once (`gh pr checks <n>`) and report

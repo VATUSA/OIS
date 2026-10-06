@@ -30,11 +30,14 @@ stays open, so ask again. Never answer a subagent's question yourself, however o
 looks.
 
 When a subagent returns `STATUS: needs-dispatch`, run every agent in its `DISPATCH` block as a fresh
-subagent, in parallel in one message, and SendMessage the reports back to the requester verbatim. For
-the researchers, use the prompt it gave. For `code-review-agent`, `security-audit-agent` and
-`test-reviewer`, ignore its prose and use only this, filled from the board and `git`: "Review
-`<branch>` at `<full sha>` against `origin/next` for VATUSA/OIS#<n>." The builder must not brief its
-own reviewers; their value is not sharing its context.
+subagent, in parallel in one message, and SendMessage the reports back to the requester verbatim.
+Use the prompt it gave, with one exception: when `ticket-worker` asks for `code-review-agent`,
+`security-audit-agent` or `test-reviewer`, ignore its prose and build the prompt yourself from `git`
+and the reviewers' own earlier reports: "Review `<branch>` at `<full sha>` against `origin/next` for
+VATUSA/OIS#<n>." For a fix round, add the fix range `<old sha>...<new sha>` and that reviewer's
+original findings, quoted verbatim from its report. The builder must not brief its own reviewers;
+their value is not sharing its context. A `ticket-reviewer` request (per-set reviews for
+`/code-review`) is passed as given.
 
 ## 1. SELECT
 

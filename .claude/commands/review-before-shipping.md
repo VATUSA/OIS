@@ -28,8 +28,8 @@ Under `/ticket-loop` this runs inside the `ticket-worker` subagent: every "ask m
 `git diff origin/next...HEAD --stat` (three dots: two dots renders everything merged into `next`
 since you forked as a deletion), then read the full diff. Know exactly what was added, changed and
 removed, and which of these it reaches: the trajectory/ETA model (`backend/src/feed/trajectory.rs`
-and every caller `git grep -n 'trajectory::'` lists), the permission/role three-in-sync invariants, the OpenAPI→client contract,
-a migration, the feed subsystem.
+and every caller `git grep -n 'trajectory::'` lists), the permission/role three-in-sync invariants,
+the OpenAPI→client contract, a migration, the feed subsystem.
 
 ## Phase 2 — Gates
 
@@ -92,7 +92,9 @@ is my call, not yours: ask me (under `/ticket-loop`, an `OPERATOR_QUESTIONS` ent
 evidence before the marker is written.
 
 **Prove the tests can fail.** `test-reviewer` is read-only, so it describes mutations rather than
-running them. Run each one it describes, and for a fix branch revert the actual bug, following
+running them. Run each one it describes; mutate every case `test-quality.md` makes mandatory that
+the diff touches (a permission or scope check, a destructive statement, a time window, a dedup key, a
+tuning constant); and for a fix branch revert the actual bug. Follow
 `.claude/rules/test-quality.md` § Prove the test can fail (commit a checkpoint first; confirm the
 mutation applied; never mutate while a suite is building in the same tree). A test that stays green is
 a MAJOR. Record each mutation and whether it went red for the Phase 7 report.
@@ -136,8 +138,8 @@ two hours. Never copy a marker onto another SHA or write one for a review that d
 ## Phase 7 — Report and stop
 
 Report: the reviewed SHA; `just ci-full`'s summary (every SKIPPED step named); the scan result; each
-agent's verdict line; each mutation and whether it went red; what you fixed (with the fix commits); minor findings left as they are; and
-anything dismissed and why.
+agent's verdict line; each mutation and whether it went red; what you fixed (with the fix commits);
+minor findings left as they are; and anything dismissed and why.
 
 `/review-before-shipping` ends here. It does not push, open a PR, comment on the issue, or move the
 card; that is `/ship`.

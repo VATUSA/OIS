@@ -71,13 +71,15 @@ developer noise):
    priority, added to the board (`gh project item-add 7 --owner VATUSA --url <issue-url>`), set to
    `Triaging` (`.claude/scripts/board-status.sh <n> "Triaging"`), and the status read back. There is
    no triage agent here, so the triage goes in the body: what happens, what should happen, how to
-   reproduce, where you saw it, the Sentry issue link, and the blast-radius footer.
+   reproduce, where you saw it, the Sentry issue link, and the blast-radius footer. End the body with
+   `🤖 Drafted by Claude Code`. Read the issue number from `gh issue create`'s output; never predict
+   it.
 
    `VATUSA/OIS` is a **public** repository. Redact what Sentry captured (CIDs, names, IPs, tokens,
    query strings) before anything leaves it. A **security** regression (an authorization gap, a leaked
    credential, an exploitable input) never becomes an issue or a comment: take it to the operator
-   through AskUserQuestion and let them choose a private route, such as a GitHub security advisory. End it with `🤖 Drafted by Claude Code`. Read the issue number from `gh issue create`'s
-   output; never predict it.
+   through AskUserQuestion and let them choose a private route, such as a GitHub
+   security advisory.
 5. `/cleanup` the reproduction worktree.
 
 ## Assignment
