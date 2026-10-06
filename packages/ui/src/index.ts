@@ -61,6 +61,7 @@ export {
 export { ColorSwatches, type Swatch } from "./components/color-swatches";
 export {
   SectorGrid,
+  SectorLimitInput,
   type LoadLevel,
   type SectorGridCell,
   type SectorGridRow,

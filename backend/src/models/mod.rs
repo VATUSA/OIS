@@ -1536,6 +1536,37 @@ pub struct SectorVolumeBody {
     pub rings: Vec<Vec<[f64; 2]>>,
 }
 
+/// One sector and the occupancy limit its counts are judged against (#722).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorLimitBody {
+    pub sector_id: String,
+    /// The sector's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume.
+    pub tier: String,
+    /// The sector's limit: its override, or the default.
+    pub limit: i32,
+    /// Whether `limit` is a stored override rather than the default.
+    pub overridden: bool,
+}
+
+/// An ARTCC's sectors with their occupancy limits (#722). An ARTCC with no sector data has no sectors.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorLimitsBody {
+    pub artcc: String,
+    /// What a sector reads until it is overridden.
+    pub default_limit: i32,
+    /// Whether the caller may set this ARTCC's limits (`flow.sector_limits.update`, nationally or for
+    /// this ARTCC).
+    pub editable: bool,
+    /// Ordered by `sector_id`.
+    pub sectors: Vec<SectorLimitBody>,
+}
+
+/// Set a sector's occupancy limit: a positive whole number. Setting the default removes the override.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetSectorLimitRequest {
+    pub limit: i32,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
