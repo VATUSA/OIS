@@ -30,9 +30,29 @@ failed refresh keeps the current table.
 ## Containment
 
 **Containment** (`SectorVolume::contains`, `feed/sectors.rs`): laterally inside any ring, and
-`base_alt_ft <= altitude < top_alt_ft`. The band is **half-open**, so a sector's top is the next stratum's
-floor and a flight is never in two strata at once. An unknown altitude fails open: laterally inside counts.
+`base_alt_ft <= altitude < top_alt_ft`. The band is **half-open**, so at a shared boundary altitude a
+sector's top is the next stratum's floor and stacked strata never both claim it. Bands can still
+*overlap*: the source's enroute Lows start at the surface over the TRACONs, so KATL at 3,000 ft is inside
+both `ZTL 70` (0–4,000) and `ZTL 59` (0–23,000). An unknown altitude fails open: laterally inside counts.
 It tests one altitude, the one supplied, not flow's "filed or current" rule.
+
+**Counting: TRACON precedence (#726)** (`SectorTable::counting`, `feed/sectors.rs`). Containment is not
+counting. Of the volumes that contain a fix, if any has tier `approach` (`APPROACH_TIER`), only the
+approach volumes count it; otherwise every containing volume does.
+
+- Precedence is **global, not per ARTCC**: a ZJX approach volume suppresses a ZMA enroute volume over it.
+  Callers pass the whole table, never one facility's slice.
+- It holds only while the fix is in the approach band: it releases at the TRACON's top (the half-open
+  band puts the top in the stratum above) and laterally outside the TRACON.
+- A fix with an unknown altitude laterally inside a TRACON counts in the TRACON only.
+- Approach-vs-approach and enroute-vs-enroute overlaps between different sectors are not resolved; each
+  counts.
+
+**Source gap: ZSE has no TRACON volumes.** At the pinned vTSD commit ZSE has Low and Ultra High volumes
+only, and KSEA and KPDX at 3,000 ft are inside no volume at all. The TRACONs exist in the same repo's
+`Data/tracon-boundaries.json`, but without altitudes, so OIS invents nothing; the data is #727's. The
+engine keeps the two states apart: a quiet TRACON is a row of zeros, while ZSE has no approach row at
+all, which the TRACON view (#725) should report as "no TRACON sector data" rather than render as quiet.
 
 ## Sector occupancy (#721)
 
@@ -40,8 +60,8 @@ The engine behind the sector-forecasting epic (#720). It is pure and DB-free, re
 above. It has no endpoint yet; #725 serves it.
 
 - **Cell value** (`feed/sector_load.rs`, `sector_loads`): for each sector and 15-minute bin, the **peak
-  one-minute concurrent occupancy**. Each minute it counts the distinct flights inside any of the sector's
-  volumes, and the cell is the busiest of the bin's fifteen minutes. It is not throughput: 40 flights
+  one-minute concurrent occupancy**. Each minute it counts the distinct flights counted by any of the
+  sector's volumes (Counting, above), and the cell is the busiest of the bin's fifteen minutes. It is not throughput: 40 flights
   transiting a sector, never more than 3 at once, read 3. A boundary skim within a minute, or a crossing
   between a sector's pieces, counts once.
 - **Bins** are absolute Zulu quarter-hours, 24 of them (6 h). The first is the quarter-hour containing now:
