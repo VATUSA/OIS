@@ -25,8 +25,9 @@ and turbo may replay a cached typecheck; use `pnpm typecheck --force` when it ma
 ## Lint
 
 `react-hooks/exhaustive-deps` is an **error** (`eslint.config.mjs:24`), not a warning. Fix the
-dependency list. When a disable is genuinely right, it carries a reason on the same line, as an
-`eslint-disable-next-line react-hooks/exhaustive-deps -- <why>`.
+dependency list. When a disable is genuinely right, a new one carries its reason on the same
+line: `eslint-disable-next-line react-hooks/exhaustive-deps -- <why>`. The existing disables
+predate this form; don't copy their reasonless shape.
 
 ## DOM tests
 

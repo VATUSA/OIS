@@ -40,7 +40,7 @@ Agents gate in parallel worktrees on one CPU and one Postgres, and that produces
 failure shapes that look like real ones.
 
 - **Starvation looks like a hang.** Before deciding a run is stuck, check `pgrep -fl 'cargo test'`,
-  `pgrep -c rustc`, and `uptime`.
+  `pgrep rustc | wc -l`, and `uptime`.
 - **The `#[sqlx::test]` harness flakes under contention.** The panic sits inside `sqlx-core`
   (`database "_sqlx_test_…" does not exist`, `PoolTimedOut`, `already exists`), never in an
   assertion, and it lands on a different unrelated test each run. Use `just test-rust`, which runs

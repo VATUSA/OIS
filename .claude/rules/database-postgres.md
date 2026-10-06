@@ -17,18 +17,23 @@ Sources: OIS lessons from #61, #436, #550, #569, #584, #585, #656, and #706.
 ## Picking a migration number: scan branches, not PRs
 
 `AGENTS.md` gives the open-PR scan. It is not enough: sessions push branches long before they
-open PRs, and #584's `0103` was on a branch with no PR when #585 picked the same number. Scan every
-remote branch, take the maximum plus one, and **re-scan immediately before pushing** (on #656 the
-re-scan fired: `0114` had been taken while the rework was gating).
+open PRs, and #584's `0103` was on a branch with no PR when #585 picked the same number. Scan
+`origin/next` and every other remote branch, pick above the highest, and **re-scan immediately
+before pushing** (on #656 the re-scan fired: `0114` had been taken while the rework was gating).
+The scan below exits non-zero on a clash, so chain the push on it:
 
 ```bash
+mine=0127   # the number your branch adds
 git fetch -q --prune
-for b in $(git branch -r | grep -v HEAD); do
-  git diff --name-only --diff-filter=A origin/next..."$b" -- backend/migrations 2>/dev/null
-done | grep -oE 'migrations/[0-9]+' | sort -u | tail -3
+taken=$( { git ls-tree --name-only origin/next backend/migrations/
+  for b in $(git branch -r | grep -v -e HEAD -e "origin/$(git branch --show-current)\$"); do
+    git diff --name-only --diff-filter=A origin/next..."$b" -- backend/migrations 2>/dev/null
+  done; } | grep -oE 'migrations/[0-9]+' | grep -oE '[0-9]+$' | sort -u )
+echo "highest taken: $(echo "$taken" | tail -1)"
+! echo "$taken" | grep -qx "$mine" && git push -u origin "$(git branch --show-current)"
 ```
 
-Chain the push on that scan, so a collision stops the push instead of printing a warning above it.
+
 A gap is harmless and renumbering upward is always safe; a duplicate half-migrates the database at
 startup (`.github/scripts/check-migration-versions.sh` explains why).
 
@@ -40,11 +45,12 @@ A `create table` migration's `check (status in (…))` may have been replaced by
 status or enum value:
 
 ```bash
-grep -rn "alter table <schema>.<table>" backend/migrations/ | grep -iE "constraint|check"
 grep -rn "check (<column>" backend/migrations/
+grep -rn -A3 "alter table <schema>.<table>" backend/migrations/
 ```
 
-Read the newest hit and use that value set. Do this in review too, not only when writing.
+The first grep finds every value set; `alter table` and `add constraint` usually sit on separate
+lines, so the second needs `-A`. Read the newest hit and use that value set. Do this in review too, not only when writing.
 
 ## Renaming a stored key needs a data migration
 
@@ -97,7 +103,7 @@ against it can fail with "migration N was previously applied but is missing". Cr
 database and point the backend at it on a spare port:
 
 ```bash
-docker compose exec postgres psql -U ois -d postgres -c 'create database ois_tmp;'
+psql postgres://ois:ois@127.0.0.1:5432/postgres -c 'create database ois_tmp;'
 DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois_tmp BIND_ADDR=127.0.0.1:3407 \
   ./target/debug/ois-backend
 ```

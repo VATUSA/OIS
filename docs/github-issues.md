@@ -251,8 +251,8 @@ Every issue has three touchpoints.
 2. **Moment 2, plan approved.** One comment: what you are building and any decision that changes
    what the issue asked for. Not the file list, the test plan, or the sequencing; the full plan
    goes in the PR.
-3. **Moment 3, work complete.** After `/ship` has pushed and opened the PR, one comment, then move
-   the card to **Testing Queue**. Draft to this template and check every line against the diff:
+3. **Moment 3, work complete.** After `/ship` has pushed and opened the PR, move the card to
+   **Testing Queue** and post one comment. Draft to this template and check every line against the diff:
 
    ```
    Done: <one sentence on what changed>. PR #<n>.
@@ -356,8 +356,8 @@ gh project item-add 7 --owner VATUSA --url https://github.com/VATUSA/OIS/issues/
   isn't on the board straight afterwards, wait and re-run the move as its own call. Never re-run
   `item-add`; that's how an issue lands on the board twice.
 - **Read the status back** (the `projectItems` query in
-  [Referring to an issue](#referring-to-an-issue)) before you report the issue as filed. Both
-  commands print nothing useful on success.
+  [Referring to an issue](#referring-to-an-issue)) before you report the issue as filed.
+  `item-add` prints nothing on success, and a printed "moved" line is not the resource.
 
 ### Moving a card
 

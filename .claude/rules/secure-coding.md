@@ -79,8 +79,8 @@ stack trace, or an internal type name.
 - **The CSP is security config.** Adding an origin to `connect-src`, `img-src`, or `script-src`
   in `desktop/src-tauri/tauri.conf.json:27` widens what the webview can reach. Justify each one.
 - **The session token is stored only where `desktop/src-tauri/src/auth.rs` stores it**: the OS
-  keychain, and on macOS an owner-only session file whose trade-off is documented in that module.
-  Never in web storage, a URL, or a log.
+  credential store on Windows and Linux, and on macOS, instead, an owner-only (0600) session file
+  whose trade-off that module documents. Never in web storage, a URL, or a log.
 - **The sign-in loopback origin is return-to only.** `http://127.0.0.1:8765` belongs in
   `OAUTH_RETURN_TO_ORIGINS`, never in `CORS_ALLOWED_ORIGINS` (#346; `AGENTS.md` § Environment
   variables).

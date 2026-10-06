@@ -90,7 +90,7 @@ usually have a primary cause and an interacting condition.
 
 A claimed limitation ends the investigation that would have disproved it. On #537 two such claims
 were false and both excused skipping work: "the auto-publish job has no principal to check" (it
-passed the row's `updated_by` as the actor) and "cancelling fires the cancel job" (only the manual
+passed the row's `updated_by` as the actor) and "canceling fires the cancel job" (only the manual
 cancel handler enqueued it). One of them was put to the owner as a constraint in a question, so
 their decision was built on it. Every gate passed.
 

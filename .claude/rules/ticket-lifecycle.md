@@ -11,9 +11,9 @@ Sources: ported from the house ticket-lifecycle rule; OIS lessons from #411, #44
 ## The order
 
 1. **Claim.** Read the whole thread, check nobody else holds it (below), move the card to
-   `In build`. `/start` steps 1–3.
-2. **Baseline.** Set up the worktree (`git-and-worktrees.md` § A fresh worktree) and run the gate
-   scaled to what the change can reach. Classify any red as pre-existing or introduced before
+   `In build`. `/start` steps 1–2.
+2. **Baseline.** Set up the worktree (`/start` steps 3–4; `git-and-worktrees.md` § A fresh
+   worktree) and run the gate scaled to what the change can reach. Classify any red as pre-existing or introduced before
    writing code.
 3. **Plan**, approved by the user unless a session goal or dispatch says otherwise. Moment 2 is
    posted after approval.

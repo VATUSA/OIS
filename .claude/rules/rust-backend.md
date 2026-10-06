@@ -66,7 +66,7 @@ Run `cargo clippy --workspace --all-targets -- -D warnings` on every Rust change
   (#537). Read the job before claiming it "has no principal".
 - **A tuning constant is a behavior change.** Retention and timeout constants get "tuned" without
   anyone noticing what they turn off (`backend/src/jobs.rs:1318`). Pin them as
-  `test-quality.md` § Pin the constant describes.
+  `test-quality.md` § What mutation proves describes (pin the constant).
 
 ## The contract
 
