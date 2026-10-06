@@ -2,8 +2,8 @@
 // before you have any reason to be signed in — and from the sidebar's User group once signed in
 // (#534).
 //
-// Each row links to `/api/v1/public/desktop/download/{platform}`, which resolves the current
-// release's installer server-side and redirects to it. That replaced a browser-side call to
+// Each row links to `/api/v1/public/desktop/download/{platform}` on the API origin, which resolves
+// the current release's installer server-side and redirects to it. That replaced a browser-side call to
 // `api.github.com` (#534), which failed in two ordinary situations and silently degraded every row
 // to the generic releases page:
 //
@@ -17,6 +17,7 @@ import * as React from "react";
 import {Apple, Download, Monitor, Terminal} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
+import {API_BASE} from "@/lib/api";
 
 /** Kept as an explicit secondary link, never as a silent substitute for a platform row. */
 const RELEASES_URL = "https://github.com/VATUSA/OIS/releases";
@@ -33,8 +34,16 @@ const PLATFORMS: Platform[] = [
   { id: "linux", label: "Linux", icon: Terminal },
 ];
 
-/** The server-side resolver. Which asset a platform maps to is decided in `handlers::desktop`. */
-const downloadHref = (platform: Platform["id"]) => `/api/v1/public/desktop/download/${platform}`;
+/**
+ * The server-side resolver. Which asset a platform maps to is decided in `handlers::desktop`.
+ *
+ * Built from `API_BASE` exactly as the typed client builds its URLs (trailing slash stripped, then
+ * the path appended), because in production the API is a different host from this page (#738). A
+ * root-relative path resolved against the web origin, where nginx answers with the SPA shell. An
+ * empty `API_BASE` (same-origin deployment) leaves the relative path, which is then correct.
+ */
+const downloadHref = (platform: Platform["id"]) =>
+  `${API_BASE.replace(/\/$/, "")}/api/v1/public/desktop/download/${platform}`;
 
 /** Best guess at the visitor's OS, only ever used to decide what to put first. */
 function detectPlatform(): Platform["id"] | undefined {

@@ -4,14 +4,23 @@ import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {DownloadPage} from "./download";
-
 vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => undefined}));
 
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 
-async function render() {
+/** The split-origin production shape: the web app and the API are different hosts (#738). */
+const API = "https://api-ois.vzdc.org";
+
+/**
+ * Mounts the page as deployed with `OIS_API_URL=apiUrl`. `API_BASE` is read once at module load from
+ * the `window.__OIS_API_URL__` that `deploy/40-ois-config.sh` writes, so the module graph is reset and
+ * re-imported per case: this drives the real config path rather than a mocked `API_BASE`.
+ */
+async function render(apiUrl = API) {
+  window.__OIS_API_URL__ = apiUrl;
+  vi.resetModules();
+  const {DownloadPage} = await import("./download");
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -32,6 +41,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  delete window.__OIS_API_URL__;
 });
 
 /**
@@ -55,16 +65,19 @@ describe("DownloadPage", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  // AC2: each row hands over an installer through our own origin, which the desktop CSP allows and
+  // #534 AC2: each row hands over an installer through our own API, which the desktop CSP allows and
   // GitHub cannot rate-limit. Which asset a platform resolves to is `handlers::desktop`'s decision.
-  it("links every platform at the server-side resolver", async () => {
+  //
+  // #738: the href is the *resolved* URL on the API origin. The literal relative path this case used
+  // to assert was the bug: in production it resolves against the web host, which serves the SPA shell.
+  it("links every platform at the server-side resolver on the API origin", async () => {
     const el = await render();
 
     expect(hrefs(el)).toEqual(
       expect.arrayContaining([
-        "/api/v1/public/desktop/download/macos",
-        "/api/v1/public/desktop/download/windows",
-        "/api/v1/public/desktop/download/linux",
+        `${API}/api/v1/public/desktop/download/macos`,
+        `${API}/api/v1/public/desktop/download/windows`,
+        `${API}/api/v1/public/desktop/download/linux`,
       ]),
     );
     expect(el.textContent).toContain("macOS");
@@ -85,10 +98,31 @@ describe("DownloadPage", () => {
 
     expect(rows).toHaveLength(3);
     for (const row of rows) {
-      expect(row.getAttribute("href")).toMatch(/^\/api\/v1\/public\/desktop\/download\//);
+      expect(row.getAttribute("href")?.startsWith(`${API}/api/v1/public/desktop/download/`)).toBe(true);
     }
     // Still reachable, deliberately, for older builds and formats this page doesn't list.
     expect(hrefs(el)).toContain("https://github.com/VATUSA/OIS/releases");
+  });
+
+  // #738 AC1: `OIS_API_URL` empty means same-origin ("empty → same-origin", 40-ois-config.sh). The
+  // relative path is then right, and must not become `undefined/api/…` or a thrown `new URL`.
+  it("stays same-origin when no API base is configured", async () => {
+    const el = await render("");
+
+    expect(hrefs(el)).toEqual(
+      expect.arrayContaining([
+        "/api/v1/public/desktop/download/macos",
+        "/api/v1/public/desktop/download/windows",
+        "/api/v1/public/desktop/download/linux",
+      ]),
+    );
+  });
+
+  // The typed client strips a trailing slash from its base; the links must land where it does.
+  it("does not double the slash when the API base ends in one", async () => {
+    const el = await render(`${API}/`);
+
+    expect(hrefs(el)).toContain(`${API}/api/v1/public/desktop/download/macos`);
   });
 
   // AC5: installers are unsigned on purpose (`release.yml` documents it), so the first launch warns.
