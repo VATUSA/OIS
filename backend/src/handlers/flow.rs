@@ -266,6 +266,34 @@ async fn require_fca_write_scope(
     }
 }
 
+/// An event FCA belongs to its event's planner lifecycle (`/events/{id}/fcas`: publish, archive,
+/// auto-publish), so the plain FCA routes write one only for a caller who holds `events.plan.update`
+/// (#736). Anyone else holding `flow.fca.*` at the ARTCC — TMU staff, and since #730 every rostered
+/// controller — is refused: an unpublished one answers `404`, as `fca_traffic` does, so the route never
+/// confirms it exists; a published one, which they can already see, answers `409 event_fca`.
+///
+/// Runs before the ARTCC scope check, so an out-of-scope caller can't learn from a `403` that a planned
+/// FCA exists.
+async fn require_event_fca_planner(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    if fca.event_id.is_none()
+        || !principal
+            .permission_scope(state, "events.plan.update")
+            .await?
+            .is_empty()
+    {
+        return Ok(());
+    }
+    if fca.event_status.as_deref() == Some("published") {
+        Err(ApiError::ConflictReason("event_fca"))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
 /// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
 /// points check, so a bad `mode` or `color` reached the table through them.
 pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
@@ -327,7 +355,7 @@ pub async fn create_fca(
     security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403), (status = 404))
+    responses((status = 200, body = FcaBody), (status = 400), (status = 401), (status = 403), (status = 404), (status = 409, description = "`event_fca`: an event FCA; manage it through /events/{id}/fcas"))
 )]
 pub async fn update_fca(
     State(state): State<AppState>,
@@ -342,6 +370,7 @@ pub async fn update_fca(
     let existing = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_event_fca_planner(&state, &principal, &existing).await?;
     // As it is AND where it's headed — so an FCA can't be taken from, or moved into, an ARTCC the
     // caller doesn't hold (relabelling a ZNY FCA as ZDC would otherwise open its releases, #626).
     require_fca_write_scope(
@@ -367,7 +396,7 @@ pub async fn update_fca(
     tag = "flow",
     security(("session" = ["flow.fca.delete"]), ("api_key" = ["flow.fca.delete"]), ("service_account" = ["flow.fca.delete"])),
     params(("id" = String, Path, description = "FCA id")),
-    responses((status = 204), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404), (status = 409, description = "`event_fca`: an event FCA; manage it through /events/{id}/fcas"))
 )]
 pub async fn delete_fca(
     State(state): State<AppState>,
@@ -381,6 +410,7 @@ pub async fn delete_fca(
     let existing = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_event_fca_planner(&state, &principal, &existing).await?;
     require_fca_write_scope(&state, &principal, "flow.fca.delete", &[&existing.artcc]).await?;
     if flow_repo::delete_fca(pool, &id).await? {
         state.publish(crate::realtime::topic::FCA);
@@ -5244,7 +5274,9 @@ mod fca_scope_tests {
     use sqlx::PgPool;
 
     use crate::repos::flow as flow_repo;
-    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+    use crate::scope_test_support::{
+        grant, seed_user, send, send_json, session_cookie, test_state,
+    };
 
     fn fca(artcc: &str) -> serde_json::Value {
         json!({ "name": format!("{artcc} FCA"), "artcc": artcc, "points": [[0.0, 0.0], [1.0, 1.0]] })
@@ -5269,6 +5301,196 @@ mod fca_scope_tests {
         grant(pool, &user, "flow.fca.update", artcc).await;
         grant(pool, &user, "flow.fca.delete", artcc).await;
         session_cookie(pool, &user).await
+    }
+
+    /// Event 7360 with one planned, one published and one archived FCA at ZDC.
+    async fn seed_event_fcas(pool: &PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (7360, 'Event FCA guard', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, artcc, enabled, event_id, event_status) values \
+               ('ev-planned',   'Planned', 'ZDC', true, 7360, 'planned'), \
+               ('ev-published', 'Published', 'ZDC', true, 7360, 'published'), \
+               ('ev-archived',  'Archived', 'ZDC', true, 7360, 'archived')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// `(name, deleted, event_status)` of a row, to prove a refused write changed nothing.
+    async fn row(pool: &PgPool, id: &str) -> (String, bool, Option<String>) {
+        sqlx::query_as(
+            "select name, deleted_at is not null, event_status from flow.fca where id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A CONTROLLER at `artcc`, granted the way the VATUSA sync grants it (#730), as a session cookie.
+    async fn controller(pool: &PgPool, artcc: &str) -> String {
+        use crate::repos::access::{GrantSource, set_user_role_scoped};
+        let user = seed_user(pool).await;
+        let mut tx = pool.begin().await.unwrap();
+        set_user_role_scoped(
+            &mut tx,
+            &user,
+            "CONTROLLER",
+            true,
+            Some(artcc),
+            GrantSource::Vatusa,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        session_cookie(pool, &user).await
+    }
+
+    /// #736: an event FCA belongs to the planner lifecycle. A controller holding `flow.fca.*` at ZDC is
+    /// refused both writes on ZDC's event FCAs: an unpublished one (planned or archived) `404`s (as
+    /// `fca_traffic` answers), a published one `409 event_fca`s. Nothing changes. A non-event ZDC FCA
+    /// stays theirs to write.
+    #[sqlx::test]
+    async fn a_controller_cannot_write_an_event_fca_through_the_plain_routes(pool: PgPool) {
+        seed_event_fcas(&pool).await;
+        let state = test_state(pool.clone(), Default::default());
+        let cookie = controller(&pool, "ZDC").await;
+        let uri = |id: &str| format!("/api/v1/flow/fcas/{id}");
+
+        for (id, refused) in [
+            ("ev-planned", StatusCode::NOT_FOUND),
+            ("ev-published", StatusCode::CONFLICT),
+            ("ev-archived", StatusCode::NOT_FOUND),
+        ] {
+            let before = row(&pool, id).await;
+            assert_eq!(
+                send(&state, Method::PUT, &uri(id), &cookie, Some(fca("ZDC"))).await,
+                refused,
+                "PUT {id}"
+            );
+            assert_eq!(
+                send(&state, Method::DELETE, &uri(id), &cookie, None).await,
+                refused,
+                "DELETE {id}"
+            );
+            assert_eq!(row(&pool, id).await, before, "{id} is unchanged");
+        }
+        let (status, body) = send_json(&state, Method::DELETE, &uri("ev-published"), &cookie).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.to_string().contains("event_fca"), "{body}");
+
+        // Positive control: the same controller still edits and deletes an ordinary ZDC FCA.
+        let owner = seed_user(&pool).await;
+        let plain = seed_fca(&pool, &owner, "ZDC").await;
+        assert_eq!(
+            send(&state, Method::PUT, &uri(&plain), &cookie, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &uri(&plain), &cookie, None).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// The guard runs before the ARTCC check: a controller elsewhere gets the same `404` for a planned
+    /// FCA as for one that doesn't exist, not a `403` that confirms it does.
+    #[sqlx::test]
+    async fn an_out_of_scope_controller_cannot_learn_a_planned_fca_exists(pool: PgPool) {
+        seed_event_fcas(&pool).await;
+        let state = test_state(pool.clone(), Default::default());
+        let cookie = controller(&pool, "ZTL").await;
+        assert_eq!(
+            send(
+                &state,
+                Method::DELETE,
+                "/api/v1/flow/fcas/ev-planned",
+                &cookie,
+                None
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::DELETE,
+                "/api/v1/flow/fcas/no-such-fca",
+                &cookie,
+                None
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+        // The same through `PUT`: the event check runs before the ARTCC scope check there too, or the
+        // scope's 403 would confirm the planned FCA exists.
+        for id in ["ev-planned", "no-such-fca"] {
+            assert_eq!(
+                send(
+                    &state,
+                    Method::PUT,
+                    &format!("/api/v1/flow/fcas/{id}"),
+                    &cookie,
+                    Some(fca("ZDC"))
+                )
+                .await,
+                StatusCode::NOT_FOUND,
+                "PUT {id}"
+            );
+        }
+    }
+
+    /// A planner keeps both routes: the event route, and the plain route for an event FCA.
+    #[sqlx::test]
+    async fn a_planner_still_manages_event_fcas(pool: PgPool) {
+        seed_event_fcas(&pool).await;
+        let state = test_state(pool.clone(), Default::default());
+        let planner = seed_user(&pool).await;
+        for p in ["events.plan.update", "flow.fca.update", "flow.fca.delete"] {
+            grant(&pool, &planner, p, Some("ZDC")).await;
+        }
+        let cookie = session_cookie(&pool, &planner).await;
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/events/7360/fcas/ev-planned",
+                &cookie,
+                Some(fca("ZDC"))
+            )
+            .await,
+            StatusCode::OK,
+            "the event route"
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                "/api/v1/flow/fcas/ev-published",
+                &cookie,
+                Some(fca("ZDC"))
+            )
+            .await,
+            StatusCode::OK,
+            "the plain route, for a planner"
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::DELETE,
+                "/api/v1/flow/fcas/ev-planned",
+                &cookie,
+                None
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
     }
 
     /// #730: a rostered controller's FCA access comes from the CONTROLLER group the VATUSA sync grants

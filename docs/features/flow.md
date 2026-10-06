@@ -140,6 +140,12 @@ answer with no credential:
 | `GET /flow/facilities` | `atc::list_flow_facilities` |
 | `GET /public/flight/{callsign}` | `flight_advisory` |
 
+`PUT`/`DELETE /flow/fcas/{id}` write an **event** FCA only for a caller holding `events.plan.update`
+(#736). Event FCAs belong to the planner lifecycle at `/events/{id}/fcas` (publish, archive,
+auto-publish), so anyone else holding `flow.fca.*` at the ARTCC is refused. An unpublished one answers
+`404`, so the route never confirms it exists; a published one answers `409 event_fca`. The check runs
+before the ARTCC scope check, so an out-of-scope caller can't learn from a `403` that one exists.
+
 `GET /flow/fcas/{id}/traffic` is public only for an FCA that `GET /flow/fcas` lists. For a **hidden**
 FCA it answers `404` to an anonymous caller, as if the FCA didn't exist. An unpublished event FCA
 (planned or archived) is served to a caller holding `events.plan.read`, the gate on
