@@ -80,10 +80,10 @@ predicate, or a test against a one-row table passes for a query that deletes eve
 **Handlers** — drive the real router: `crate::router::build_router(state).oneshot(request)`.
 `backend/src/scope_test_support.rs` has a minimal `test_state`, `seed_user`, `grant`, `deny_scoped`,
 `session_cookie`, and `send` (any method and JSON body, returns the status) and `send_json` (any
-method, no request body, returns the status and the decoded body). Assert the status **and** what changed: the body for a read, the database for a write.
-For a permissioned route, three tests at least: allowed, missing permission, and (for ARTCC-scoped
-data) the permission at the wrong ARTCC. For those handlers a missing permission is 401 and a wrong
-facility 403; assert which one fired.
+method, no request body, returns the status and the decoded body). Assert the status **and** what
+changed: the body for a read, the database for a write. For a permissioned route, three tests at
+least: allowed, missing permission, and (for ARTCC-scoped data) the permission at the wrong ARTCC.
+For those handlers a missing permission is 401 and a wrong facility 403; assert which one fired.
 
 **Feed** — the feed has no DB handle, so test the pure function over an in-memory snapshot and
 caches. For a cache-plus-refresh-job pattern, test the write handler's force-reload too, not just the

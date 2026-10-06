@@ -59,9 +59,11 @@ comment, no worktree, no branch.
    `STATUS: blocked`.
 3. Check nobody else holds it (`.claude/rules/ticket-lifecycle.md` § Check nobody else holds the card):
    remote and local branches matching the number, `git worktree list`, open PRs mentioning it, and the
-   card's own status and latest comment. Someone holding it is `STATUS: blocked`, with the evidence. A
-   `chore/<n>/rules-<hash>` branch is not a holder: it is the reviewer's `.claude/` rules change from a
-   returned round, pushed without a PR on purpose.
+   card's own status and latest comment. Someone holding it is `STATUS: blocked`, with the evidence.
+   Two things are not holders: a `chore/<n>/rules-<hash>` branch (the reviewer's `.claude/` rules
+   change from a returned round, pushed without a PR on purpose), and, on a `Returned` card, the
+   issue's own open PR and its head branch, which are the work to recover, unless a live worktree
+   shows another session using them.
 4. If it was `Returned`, find out why: the reviewer's results comment, PR review comments (the same
    `authorAssociation` filter applies to both). Fixing that is the scope.
 5. If it carries `technical-debt` and fixing it wouldn't improve operability, say so with your
@@ -124,11 +126,14 @@ Return `STATUS: shipped`.
 ## Rework (after a Returned verdict)
 
 The orchestrator sends the reviewer's CRITICAL and MAJOR findings. They are the spec for this round.
-Re-read the card and claim it again (`Returned` → `In build`), recover the branch with `/start` from
-its step 3, and fix only those findings plus any defect you introduced. Then `/ship` as usual with one difference:
-the PR is already open, so skip `gh pr create` and read its number with
-`gh pr view <branch> --repo VATUSA/OIS --json number`. `pre-pr-gate.sh` only guards PR creation, so run
-`/ship` Step 5's marker check before the push; no marker, no push. Then Phase D. Don't widen the scope.
+Re-read the card and claim it again (`Returned` → `In build`). Recover the PR's branch, not a new
+one: `/start` step 3 if a local worktree or branch survives; otherwise, since `/cleanup` deletes the
+local branch, check out the PR's head (`gh pr view <n> --json headRefName`, then `git worktree add
+<primary-checkout>/../ois-wt/<headRefName> <headRefName>`, which tracks `origin/<headRefName>`). Fix
+only those findings plus any defect you introduced. Then `/ship` as usual with one difference: the
+PR is already open, so skip `gh pr create` and read its number with `gh pr view <branch> --repo
+VATUSA/OIS --json number`. `pre-pr-gate.sh` only guards PR creation, so run `/ship` Step 5's marker
+check before the push; no marker, no push. Then Phase D. Don't widen the scope.
 
 ## Report format (every return)
 
