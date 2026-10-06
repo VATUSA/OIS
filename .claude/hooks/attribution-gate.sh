@@ -33,6 +33,8 @@ collect_files() {
             case "$arg" in
                 "$flag") FILES[${#FILES[@]}]="$(resolve_dir "$SEG_DIR" "${ARGS[$((i + 1))]:-}")" ;;
                 "$flag="*) FILES[${#FILES[@]}]="$(resolve_dir "$SEG_DIR" "${arg#"$flag"=}")" ;;
+                # A short flag with its value glued on: `-Fmsg.txt`.
+                "$flag"?*) [[ ${#flag} -eq 2 ]] && FILES[${#FILES[@]}]="$(resolve_dir "$SEG_DIR" "${arg#"$flag"}")" ;;
             esac
         done
         i=$((i + 1))
@@ -56,15 +58,51 @@ inspect() {
 for_each_command inspect
 [[ $WATCHED -eq 1 ]] || exit 0
 
+# A heredoc's body is part of the command text, so a message read from stdin is visible only when
+# the command carries one (`<<'EOF'`, not the here-string `<<<`).
+HAS_HEREDOC=0
+[[ "$COMMAND" =~ (^|[^<])\<\<-?[[:space:]]*[\'\"]?[A-Za-z_] ]] && HAS_HEREDOC=1
+
 found=0
+
+# Message text that arrives through a substitution: `--body "$(cat body.md)"`, `-m "$(< msg)"`.
+# Read the file it names; `$(cat <<'EOF' ...)` is a heredoc, already in the command text.
+SUBST_RE='\$\([[:space:]]*(cat[[:space:]]+|<[[:space:]]*)([^]()`$<>|;&[:cntrl:]]+)\)'
+rest="$COMMAND"
+while [[ "$rest" =~ $SUBST_RE ]]; do
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+    read -r -a names <<<"${BASH_REMATCH[2]}"
+    for name in "${names[@]}"; do
+        name="${name//[\'\"]/}"
+        case "$name" in -*|'') continue ;; esac
+        f="$(resolve_dir "$HOOK_CWD" "$name")"
+        if [[ -e "$f" ]]; then
+            FILES[${#FILES[@]}]="$f"
+        elif [[ $HAS_HEREDOC -eq 0 ]]; then
+            echo "BLOCKED: the message reads $name through \$(...), and that file cannot be found to check it."
+            found=1
+        fi
+    done
+done
+
 if printf '%s\n' "$COMMAND" | attribution_hits - >/dev/null; then
     echo "BLOCKED: this commit/PR text carries AI attribution:"
     printf '%s\n' "$COMMAND" | grep -niE "$ATTRIBUTION_RE" | sed 's/^/  /'
     found=1
 fi
 for f in "${FILES[@]}"; do
-    # `-` (stdin) is the heredoc, already scanned as part of the command text.
-    case "$f" in */-|-|*__Q__*|*'$'*) continue ;; esac
+    case "$f" in
+        */-|-|/dev/stdin|/dev/fd/0)
+            # stdin: a heredoc's body is already scanned as command text; a pipe or a redirect is not.
+            if [[ $HAS_HEREDOC -eq 0 ]]; then
+                echo "BLOCKED: the message comes from stdin (a pipe or a redirect), which this gate cannot read."
+                echo "  Write it to a file and pass the path: --body-file body.md / git commit -F msg.txt"
+                found=1
+            fi
+            continue
+            ;;
+        *__Q__*|*'$'*) continue ;;
+    esac
     # A file that does not exist yet is written by this same command (`cat > msg <<EOF && git
     # commit -F msg`), so its text is the command text scanned above.
     [[ -e "$f" ]] || continue

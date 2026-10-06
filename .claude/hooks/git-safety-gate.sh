@@ -17,7 +17,16 @@ exec >&2
 gate_read_command || exit 2
 case "$COMMAND" in *git*|*gh*) ;; *) exit 0 ;; esac
 
-PROTECTED_RE='^(refs/heads/)?(main|next)$'
+PROTECTED_RE='^(main|next)$'
+
+# The branch a push destination names: git expands `heads/next` and `refs/heads/next` to the same
+# ref, and `@` means HEAD.
+branch_of() {
+    local dst="$1"
+    [[ "$dst" == @ || "$dst" == HEAD ]] && dst="$(current_branch "$GIT_DIR_AT")"
+    dst="${dst#refs/}"
+    printf '%s' "${dst#heads/}"
+}
 
 block() {
     echo "BLOCKED: $1"
@@ -54,12 +63,9 @@ check_push() {
     fi
     for refspec in "${positional[@]:1}"; do
         refspec="${refspec#+}"
-        dst="${refspec##*:}"
-        if [[ "$dst" == HEAD ]]; then
-            dst="$(current_branch "$GIT_DIR_AT")"
-        fi
+        dst="$(branch_of "${refspec##*:}")"
         if [[ "$dst" =~ $PROTECTED_RE ]]; then
-            block "pushing to '${dst#refs/heads/}' is not allowed (refspec '$refspec')." \
+            block "pushing to '$dst' is not allowed (refspec '$refspec')." \
                 "main and next change only through a reviewed PR targeting next."
             return 2
         fi
@@ -139,9 +145,29 @@ check_add() {
     return 0
 }
 
+# gh_api_merge — 0 when WORDS is a `gh api` call that merges a PR: a PUT to `pulls/<n>/merge`, or the
+# GraphQL merge mutations. A GET on `pulls/<n>/merge` only asks whether it is merged, so it passes.
+gh_api_merge() {
+    [[ ${#WORDS[@]} -gt 1 && "${WORDS[0]##*/}" == gh ]] || return 1
+    local w prev="" api=0 put=0 endpoint=0
+    for w in "${WORDS[@]:1}"; do
+        if [[ $api -eq 0 ]]; then
+            [[ "$w" == api ]] && api=1
+            prev="$w"
+            continue
+        fi
+        case "$prev" in -X|--method) [[ "$w" =~ ^[Pp][Uu][Tt]$ ]] && put=1 ;; esac
+        [[ "$w" =~ ^(-X|--method=)[Pp][Uu][Tt]$ ]] && put=1
+        [[ "$w" =~ (^|/)pulls/[0-9]+/merge/?$ ]] && endpoint=1
+        [[ "$w" == graphql ]] && case "$COMMAND" in *mergePullRequest*|*enablePullRequestAutoMerge*) return 0 ;; esac
+        prev="$w"
+    done
+    [[ $put -eq 1 && $endpoint -eq 1 ]]
+}
+
 inspect() {
-    if gh_is pr merge; then
-        block "\`gh pr merge\` is not allowed. A human merges PRs after review."
+    if gh_is pr merge || gh_api_merge; then
+        block "merging a PR (\`gh pr merge\`, or the merge API through \`gh api\`) is not allowed. A human merges PRs after review."
         return 2
     fi
     git_parse || return 0

@@ -55,6 +55,16 @@ These have bitten before and are cheap to catch here:
 - A `RequirePermission` **absent** from a route that mutates state.
 
 ## Phase 5 — Report
-Confirm every gate is green and list what you fixed vs. what you're flagging to me. OIS has no marker
-files — the evidence is the green gates and this write-up. Only CRITICAL/MAJOR findings must be
-remediated; note nits without acting on them.
+Confirm every gate is green and list what you fixed vs. what you're flagging to me. Only CRITICAL/MAJOR
+findings must be remediated; note nits without acting on them.
+
+When every gate is green and no CRITICAL/MAJOR finding is open, record the review for the exact commit
+you reviewed. `gh pr create` is blocked until this marker exists for HEAD (`.claude/hooks/pre-pr-gate.sh`):
+
+```bash
+m="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/markers/review-shipping"
+mkdir -p "$m" && date +%s >"$m/$(git rev-parse HEAD)"
+```
+
+It lives in the primary checkout, so it is found from any worktree. It expires after two hours, and a new
+commit needs a new review.

@@ -65,15 +65,35 @@ hook_segments() {
 # hook_words SEGMENT
 #
 # Splits SEGMENT into the array WORDS and drops what only wraps a command (`env X=1`, `sudo`,
-# `time`, `if`/`then`, `{`), so WORDS[0] is the program that actually runs.
+# `time`, `timeout 600`, `nice -n 5`, `eval`, `if`/`then`, `{`), so WORDS[0] is the program that
+# actually runs.
 hook_words() {
-    local raw w started=0
+    local raw w started=0 wrapper="" skip_next=0
     WORDS=()
     read -r -a raw <<<"$1"
     for w in "${raw[@]}"; do
         if [[ $started -eq 0 ]]; then
+            if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
+            # `timeout [opts] DURATION cmd` and `nice [-n N] cmd`: drop their options and argument.
+            case "$wrapper" in
+                timeout)
+                    case "$w" in
+                        -s|-k|--signal|--kill-after) skip_next=1; continue ;;
+                        -*) continue ;;
+                        *) wrapper=""; continue ;;  # the duration
+                    esac
+                    ;;
+                nice)
+                    case "$w" in
+                        -n|--adjustment) skip_next=1; continue ;;
+                        -*) continue ;;
+                        *) wrapper="" ;;
+                    esac
+                    ;;
+            esac
             case "$w" in
-                '{'|'}'|'!'|if|then|else|elif|do|while|until|time|command|builtin|exec|nohup|sudo|env) continue ;;
+                '{'|'}'|'!'|if|then|else|elif|do|while|until|time|command|builtin|exec|nohup|sudo|env|eval) continue ;;
+                timeout|nice) wrapper="$w"; continue ;;
             esac
             [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && continue
             started=1

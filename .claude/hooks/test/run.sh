@@ -138,6 +138,26 @@ allow $G "worktree add from primary" 'git worktree add ../ois-wt/feat/4/z -b fea
 allow $G "list branches in primary" 'git branch -vv' "$PRIMARY"
 allow $G "delete a branch in primary" 'git branch -d old' "$PRIMARY"
 allow $G "explicit git add" 'git add backend/src/a.rs web/src/b.ts'
+# Wrapped or indirect pushes and merges (#744 review): next has no branch protection, so these
+# shapes must not slip past.
+block $G "push under timeout" 'timeout 600 git push origin next'
+block $G "push under timeout with options" 'timeout -k 5 --preserve-status 600 git push origin next'
+block $G "push under nice -n" 'nice -n 5 git push origin next'
+block $G "push inside bash -c" "bash -c 'git push origin next'"
+block $G "push inside sh -lc" 'sh -lc "cd /tmp && git push origin main"'
+block $G "push inside eval (quoted)" "eval 'git push origin next'"
+block $G "push inside eval (bare)" 'eval git push origin next'
+block $G "push heads/next" 'git push origin heads/next'
+block $G "push HEAD while on next" 'git push origin HEAD' "$PRIMARY"
+block $G "push @ while on next" 'git push -u origin @' "$PRIMARY"
+block $G "gh api PUT pulls/N/merge" 'gh api -X PUT repos/VATUSA/OIS/pulls/12/merge'
+block $G "gh api --method=put /pulls/N/merge" 'gh api --method=put /repos/VATUSA/OIS/pulls/12/merge -f merge_method=squash'
+block $G "gh api graphql mergePullRequest" "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
+allow $G "feature push inside bash -c" "bash -c 'git push -u origin feat/1/test-branch'"
+allow $G "push HEAD from a feature worktree" 'git push -u origin HEAD'
+allow $G "timeout on an unrelated command" 'timeout 600 cargo test --workspace'
+allow $G "gh api GET merge status" 'gh api repos/VATUSA/OIS/pulls/12/merge'
+allow $G "gh api read a PR" 'gh api repos/VATUSA/OIS/pulls/12'
 allow $G "commit message that mentions a push to next" 'git commit -m "never git push origin next; gh pr merge is blocked"'
 allow $G "heredoc body that mentions merging" "$(printf 'git commit -F - <<%sEOF%s\nchore: x\n\ngit push origin next && gh pr merge 3\nEOF' "'" "'")"
 allow $G "gh pr view" 'gh pr view 12'
@@ -184,6 +204,20 @@ allow $G "message file written by the same command" 'printf "fix: x\n" > new-msg
 allow $G "clean pr create" 'gh pr create --title t --body-file clean-body.md'
 allow $G "trailer text outside a commit or PR" 'echo "Co-Authored-By: Claude" | wc -l'
 allow $G "pr view" 'gh pr view 5'
+# Bodies that reach gh/git without a plain path (#744 review).
+printf 'fix: x\n\nCo-Authored-By: Someone <noreply@anthropic.com>\n' >"$WT/noreply-msg.txt"
+block $G "noreply@anthropic.com alone" 'git commit -F noreply-msg.txt'
+block $G "pr body from \$(cat file)" 'gh pr create --title t --body "$(cat dirty-body.md)"'
+block $G "pr body from \$(< file)" 'gh pr edit 5 --body "$(< dirty-body.md)"'
+block $G "commit message from \$(cat file)" 'git commit -m "$(cat dirty-msg.txt)"'
+block $G "pr body piped to --body-file -" 'cat dirty-body.md | gh pr create --title t --body-file -'
+block $G "pr body from /dev/stdin" 'gh pr create --title t --body-file /dev/stdin < clean-body.md'
+block $G "commit message piped to -F -" 'cat clean-msg.txt | git commit -F -'
+block $G "glued -Ffile" 'gh pr create --title t -Fdirty-body.md'
+block $G "\$(cat file) that is missing" 'gh pr create --title t --body "$(cat no-such-body.md)"'
+allow $G "pr body from \$(cat clean file)" 'gh pr create --title t --body "$(cat clean-body.md)"'
+allow $G "commit -m from a heredoc substitution" "$(printf 'git commit -m "$(cat <<%sEOF%s\nfix: x\n\nCloses #1\nEOF\n)"' "'" "'")"
+allow $G "body file written by the same heredoc command" "$(printf 'cat > new-body.md <<%sEOF%s\nclean\nEOF\ngh pr create --title t --body "$(cat new-body.md)"' "'" "'")"
 malformed $G
 
 # --- pre-pr-gate -----------------------------------------------------------------------------------
@@ -198,6 +232,12 @@ rm -f "$MARKERS/$WT_SHA"
 date +%s >"$MARKERS/0000000000000000000000000000000000000000"
 block $G "marker for a different commit" 'gh pr create --base next --title t --body b'
 block $G "marker in the worktree's own .claude does not count" "mkdir -p .claude/markers/review-shipping && gh pr create --title t"
+# The marker /review-before-shipping tells the reviewer to write is the one this gate reads: run that
+# command's own snippet in the worktree, and the PR must pass (#744 review: nothing wrote it).
+rm -f "$MARKERS/$WT_SHA"
+writer="$(awk '/^```bash$/ {f = 1; next} /^```$/ {f = 0} f' "$HOOKS/../commands/review-before-shipping.md")"
+(cd "$WT" && bash -c "$writer") >/dev/null 2>&1
+allow $G "marker written by /review-before-shipping's snippet" 'gh pr create --base next --title t --body b'
 date +%s >"$MARKERS/$WT_SHA"
 allow $G "fresh marker for HEAD" 'gh pr create --base next --title t --body b'
 allow $G "fresh marker, gh -R form" 'gh -R VATUSA/OIS pr create --base next --title t --body b'

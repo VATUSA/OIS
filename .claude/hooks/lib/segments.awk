@@ -8,6 +8,7 @@
 #     placeholder __Q__ otherwise, so a quoted message never splits into fake commands;
 #   * `;` `&` `|` `(` `)` newlines, backticks and `$(` end a command, so `a && git push` and
 #     `echo $(git push)` both expose the push;
+#   * the quoted script of `bash -c`, `sh -lc` (any `*sh -…c…`) or `eval` is split as commands too;
 #   * redirections (`> f`, `2>&1`, `<<'EOF'`) and comments are dropped.
 # POSIX awk only: it runs under macOS's BSD awk as well as gawk/mawk.
 
@@ -50,6 +51,14 @@ END {
         }
         if (c == "'" || c == "\"") {
             i = read_quoted(i)
+            # The script of `bash -c '...'` / `sh -lc "..."` / `eval '...'` is itself a command line:
+            # splice it back in after this word, so its commands are split and checked like any other.
+            if (seg ~ /(^|[ \t\/])((ba|z|da|k)?sh[ \t]+-[A-Za-z]*c[A-Za-z]*|eval)[ \t]+$/) {
+                text = substr(text, 1, i - 1) "\n" word "\n" substr(text, i)
+                L = length(text)
+                seg = seg "__Q__"
+                continue
+            }
             seg = seg plain(word)
             continue
         }
