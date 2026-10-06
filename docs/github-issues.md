@@ -25,9 +25,9 @@ mechanism, says what "done" looks like, and is labeled so the board sorts it cor
 | **Returned** | Kicked back for rework (from review or test). |
 | **In build** | Actively being implemented. |
 | **Post build** | Build done — pre-test wrap-up (regenerate the client, apply migrations, self-check, `just ci`). |
-| **Testing Queue** | Awaiting test. |
+| **Testing Queue** | PR open, awaiting test. |
 | **In Test** | Under test. |
-| **Code Review** | PR open, in review. |
+| **Code Review** | Tested, PR in review. |
 | **Shippable** | Approved and ready to ship. |
 | **Done** | Merged / deployed. |
 
@@ -188,9 +188,10 @@ pointer rather than filing again.
   back.
 - **Agents do not self-assign, close issues, or merge PRs, and don't move an issue to Shippable or
   Done** — a human owns review, ship, and close. An agent may move **To Do → In build** when it
-  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), and open
-  the PR (**Code Review**). Work lands on **`next`**, the integration branch, per the project's
-  no-branch rule (see `AGENTS.md` § Git workflow); `main` is promoted from `next` separately.
+  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), open the
+  PR, and move the card to **Testing Queue**. Work lands on **`next`**, the integration branch, per
+  the project's no-branch rule (see `AGENTS.md` § Git workflow); `main` is promoted from `next`
+  separately.
 - **The columns say where work is. They do not gate the merge.** What gates a merge is green CI plus
   the review loop — nothing checks a card's column before a PR can land, and nothing is going to:
   enforcing it would need a project-scoped secret (Actions' default `GITHUB_TOKEN` cannot read

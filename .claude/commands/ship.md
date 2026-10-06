@@ -8,7 +8,8 @@ first, then review the commit, then push and open the PR** — so the thing revi
 that ships. Do NOT skip steps.
 
 ## Step 1 — Gate (scaled to blast radius)
-Run `just ci` (fmt-check, cargo check/clippy, rust tests, pnpm lint/typecheck). If the API contract
+Run `just ci` (migration check, fmt-check, cargo check, rust tests, pnpm lint/typecheck), then
+`cargo clippy --workspace --all-targets -- -D warnings` — `just ci` skips clippy. If the API contract
 moved, **regenerate the client first** (see `/review-before-shipping` Phase 3). Read the real
 `test result:` / typecheck output, not the exit code. Green before proceeding — fix and re-run
 otherwise.
@@ -50,7 +51,7 @@ OIS **has** CI (`.github/workflows/ci.yml`) — `gh pr checks` returns real chec
 green, but `just ci` locally is the primary evidence. Do not sit blocked waiting on the remote run.
 
 ## Step 7 — Move the card + Moment 3 comment
-- `.claude/scripts/board-status.sh $ARGUMENTS "Code Review"` and confirm the issue is **assigned to
+- `.claude/scripts/board-status.sh $ARGUMENTS "Testing Queue"` and confirm the issue is **assigned to
   me**.
 - Post the **Moment 3** comment on the issue (≤1,200 chars): real **file paths** only; name the
   **blast radius** (does it touch the trajectory/ETA model, the permission/role three-in-sync

@@ -41,7 +41,8 @@ never pick one yourself). Everything goes through `gh` against `VATUSA/OIS`. Do 
 
 - Run the gate scaled to what the change can **reach**, not where it sits — a change touching the
   **trajectory/ETA model**, the **permission/role three-in-sync invariants**, or the
-  **OpenAPI→client contract** reaches further than its directory. `just ci` is the full gate.
+  **OpenAPI→client contract** reaches further than its directory. `just ci` is the local gate;
+  it skips clippy and the other CI-only checks (see `AGENTS.md` § Commands).
 - Read the actual `test result:` / typecheck output — **never the exit code**, which lies in both
   directions. Classify any red as **pre-existing** or **introduced** before you write anything.
 

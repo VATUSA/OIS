@@ -262,9 +262,13 @@ just test-js       # pnpm test
 # desktop
 just desktop-build # bundle the Tauri app for the host platform
 
-# the full local gate (run before calling anything done)
+# the local gate (run before calling anything done)
 just ci            # migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
 ```
+
+`just ci` is not CI. `.github/workflows/ci.yml` also runs clippy (`-D warnings`), doc tests,
+`pnpm test`, `pnpm audit`, `cargo deny`, and the client-drift check — none of which `just ci` runs.
+On any Rust change, also run `cargo clippy --workspace --all-targets -- -D warnings`.
 
 First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`. `.env` is read
 by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both are gitignored.
@@ -292,9 +296,10 @@ by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both
   verified by running the full stack (`just up && just backend`) and exercising the endpoint.
 - Read the `test result:` summary line, not just the exit code.
 
-Definition of done for a change: `just ci` is green, the client is regenerated if the contract moved,
-and any DB migration has been applied (it applies automatically on the next backend start — it is
-idempotent-friendly and numbered sequentially).
+Definition of done for a change: `just ci` is green (plus clippy for a Rust change — see
+§ Commands), the client is regenerated if the contract moved, and any DB migration has been applied
+(it applies automatically on the next backend start — it is idempotent-friendly and numbered
+sequentially).
 
 ---
 

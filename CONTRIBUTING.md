@@ -50,7 +50,8 @@ typed client** and **Permissions** sections:
 ## Pull requests
 
 - Target `next`.
-- Keep `just ci` green (fmt, clippy, tests, `pnpm lint`/`typecheck`) before requesting review.
+- Keep `just ci` green before requesting review, plus clippy on a Rust change. `just ci` is not CI:
+  `AGENTS.md` § Commands lists what CI runs that it doesn't.
 - Keep the change scoped to the linked issue — don't fold in unrelated cleanup.
 - Use conventional-commit-style messages (`type(scope): summary`) and a clear PR description
   (what changed, why, how you verified it).
