@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/git-safety-gate.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/branch-naming-gate.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/attribution-gate.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/pre-pr-gate.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/migration-gate.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/issue-created-reminder.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/pr-created-reminder.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/plan-approved-reminder.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(dirname \"$(git -C \"${CLAUDE_PROJECT_DIR:-.}\" rev-parse --path-format=absolute --git-common-dir)\")/.claude/hooks/client-regen-reminder.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
