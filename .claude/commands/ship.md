@@ -36,9 +36,11 @@ sad paths are covered (metering / trajectory / permission resolution especially)
 - Attribution check over every commit the PR will carry, using the same patterns the hooks use. It
   must print `attribution: clean`:
   ```bash
-  bash -c '. .claude/hooks/lib/attribution.sh
-  git log --format="%an <%ae>%n%cn <%ce>%n%B" origin/next..HEAD | attribution_hits - && exit 1
-  echo "attribution: clean"'
+  bash -c 'set -uo pipefail
+  . "$(git rev-parse --show-toplevel)/.claude/hooks/lib/attribution.sh" || { echo "BLOCKER: attribution lib not found"; exit 2; }
+  log="$(git log --format="%an <%ae>%n%cn <%ce>%n%B" origin/next..HEAD)" || { echo "BLOCKER: git log failed"; exit 2; }
+  printf "%s\n" "$log" | attribution_hits -; rc=$?
+  case $rc in 0) echo "BLOCKER: attribution found"; exit 1 ;; 1) echo "attribution: clean" ;; *) echo "BLOCKER: check did not run"; exit 2 ;; esac'
   ```
   Also read `git log --format='%an <%ae>' origin/next..HEAD | sort -u`: the only author is the user.
 
@@ -53,7 +55,9 @@ git push -u origin {branch}
 git ls-remote origin refs/heads/{branch}   # must print exactly the SHA below
 git rev-parse HEAD
 ```
-Compare the two SHAs yourself. A push has failed silently before (`.claude/rules/git-and-worktrees.md`
+Compare the two SHAs yourself. **Rework on an open PR:** a push updates the PR directly and
+`pre-pr-gate.sh` only guards PR creation, so before pushing confirm the marker for HEAD exists (the
+path `/review-before-shipping` Phase 6 printed); no marker, no push. A push has failed silently before (`.claude/rules/git-and-worktrees.md`
 § A push isn't done until the remote says so); nothing after this step happens until they match.
 Chain later steps on the push with `&&`, never `;`.
 
@@ -72,7 +76,7 @@ EOF
 )"
 ```
 `pre-pr-gate.sh` refuses this unless HEAD carries a fresh review marker; if it blocks, go back to
-Step 4. **Read the PR number from `gh`'s output** (the `/pull/<n>` URL it prints). Never predict it:
+Step 4. **Rework on an open PR:** skip `gh pr create`; the Step 5 push already updated the PR. **Read the PR number from `gh`'s output** (the `/pull/<n>` URL it prints). Never predict it:
 concurrent sessions take "the next number". If the branch is stacked on another open PR, say so on the
 body's first line.
 
@@ -83,7 +87,9 @@ shares the API budget with the board.
 
 ## Step 7 — Move the card + Moment 3 comment
 - `.claude/scripts/board-status.sh $ARGUMENTS "Testing Queue"`, read the card back, and confirm the
-  issue is **assigned to me**. Never `Code Review`, `Shippable` or `Done`; those are a human's.
+  issue is **assigned to me**. Never `Code Review`, `Shippable` or `Done`; those are a human's. (The
+  one exception: under `/ticket-loop`, `ticket-reviewer` moves a card to `Code Review` when the
+  operator's own pass decision is relayed to it.)
 - Post the **Moment 3** comment on the issue: at most **1,200 characters** of body text, the footer
   excluded. Real **file paths** only; name the **blast radius** (trajectory/ETA model, the
   permission/role three-in-sync invariants, the OpenAPI→client contract, or none); and the **deploy

@@ -18,7 +18,7 @@ once per aircraft per tick.
 CPU-heavy work with no `.await` in it, run inline in an async handler, starves the Tokio workers: a
 burst of polling clients stalls the health check and the websocket keepalive too, and the process
 looks hung. That is why route resolution and metering run under `tokio::task::spawn_blocking`
-(`backend/src/handlers/flow.rs:2140` explains it; `handlers/feed.rs`, `handlers/gdp.rs` and
+(`backend/src/handlers/flow.rs:2141` explains it; `handlers/feed.rs`, `handlers/gdp.rs` and
 `handlers/runway.rs` follow the same pattern).
 
 Flag a new or changed async handler that:
@@ -54,8 +54,8 @@ The poller (`backend/src/feed/mod.rs`, the `loop` in `poller`) fetches the VATSI
 
 - a database query or HTTP call added to the feed path, rather than a cache plus a refresh job;
 - work added to every tick that is O(aircraft × something) without a reason, especially anything
-  reaching the trajectory model, which has three callers (FCA metering, airport-flow demand, runway
-  ETE);
+  reaching the trajectory model, whose callers (FCA metering, airport-flow demand, runway ETE, sector
+  occupancy; `git grep -n 'trajectory::'`) all run per tick or per request;
 - a cache rebuilt on every tick when its inputs change daily.
 
 Each tick also fans out to every connected browser: `web/src/lib/realtime.ts` refetches every

@@ -4,7 +4,10 @@ argument-hint: "[branch | #PR | base...head] (default: origin/next...HEAD)"
 ---
 
 You are performing a code review. It is **read-only with no side effects**: no edits, no commits, no
-review marker, no GitHub comments, no board moves. Pure review.
+review marker, no GitHub comments, no board moves. Pure review. Running a mutation or a gate edits or
+builds a tree, so do it only in a worktree of your own checked out at the head (as `ticket-reviewer`
+has), never in someone's working worktree; otherwise describe the mutation and the result you
+expect.
 
 This command deliberately replaces Claude Code's built-in `/code-review` in this repository. The
 built-in reviews a diff generically; this one knows OIS's critical paths and holds every finding to a
@@ -29,7 +32,8 @@ misread intent. Never confirm a finding from its description alone.
    grant form", "new migration + repo"). A big branch is reviewed per set, not as one blob.
 5. Mark each **CRITICAL-PATH** set. In OIS these are:
    - **the trajectory/ETA model** — `backend/src/feed/trajectory.rs`, shared by FCA metering
-     (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`) and runway ETE (`feed/runway.rs`);
+     (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`), runway ETE (`feed/runway.rs`) and
+     sector occupancy (`feed/sector_tracks.rs`); `git grep -n 'trajectory::'` is the current list;
    - **permissions and roles** — `backend/src/auth/`, `crates/ois-core/src/catalog.rs`,
      `backend/src/repos/access.rs`, and any `access.*` migration (the three-in-sync invariants);
    - **the API contract** — `router.rs`, `openapi.rs`, any `#[derive(ToSchema)]` model or its `///`
@@ -100,11 +104,13 @@ an `EXPLAIN` on a new query, a mutation that should make a test go red. Say what
 For every CRITICAL-PATH set, trace it end to end (route → handler → repo → DB, or poller → feed →
 cache → reader) and show the change is additive or behavior-preserving. Back it with a test that runs
 the real path (a router-level test through `build_router`, a `#[sqlx::test]`) rather than a helper
-called directly. For the trajectory model, check all three callers, not one.
+called directly: cite that test, or report its absence. For the trajectory model, check every caller,
+not one.
 
 ## Phase 6 — Gates (report only)
 
-Run `just ci-full` and report its summary line by line. A failure is re-run in isolation and compared
+Run `just ci-full` only in a worktree checked out at the target's head (`git rev-parse HEAD` equals it);
+otherwise skip it and say the gates were not run here. Report its summary line by line. A failure is re-run in isolation and compared
 against `origin/next` before it is blamed on the branch: separate **pre-existing** and **flaky**
 failures from real regressions. Fix nothing.
 

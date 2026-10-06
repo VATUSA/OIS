@@ -6,7 +6,7 @@ argument-hint: "[path or base ref] (default: origin/next...HEAD)"
 You are writing tests for the current branch. Analyze the diff, find what is untested or tested
 without proof, and write tests that give **real** confidence the change works. The standard is
 `.claude/rules/test-quality.md`; `AGENTS.md` § Testing & verification is the harness. This command is
-the procedure, not a second copy of either.
+the procedure, not a second copy of either. Read `test-quality.md` first.
 
 ## The bar
 
@@ -34,13 +34,16 @@ handler reached through the router, not only the helper it calls).
 
 | Kind | Where it lives | Test it with |
 | --- | --- | --- |
-| Pure logic: trajectory, metering, permission tree, parsers | `backend/src/feed/`, `crates/ois-core/` | a `#[cfg(test)] mod tests` unit test beside the code |
+| Pure logic: trajectory, permission tree, parsers | `backend/src/feed/`, `crates/ois-core/` | a `#[cfg(test)] mod tests` unit test beside the code |
+| FCA metering | `backend/src/handlers/flow.rs` | unit tests on its pure steps, plus a router-level test |
 | SQL | `backend/src/repos/` | `#[sqlx::test]` against a real throwaway database |
 | Handlers and routes | `backend/src/handlers/`, `router.rs` | a router-level test through `build_router` |
 | Migrations | `backend/migrations/` | a `#[sqlx::test]` that exercises the new schema (migrations apply automatically) |
-| Jobs and the feed | `backend/src/jobs.rs`, `backend/src/feed/` | the pure step as a unit test, and the scheduler pass that calls it |
+| The feed | `backend/src/feed/` | a unit test on the pure function over an in-memory snapshot and caches |
+| Jobs | `backend/src/jobs.rs` | `#[sqlx::test]` on the `*_once` pass the scheduler calls |
 | Bot | `discord/src/jobs/`, `discord/src/interactions/` | `#[cfg(test)]` unit tests on the pure payload and parsing logic; nothing talks to Discord |
-| Web | `web/src/`, `packages/ui/` | vitest `*.test.ts(x)`, DOM tests opting in with `// @vitest-environment jsdom` |
+| Web | `web/src/`, `packages/ui/` | vitest `*.test.ts(x)`; DOM tests are `*.dom.test.tsx` and opt in with `// @vitest-environment jsdom` |
+| "X never happens" (nothing stores a token, no route calls Y) | anywhere | a source-scan guard (`*.guard.test.ts`), proven by planting the forbidden call in a throwaway file |
 
 Read what each file actually changed, not just its name.
 
@@ -75,34 +78,47 @@ database with every migration applied (`backend/src/repos/access.rs` has example
 predicate, or a test against a one-row table passes for a query that deletes everything.
 
 **Handlers** — drive the real router: `crate::router::build_router(state).oneshot(request)`.
-`backend/src/scope_test_support.rs` has `send` and `send_json` and a minimal `AppState`. Assert the
-status **and** the body or the database afterwards. For a permissioned route, three tests at least:
-allowed, missing permission, and (for ARTCC-scoped data) the permission at the wrong ARTCC. A missing
-permission and a wrong scope answer differently; assert which one fired.
+`backend/src/scope_test_support.rs` has a minimal `test_state`, `seed_user`, `grant`, `deny_scoped`,
+`session_cookie`, and `send` (any method, returns the status) and `send_json` (a GET, returns the status
+and the body). Assert the status **and** what changed: the body for a read, the database for a write.
+For a permissioned route, three tests at least: allowed, missing permission, and (for ARTCC-scoped
+data) the permission at the wrong ARTCC. For those handlers a missing permission is 401 and a wrong
+facility 403; assert which one fired.
 
-**Feed and jobs** — the feed has no DB handle, so test the pure function over an in-memory snapshot
-and caches. For a cache-plus-refresh-job pattern, test the write handler's force-reload too, not just
-the loader.
+**Feed** — the feed has no DB handle, so test the pure function over an in-memory snapshot and
+caches. For a cache-plus-refresh-job pattern, test the write handler's force-reload too, not just the
+loader.
+
+**Jobs** — a `jobs.rs` worker's logic lives in a private `*_once(pool, …)` pass, and that pass is
+where OIS fixes have gone untested before. Test the pass itself with `#[sqlx::test]`, times anchored
+on `Utc::now()`; `mod ace_reminder_tests` in `backend/src/jobs.rs` is the model.
 
 **Web** — vitest. Seed the TanStack Query cache with `queryClient.setQueryData(...)` rather than
-stubbing `fetch`. Use the generated client's types for fixtures so a contract change breaks the test
-at compile time. Assert what the user sees and what is sent, not component internals.
+stubbing `fetch`: `web/src/test/no-network.ts` blocks the network, and the generated client captures
+`fetch` when it loads, so a stub in the test is too late. To assert what is sent, mock the client
+module (`vi.mock("@/lib/api", …)`, as `web/src/components/event-banner.dom.test.tsx` does). Use the
+generated client's types for fixtures so a contract change breaks the test at compile time. Assert
+what the user sees and what is sent, not component internals.
 
 ## Phase 4 — Run, then prove each test can fail
 
 1. Run the new tests: `cargo test -p <crate> <test_name>` or `pnpm --filter web test -- <file>`.
-   Read the `test result:` line; it must show them passing, not `0 passed` from a filter typo.
+   Read cargo's `test result:` line (not `0 passed` from a filter typo) or vitest's `Test Files` and
+   `Tests` lines (not "No test files found").
 2. **Mutate**: for each new test, make the smallest plausible bug in the code it guards (flip a
    comparison, drop a `RequirePermission`, remove a predicate), run the test, watch it go red, then
    restore. Commit a checkpoint first: `git checkout -- <file>` restores HEAD and would wipe uncommitted
-   work. A test that stays green under a plausible mutation is decoration; strengthen it or delete it.
+   work. Confirm the mutation applied (`git diff --quiet` must fail), and never mutate while a suite is
+   building in the same tree. A test that stays green under a plausible mutation is decoration;
+   strengthen it or delete it.
 3. If a test reveals a real bug, fix the implementation, not the test, and say so.
 4. Run `just ci-full` before calling it done.
 
 ## Priority
 
 Highest value first: the wiring and authorization of new routes; repo writes and migrations; the
-trajectory model and its three callers (FCA metering, airport-flow demand, runway ETE); pure logic;
+trajectory model and every caller (`git grep -n 'trajectory::'`: FCA metering, airport-flow demand,
+runway ETE, sector occupancy); job `*_once` passes; pure logic;
 web behavior.
 
 ## Report

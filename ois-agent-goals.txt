@@ -15,7 +15,7 @@ Relay its OPERATOR_QUESTIONS and its verdict through AskUserQuestion; only CRITI
 Complete when the queue is empty. Queue exhaustion is the only exit condition.
 
 =================================================REGRESSION CHECKER=================================================
-Start a separate session with `claude --agent regression-checker`, then `/loop 30m`, and follow .claude/agents/regression-checker.md. Confirm the Sentry connection values (instance URL, org slug, the ois-backend and ois-web project slugs, the backend trace sample rate) with me before the first run.
+Start a separate session with `claude --agent regression-checker`, then `/loop 30m run one Sentry pass per your agent instructions`, and follow .claude/agents/regression-checker.md. Confirm the Sentry connection values (instance URL, org slug, the ois-backend and ois-web project slugs, the backend trace sample rate) with me before the first run.
 
 Sentry is read-only for you: resolve, ignore or assign nothing there without asking me. Never set a priority label; ask me with a recommendation.
 

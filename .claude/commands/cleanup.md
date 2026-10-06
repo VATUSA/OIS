@@ -26,10 +26,11 @@ Record its absolute path `<WT>` and branch `<BR>`. **Refuse** when:
 - `<WT>` is the primary checkout: the first entry in the list, the one whose `.git` is a directory.
   The primary checkout stays on `next` and is never removed.
 - `<BR>` is `main` or `next`: those are never removed here.
-- The worktree is detached (a `detached` line, no `branch`), as a reproduction worktree on
-  `origin/main` is: there is no `<BR>`, so Step 3 skips the `ls-remote` line and Step 4 skips
-  `git branch -d`.
 - Another session is plainly using it (you didn't create it and it isn't yours to remove): ask.
+
+A **detached** worktree (a `detached` line, no `branch`), such as a reproduction worktree on
+`origin/main`, is allowed: there is no `<BR>`, so Step 3 skips the `ls-remote` line and Step 4 skips
+`git branch -d`.
 
 ## Step 2 — Nothing uncommitted
 

@@ -12,6 +12,9 @@ Under `/ticket-loop` this runs inside the `ticket-worker` subagent: every "ask m
 
 ## Phase 0 — Pin the reviewed commit
 
+- If the API contract moved (an endpoint, or a `#[derive(ToSchema)]` model or its `///` doc
+  comments), **regenerate the client first** (`AGENTS.md` § The API contract → typed client) and
+  commit it, so the pinned commit already carries it.
 - `git status --porcelain` must print nothing. If it prints anything, commit it (or remove it)
   first; the review is of a commit, not a tree.
 - `git rev-parse HEAD` — the full 40-character **reviewed SHA**. Every phase reviews that commit, and
@@ -25,14 +28,11 @@ Under `/ticket-loop` this runs inside the `ticket-worker` subagent: every "ask m
 `git diff origin/next...HEAD --stat` (three dots: two dots renders everything merged into `next`
 since you forked as a deletion), then read the full diff. Know exactly what was added, changed and
 removed, and which of these it reaches: the trajectory/ETA model (`backend/src/feed/trajectory.rs`
-and its three callers), the permission/role three-in-sync invariants, the OpenAPI→client contract,
+and every caller `git grep -n 'trajectory::'` lists), the permission/role three-in-sync invariants, the OpenAPI→client contract,
 a migration, the feed subsystem.
 
 ## Phase 2 — Gates
 
-- If the API contract moved (an endpoint, or a `#[derive(ToSchema)]` model or its `///` doc
-  comments): **regenerate the client first** (`AGENTS.md` § The API contract → typed client) and
-  commit the result before going on.
 - Run **`just ci-full`**. It mirrors `.github/workflows/ci.yml` (fmt, clippy `-D warnings`, nextest or
   `cargo test`, doc tests, pnpm lint/typecheck/test, the audits, cargo deny, client drift) and ends
   with a PASS/FAIL/SKIPPED summary.
@@ -44,6 +44,8 @@ a migration, the feed subsystem.
   `just ci-full` once it is fixed.
 - A red step you can show is pre-existing (it fails identically on `origin/next`) is reported as
   such, with the evidence, not fixed here.
+- **Any commit made to get a gate green moves HEAD**: re-pin (Phase 0) and restart from Phase 1, so
+  the reviewers and the marker see the same commit.
 
 ## Phase 3 — Pitfall scan
 
@@ -85,7 +87,15 @@ Merge the three reports and the Phase 3 hits into one list, deduplicated by `fil
   are review guidance only: they are a SUGGESTION, never a blocker.
 
 Before fixing anything, try to disprove it: read the code the finding names and trace the path. A
-finding that dies under that is listed as dismissed, with the reason.
+finding that dies under that is listed as dismissed, with the reason. Dismissing a CRITICAL or MAJOR
+is my call, not yours: ask me (under `/ticket-loop`, an `OPERATOR_QUESTIONS` entry) with your
+evidence before the marker is written.
+
+**Prove the tests can fail.** `test-reviewer` is read-only, so it describes mutations rather than
+running them. Run each one it describes, and for a fix branch revert the actual bug, following
+`.claude/rules/test-quality.md` § Prove the test can fail (commit a checkpoint first; confirm the
+mutation applied; never mutate while a suite is building in the same tree). A test that stays green is
+a MAJOR. Record each mutation and whether it went red for the Phase 7 report.
 
 Fix every surviving CRITICAL and MAJOR **as a new commit** (never amend the reviewed commit).
 **Ask me before**: changing a test's expected behavior; altering business logic or a calculation;
@@ -126,7 +136,7 @@ two hours. Never copy a marker onto another SHA or write one for a review that d
 ## Phase 7 — Report and stop
 
 Report: the reviewed SHA; `just ci-full`'s summary (every SKIPPED step named); the scan result; each
-agent's verdict line; what you fixed (with the fix commits); minor findings left as they are; and
+agent's verdict line; each mutation and whether it went red; what you fixed (with the fix commits); minor findings left as they are; and
 anything dismissed and why.
 
 `/review-before-shipping` ends here. It does not push, open a PR, comment on the issue, or move the

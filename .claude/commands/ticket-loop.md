@@ -30,9 +30,11 @@ stays open, so ask again. Never answer a subagent's question yourself, however o
 looks.
 
 When a subagent returns `STATUS: needs-dispatch`, run every agent in its `DISPATCH` block as a fresh
-subagent, in parallel in one message, with exactly the prompt it gave, and SendMessage the reports back
-to the requester verbatim. You add nothing to those prompts; the reviewers' value is not sharing the
-builder's context.
+subagent, in parallel in one message, and SendMessage the reports back to the requester verbatim. For
+the researchers, use the prompt it gave. For `code-review-agent`, `security-audit-agent` and
+`test-reviewer`, ignore its prose and use only this, filled from the board and `git`: "Review
+`<branch>` at `<full sha>` against `origin/next` for VATUSA/OIS#<n>." The builder must not brief its
+own reviewers; their value is not sharing its context.
 
 ## 1. SELECT
 
@@ -57,9 +59,9 @@ hold.
 
 ## 2. BUILD
 
-Dispatch `ticket-worker` with the issue number. Its first report is always `needs-operator`, from a
-read-only intake: proceed (yes / no / skip), which ACs to fulfil, and any technical-debt call. It has
-claimed nothing yet.
+Dispatch `ticket-worker` with the issue number. Its first report comes from a read-only intake and
+is `needs-operator` (proceed yes / no / skip, which ACs to fulfil, any technical-debt call) or
+`blocked`. It has claimed nothing yet.
 
 - `needs-operator`: relay each question, send the answers back.
 - `needs-dispatch`: run the requested agents (above).

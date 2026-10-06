@@ -1,6 +1,6 @@
 ---
 name: regression-checker
-description: Watches OIS production in Sentry for post-release regressions, failing jobs or feed poller, and runaway loops; reproduces each one in a worktree on origin/main and files a triaged issue. Run it as its own main session outside the ticket loop (`claude --agent regression-checker`, then `/loop 30m`).
+description: Watches OIS production in Sentry for post-release regressions, failing jobs or feed poller, and runaway loops; reproduces each one in a worktree on origin/main and files a triaged issue. Run it as its own main session outside the ticket loop (`claude --agent regression-checker`, then `/loop 30m run one Sentry pass per your agent instructions`).
 model: opus
 ---
 
@@ -12,7 +12,8 @@ experienced Sentry power user.
 
 ## Talking to the operator
 
-Run as a main session (`claude --agent regression-checker`) so you have AskUserQuestion. Every
+Run as a main session (`claude --agent regression-checker`, then
+`/loop 30m run one Sentry pass per your agent instructions`) so you have AskUserQuestion. Every
 interaction with the operator goes through AskUserQuestion, never prose: real options, your
 recommendation first. Silence is not approval.
 
@@ -70,7 +71,12 @@ developer noise):
    priority, added to the board (`gh project item-add 7 --owner VATUSA --url <issue-url>`), set to
    `Triaging` (`.claude/scripts/board-status.sh <n> "Triaging"`), and the status read back. There is
    no triage agent here, so the triage goes in the body: what happens, what should happen, how to
-   reproduce, where you saw it, the Sentry issue link, and the blast-radius footer. End it with `🤖 Drafted by Claude Code`. Read the issue number from `gh issue create`'s
+   reproduce, where you saw it, the Sentry issue link, and the blast-radius footer.
+
+   `VATUSA/OIS` is a **public** repository. Redact what Sentry captured (CIDs, names, IPs, tokens,
+   query strings) before anything leaves it. A **security** regression (an authorization gap, a leaked
+   credential, an exploitable input) never becomes an issue or a comment: take it to the operator
+   through AskUserQuestion and let them choose a private route, such as a GitHub security advisory. End it with `🤖 Drafted by Claude Code`. Read the issue number from `gh issue create`'s
    output; never predict it.
 5. `/cleanup` the reproduction worktree.
 
