@@ -5303,7 +5303,7 @@ mod fca_scope_tests {
         session_cookie(pool, &user).await
     }
 
-    /// Event 7360 with one planned and one published FCA at ZDC.
+    /// Event 7360 with one planned, one published and one archived FCA at ZDC.
     async fn seed_event_fcas(pool: &PgPool) {
         sqlx::query(
             "insert into events.event (id, title, start_time, end_time) values \
@@ -5315,7 +5315,8 @@ mod fca_scope_tests {
         sqlx::query(
             "insert into flow.fca (id, name, artcc, enabled, event_id, event_status) values \
                ('ev-planned',   'Planned', 'ZDC', true, 7360, 'planned'), \
-               ('ev-published', 'Published', 'ZDC', true, 7360, 'published')",
+               ('ev-published', 'Published', 'ZDC', true, 7360, 'published'), \
+               ('ev-archived',  'Archived', 'ZDC', true, 7360, 'archived')",
         )
         .execute(pool)
         .await
@@ -5353,8 +5354,9 @@ mod fca_scope_tests {
     }
 
     /// #736: an event FCA belongs to the planner lifecycle. A controller holding `flow.fca.*` at ZDC is
-    /// refused both writes on ZDC's event FCAs: an unpublished one `404`s (as `fca_traffic` answers), a
-    /// published one `409 event_fca`s. Nothing changes. A non-event ZDC FCA stays theirs to write.
+    /// refused both writes on ZDC's event FCAs: an unpublished one (planned or archived) `404`s (as
+    /// `fca_traffic` answers), a published one `409 event_fca`s. Nothing changes. A non-event ZDC FCA
+    /// stays theirs to write.
     #[sqlx::test]
     async fn a_controller_cannot_write_an_event_fca_through_the_plain_routes(pool: PgPool) {
         seed_event_fcas(&pool).await;
@@ -5365,6 +5367,7 @@ mod fca_scope_tests {
         for (id, refused) in [
             ("ev-planned", StatusCode::NOT_FOUND),
             ("ev-published", StatusCode::CONFLICT),
+            ("ev-archived", StatusCode::NOT_FOUND),
         ] {
             let before = row(&pool, id).await;
             assert_eq!(
