@@ -112,6 +112,6 @@ dev: up
 check-migrations:
     .github/scripts/check-migration-versions.sh
 
-# CI-equivalent local validation
+# Local validation — CI also runs clippy, doc tests, pnpm test/audit, and cargo deny
 ci: check-migrations fmt-check check test-rust
     pnpm lint && pnpm typecheck

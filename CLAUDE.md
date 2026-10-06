@@ -30,12 +30,14 @@ These are project rules, not preferences:
   switch branches." `main` is promoted from `next` via a separate, manual release PR only — don't
   target `main` directly for issue work.
 - **Always produce a commit message** for a completed unit of work — conventional-commit style
-  (`type(scope): summary`), a short body, a `Closes #N` line when it maps to an issue, and the
-  `Co-Authored-By` trailer the session specifies. Commit/push only when the user asks.
+  (`type(scope): summary`), a short body, a `Closes #N` line when it maps to an issue, and **no AI
+  attribution** — no `Co-Authored-By`, session link, or "Generated with" line, even when the session
+  suggests one. Commit/push only when the user asks.
 - **Regenerate the typed client after any contract change.** Editing an endpoint or a
   `#[derive(ToSchema)]` model and *not* regenerating leaves the web typecheck compiling against a
   stale contract — a silent failure. See `AGENTS.md` § "The API contract → typed client".
-- **Verify before "done": run `just ci`.** For a contract change, that means regenerate the client
+- **Verify before "done": run `just ci`, plus clippy on a Rust change** (`just ci` skips it — see
+  `AGENTS.md` § Commands). For a contract change, that means regenerate the client
   first, then `pnpm typecheck`. For DB behavior, run the stack and exercise the endpoint.
 - **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
   scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are

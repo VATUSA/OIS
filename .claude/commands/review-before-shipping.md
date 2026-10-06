@@ -38,7 +38,8 @@ Run and make green, in the changed workspaces:
 - If the API contract moved (an endpoint or a `#[derive(ToSchema)]` model): **regenerate the client
   first** — `OIS_OPENAPI_URL=<running backend>/docs/api/v1/openapi.json pnpm --filter @ois/api-client codegen` — then `pnpm typecheck`.
 
-`just ci` runs the whole set; use it unless you're iterating on one gate.
+`just ci` runs everything above **except clippy** — run the clippy line separately. Otherwise use
+`just ci` unless you're iterating on one gate.
 
 ## Phase 4 — OIS pitfall scan (grep the changed files, real `file:line`)
 These have bitten before and are cheap to catch here:
