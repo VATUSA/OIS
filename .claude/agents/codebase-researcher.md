@@ -25,14 +25,18 @@ Use this as a starting point for where to look, not as an answer.
   (`backend/src/auth/principal.rs`), `State<AppState>`.
 - **Permission marker**: `backend/src/auth/permissions.rs`, its string in
   `crates/ois-core/src/catalog.rs`, and its `access.permissions` migration row.
-- **Repo**: `backend/src/repos/<domain>.rs`. All SQL lives here.
+- **Repo**: `backend/src/repos/<domain>.rs`. SQL belongs here. A few deliberate exceptions exist
+  (the realtime `LISTEN` in `backend/src/realtime.rs`, the health check, the historical
+  reconstruction in `backend/src/feed/stats/reconstruct.rs`); grep before assuming.
 - **Model**: `backend/src/models/`, holding request, response and row types.
 - **Feed**: `backend/src/feed/`. Compute functions read `AppState` caches behind `ArcSwap`
   (`backend/src/state.rs`) rather than the database. Caches are filled by `backend/src/jobs.rs`
   workers registered in `backend/src/job_registry.rs` and started from `backend/src/lib.rs`.
 - **Trajectory**: `backend/src/feed/trajectory.rs`, called by FCA metering
-  (`backend/src/handlers/flow.rs`), airport-flow demand (`backend/src/feed/flow.rs`) and runway ETE
-  (`backend/src/feed/runway.rs`).
+  (`backend/src/handlers/flow.rs`), airport-flow demand (`backend/src/feed/flow.rs`), runway ETE
+  (`backend/src/feed/runway.rs`) and the sector occupancy engine
+  (`backend/src/feed/sector_tracks.rs`). `AGENTS.md` lists three; grep `trajectory::` before relying
+  on any list.
 - **Realtime**: `AppState::publish(topic)` → `GET /api/v1/ws` (`backend/src/realtime.rs`) →
   React Query invalidation (`web/src/lib/realtime.ts`).
 - **Discord**: `enqueue_job` (`backend/src/repos/integration.rs`) → the bot leases through
@@ -67,6 +71,7 @@ path as it read when this agent was written:
 PUT /api/v1/flow/fcas/{id}/order          backend/src/router.rs:492
   → handlers::flow::reorder_fca           backend/src/handlers/flow.rs:2779  RequirePermission<FlowFcaUpdate>
     → repos::flow::get_fca                backend/src/repos/flow.rs:70       reads the FCA row
+    → require_fca_write_scope             backend/src/handlers/flow.rs:2790  ARTCC scope on the FCA's artcc
     → repos::flow::set_manual_order       backend/src/repos/flow.rs:435      writes the manual order
     → state.publish(topic::FCA)           backend/src/handlers/flow.rs:2797  realtime nudge
   ← web: useReorderFca                    web/src/lib/fca.ts:541

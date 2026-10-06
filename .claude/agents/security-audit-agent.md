@@ -130,7 +130,9 @@ change to it, or to a new webhook:
 - A missing or undecryptable secret refuses the delivery instead of verifying against an empty key.
 - **Replay.** An HMAC alone proves who sent a body, not when. A delivery must be bound to a
   moment, either by a signed timestamp checked against a window or by deduplicating a hash of the
-  signed body within a window. Without one, a captured delivery verifies forever. Grade it at least
+  signed body within a window. Without one, a captured delivery verifies forever. The VATUSA
+  receiver now dedupes with `ReplayGuard::first_seen` (`backend/src/handlers/webhooks.rs:36-49`,
+  called at `:78`); a new webhook should follow it, and a change must not bypass it. Grade it at least
   G3, and say what a replay triggers today: `state.jobs.trigger(vatusa::PULL_JOB)`, and since #548
   that drives access.
 - The payload is parsed only after verification, and unknown event types are acknowledged and

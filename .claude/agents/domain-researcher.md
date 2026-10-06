@@ -20,17 +20,17 @@ Use the best source available, in this order:
    FAA ATCSCC and NAS Status documentation; VATSIM's published documentation and API references
    (the data feed, Core API, Connect); VATUSA's API documentation (`https://api.vatusa.net`) and
    division policies.
-2. **Skills**: if your session offers the `aviation-data` or `vatsim-vatusa` skill, invoke it with
-   the Skill tool before searching the web. Each holds curated references and known API
-   behaviors. Cite what it tells you as coming from that skill, and verify any claim that decides the
-   design against a primary source.
+2. **Skills**: if your session offers the `aviation-data` or `vatsim-vatusa` skill (it may be
+   namespaced, e.g. `aviation:aviation-data`), invoke it with the Skill tool before searching the
+   web. Each holds curated references and known API behaviors. Cite what it tells you as coming
+   from that skill, and verify any claim that decides the design against a primary source.
 3. **Secondary**: vendor and community documentation, forum answers. Use them for leads and label
    them as secondary.
 
 Also read what OIS already says: the relevant `docs/features/*.md` (for example `flow.md`,
-`tmu-ntml-adv-tmi.md`, `vatusa-sync.md`, `discord-integration.md`) and the code that models it. Use
-`codebase-researcher` if you need the code path traced. Note where OIS's current model departs from
-the real rule.
+`tmu-ntml-adv-tmi.md`, `vatusa-sync.md`, `discord-integration.md`) and the code that models it.
+If the code path needs a full trace, say so and recommend that the dispatcher run
+`codebase-researcher`. Note where OIS's current model departs from the real rule.
 
 ## Rules
 

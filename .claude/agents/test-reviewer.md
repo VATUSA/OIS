@@ -1,6 +1,6 @@
 ---
 name: test-reviewer
-description: Reviews the tests in an OIS diff (or a named test file) and sorts each one into tests that prove behavior and tests that pass without proving anything. Checks Rust unit tests, #[sqlx::test] DB tests and vitest web tests against .claude/rules/test-quality.md. Use when writing, reviewing or auditing tests.
+description: 'Reviews the tests in an OIS diff (or a named test file) and sorts each one into tests that prove behavior and tests that pass without proving anything. Checks Rust unit tests, #[sqlx::test] DB tests and vitest web tests against .claude/rules/test-quality.md. Use when writing, reviewing or auditing tests.'
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -59,9 +59,9 @@ caller scoped to a different ARTCC is refused); contract and source-scan guards 
 - **Permission tests** need a caller without the permission, and for scoped data, a caller holding
   it at a different ARTCC. A `SERVER_ADMIN` caller passes every check and proves nothing about one.
 - **Trajectory changes** need tests at the callers they affect (FCA metering, airport-flow demand,
-  runway ETE), not only in `backend/src/feed/trajectory.rs`.
+  runway ETE, sector occupancy; grep `trajectory::` for the current list), not only in `backend/src/feed/trajectory.rs`.
 - **No network.** Tests never call VATSIM, VATUSA, Open-Meteo or AWC. A `#[ignore = "network: …"]`
-  test (`backend/src/feed/coverage.rs:79`) is a manual tool, not coverage.
+  test (`backend/src/feed/coverage.rs:78`) is a manual tool, not coverage.
 - **Web tests** opt into the DOM per file with `// @vitest-environment jsdom`. They seed the
   TanStack Query cache rather than stubbing `fetch`. An `await` on an optimistic write can race its
   rollback; assert on the settled state.

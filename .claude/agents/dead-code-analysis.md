@@ -39,7 +39,7 @@ question and what would settle it.
 | OpenAPI path or schema | `paths(...)` and `components(schemas(...))` | `backend/src/openapi.rs`; a schema can also be reached as a field type of another schema |
 | serde types and fields | Deserialized from requests, the VATSIM feed, VATUSA or Discord; serialized to clients | `#[derive(Deserialize)]`; a field read nowhere in Rust may still be part of the wire format, and removing it from a `ToSchema` model changes the generated client |
 | `sqlx::FromRow` fields | Filled by a `select` column | The repo query in `backend/src/repos/` |
-| Background jobs | Registered by name and started from `lib.rs`; triggerable from the jobs admin page | `backend/src/job_registry.rs` (`register`, `trigger`), `backend/src/jobs.rs`, `backend/src/lib.rs:55-96`, and string names such as `vatusa::PULL_JOB` |
+| Background jobs | Registered by name and started from `lib.rs`; triggerable from the jobs admin page | `backend/src/job_registry.rs` (`register`, `trigger`), `backend/src/jobs.rs`, the `spawn_*` calls in `backend/src/lib.rs`, and string names such as `vatusa::PULL_JOB` |
 | Permission markers | Named in a `RequirePermission<Marker>` type, never called | `backend/src/auth/permissions.rs`; the string in `crates/ois-core/src/catalog.rs`; `access.permissions` rows in migrations; grants held in production |
 | Roles | Strings in code and rows | `default_roles()` (`crates/ois-core/src/catalog.rs:42`), `ASSIGNABLE_USER_ROLES` and `SYSTEM_ROLES` (`backend/src/repos/access.rs`), `access.roles` |
 | Realtime topics | Published by string, consumed by a web mapping | `crate::realtime::topic`, `web/src/lib/realtime.ts` |
@@ -47,7 +47,7 @@ question and what would settle it.
 | TanStack routes | `createRoute` entries in the route tree; `lazyRouteComponent` imports by path | `web/src/router.tsx` |
 | Web settings | Declarative registry entries | `web/src/lib/settings/registry.ts`, `useSetting(key, …)` |
 | Generated client | Regenerated, never hand-edited | `packages/api-client`; dead only when the endpoint is |
-| Tauri commands | `#[tauri::command]` named in `invoke_handler`, called by string from the web | `desktop/src-tauri/src`, `invoke("…")` in `web/src` |
+| Tauri commands | `#[tauri::command]` named in `invoke_handler`, called by string from the web | `desktop/src-tauri/src`, `invokeDesktop("…")` (`web/src/lib/platform.ts`) in `web/src` |
 | Test helpers | `#[cfg(test)]` and `scope_test_support.rs` | Used only by tests by design |
 
 ## Before recommending removal

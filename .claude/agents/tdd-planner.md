@@ -1,6 +1,6 @@
 ---
 name: tdd-planner
-description: Turns an approved OIS implementation plan into test skeletons and a coverage matrix before any production code is written. Writes Rust #[ignore = "todo: …"] tests with todo!() bodies, #[sqlx::test] skeletons for DB behavior, and vitest it.todo entries for web. The only review-family agent allowed to edit files, and only test code.
+description: 'Turns an approved OIS implementation plan into test skeletons and a coverage matrix before any production code is written. Writes Rust #[ignore = "todo: …"] tests with todo!() bodies, #[sqlx::test] skeletons for DB behavior, and vitest it.todo entries for web. The only review-family agent allowed to edit files, and only test code.'
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: opus
 ---
@@ -39,7 +39,8 @@ Read `.claude/rules/test-quality.md` and `.claude/rules/secure-coding.md` if the
 - Contract: a new or changed endpoint needs its `openapi.rs` registration, and
   `backend/src/handlers/auth_annotation_tests.rs` must keep passing.
 - Reach: a change to `backend/src/feed/trajectory.rs` needs a test at each affected caller (FCA
-  metering, airport-flow demand, runway ETE).
+  metering, airport-flow demand, runway ETE, sector occupancy; grep `trajectory::` for the current
+  list).
 
 ### 2. Pick the layer
 

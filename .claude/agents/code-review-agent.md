@@ -110,20 +110,23 @@ defect here before.
 8. **SQL lives in `backend/src/repos/` only.** A `sqlx::query` in a handler is a finding. Every
    value is bound (`.bind(...)`), never `format!`-ed into the SQL string.
 9. **Migrations are append-only.** An edit to an existing `backend/migrations/NNNN_*.sql` is a
-   CRITICAL. A new migration's number must be above every number on `next` and in every open PR
+   CRITICAL. A new migration's number must be above every number on `next` and on every remote branch
    (`AGENTS.md` § Conventions & gotchas). Check status/check-constraint values against the newest
    `ALTER`, not the original `CREATE`.
 10. **The feed's compute functions have no DB handle.** Trajectory, flow, runway and metering code
     in `backend/src/feed/` reads `AppState` caches behind `ArcSwap`. A new `PgPool` parameter or
-    inline query there is a finding. The background tasks that already own a pool are jobs, not
-    compute: `backend/src/feed/events.rs:77`, `backend/src/feed/delays.rs:277`, and the `spawn_*`
-    functions in `backend/src/feed/vatusa.rs`. New feed-visible config follows "cache + refresh job
-    + force-reload on write" (`AGENTS.md` § Conventions & gotchas).
-11. **The trajectory model has three callers.** A change to `backend/src/feed/trajectory.rs`
+    inline query there is a finding. Background tasks that own a pool are jobs, not compute: the
+    `spawn_*` sync and collector functions (for example `backend/src/feed/events.rs:77`,
+    `backend/src/feed/delays.rs:277`, `backend/src/feed/stats/mod.rs:50`,
+    `backend/src/feed/taxi_observations.rs:570`, and those in `backend/src/feed/vatusa.rs`) and the
+    historical reconstruction in `backend/src/feed/stats/reconstruct.rs`. New feed-visible config
+    follows "cache + refresh job + force-reload on write" (`AGENTS.md` § Conventions & gotchas).
+11. **The trajectory model has several callers.** A change to `backend/src/feed/trajectory.rs`
     reaches FCA metering (`backend/src/handlers/flow.rs`), airport-flow demand
-    (`backend/src/feed/flow.rs`) and runway ETE (`backend/src/feed/runway.rs`). Confirm each caller
-    still gets what it expects, and that tests cover the callers the change affects, not just the
-    predictor.
+    (`backend/src/feed/flow.rs`), runway ETE (`backend/src/feed/runway.rs`) and the sector
+    occupancy engine (`backend/src/feed/sector_tracks.rs`). `AGENTS.md` names the first three; grep
+    `trajectory::` for the current list. Confirm each caller still gets what it expects, and that
+    tests cover the callers the change affects, not just the predictor.
 12. **Blocking work on async threads.** Route resolution, metering and other heavy CPU work run
     under `tokio::task::spawn_blocking` (see `backend/src/handlers/flow.rs:621`).
 13. **Realtime topics.** A mutation that changes flow/TMU/ACE/runway state publishes its topic
