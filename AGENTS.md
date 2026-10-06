@@ -142,13 +142,18 @@ per-aircraft `AircraftProfile`s resolved by exact type → wake class → defaul
 - **Run the model:** FCA metering (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`), runway
   ETE (`feed/runway.rs`), sector occupancy (`feed/sector_tracks.rs`), and the shared prediction
   service (`feed/predict.rs`), which builds the `VerticalProfile` the others time against.
-- **Reached through `feed/predict.rs`:** `feed/fca.rs` and `feed/taxi_estimate.rs`.
+- **Inputs, not callers:** `feed/fca.rs` supplies the route `predict.rs` times along
+  (`fca::route_path`), and `feed/taxi_estimate.rs` supplies the ground allowance `feed/flow.rs` adds
+  before wheels-up. A `trajectory.rs` change does not reach them, but a change to them moves every ETA
+  built on them.
 - **Carry the `ProfileTable` only:** `state.rs` (the cache), `jobs.rs` (its refresh),
-  `repos/aircraft_profiles.rs` (loading it) and `scope_test_support.rs` (a test fixture).
+  `repos/aircraft_profiles.rs` (loading it), `handlers/aircraft_profiles.rs` (reloading it on write)
+  and `scope_test_support.rs` (a test fixture).
 
-A change here reaches every one of them — verify each, don't reason about one. The list goes stale:
+A change here reaches every caller above — verify each, don't reason about one. The list goes stale:
 re-derive it with `git grep 'trajectory::' -- backend/src` and `git grep 'predict::' -- backend/src`
-before relying on it.
+before relying on it, and keep only non-test call sites: both also match doc comments,
+`#[cfg(test)]` code and constant imports.
 
 ### The live feed subsystem (`feed/`)
 
