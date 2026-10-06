@@ -25,9 +25,9 @@ mechanism, says what "done" looks like, and is labeled so the board sorts it cor
 | **Returned** | Kicked back for rework (from review or test). |
 | **In build** | Actively being implemented. |
 | **Post build** | Build done — pre-test wrap-up (regenerate the client, apply migrations, self-check, `just ci`). |
-| **Testing Queue** | Awaiting test. |
+| **Testing Queue** | PR open, awaiting test. |
 | **In Test** | Under test. |
-| **Code Review** | PR open, in review. |
+| **Code Review** | Tested, PR in review. |
 | **Shippable** | Approved and ready to ship. |
 | **Done** | Merged / deployed. |
 
