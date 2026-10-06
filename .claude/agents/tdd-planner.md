@@ -93,8 +93,9 @@ it.todo("shows 'No flights' when the FCA has no members");
 
 Skeleton rules:
 
-- No helper functions in test code beyond what `scope_test_support.rs` already offers. Repetition
-  is clearer.
+- No helper functions in test code beyond what `scope_test_support.rs` already offers, and, for a
+  machine caller's bearer request, the `api_key`/`call_with` helpers in
+  `backend/src/handlers/machine_actor_tests.rs`. Repetition is clearer.
 - Fixtures use absolute values that straddle the boundary under test. Never derive them from the
   constant being tested.
 - A destructive `WHERE` gets one surviving neighbor row per predicate.

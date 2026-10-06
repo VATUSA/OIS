@@ -72,7 +72,8 @@ Go through every item. Mark each one **pass**, **fail** or **n/a**, with the evi
 ### Commit integrity
 
 16. **Staged by explicit path.** `git status --short` shows nothing intended still `M` or `??`.
-    `git diff origin/next..HEAD --name-only` lists every intended file and nothing unintended.
+    `git diff origin/next...HEAD --name-only` (three dots, so nothing that merged into `next` after
+    the fork shows up) lists every intended file and nothing unintended.
 17. **Branch.** Not `next` or `main`. The name matches `{feat|fix|chore}/{issue}/{desc}`.
 18. **Message.** Conventional `type(scope): summary`, a short body, `Closes #N` when it maps to an
     issue, and no AI attribution: no `Co-Authored-By`, session link or "Generated with" line.

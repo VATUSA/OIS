@@ -108,11 +108,15 @@ the action limited to what they may touch?
   against `CORS_ALLOWED_ORIGINS` plus `OAUTH_RETURN_TO_ORIGINS` (`validate_return_to`, `:537`;
   `backend/src/config.rs:48-54`). A widened origin list, or a redirect built from an unvalidated
   value, is an open redirect at minimum.
-- **Desktop token.** The desktop app authenticates with `Authorization: Bearer ois_dsk_…`, kept in
-  the OS keychain (`desktop/src-tauri/src/auth.rs:1-11`, entry at `:81`). Sign-in uses the system
-  browser and a loopback redirect carrying a single-use code, traded at `desktop_exchange`
-  (`backend/src/handlers/auth.rs:367`). Flag a token that travels in a URL, gets written outside the
-  keychain (a file, `localStorage`, a log), or a code that can be redeemed twice or never expires.
+- **Desktop token.** The desktop app authenticates with `Authorization: Bearer ois_dsk_…`. On
+  Windows and Linux the token is kept in the OS credential store (the keyring entry in
+  `desktop/src-tauri/src/auth.rs`); **on macOS it deliberately is not**: it is an owner-only (`0o600`)
+  session file, because the login keychain's per-item ACL breaks on every unsigned update (#535,
+  `auth.rs` "macOS does not use the keychain"). Sign-in uses the system browser and a loopback
+  redirect carrying a single-use code, traded at `desktop_exchange`
+  (`backend/src/handlers/auth.rs:367`). Flag a token that travels in a URL, lands in `localStorage`
+  or a log, sits outside the credential store on Windows/Linux, or sits in a macOS file looser than
+  `0600`; and a code that can be redeemed twice or never expires.
   The loopback origin `http://127.0.0.1:8765` belongs in `OAUTH_RETURN_TO_ORIGINS`, never in
   `CORS_ALLOWED_ORIGINS` (`AGENTS.md` § Environment variables).
 - **Secrets at rest.** Webhook secrets are encrypted with `OIS_SECRET_KEY`

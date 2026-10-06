@@ -110,8 +110,9 @@ defect here before.
 8. **SQL lives in `backend/src/repos/` only.** A `sqlx::query` in a handler is a finding. Every
    value is bound (`.bind(...)`), never `format!`-ed into the SQL string.
 9. **Migrations are append-only.** An edit to an existing `backend/migrations/NNNN_*.sql` is a
-   CRITICAL. A new migration's number must be above every number on `next` and on every remote branch
-   (`AGENTS.md` § Conventions & gotchas). Check status/check-constraint values against the newest
+   CRITICAL. A new migration's number must be above every number on `next` and in every open PR
+   (`AGENTS.md` § Conventions & gotchas); scan the remote branches too, since a branch without a PR
+   can already hold the number. Check status/check-constraint values against the newest
    `ALTER`, not the original `CREATE`.
 10. **The feed's compute functions have no DB handle.** Trajectory, flow, runway and metering code
     in `backend/src/feed/` reads `AppState` caches behind `ArcSwap`. A new `PgPool` parameter or
@@ -128,7 +129,7 @@ defect here before.
     `trajectory::` for the current list. Confirm each caller still gets what it expects, and that
     tests cover the callers the change affects, not just the predictor.
 12. **Blocking work on async threads.** Route resolution, metering and other heavy CPU work run
-    under `tokio::task::spawn_blocking` (see `backend/src/handlers/flow.rs:621`).
+    under `tokio::task::spawn_blocking` (see `fca_counts` in `backend/src/handlers/flow.rs`).
 13. **Realtime topics.** A mutation that changes flow/TMU/ACE/runway state publishes its topic
     (`AppState::publish`). `backend/src/handlers/topic_publish_tests.rs` is the pattern for testing it.
 14. **Audit.** Access changes carry a required human reason and before/after snapshots
@@ -152,7 +153,7 @@ agent.
 
 ### 7. Tests
 
-Apply `.claude/rules/test-quality.md`. For each new behavior, is there a test that would fail if the
+Apply `.claude/rules/test-quality.md` if it exists. For each new behavior, is there a test that would fail if the
 behavior were removed?
 
 - DB-touching repo logic has a `#[sqlx::test]` (`AGENTS.md` § Testing & verification).
