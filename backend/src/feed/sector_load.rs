@@ -73,9 +73,14 @@ pub struct SectorLoad {
 ///
 /// Bins are absolute Zulu quarter-hours — at 1407Z the first starts at 1400 — so they never depend on
 /// when the process started. A flight counts in a sector in a minute when any of its fixes that minute
-/// is inside any of the sector's volumes, laterally **and** between the volume's floor and ceiling
-/// ([`SectorVolume::contains`](super::sectors::SectorVolume::contains)). Occupants are sets keyed by
-/// sector and minute, so a boundary skim or a crossing between a sector's pieces counts once.
+/// is counted by one of the sector's volumes ([`SectorTable::counting`]): laterally inside **and** in the
+/// half-open band `floor <= alt < top` at the fix's predicted altitude, with TRACON precedence (#726) —
+/// when an approach volume contains the fix, only approach volumes count it, so an enroute Low from the
+/// surface over a TRACON does not double-count it. Occupants are sets keyed by sector and minute, so a
+/// boundary skim or a crossing between a sector's pieces counts once.
+///
+/// A row exists only for a sector with a volume: a quiet TRACON is a row of zeros, and a facility whose
+/// source has no TRACON volumes (ZSE, see [`super::sectors`]) has no approach row at all.
 pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<SectorLoad> {
     let bin_ms = BIN_MIN * MINUTE_MS;
     let first_ms = now_ms - now_ms.rem_euclid(bin_ms);
@@ -109,12 +114,7 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
             .filter(|f| (first_ms..end_ms).contains(&f.t_ms))
         {
             let minute = (fix.t_ms - first_ms) / MINUTE_MS;
-            let inside = table
-                .volumes
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.contains(fix.lat, fix.lon, fix.alt_ft));
-            for (i, _) in inside {
+            for i in table.counting(fix.lat, fix.lon, fix.alt_ft) {
                 let (active, proposed) = occupied.entry((row_of_volume[i], minute)).or_default();
                 match track.population {
                     Population::Active => active.insert(track.id),
@@ -365,3 +365,7 @@ mod tests {
         assert!(loads[0].bins.iter().all(|b| b.combined == 0));
     }
 }
+
+#[cfg(test)]
+#[path = "sector_load_strata_tests.rs"]
+mod strata_tests;
