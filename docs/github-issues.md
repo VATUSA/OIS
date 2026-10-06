@@ -3,7 +3,8 @@
 How we file and track work for OIS on GitHub. Modeled on the AvioDeck conventions, adapted to
 OIS's domains and workflow. This is the standard for both humans and agents.
 
-- **Repo:** [`VATUSA/OIS`](https://github.com/VATUSA/OIS) (private) — issues live here.
+- **Repo:** [`VATUSA/OIS`](https://github.com/VATUSA/OIS) (public: anyone can comment, so only team
+  comments are spec; see `/start`) — issues live here.
 - **Board:** [VATUSA · Project 7](https://github.com/orgs/VATUSA/projects/7/views/1) — every issue is
   added to it and moves through its Status pipeline.
 
