@@ -275,6 +275,146 @@ hook_commit reject "Co-Authored-By: Claude trailer" $'fix: x\n\nCo-Authored-By: 
 hook_commit reject "Generated with Claude Code line" $'fix: x\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)'
 hook_commit accept "clean message" $'fix: x\n\nCloses #1'
 
+# --- review-scan.sh --------------------------------------------------------------------------------
+# A miniature of OIS's layout: one base commit, then a branch that keeps every invariant (must scan
+# clean) and a branch that breaks each one (must report each).
+SCANNER="$HOOKS/../scripts/review-scan.sh"
+SCAN="$SANDBOX/scan"
+git init -q -b next "$SCAN" && git -C "$SCAN" config user.name test && git -C "$SCAN" config user.email t@example.com
+git -C "$SCAN" config commit.gpgsign false
+mkdir -p "$SCAN"/backend/src/{auth,repos,handlers} "$SCAN"/backend/migrations "$SCAN"/crates/ois-core/src
+cat >"$SCAN/backend/src/auth/permissions.rs" <<'RS'
+permission!(TmuTmiRead, ["tmu", "tmi"], Read);
+permission!(TmuTmiUpdate, ["tmu", "tmi"], Update);
+RS
+cat >"$SCAN/crates/ois-core/src/catalog.rs" <<'RS'
+pub fn default_roles() -> Vec<&'static str> {
+    vec![
+        SERVER_ADMIN_ROLE,
+        "USER",
+    ]
+}
+
+pub fn draft_new_permission_names() -> Vec<&'static str> {
+    vec![
+        "tmu.tmi.read",
+        "tmu.tmi.update",
+    ]
+}
+RS
+cat >"$SCAN/backend/src/repos/access.rs" <<'RS'
+pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
+    "USER",
+];
+RS
+cat >"$SCAN/backend/migrations/0001_init.sql" <<'SQL'
+insert into access.permissions (name, description) values
+    ('tmu.tmi.read', 'Read TMIs'),
+    ('tmu.tmi.update', 'Update TMIs');
+insert into access.roles (name, description) values
+    ('USER', 'Everyone');
+SQL
+cat >"$SCAN/backend/src/router.rs" <<'RS'
+use crate::handlers::{jobs as jobs_handler, tmu};
+pub fn build_router() -> Router {
+    Router::new()
+        .route("/api/v1/tmu/tmis", get(tmu::list_tmis))
+        .route("/api/v1/tmu/tmis/{id}", patch(tmu::update_tmi))
+}
+RS
+cat >"$SCAN/backend/src/openapi.rs" <<'RS'
+#[openapi(
+    paths(
+        crate::handlers::tmu::list_tmis,
+        crate::handlers::tmu::update_tmi,
+    )
+)]
+pub struct ApiDoc;
+RS
+cat >"$SCAN/backend/src/handlers/tmu.rs" <<'RS'
+pub async fn list_tmis(
+    _permission: RequirePermission<TmuTmiRead>,
+) -> Result<Json<Vec<Tmi>>, ApiError> {
+    tmu_repo::list().await
+}
+
+pub async fn update_tmi(
+    _permission: RequirePermission<TmuTmiUpdate>,
+    Path(id): Path<String>,
+) -> Result<Json<Tmi>, ApiError> {
+    tmu_repo::update(&id).await
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {}
+}
+RS
+git -C "$SCAN" add -A >/dev/null && git -C "$SCAN" commit -qm base
+
+# Clean branch: a fully wired permission + route, an aliased router module, and test-only SQL/unwrap.
+git -C "$SCAN" checkout -q -b clean
+perl -pi -e 'print "permission!(TmuTmiCreate, [\"tmu\", \"tmi\"], Create);\n" if $. == 1' "$SCAN/backend/src/auth/permissions.rs"
+perl -pi -e 's/^(\s+)"tmu.tmi.read",/$1"tmu.tmi.read",\n$1"tmu.tmi.create",/' "$SCAN/crates/ois-core/src/catalog.rs"
+printf "insert into access.permissions (name, description) values\n    ('tmu.tmi.create', 'Create TMIs');\n" >"$SCAN/backend/migrations/0002_tmi_create.sql"
+perl -pi -e 's/^(\s+)\.route\("\/api\/v1\/tmu\/tmis", get\(tmu::list_tmis\)\)/$1.route("\/api\/v1\/tmu\/tmis", get(tmu::list_tmis).post(tmu::create_tmi))\n$1.route("\/api\/v1\/jobs", get(jobs_handler::list_jobs))/' "$SCAN/backend/src/router.rs"
+perl -pi -e 's/^(\s+)crate::handlers::tmu::list_tmis,/$1crate::handlers::tmu::list_tmis,\n$1crate::handlers::tmu::create_tmi,\n$1crate::handlers::jobs::list_jobs,/' "$SCAN/backend/src/openapi.rs"
+perl -0pi -e 's/#\[cfg\(test\)\]/pub async fn create_tmi(\n    _permission: RequirePermission<TmuTmiCreate>,\n    Query(query): Query<CreateQuery>,\n) -> Result<Json<Tmi>, ApiError> {\n    tmu_repo::create().await\n}\n\nasync fn reload(pool: &sqlx::PgPool) -> Result<(), ApiError> {\n    tmu_repo::load(pool).await\n}\n\n#[cfg(test)]/; s/fn t\(\) \{\}/fn t() {\n        let n: i64 = sqlx::query_scalar("select 1").fetch_one(p).await.unwrap();\n    }/' "$SCAN/backend/src/handlers/tmu.rs"
+git -C "$SCAN" add -A >/dev/null && git -C "$SCAN" commit -qm clean
+scan_out="$(cd "$SCAN" && bash "$SCANNER" next 2>&1)"
+scan_rc=$?
+if [[ $scan_rc -eq 0 ]]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    failures="$failures  FAIL review-scan: a branch that keeps every invariant should scan clean (exit $scan_rc)"$'\n'"$(printf '%s\n' "$scan_out" | sed 's/^/      /')"$'\n'
+fi
+
+# Dirty branch: one break per check.
+git -C "$SCAN" checkout -q -b dirty next
+perl -pi -e 'print "permission!(FlowFooUpdate, [\"flow\", \"foo\"], Update);\n" if $. == 1' "$SCAN/backend/src/auth/permissions.rs"
+perl -pi -e 's/^(\s+)"tmu.tmi.read",/$1"tmu.tmi.read",\n$1"flow.bar.read",/; s/^(\s+)"USER",/$1"USER",\n$1"OTHER_ROLE",/' "$SCAN/crates/ois-core/src/catalog.rs"
+perl -pi -e 's/^(\s+)"USER",/$1"USER",\n$1"THIRD_ROLE",/' "$SCAN/backend/src/repos/access.rs"
+printf "insert into access.permissions (name, description) values\n    ('flow.baz.read', 'x');\ninsert into access.roles (name, description) values\n    ('NEW_ROLE', 'x');\n" >"$SCAN/backend/migrations/0002_flow.sql"
+echo "-- edited after it shipped" >>"$SCAN/backend/migrations/0001_init.sql"
+perl -pi -e 's/^(\s+)\.route\("\/api\/v1\/tmu\/tmis", get\(tmu::list_tmis\)\)/$1.route("\/api\/v1\/tmu\/tmis", get(tmu::list_tmis))\n$1.route("\/api\/v1\/tmu\/purge", delete(tmu::purge_tmis))/' "$SCAN/backend/src/router.rs"
+perl -pi -e 's/^(\s+)crate::handlers::tmu::list_tmis,/$1crate::handlers::tmu::list_tmis,\n$1crate::handlers::tmu::orphan_handler,/' "$SCAN/backend/src/openapi.rs"
+perl -0pi -e 's/    _permission: RequirePermission<TmuTmiUpdate>,\n//; s/#\[cfg\(test\)\]/pub async fn purge_tmis(State(state): State<AppState>) -> Result<Json<()>, ApiError> {\n    let rows = sqlx::query("delete from tmu.tmis").execute(&state.db).await;\n    let n = rows.unwrap();\n    Ok(Json(()))\n}\n\n#[cfg(test)]/' "$SCAN/backend/src/handlers/tmu.rs"
+git -C "$SCAN" add -A >/dev/null && git -C "$SCAN" commit -qm dirty
+scan_out="$(cd "$SCAN" && bash "$SCANNER" next 2>&1)"
+scan_rc=$?
+scan_expect() {
+    if [[ $scan_rc -eq 1 ]] && printf '%s\n' "$scan_out" | grep -qE "$1"; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        failures="$failures  FAIL review-scan: expected a finding matching /$1/ (exit $scan_rc)"$'\n'"$(printf '%s\n' "$scan_out" | sed 's/^/      /')"$'\n'
+    fi
+}
+scan_expect '^backend/src/auth/permissions.rs:1: permission flow.foo.update has a marker but no "flow.foo.update" in'
+scan_expect '^backend/src/auth/permissions.rs:1: permission flow.foo.update has a marker but no access.permissions row'
+scan_expect '^crates/ois-core/src/catalog.rs:[0-9]+: permission flow.bar.read is in the catalog but no migration'
+scan_expect '^crates/ois-core/src/catalog.rs:[0-9]+: role OTHER_ROLE is in default_roles\(\) but no migration'
+scan_expect '^backend/src/repos/access.rs:3: role THIRD_ROLE is assignable but missing from default_roles'
+scan_expect '^backend/src/repos/access.rs:3: role THIRD_ROLE is assignable but no migration'
+scan_expect '^backend/migrations/0002_flow.sql:2: permission flow.baz.read is inserted but missing'
+scan_expect '^backend/migrations/0002_flow.sql:4: role NEW_ROLE is inserted but missing from default_roles'
+scan_expect '^backend/migrations/0002_flow.sql:4: role NEW_ROLE is not in ASSIGNABLE_USER_ROLES'
+scan_expect '^backend/migrations/0001_init.sql:1: applied migration edited in place'
+scan_expect '^backend/src/router.rs:[0-9]+: route tmu::purge_tmis is not registered in backend/src/openapi.rs'
+scan_expect '^backend/src/handlers/tmu.rs:[0-9]+: mutating route \(delete\) tmu::purge_tmis takes no RequirePermission'
+scan_expect '^backend/src/openapi.rs:[0-9]+: path tmu::orphan_handler is in the OpenAPI document but no route'
+scan_expect '^backend/src/handlers/tmu.rs:[0-9]+: SQL in a handler'
+scan_expect '^backend/src/handlers/tmu.rs:[0-9]+: unwrap\(\)/expect\(\) in a handler'
+scan_expect '^backend/src/handlers/tmu.rs:8: RequirePermission<TmuTmiUpdate> was removed'
+if (cd "$SCAN" && bash "$SCANNER" no-such-ref >/dev/null 2>&1); [[ $? -eq 2 ]]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    failures="$failures  FAIL review-scan: an unknown base ref must exit 2, not pass"$'\n'
+fi
+
 # --- cost on an unrelated Bash call (informational) -------------------------------------------------
 # Claude Code runs a matcher's hooks in parallel, so the added latency is about the slowest single
 # gate; the sequential sum is the worst case. Machine load moves these numbers, so they never fail.

@@ -199,7 +199,9 @@ while IFS= read -r file; do
     while IFS=$'\t' read -r line text; do
         [[ $line -lt $test_from ]] || continue
         [[ "$text" =~ $COMMENT_RE ]] && continue
-        if printf '%s' "$text" | grep -qiE 'sqlx::|QueryBuilder|"[[:space:]]*(select|insert into|update [a-z_.]+ set|delete from|with [a-z_]+ as) '; then
+        # Query calls are matched case-sensitively, so the `Query(q)` extractor is not one.
+        if printf '%s' "$text" | grep -qE 'sqlx::(query|raw_sql)|(^|[^A-Za-z_])query(_as|_scalar)?(::<|\()|QueryBuilder' ||
+            printf '%s' "$text" | grep -qiE '"[[:space:]]*(select|insert into|update [a-z_.]+ set|delete from|with [a-z_]+ as) '; then
             finding "$file" "$line" "SQL in a handler; move the query to repos/ (handlers stay thin)"
         fi
         if printf '%s' "$text" | grep -qE '\.unwrap\(\)|\.expect\('; then
@@ -216,7 +218,7 @@ done < <(git diff --name-only --diff-filter=AM "$mb" HEAD -- "$HANDLERS/*.rs")
 
 files="$(git diff --name-only "$mb" HEAD | wc -l | tr -d ' ')"
 if [[ -s "$findings" ]]; then
-    sort -t: -k1,1 -k2,2n -u "$findings"
+    sort -u "$findings" | sort -s -t: -k1,1 -k2,2n
     echo "review-scan: $(sort -u "$findings" | wc -l | tr -d ' ') finding(s) across $files changed file(s) vs $base"
     exit 1
 fi
