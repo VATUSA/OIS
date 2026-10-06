@@ -27,10 +27,18 @@ function sources(dir: string): string[] {
   });
 }
 
-/** Comments blanked out, newlines kept, so a match's line number is still the real one. */
+/**
+ * Comments blanked out, newlines kept, so a match's line number is still the real one.
+ *
+ * One left-to-right pass that matches string and template literals first and keeps them, so a `/*` or
+ * `//` inside a string never starts a comment, and a `//` comment runs to its line's end, `/*` and all.
+ */
+const LITERAL_OR_COMMENT =
+  /("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|\/\/[^\n]*|\/\*[\s\S]*?\*\//g;
 function stripComments(text: string): string {
-  const blank = (m: string) => m.replace(/[^\n]/g, " ");
-  return text.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/^\s*\/\/.*$/gm, blank);
+  return text.replace(LITERAL_OR_COMMENT, (m, literal?: string) =>
+    literal ? m : m.replace(/[^\n]/g, " "),
+  );
 }
 
 const BARE_API_LITERAL = /["'`]\/api\//g;
@@ -50,9 +58,13 @@ function offenders(text: string, file: string): string[] {
 
 describe("browser-navigable API URLs go through API_BASE (#738 AC4)", () => {
   it("builds no href, location or helper from a bare /api/ path in web/src", () => {
-    const found = sources(SRC).flatMap((path) =>
-      offenders(readFileSync(path, "utf8"), relative(SRC, path)),
+    const files = sources(SRC);
+    // An empty scan finds nothing, so it would pass on any filter or path mistake: pin that it reads
+    // the page this guard exists for and the module the rule points people at.
+    expect(files.map((path) => relative(SRC, path))).toEqual(
+      expect.arrayContaining([join("pages", "download.tsx"), join("lib", "api.ts")]),
     );
+    const found = files.flatMap((path) => offenders(readFileSync(path, "utf8"), relative(SRC, path)));
 
     expect(found, "build the URL from API_BASE (@/lib/api); see pages/download.tsx").toEqual([]);
   });
@@ -70,6 +82,18 @@ describe("browser-navigable API URLs go through API_BASE (#738 AC4)", () => {
     for (const line of bad) expect(offenders(line, "x.tsx"), line).toEqual(["x.tsx:1"]);
   });
 
+  // A `/*` inside a line comment or a string is not a block comment. Read as one, it hid everything up
+  // to the next `*/` from the scan: `lib/historical.ts`'s `/api/v1/stats/hist/*` comment, and
+  // `lib/aircraft-icons.ts`'s glob string, each blanked real code.
+  it("still scans code after a `/*` inside a line comment or a string", () => {
+    const hidden = [
+      '// the `/api/v1/stats/hist/*` endpoint\nexport const leak = "/api/v1/x";\n/** doc */',
+      'const glob = "../assets/aircraft/*.svg";\n<a href="/api/v1/x">x</a>;\n/** doc */',
+      "const glob = `../assets/*.svg`;\nlocation.href = '/api/v1/x';\n/** doc */",
+    ];
+    for (const src of hidden) expect(offenders(src, "x.tsx"), src).toEqual(["x.tsx:2"]);
+  });
+
   it("accepts typed-client calls, a based URL, casts and comments", () => {
     const good = [
       'await ois.GET("/api/v1/me");',
@@ -80,6 +104,8 @@ describe("browser-navigable API URLs go through API_BASE (#738 AC4)", () => {
       "// links to `/api/v1/public/desktop/download/{platform}`",
       "/** see `/api/v1/stats/hist/*` */",
       "const u = `${API_BASE}/api/v1/public/desktop/download/macos`;",
+      'const {data} = await ois.GET(path); // proxies "/api/v1/me"',
+      'const docs = "https://example.org/a//b"; // not a comment start inside the string',
     ];
     for (const src of good) expect(offenders(src, "x.tsx"), src).toEqual([]);
   });
