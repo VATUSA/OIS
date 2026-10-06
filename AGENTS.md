@@ -262,16 +262,33 @@ just test-js       # pnpm test
 # desktop
 just desktop-build # bundle the Tauri app for the host platform
 
-# the local gate (run before calling anything done)
-just ci            # migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
+# the gates
+just ci            # fast subset: migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
+just ci-full       # what CI runs (run before calling anything done): adds clippy -D warnings, nextest, doc tests,
+                   #   pnpm test, pnpm audit, cargo deny and the client-drift check; prints PASS/FAIL/SKIPPED per step
+
+# once per clone
+just setup         # git hooks from .githooks/: pre-commit (rustfmt, gitleaks, migration versions),
+                   #   commit-msg (no AI attribution), pre-push (clippy)
 ```
 
-`just ci` is not CI. `.github/workflows/ci.yml` also runs clippy (`-D warnings`), doc tests,
-`pnpm test`, `pnpm audit`, `cargo deny`, and the client-drift check — none of which `just ci` runs.
-On any Rust change, also run `cargo clippy --workspace --all-targets -- -D warnings`.
+`just ci-full` mirrors `.github/workflows/ci.yml` except the cross-platform `desktop` matrix, which
+needs the other operating systems. It runs every step and fails at the end if any failed; a step it
+cannot run (no `cargo-deny` installed) shows as SKIPPED, not passed. Rust tests use nextest with CI's
+profile when it is installed and say so when they fall back to `cargo test`.
 
-First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`. `.env` is read
-by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both are gitignored.
+First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`, `just setup`.
+`.env` is read by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both are
+gitignored.
+
+**Agent gates.** `.claude/settings.json` wires Claude Code hooks from `.claude/hooks/`, always run
+from the primary checkout's copy, so a branch cannot loosen its own gates. They block a push to
+`main`/`next`, `gh pr merge`, a branch created or switched in the primary checkout, `git add -A`/`.`,
+a branch name off the `{feat|fix|chore}/{issue}/{desc}` pattern, AI attribution in a commit or PR,
+`gh pr create` on a HEAD with no `/review-before-shipping` marker, and a staged migration whose number
+another origin branch already took. `bash .claude/hooks/test/run.sh` tests them.
+`.claude/scripts/review-scan.sh [base]` scans the committed diff for broken sync-invariants (see
+§ Architecture), SQL or `unwrap` in handlers, and an applied migration edited in place.
 
 ---
 
@@ -296,8 +313,8 @@ by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both
   verified by running the full stack (`just up && just backend`) and exercising the endpoint.
 - Read the `test result:` summary line, not just the exit code.
 
-Definition of done for a change: `just ci` is green (plus clippy for a Rust change — see
-§ Commands), the client is regenerated if the contract moved, and any DB migration has been applied
+Definition of done for a change: `just ci-full` is green, with any SKIPPED step named in the PR (see
+§ Commands); the client is regenerated if the contract moved; and any DB migration has been applied
 (it applies automatically on the next backend start — it is idempotent-friendly and numbered
 sequentially).
 

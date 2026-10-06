@@ -112,6 +112,78 @@ dev: up
 check-migrations:
     .github/scripts/check-migration-versions.sh
 
-# Local validation — CI also runs clippy, doc tests, pnpm test/audit, and cargo deny
+# Not what CI runs: it skips clippy, doc tests, pnpm test, the audits and the client-drift check,
+# which `just ci-full` adds.
+# Fast local validation (a subset of CI; see ci-full)
 ci: check-migrations fmt-check check test-rust
     pnpm lint && pnpm typecheck
+
+# Runs every step, then fails if any step failed; a step it cannot run here is reported SKIPPED,
+# never passed. Not covered: the macOS/Windows/Linux `desktop` matrix (clippy below compiles the
+# Tauri shell for this host only).
+# Everything .github/workflows/ci.yml runs that can run on this machine
+ci-full:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    results=()
+    failed=0
+    step() {
+        local name="$1"; shift
+        echo; echo "==> $name"
+        if "$@"; then results+=("PASS     $name"); else results+=("FAIL     $name"); failed=1; fi
+    }
+    skip() { echo; echo "==> $1: SKIPPED ($2)"; results+=("SKIPPED  $1 ($2)"); }
+
+    # migrations job
+    step "migration versions" .github/scripts/check-migration-versions.sh
+    # rust job
+    step "cargo fmt --check" cargo fmt --all -- --check
+    step "cargo clippy -D warnings" cargo clippy --workspace --all-targets -- -D warnings
+    if cargo nextest --version >/dev/null 2>&1; then
+        step "rust tests (cargo nextest, as CI)" cargo nextest run --workspace --all-targets --profile ci
+    else
+        step "rust tests (cargo test: nextest is not installed)" cargo test --workspace --all-targets
+    fi
+    step "doc tests" cargo test --workspace --doc
+    # js job
+    step "pnpm install --frozen-lockfile" pnpm install --frozen-lockfile
+    step "pnpm lint" pnpm lint
+    step "pnpm typecheck" pnpm typecheck
+    step "pnpm test" pnpm test
+    step "pnpm audit --audit-level=high" pnpm audit --audit-level=high
+    # deny job
+    if cargo deny --version >/dev/null 2>&1; then
+        step "cargo deny check" cargo deny check
+    else
+        skip "cargo deny check" "cargo-deny is not installed: cargo install --locked cargo-deny"
+    fi
+    # client-drift job: regenerate the client from the compiled OpenAPI document and compare it to the
+    # checked-in one. The worktree copy is restored afterwards; on drift, run the codegen yourself.
+    drift() {
+        local schema=packages/api-client/src/generated/schema.d.ts saved
+        saved="$(mktemp)" || return 1
+        cp "$schema" "$saved"
+        cargo test -p ois-backend --lib openapi::dump_openapi_json -- --exact --ignored --quiet &&
+            OIS_OPENAPI_URL=/tmp/ois-openapi.json pnpm --filter @ois/api-client codegen >/dev/null &&
+            cmp -s "$schema" "$saved"
+        local status=$?
+        if [[ $status -ne 0 ]] && ! cmp -s "$schema" "$saved"; then
+            diff -u "$saved" "$schema" | head -40
+            echo "client drift: the generated client is stale. Regenerate it (AGENTS.md § The API contract) and commit it."
+        fi
+        cp "$saved" "$schema"
+        rm -f "$saved"
+        return $status
+    }
+    step "client drift" drift
+
+    echo; echo "==> just ci-full summary"
+    printf '  %s\n' "${results[@]}"
+    exit $failed
+
+# .githooks/: pre-commit (rustfmt, gitleaks, migration versions), commit-msg (no AI attribution),
+# pre-push (clippy). Run once per clone; every worktree shares the setting.
+# Enable the repo's git hooks (core.hooksPath=.githooks)
+setup:
+    git config core.hooksPath .githooks
+    @echo "git hooks enabled: core.hooksPath=$(git config core.hooksPath)"

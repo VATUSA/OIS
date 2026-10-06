@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Git pre-push hook: clippy with warnings as errors, which CI runs and `just ci` skips
+# (.github/workflows/ci.yml, rust job). Installed by `just setup`. Deleting a remote branch pushes no
+# code, so it skips the check.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+zero=0000000000000000000000000000000000000000
+pushes_code=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    [[ "$local_sha" != "$zero" ]] && pushes_code=1
+done
+[[ $pushes_code -eq 1 ]] || exit 0
+
+echo "pre-push: cargo clippy --workspace --all-targets -- -D warnings" >&2
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo "pre-push: clippy failed. Fix the warnings above, commit, and push again." >&2
+    exit 1
+fi
