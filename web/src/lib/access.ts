@@ -193,3 +193,65 @@ export function useVatusaResync() {
       ),
   });
 }
+
+export type AccessResetBody = components["schemas"]["AccessResetBody"];
+export type AccessResetGrant = components["schemas"]["AccessResetGrant"];
+
+/**
+ * Dry run of "Reset all access to VATUSA" (#795): who would change and how, from the VATUSA data the
+ * last division pull stored. Writes nothing. Server admin only; fetched only while `enabled`.
+ */
+export function useVatusaResetPreview(enabled: boolean) {
+  return useQuery({
+    enabled,
+    retry: false,
+    queryKey: ["vatusa-reset-preview"],
+    queryFn: async () => {
+      const { data, error } = await ois.GET("/api/v1/admin/access/vatusa-reset");
+      if (error || !data) throw new Error("failed to load the reset preview");
+      return data;
+    },
+  });
+}
+
+/**
+ * Reset every user's access to VATUSA (#795). A failure carries the server's reason (a failed VATUSA
+ * pull, or a run that stopped part-way) and how many users were already reset.
+ */
+export function useVatusaReset() {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return useMutation({
+    mutationFn: async ({ reason }: { reason: string }) => {
+      const { data, error, response } = await ois.POST("/api/v1/admin/access/vatusa-reset", {
+        body: { reason },
+      });
+      if (error || !data) {
+        const failure = error as { message?: string; users_reset?: number } | undefined;
+        const err = new Error(failure?.message ?? "reset failed") as Error & {
+          status?: number;
+          usersReset?: number;
+        };
+        err.status = response?.status;
+        err.usersReset = failure?.users_reset;
+        throw err;
+      }
+      return data;
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["vatusa-reset-preview"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      void queryClient.invalidateQueries({ queryKey: ["user-access"] });
+      void queryClient.invalidateQueries({ queryKey: ["user-vatusa"] });
+    },
+    onSuccess: (data) =>
+      toast.success("Access reset to VATUSA", {
+        description: `${data.users_reset} of ${data.users_checked} users changed`,
+      }),
+    onError: (err: Error & { usersReset?: number }) =>
+      toast.error("Reset to VATUSA failed", {
+        description:
+          err.usersReset != null ? `${err.message} (${err.usersReset} users reset)` : err.message,
+      }),
+  });
+}

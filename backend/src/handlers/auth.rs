@@ -20,7 +20,10 @@ use crate::{
     config::{configured_return_to_origins, configured_server_admin_cids, cookie_secure},
     errors::ApiError,
     models::{DesktopExchangeRequest, DesktopSessionBody, MeBody},
-    repos::{access as access_repo, auth as auth_repo, users as user_repo},
+    repos::{
+        access::{self as access_repo, BASELINE_ROLE},
+        auth as auth_repo, users as user_repo,
+    },
     state::AppState,
 };
 
@@ -48,11 +51,6 @@ const DESKTOP_STATE_MAX_LEN: usize = 128;
 
 /// Marks a session token as belonging to the desktop app; `auth::middleware` dispatches on it.
 const DESKTOP_SESSION_TOKEN_PREFIX: &str = "ois_dsk_";
-
-/// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
-/// (migration 0094) rather than being copied onto each user — editing the group changes everyone's
-/// baseline with no backfill, which is the whole point of #542.
-const BASELINE_ROLE: &str = "USER";
 
 #[derive(Deserialize)]
 pub struct LoginQuery {

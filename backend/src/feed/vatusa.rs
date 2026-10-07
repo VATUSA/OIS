@@ -407,6 +407,17 @@ async fn fetch_division(api_key: &str) -> Result<ControllersAndRoles, String> {
         .map_err(|e| format!("VATUSA division pull returned an unreadable body: {e}"))
 }
 
+/// Fetch and store the division once, then announce any access change. The daily job runs it, and so
+/// does the access reset (#795) before it reads anyone's VATUSA roles.
+pub async fn pull_division(
+    pool: &PgPool,
+    api_key: &str,
+    events: &crate::realtime::Events,
+) -> Result<String, String> {
+    let pulled = fetch_division(api_key).await?;
+    apply_and_announce(pool, &division_members(pulled), events).await
+}
+
 /// Pull the division daily (and on demand: from Background Tasks, or when a verified webhook delivery
 /// says the roster changed). Replaces the old 6-hourly reconcile, which refreshed ≤ 800 already-signed-in
 /// members a day over v2, one fetch each.
@@ -417,8 +428,7 @@ pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool, events: crate::r
     tokio::spawn(division_pull_job(reg, move || {
         let (pool, api_key, events) = (pool.clone(), api_key.clone(), events.clone());
         async move {
-            let pulled = fetch_division(&api_key).await?;
-            let summary = apply_and_announce(&pool, &division_members(pulled), &events).await?;
+            let summary = pull_division(&pool, &api_key, &events).await?;
             // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
             // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
             match ensure_webhook(&pool, &api_key).await {

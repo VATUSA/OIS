@@ -165,6 +165,34 @@ controller also gets **`CONTROLLER`**, the baseline operational group (migration
   Planning (`events.plan.*`), Historical (`stats.*`), admin or `*.publish` permission.
   `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.
 
+## Reset all access to VATUSA (#795)
+
+Resync (#549) puts one member back on role sync and only touches `vatusa` rows. **Reset all access to
+VATUSA** (Admin → Access) does it for everyone and also removes hand-made grants, so each user ends up
+holding exactly their `system` grants plus what VATUSA justifies.
+
+- **Server admin only.** Both routes check the caller holds `SERVER_ADMIN` and answer `403` to anyone
+  else, a national `access.users.update` holder included. There is no catalog permission for it.
+- **Dry run first.** `GET /api/v1/admin/access/vatusa-reset` lists every user who would change and the
+  rows they would gain and lose (group or permission, scope, source, allow or deny). It runs each
+  user's reset in a transaction it rolls back, against the VATUSA data the last pull stored, so it
+  writes nothing.
+- **The reset.** `POST /api/v1/admin/access/vatusa-reset` with a reason. It runs the division pull
+  first; if the pull fails, or `VATUSA_API_KEY` is unset, nothing is reset and the error says why
+  (`502 vatusa_pull_failed`, `503 vatusa_not_configured`). Then, one transaction per user in CID
+  order: clear the detach, delete every `manual` row in `access.user_roles` and
+  `access.user_permissions` (denies included), reconcile the `vatusa` group grants, and write one
+  `USER_ACCESS` audit entry naming every row removed and added. A user with no change gets no entry.
+  Because the pull is fresh, the result can differ from the dry run if VATUSA changed since the last
+  pull; the response lists what the reset actually did.
+- **`USER` and `SERVER_ADMIN` are never removed**, whatever their `source`. Migration 0098 backfilled
+  both as `manual` for everyone who held them then.
+- **A failure part-way** stops the run with `500 reset_incomplete`. Users before it are reset and
+  audited, the failing user is rolled back whole, and users after it are untouched. `users_reset`
+  says how many were done; running it again finishes the rest.
+- Service accounts keep their grants (`access.service_account_roles` is not touched). API keys follow
+  their owner's live access.
+
 ## Freshness
 
 Every controller is at most **a day** stale, whatever the division's size — the old per-member reconcile

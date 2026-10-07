@@ -696,6 +696,11 @@ pub async fn set_user_role(
     set_user_role_scoped(tx, user_id, role_name, held, None, source).await
 }
 
+/// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
+/// (migration 0094) rather than being copied onto each user — editing the group changes everyone's
+/// baseline with no backfill, which is the whole point of #542.
+pub const BASELINE_ROLE: &str = "USER";
+
 /// Who created a grant, and therefore whose row it is to remove (VATUSA/OIS#547).
 ///
 /// Typed rather than a string so a writer cannot mistype it, and so adding a source is a compile
