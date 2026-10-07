@@ -60,6 +60,25 @@ above. It has no endpoint yet; #725 serves it.
   The latest is the binding constraint, since a flight held for a later release can't satisfy an earlier
   one. The flight advisory and the TMU departures list (#732) use the same rule.
 
+## Sector limits (#722)
+
+A sector's occupancy is judged against its **limit**: how many aircraft one controller can work there.
+The limit is shared, so everyone watching an ARTCC sees the same colours.
+
+- **Default 10** (`feed/sector_limits.rs`, `DEFAULT_LIMIT`). Only overrides are stored, in
+  `flow.sector_limit` keyed per `(artcc, sector_id)`. Setting a sector back to 10 deletes its row.
+- **Level** (`level`), strictly greater than: **over** when the active peak alone exceeds the limit,
+  **watch** when only `combined` does, else **ok**. A peak equal to the limit is ok.
+- **Read**: `GET /api/v1/flow/sector-limits/{artcc}` (`flow.sectors.read`) lists the ARTCC's sectors
+  from the cached dataset, with `editable` for the caller. An ARTCC with no sector data returns no
+  sectors, not a 404.
+- **Write**: `PUT /api/v1/flow/sector-limits/{artcc}/{sector_id}` needs `flow.sector_limits.update`
+  for that ARTCC. A TMU at one facility gets a 403 on a neighbour's sectors. Zero or a negative limit is
+  a 400, an unknown sector is a 404, and an unchanged value writes nothing. A refusal never touches an
+  existing override. The comparison is made against the stored row, not the cache.
+- **Cache**: `AppState::sector_limits`, refreshed every 30 s by `sector_limits_refresh`. A write
+  force-reloads it and publishes `flow.sector_limits`, so viewers recolour at once.
+
 ## The sector dataset
 
 ### Where it comes from

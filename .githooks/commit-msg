@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Git commit-msg hook: reject AI attribution in the commit message. Installed by `just setup`.
+# Shares its patterns with the Claude Code attribution gate (.claude/hooks/lib/attribution.sh), and
+# catches what that gate cannot see: a message written in an editor, amended, or reused with `-C`.
+set -uo pipefail
+# Resolved from this hook's own path, so it works from whichever checkout installed it.
+lib="$(cd "$(dirname "$0")/.." && pwd)/.claude/hooks/lib/attribution.sh"
+if [[ ! -f "$lib" ]]; then
+    echo "commit-msg: cannot find $lib, so the message was not checked for attribution." >&2
+    exit 1
+fi
+# shellcheck source-path=SCRIPTDIR source=../.claude/hooks/lib/attribution.sh
+. "$lib"
+
+if hits="$(attribution_hits - <"$1")"; then
+    echo "commit-msg: the message carries AI attribution:" >&2
+    printf '%s\n' "$hits" | sed 's/^(standard input):/  line /' >&2
+    echo "Commits in this repo are authored solely as the user; remove the trailer, link or credit line." >&2
+    exit 1
+fi
+exit 0

@@ -22,6 +22,9 @@ pub mod neighbors;
 pub mod predict;
 pub mod runway;
 pub mod runway_db;
+pub mod sector_limits;
+#[cfg(test)]
+mod sector_limits_tests;
 pub mod sector_load;
 pub mod sector_tracks;
 pub mod sectors;

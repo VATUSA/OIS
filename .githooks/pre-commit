@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Git pre-commit hook. Installed for the whole repo by `just setup` (core.hooksPath=.githooks).
+#   1. rustfmt --check on the staged .rs files (the checked-out copies);
+#   2. gitleaks on the staged changes, when gitleaks is installed;
+#   3. the duplicate-migration-version check, when a migration is staged.
+# Bypassing it (`--no-verify`) only defers the failure to CI.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+failed=0
+staged() { git diff --cached --name-only --diff-filter=ACMR -- "$@"; }
+
+rust_files=()
+while IFS= read -r f; do
+    [[ -f "$f" ]] && rust_files[${#rust_files[@]}]="$f"
+done < <(staged '*.rs')
+if [[ ${#rust_files[@]} -gt 0 ]]; then
+    # rustfmt alone defaults to the 2015 edition; the workspace is 2024 (Cargo.toml [workspace.package]).
+    if ! rustfmt --edition 2024 --check -- "${rust_files[@]}" >/dev/null 2>&1; then
+        echo "pre-commit: rustfmt would reformat staged Rust files. Run \`just fmt\`, re-stage, commit." >&2
+        rustfmt --edition 2024 --check -l -- "${rust_files[@]}" 2>/dev/null | sed 's/^/  /' >&2
+        failed=1
+    fi
+fi
+
+if command -v gitleaks >/dev/null 2>&1; then
+    if ! gitleaks protect --staged --redact --no-banner >/dev/null 2>&1; then
+        echo "pre-commit: gitleaks found a possible secret in the staged changes:" >&2
+        gitleaks protect --staged --redact --no-banner -v 2>&1 | sed 's/^/  /' >&2
+        failed=1
+    fi
+else
+    echo "pre-commit: gitleaks is not installed, so staged changes were NOT scanned for secrets (brew install gitleaks)." >&2
+fi
+
+if [[ -n "$(staged 'backend/migrations/*')" ]]; then
+    if ! .github/scripts/check-migration-versions.sh >/dev/null; then
+        .github/scripts/check-migration-versions.sh >&2 || true
+        failed=1
+    fi
+fi
+
+exit $failed

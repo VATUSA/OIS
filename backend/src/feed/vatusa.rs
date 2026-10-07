@@ -148,20 +148,27 @@ fn client() -> reqwest::Client {
 /// at sign-in, for `discord_id` (which v3 does not carry) and a brand-new member's first sign-in.
 /// `api_key` is passed as `?apikey=` so visits are populated. (Email is not parsed: sign-in has it from
 /// VATSIM Connect.)
+///
+/// Every error is stripped of its URL: reqwest's `Display` appends the request URL, query and all, so a
+/// failed fetch would otherwise write the key into the sign-in warning log (#757).
 async fn fetch_member(
     http: &reqwest::Client,
+    base: &str,
     api_key: &str,
     cid: i64,
 ) -> Result<VatusaMember, reqwest::Error> {
-    let url = format!("{}/v2/user/{cid}", vatusa_api_base());
-    let env: Envelope<VatusaMember> = http
-        .get(&url)
-        .query(&[("apikey", api_key)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let url = format!("{base}/v2/user/{cid}");
+    let env: Envelope<VatusaMember> = async {
+        http.get(&url)
+            .query(&[("apikey", api_key)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    }
+    .await
+    .map_err(reqwest::Error::without_url)?;
     Ok(env.data)
 }
 
@@ -171,7 +178,7 @@ pub async fn sync_member(pool: &PgPool, cid: i64) -> Result<(), String> {
     let Some(api_key) = vatusa_api_key() else {
         return Ok(()); // sync disabled
     };
-    let member = fetch_member(&client(), &api_key, cid)
+    let member = fetch_member(&client(), &vatusa_api_base(), &api_key, cid)
         .await
         .map_err(|e| format!("VATUSA fetch for {cid} failed: {e}"))?;
     repo::upsert_member(pool, &member)
@@ -623,6 +630,38 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{addr}/v3/webhooks")
+    }
+
+    /// #757: the v2 member fetch sends the key as `?apikey=`, and reqwest's error text carries the request
+    /// URL. Whatever goes wrong, the error that reaches the sign-in warning log must not hold the key.
+    const KEY: &str = "vatusa-secret-key-757";
+
+    #[tokio::test]
+    async fn a_failed_member_fetch_does_not_log_the_api_key() {
+        let url = serve_once("500 Internal Server Error", String::new()).await;
+        let base = url.trim_end_matches("/v3/webhooks");
+        let err = fetch_member(&client(), base, KEY, 1_757_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(KEY), "the key leaked into the error: {err}");
+        assert!(
+            err.contains("500"),
+            "the error should still say what failed: {err}"
+        );
+    }
+
+    /// A transport failure is an error from `send`, not from `error_for_status`: pin that path too.
+    #[tokio::test]
+    async fn an_unreachable_vatusa_does_not_log_the_api_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let err = fetch_member(&client(), &base, KEY, 1_757_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(KEY), "the key leaked into the error: {err}");
     }
 
     /// #688 AC5: a refused call says what VATUSA said, not only the status — a `400` from a bad key

@@ -36,9 +36,9 @@ These are project rules, not preferences:
 - **Regenerate the typed client after any contract change.** Editing an endpoint or a
   `#[derive(ToSchema)]` model and *not* regenerating leaves the web typecheck compiling against a
   stale contract — a silent failure. See `AGENTS.md` § "The API contract → typed client".
-- **Verify before "done": run `just ci`, plus clippy on a Rust change** (`just ci` skips it — see
-  `AGENTS.md` § Commands). For a contract change, that means regenerate the client
-  first, then `pnpm typecheck`. For DB behavior, run the stack and exercise the endpoint.
+- **Verify before "done": run `just ci-full`**, which mirrors CI (`just ci` is the fast subset; it
+  skips clippy, vitest, the audits and client drift — see `AGENTS.md` § Commands). For a contract
+  change, regenerate the client first. For DB behavior, run the stack and exercise the endpoint.
 - **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
   scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are
   read-only.

@@ -28,8 +28,11 @@ const KEYCHAIN_SERVICE: &str = "net.vatusa.ois";
 const KEYCHAIN_USER: &str = "desktop-session";
 
 /// The loopback redirect target. Fixed rather than ephemeral because the backend's `return_to`
-/// allowlist is static env config (`CORS_ALLOWED_ORIGINS`), so a port chosen at runtime could not
-/// be authorised. Bound only on 127.0.0.1, so nothing off-machine can reach it.
+/// allowlist is static env config, so a port chosen at runtime could not be authorised. Its origin
+/// belongs in `OAUTH_RETURN_TO_ORIGINS` (redirect-only), never `CORS_ALLOWED_ORIGINS`: the port is
+/// bound only while sign-in runs, and CORS would let anything else that binds it make credentialed
+/// API calls with the user's cookie (#346). Bound only on 127.0.0.1, so nothing off-machine can
+/// reach it.
 const LOOPBACK_ADDR: &str = "127.0.0.1:8765";
 pub const LOOPBACK_REDIRECT: &str = "http://127.0.0.1:8765/callback";
 

@@ -31,6 +31,7 @@ pub mod public;
 pub mod release_authority;
 pub mod restriction_artcc;
 pub mod runway;
+pub mod sector_limits;
 pub mod service_accounts;
 pub mod stats;
 pub mod taxi_insights;
@@ -40,6 +41,9 @@ pub mod webhooks;
 
 #[cfg(test)]
 mod topic_publish_tests;
+
+#[cfg(test)]
+mod sector_limits_tests;
 
 #[cfg(test)]
 mod actor_ratchet_tests;

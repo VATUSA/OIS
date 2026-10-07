@@ -26,6 +26,9 @@ pub mod org;
 pub mod preferences;
 pub mod public;
 pub mod runway;
+pub mod sector_limits;
+#[cfg(test)]
+mod sector_limits_tests;
 pub mod service_accounts;
 pub mod stats;
 pub mod taxi_insights;
