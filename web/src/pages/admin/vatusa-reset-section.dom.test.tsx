@@ -161,4 +161,42 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
     const apply = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
     expect(apply.disabled).toBe(true);
   });
+
+  async function openDialog(host: HTMLElement) {
+    const open = await vi.waitFor(() => {
+      const b = resetButton(host);
+      if (!b) throw new Error("no reset button yet");
+      return b;
+    });
+    await act(async () => open.click());
+    await vi.waitFor(() => expect(document.body.textContent).toContain("users would change"));
+  }
+
+  it("shows why a reset failed and how many users it reached", async () => {
+    post.mockResolvedValue({
+      data: undefined,
+      error: {error: "vatusa_pull_failed", message: "VATUSA division pull failed: 502", users_reset: 0},
+      response: {status: 502},
+    });
+    const host = await mount(true);
+    await openDialog(host);
+    type("Reason", "drift cleanup");
+    type("Confirmation", "RESET");
+    const apply = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
+    await act(async () => apply.click());
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("VATUSA division pull failed: 502"),
+    );
+  });
+
+  it("runs a fresh dry run each time the dialog opens", async () => {
+    const host = await mount(true);
+    const dryRuns = () => get.mock.calls.filter(([path]) => path === "/api/v1/admin/access/vatusa-reset").length;
+    await openDialog(host);
+    expect(dryRuns()).toBe(1);
+    const cancel = [...document.querySelectorAll("button")].find((b) => b.textContent === "Cancel")!;
+    await act(async () => cancel.click());
+    await openDialog(host);
+    expect(dryRuns()).toBe(2);
+  });
 });

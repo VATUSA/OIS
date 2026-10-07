@@ -604,11 +604,12 @@ pub struct ResetRun {
 /// The members a reset can change, in CID order: detached, holding a `manual` row other than a
 /// [`RESET_KEEPS_GROUPS`] group, or holding `vatusa` group grants that differ from what their stored
 /// VATUSA roles justify. Everyone else already holds exactly their `system` grants plus VATUSA's, so
-/// [`reset_member`] would change nothing for them. The roster is about 10,000 controllers and most are
-/// in the last group only after a pull fails, so this keeps a reset to the members it touches.
+/// [`reset_member`] would change nothing for them. The division pull seeds every rostered controller
+/// into `identity.users` and reconciles every attached member, so most members are in none of these
+/// groups, and a reset opens a transaction only for the members it touches.
 ///
 /// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once.
-async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiError> {
     sqlx::query_scalar(
         r#"
         with justified(cid, role_name, artcc_id) as (

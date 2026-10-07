@@ -608,8 +608,14 @@ mod tests {
             scope_roles(&before, Some("ZDC")),
             ["ACE", "AEC", "CONTROLLER", "EC"]
         );
+        let zdc_before = before["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["artcc_id"] == "ZDC")
+            .unwrap();
         assert_eq!(
-            before["scopes"][1]["permissions"],
+            zdc_before["permissions"],
             json!({"access": {"users": ["read"]}})
         );
         assert_eq!(scope_roles(&after, Some("ZDC")), ["CONTROLLER", "EC"]);
@@ -798,9 +804,14 @@ mod tests {
         .await
         .unwrap();
 
+        let mut nudges = w.state.events.subscribe();
         let Err(ResetError::Failed(status, body)) = reset(&w).await else {
             panic!("the run must report the failure");
         };
+        let nudge = nudges
+            .try_recv()
+            .expect("members already reset are announced even when the run stops");
+        assert_eq!(nudge.topic, crate::realtime::topic::ACCESS_GRANTED);
         assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.error, "reset_incomplete");
         assert_eq!(
@@ -984,5 +995,92 @@ mod tests {
                 .is_none()
         );
         tx.rollback().await.unwrap();
+    }
+
+    /// The display names of the members a reset would examine, in the order it would.
+    async fn candidates(pool: &PgPool) -> Vec<String> {
+        let mut names = Vec::new();
+        for id in vatusa_repo::reset_candidates(pool).await.unwrap() {
+            names.push(
+                sqlx::query_scalar("select display_name from identity.users where id = $1")
+                    .bind(&id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap(),
+            );
+        }
+        names
+    }
+
+    /// A reset examines exactly the members `reset_member` would change, from every source VATUSA
+    /// justifies a grant through: a role mapping, the roster's home ARTCC, a visiting ARTCC, and a
+    /// division (`ZHQ`) role, which is national. A member in line through each source is left out, and
+    /// so is one whose only hand-made grant is the protected baseline.
+    #[sqlx::test]
+    async fn a_reset_examines_exactly_the_members_it_would_change(pool: PgPool) {
+        let w = world(pool).await;
+        let home_missing = user(&w.pool, 1_795_030, "Home Missing").await;
+        let home_ok = user(&w.pool, 1_795_031, "Home Ok").await;
+        sqlx::query("update identity.users set home_facility = 'ZDC' where id = any($1)")
+            .bind([&home_missing, &home_ok])
+            .execute(&w.pool)
+            .await
+            .unwrap();
+        group(&w.pool, &home_ok, "CONTROLLER", Some("ZDC"), "vatusa").await;
+        user(&w.pool, 1_795_032, "Visit Missing").await;
+        let visit_ok = user(&w.pool, 1_795_033, "Visit Ok").await;
+        for cid in [1_795_032_i64, 1_795_033] {
+            sqlx::query("insert into identity.vatusa_visits (cid, facility) values ($1, 'ZJX')")
+                .bind(cid)
+                .execute(&w.pool)
+                .await
+                .unwrap();
+        }
+        group(&w.pool, &visit_ok, "CONTROLLER", Some("ZJX"), "vatusa").await;
+        user(&w.pool, 1_795_034, "Division Missing").await;
+        let division_ok = user(&w.pool, 1_795_035, "Division Ok").await;
+        for cid in [1_795_034_i64, 1_795_035] {
+            vatusa_role(&w.pool, cid, "ZHQ", "DIVISION_TECH_TEAM").await;
+        }
+        group(&w.pool, &division_ok, "VATUSA_STAFF", None, "vatusa").await;
+        let baseline_only = user(&w.pool, 1_795_036, "Baseline Only").await;
+        group(&w.pool, &baseline_only, "USER", None, "manual").await;
+
+        assert_eq!(
+            candidates(&w.pool).await,
+            [
+                "Admin",
+                "Member",
+                "Home Missing",
+                "Visit Missing",
+                "Division Missing"
+            ]
+        );
+
+        // Parity: a member is examined exactly when resetting them would change something.
+        let users: Vec<(String, String)> =
+            sqlx::query_as("select id, display_name from identity.users order by cid")
+                .fetch_all(&w.pool)
+                .await
+                .unwrap();
+        let examined = candidates(&w.pool).await;
+        for (id, name) in &users {
+            let mut tx = w.pool.begin().await.unwrap();
+            let changes = vatusa_repo::reset_member(&mut tx, id)
+                .await
+                .unwrap()
+                .is_some();
+            tx.rollback().await.unwrap();
+            assert_eq!(examined.contains(name), changes, "{name}");
+        }
+
+        // The admin is examined only for the hand-made EC: their manual USER and SERVER_ADMIN don't
+        // count.
+        sqlx::query("delete from access.user_roles where user_id = $1 and role_name = 'EC'")
+            .bind(&w.admin)
+            .execute(&w.pool)
+            .await
+            .unwrap();
+        assert!(!candidates(&w.pool).await.contains(&"Admin".to_string()));
     }
 }
