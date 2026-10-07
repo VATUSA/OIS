@@ -139,7 +139,8 @@ Three OIS-specific habits in that footer:
 - **Data path.** Trace the chain the issue concerns, in the direction the data moves, so a reviewer
   doesn't re-derive it and a check can be reproduced. Name only hops that exist — a file, a
   `module::function`, a route as written in `backend/src/router.rs`, a hook, a page — and skip any
-  hop the path doesn't have. For example:
+  hop the path doesn't have. In these examples backend paths are relative to `backend/src/` and web
+  paths to `web/src/`; in an issue, either form is fine as long as it resolves. For example:
   - Live arrival flow: `VATSIM datafeed (feed/vatsim.rs) → handlers/feed.rs::airport_flow →
     feed/flow.rs::compute (program + CFRs from repos/tmu.rs) → GET /api/v1/tmu/flow/{icao} →
     useAirportFlow (web/src/lib/feed.ts) → pages/airport.tsx`
@@ -155,10 +156,13 @@ Three OIS-specific habits in that footer:
   leave it out:
   - *Live vs historical.* Historical ("time-machine") mode is the scrubber instant a
     `HistoricalProvider` (`web/src/lib/historical-context.tsx`) supplies; today only the dashboard
-    replay (`pages/stats/dashboard.tsx`) mounts one. Given that instant, the mode-aware hooks —
-    `useAirportFlow`, and the `useMode*` hooks in `web/src/lib/historical.ts` — call
-    `/api/v1/stats/hist/*` instead of the live route. If the issue lives on one side, say which; if
-    it's in shared compute (`feed/flow.rs::compute` above), both twins are affected — say so.
+    replay (`pages/stats/dashboard.tsx`) mounts one. Any hook or component that reads
+    `useHistoricalAt()` switches with it — grep for it in `web/src` rather than trusting a list;
+    `useAirportFlow` above is one. Given an instant, the data hooks call `/api/v1/stats/hist/*`
+    instead of the live route; the `useMode*` hooks in `web/src/lib/historical.ts` take that
+    instant as an explicit `at` argument from their callers (`features/dashboard/sources.ts`).
+    If the issue lives on one side, say which; if it's in shared compute (`feed/flow.rs::compute`
+    above), both twins are affected — say so.
   - *Web vs desktop.* The desktop app (`desktop/src-tauri`) renders the same `web/` bundle, but
     signs in with a token (`POST /api/v1/auth/desktop/exchange` and `/refresh`) and has its own
     origins and CSP. Name it when the path crosses auth, CORS/origins, CSP, or a Tauri command.
@@ -191,7 +195,8 @@ Three OIS-specific habits in that footer:
 > Blast radius: permissions (three-in-sync).
 > Data path: `pages/admin/access-control.tsx → useSaveUserAccess → POST
 > /api/v1/admin/users/{cid}/access → handlers/access.rs::update_user_access →
-> repos/access.rs::fetch_access_catalog_names`. Pre-existing.
+> repos/access.rs::fetch_access_catalog_names`.
+> Pre-existing; found while adding a flow permission.
 
 ---
 
