@@ -10,11 +10,9 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
  * window buttons and reserves no room for any: Back is the row's first control on every platform, as
  * it is on the web build.
  *
- * #402 and #419 drew a macOS traffic-light replica in this row on Windows and Linux, inset the real
- * lights into it on macOS, and made the shell's top bar a Tauri drag region. All of it was gated on
- * "Tauri, the `main` window" plus a user-agent check for macOS, so this renders the real sidebar in
- * exactly that situation, once per host OS, with the real `@/lib/platform`. A replica brought back
- * under any of those gates renders here and fails.
+ * Window chrome drawn by the app would be gated on "Tauri, the `main` window", possibly with a
+ * user-agent check for the host OS, so this renders the real sidebar in exactly that situation, once
+ * per host OS, with the real `@/lib/platform`.
  */
 const win = vi.hoisted(() => ({
   label: "main",
@@ -127,6 +125,18 @@ function appDrawnChrome(host: HTMLElement): string[] {
 
 const firstButton = (host: HTMLElement) => host.querySelector("button")?.getAttribute("aria-label");
 
+/**
+ * Whether `label`'s button opens the sidebar header with nothing before it, at either level: the
+ * chrome row is the header's first element and the button is the row's first. Any leading spacer
+ * fails this whatever it is called. The old macOS reservation was an empty sized `<div>`, which
+ * neither the button scan nor `appDrawnChrome` would see without an attribute on it.
+ */
+function leadsTheHeader(host: HTMLElement, label: string): boolean {
+  const button = host.querySelector(`button[aria-label="${label}"]`);
+  const row = button?.parentElement;
+  return !!row && row.firstElementChild === button && row.parentElement?.firstElementChild === row;
+}
+
 describe.each(Object.entries(HOSTS))("the sidebar's chrome row in the desktop main window on %s", (_os, ua) => {
   beforeEach(() => pretendAgent(ua));
 
@@ -140,6 +150,7 @@ describe.each(Object.entries(HOSTS))("the sidebar's chrome row in the desktop ma
 
     expect(appDrawnChrome(host)).toEqual([]);
     expect(firstButton(host)).toBe("Back");
+    expect(leadsTheHeader(host, "Back"), "nothing may sit before Back in the chrome row").toBe(true);
   });
 
   it("draws no window buttons when collapsed, and leads with Expand sidebar", async () => {
@@ -147,6 +158,7 @@ describe.each(Object.entries(HOSTS))("the sidebar's chrome row in the desktop ma
 
     expect(appDrawnChrome(host)).toEqual([]);
     expect(firstButton(host)).toBe("Expand sidebar");
+    expect(leadsTheHeader(host, "Expand sidebar"), "nothing may sit before the collapsed row").toBe(true);
   });
 });
 

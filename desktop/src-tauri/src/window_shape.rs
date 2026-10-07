@@ -3,13 +3,8 @@
 //! The main window uses each platform's standard title bar: macOS draws its own strip with the
 //! traffic lights in their usual place, Windows draws minimize / maximize / close at the top right,
 //! and Linux gets whatever its window manager draws. All of that is configuration in
-//! `tauri.conf.json` (`decorations: true`), so there is no runtime code here.
-//!
-//! This reverses #402 and #419, which hid the title bar and had the app draw its own controls: a
-//! replica of the macOS lights on Windows and Linux, the real lights inset into the sidebar on macOS
-//! through a `tauri.macos.conf.json` override, and a DWM call to round the undecorated Windows
-//! window. A decorated window gets its corners, shadow, snap layouts and double-click-to-maximize
-//! from the OS, so all of that is gone. What is left is the test below, which keeps it gone.
+//! `tauri.conf.json` (`decorations: true`), so there is no runtime code here; the tests below pin
+//! that configuration, on every platform.
 
 #[cfg(test)]
 mod tests {
@@ -63,26 +58,52 @@ mod tests {
         }
     }
 
+    /// Why a platform config must not touch `app.windows`, or `None` when it doesn't.
+    fn reshapes_the_windows(config: &serde_json::Value) -> Option<&'static str> {
+        config["app"].get("windows").map(|_| {
+            "it overrides app.windows, which replaces the base config's decorated main window on \
+             that platform (#796)"
+        })
+    }
+
     /// #796: macOS used to get its own shape from `tauri.macos.conf.json` (an `Overlay` title bar with
     /// the lights inset into the sidebar). Tauri merges a platform file over the base and **replaces**
     /// the whole `app.windows` array when it does, so a platform file that touches the windows at all
     /// decides that platform's frame on its own. None may: every platform takes the base config's
-    /// decorated window.
+    /// decorated window. None of the files exists today, so the loop reads nothing; the next test
+    /// proves the check fires on the override this branch deleted.
     #[test]
     fn no_platform_config_reshapes_the_windows() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         for name in PLATFORM_CONFIGS {
-            let path = dir.join(name);
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
+            let text = match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("{name}: {e}"),
             };
             let config: serde_json::Value =
                 serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert!(
-                config["app"].get("windows").is_none(),
-                "{name} overrides app.windows, which replaces the base config's decorated main window \
-                 on that platform (#796)"
-            );
+            if let Some(why) = reshapes_the_windows(&config) {
+                panic!("{name}: {why}");
+            }
         }
+    }
+
+    /// The check above has to reject the macOS override #419 shipped, or it is decoration.
+    #[test]
+    fn the_old_macos_override_would_be_rejected() {
+        let old = serde_json::json!({
+            "app": {"windows": [{
+                "label": "main",
+                "decorations": true,
+                "titleBarStyle": "Overlay",
+                "hiddenTitle": true,
+                "trafficLightPosition": {"x": 10, "y": 28}
+            }]}
+        });
+        assert!(reshapes_the_windows(&old).is_some());
+
+        let unrelated = serde_json::json!({"bundle": {"macOS": {"minimumSystemVersion": "11.0"}}});
+        assert!(reshapes_the_windows(&unrelated).is_none());
     }
 }

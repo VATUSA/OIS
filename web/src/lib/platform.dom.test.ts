@@ -167,8 +167,8 @@ describe("window identity", () => {
 
   /**
    * #403: "couldn't tell" must answer *not* the main window, and this is the only place that
-   * answer is made. `window-controls.tsx` and `popout.ts` each had their own `catch` until the
-   * three copies were collapsed into this helper; now the fallback below is the only thing
+   * answer is made. Earlier callers each had their own `catch` until the copies were collapsed
+   * into this helper; now the fallback below is the only thing
    * standing between an unreadable window and a route window that thinks it is `main` — in
    * `restoreWindows`, relaunching the whole set from a window that was itself restored.
    *

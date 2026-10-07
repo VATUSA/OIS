@@ -14,7 +14,9 @@ import {beforeAll, describe, expect, it} from "vitest";
  * cannot be mounted in jsdom. Scanning every web and `@ois/ui` source catches a new site as readily
  * as a reverted one. Don't swap it for something narrower.
  *
- * Comments are stripped first, because prose that explains the old chrome is not chrome.
+ * Comments are stripped first, because prose that explains the old chrome is not chrome. The
+ * stripping does not know about strings, so a `/*` inside a string literal (a glob such as
+ * `"../assets/*.svg"`) hides the code up to the next `*\/` from the scan; that is the accepted limit.
  */
 const ROOTS = [resolve(process.cwd(), "src"), resolve(process.cwd(), "../packages/ui/src")];
 
@@ -23,7 +25,8 @@ const FORBIDDEN: readonly [name: string, pattern: RegExp][] = [
   ["a Tauri drag region", /data-tauri-drag-region/],
   ["a call that drags the window", /\bstartDragging\s*\(/],
   ["an app-drawn minimize / maximize button", /\.(?:minimize|maximize|toggleMaximize)\s*\(/],
-  ["the traffic-light replica", /traffic-lights?\b|--traffic-/],
+  // Selectors, class names and tokens, not the words: release notes may still say "traffic light".
+  ["the traffic-light replica", /\.traffic-lights?\b|className=["'`][^"'`]*\btraffic-lights?\b|--traffic-/],
 ];
 
 function strip(text: string): string {
@@ -81,7 +84,7 @@ describe("app-drawn window chrome (#796)", () => {
       `await win.startDragging();`,
       `onClick={act((win) => win.minimize())}`,
       `onClick={act((win) => win.toggleMaximize())}`,
-      `<div className="traffic-lights">`,
+      `<div className="flex traffic-lights">`,
       `  background: var(--traffic-close);`,
     ].join("\n");
     expect(scan("old.tsx", old)).toEqual([
@@ -98,6 +101,7 @@ describe("app-drawn window chrome (#796)", () => {
       `/* win.toggleMaximize() was the replica's */`,
       `await existing.unminimize().catch(() => undefined);`,
       `const url = "https://example.com/a";`,
+      `const note = "No more traffic-light replica on Windows";`,
     ].join("\n");
     expect(scan("fine.tsx", fine)).toEqual([]);
   });
