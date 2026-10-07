@@ -102,13 +102,10 @@ shares the API budget with the board.
   issue is **assigned to me**. Never `Code Review`, `Shippable` or `Done`; those are a human's. (The
   one exception: under `/ticket-loop`, `ticket-reviewer` moves a card to `Code Review` when the
   operator's own pass decision is relayed to it.)
-- Post the **Moment 3** comment on the issue: at most **1,200 characters**. Real **file paths**
-  only; name the **blast radius** (trajectory/ETA model, the permission/role three-in-sync
-  invariants, the OpenAPI→client contract, or none); and the **deploy note** — any new migration
-  (applies on backend startup, sequential number) and whether the generated client must be
-  regenerated. If the change is entirely `docs/`, tooling, or **test-only** (`#[cfg(test)]` / web
-  tests), say so with justification (not application logic, not data-affecting) so it can skip
-  runtime verification. No AI attribution of any kind: no `Drafted by` or `Generated with` footer.
+- Post the **Moment 3** comment on the issue, drafted to the template and 1,200-character budget in
+  `docs/github-issues.md` § Comments: the three Moments. That template owns the lines (how-to-check
+  steps with their mode, blast radius, data path, deploy note) and the docs/test-only exemption;
+  don't restate it here. No AI attribution of any kind: no `Drafted by` or `Generated with` footer.
   Assert the length and the attribution before posting:
   ```bash
   n=$(LC_ALL=en_US.UTF-8 wc -m < moment3.md | tr -d ' ')

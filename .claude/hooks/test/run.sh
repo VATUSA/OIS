@@ -95,6 +95,20 @@ remind_case() {
         failures="$failures  FAIL $hook: $desc (exit $got, output: ${out:0:200})"$'\n'
     fi
 }
+# remind_lacks HOOK TEXT DESCRIPTION PAYLOAD — exit 0, a reminder printed, and TEXT nowhere in it.
+remind_lacks() {
+    local hook="$1" text="$2" desc="$3" payload="$4" got out ok=1
+    out="$(printf '%s' "$payload" | bash "$HOOKS/$hook.sh" 2>/dev/null)"
+    got=$?
+    [[ $got -eq 0 && -n "$out" ]] || ok=0
+    [[ "$out" != *"$text"* ]] || ok=0
+    if [[ $ok -eq 1 ]]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        failures="$failures  FAIL $hook: $desc (exit $got, output: ${out:0:200})"$'\n'
+    fi
+}
 remind_malformed() {
     remind_case "$1" "${2:-}" "empty payload" ""
     remind_case "$1" "${2:-}" "not JSON" "this is not json"
@@ -275,6 +289,9 @@ R=pr-created-reminder
 remind_case $R "PR #1234" "after gh pr create" "$(issue_payload 'gh pr create --base next --title t --body b' $'https://github.com/VATUSA/OIS/pull/1234\n')"
 remind_case $R "Testing Queue" "names the board column" "$(issue_payload 'gh pr create --base next --title t --body b' $'https://github.com/VATUSA/OIS/pull/1234\n')"
 remind_case $R "ls-remote" "asks for the push proof" "$(issue_payload 'gh pr create --base next --title t --body b' '')"
+remind_case $R "docs/github-issues.md § Comments" "points at the Moment 3 template" "$(issue_payload 'gh pr create --base next --title t --body b' '')"
+remind_case $R "data path" "names the data path line" "$(issue_payload 'gh pr create --base next --title t --body b' '')"
+remind_lacks $R "Drafted by Claude" "asks for no attribution footer" "$(issue_payload 'gh pr create --base next --title t --body b' '')"
 remind_case $R "" "gh pr view" "$(issue_payload 'gh pr view 5' '')"
 remind_malformed $R
 
@@ -282,6 +299,7 @@ R=plan-approved-reminder
 remind_case $R "Moment 2" "after ExitPlanMode" '{"hook_event_name":"PostToolUse","tool_name":"ExitPlanMode","tool_input":{"plan":"x"}}'
 remind_case $R "600 characters" "names the length cap" '{"tool_name":"ExitPlanMode","tool_input":{}}'
 remind_case $R "Moment 2" "empty payload still reminds" ""
+remind_lacks $R "Drafted by Claude" "asks for no attribution footer" '{"tool_name":"ExitPlanMode","tool_input":{}}'
 
 edit_payload() { jq -n --arg f "$1" --arg n "$2" '{hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: {file_path: $f, old_string: "a", new_string: $n}}'; }
 R=client-regen-reminder

@@ -121,8 +121,9 @@ Remediate only CRITICAL and MAJOR findings; ignore nit-picks. Act on each review
 1. Read each back: the PR is open with `Closes #<n>` in its body, the push is proven
    (`git ls-remote` equals `git rev-parse HEAD`), the card is in `Testing Queue`, the issue is
    assigned to the operator, and the PR's check-runs (`gh pr checks <n>`) read once, pending included.
-2. Confirm Moment 3 was posted within its 1,200-character budget, with real file paths, the blast
-   radius and the deploy note.
+2. Confirm Moment 3 was posted within its 1,200-character budget and follows the template in
+   `docs/github-issues.md` § Comments: the three Moments (real file paths, each check step's mode,
+   the blast radius, the data path and the deploy note).
 3. Return to the primary checkout (`next`) and pull.
 
 Return `STATUS: shipped`.

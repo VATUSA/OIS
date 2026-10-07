@@ -243,9 +243,9 @@ an existing one) or the bug and fix are unambiguous.
   [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
 - **Filing an issue** follows [`docs/github-issues.md`](docs/github-issues.md) — the title, the
   `type:`/`area:`/`priority:` labels, the *What happens / Why / What should happen / Acceptance* body
-  with file:line evidence, the blast-radius footer, and the scope tests for when a noticed problem
-  becomes its own `technical-debt` ticket. Agents don't self-assign, close, or merge; other repos are
-  read-only.
+  with file:line evidence, the blast-radius and data-path footer, and the scope tests for when a
+  noticed problem becomes its own `technical-debt` ticket. Agents don't self-assign, close, or merge;
+  other repos are read-only.
 - **The board sequences work; it does not gate the merge.** A PR lands on green CI plus review, not
   on its card's column — see [`docs/github-issues.md`](docs/github-issues.md) § Lifecycle for the
   rule and why there is no mechanical check. A merged PR whose card is still left of **Code Review**
