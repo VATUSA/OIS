@@ -5,7 +5,7 @@
     "CAVLR6": { "type": "STAR", "apt": ["kiad", "KIAD"], "common": [["CAVLR", 38.0, -78.0]] },
     "CAVLR": { "type": "STAR", "apt": ["KIAD"], "common": [["CAVLR", 38.0, -78.0]] },
     "DELRO5": { "type": "STAR", "apt": ["KIAD"], "common": [["DELRO", 39.5, -77.0]] },
-    "SEG6": { "type": "STAR", "apt": ["KIAD"], "common": [["SEG", 40.8, -76.9]] },
+    "SEG6": { "type": "STAR", "apt": ["kiad"], "common": [["SEG", 40.8, -76.9]] },
     "WIGOL3": { "type": "STAR", "apt": ["KIAD"], "common": [["WIGOL", 39.2, -78.6]] },
     "FRDMM5": { "type": "STAR", "apt": ["KDCA"], "common": [["FRDMM", 39.4, -76.6]] },
     "JCOBY4": { "type": "SID", "apt": ["KIAD"], "common": [["JCOBY", 38.7, -77.9]] }

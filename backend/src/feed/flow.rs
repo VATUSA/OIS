@@ -1302,7 +1302,7 @@ mod tests {
         assert_eq!(
             flow.stars,
             vec!["CAVLR", "CAVLR6", "DELRO5", "SEG6", "WIGOL3"],
-            "KIAD's STARs, sorted, once each (CAVLR6 lists `kiad` and `KIAD`); not KDCA's FRDMM5 and \
+            "KIAD's STARs, sorted, once each (CAVLR6 lists `kiad` and `KIAD`, SEG6 only `kiad`); not KDCA's FRDMM5 and \
              not the JCOBY4 SID"
         );
         assert_eq!(flow.stars, strings(&fixture["stars"]));
