@@ -114,11 +114,12 @@ describe("airportTguiColumns with a gate filter (#791)", () => {
     expect(columns.map((c) => c.name)).toEqual(["DELRO", "OTHER"]);
   });
 
-  it("gives a filtered gate with no traffic an empty column, after the gates with traffic", () => {
-    const filters = { gates: ["WIGOL", "DELRO"] };
+  it("gives each filtered gate with no traffic an empty column, sorted, after the gates with traffic", () => {
+    const filters = { gates: ["WIGOL", "SEG", "DELRO"] };
     const columns = airportTguiColumns(airportLadderItems(flow, filters, NOW), NOW, filters.gates);
     expect(columns.map((c) => [c.name, c.items.length])).toEqual([
       ["DELRO", 1],
+      ["SEG", 0],
       ["WIGOL", 0],
     ]);
   });
@@ -177,6 +178,12 @@ describe("the TGUI widget's gate filter (#791)", () => {
 
   const columnNames = (host: HTMLElement) =>
     [...host.querySelectorAll("[data-column]")].map((c) => c.getAttribute("data-column"));
+
+  it("an unfiltered widget stays traffic-only, with no column per STAR", () => {
+    const flow = flowOf([arrival("AAL1", 10, "DELRO5")]);
+    const host = render(<ViewWidgetView widget={widget()} editing={false} onChange={() => {}} />, flow);
+    expect(columnNames(host)).toEqual(["DELRO"]);
+  });
 
   it("keeps a column for a filtered gate with no traffic", () => {
     const flow = flowOf([arrival("AAL1", 10, "DELRO5")]);

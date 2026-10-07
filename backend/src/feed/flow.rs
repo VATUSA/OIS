@@ -1256,7 +1256,8 @@ mod tests {
 
     // ---- static gate list (#791) ----
 
-    /// The shared gate-name fixture. `web/src/pages/airport-gates.test.ts` reads the same file.
+    /// The shared gate-name fixture. `web/src/features/dashboard/tgui-gates.dom.test.tsx` reads the same
+    /// file.
     fn gate_fixture() -> serde_json::Value {
         serde_json::from_str(include_str!("../../../fixtures/tgui-gate-names.json"))
             .expect("the TGUI gate-name fixture should parse")
@@ -1301,7 +1302,8 @@ mod tests {
         assert_eq!(
             flow.stars,
             vec!["CAVLR", "CAVLR6", "DELRO5", "SEG6", "WIGOL3"],
-            "KIAD's STARs, sorted; not KDCA's FRDMM5 and not the JCOBY4 SID"
+            "KIAD's STARs, sorted, once each (CAVLR6 lists `kiad` and `KIAD`); not KDCA's FRDMM5 and \
+             not the JCOBY4 SID"
         );
         assert_eq!(flow.stars, strings(&fixture["stars"]));
         // The excluded STAR is reachable for its own airport, so the filter is the airport, not
