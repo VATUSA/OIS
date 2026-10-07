@@ -99,6 +99,32 @@ The limit is shared, so everyone watching an ARTCC sees the same colours.
 - **Cache**: `AppState::sector_limits`, refreshed every 30 s by `sector_limits_refresh`. A write
   force-reloads it and publishes `flow.sector_limits`, so viewers recolour at once.
 
+## Sector consolidation (#723)
+
+Sectors worked at one position combine into one row. Stored in `flow.sector_consolidation`
+(migration 0128) as `(artcc, sector_id) → target_sector_id`.
+
+- **Union, never a sum** (`sector_loads`, `feed/sector_load.rs`): a consolidated sector has no row of its
+  own. Its volumes are filed under the target's row **before** counting, so the combined row counts
+  distinct flights per minute across all the airspace. An aircraft crossing from a source into the target
+  within a minute counts once. A combined row can read lower than the sum of its parts, and that is
+  correct. `SectorLoad::consolidated` lists the sources, so the row can be labelled.
+- **The target's limit** (`row_limit`, `feed/sector_consolidations.rs`): one controller, one workload.
+  Never the sum of the sources' limits and never their maximum.
+- **Rules**: same ARTCC only, since both sectors are looked up in the path's ARTCC (another ARTCC's
+  sector is a 404). A sector worked at itself is a 400. A loop (a at b, then b at a) is a 409. Neither
+  refusal writes anything.
+- **Flat on every write** (`repos::sector_consolidations::consolidate`, one transaction, serialised per
+  ARTCC). A target that is itself worked elsewhere resolves to where it is worked. Sectors worked at the
+  source move with it: 18 at 41, then 41 at 20, leaves 18 at 20.
+- **Read**: `GET /api/v1/flow/sector-consolidations/{artcc}` (`flow.sectors.read`), with `editable`.
+- **Write**: `PUT /api/v1/flow/sector-consolidations/{artcc}/{sector_id}` with `target_sector_id`, and
+  `DELETE` on the same path to release. Both need `flow.sector_consolidations.update` for that ARTCC,
+  which is separate from `flow.sector_limits.update` and granted to the same five groups. A release
+  isn't checked against the dataset, so one left behind by a re-import can still be cleared.
+- **Cache**: `AppState::sector_consolidations`, refreshed every 30 s by `sector_consolidations_refresh`.
+  A write that changes anything force-reloads it and publishes `flow.sector_consolidations`.
+
 ## The sector dataset
 
 ### Where it comes from

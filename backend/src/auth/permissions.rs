@@ -118,6 +118,13 @@ permission!(
 permission!(FlowSectorsRead, ["flow", "sectors"], Read);
 // Set a sector's occupancy limit (#722). Facility-scoped: `handlers::sector_limits` checks the ARTCC.
 permission!(FlowSectorLimitsUpdate, ["flow", "sector_limits"], Update);
+// Work a sector at another sector's position (#723). Facility-scoped:
+// `handlers::sector_consolidations` checks the ARTCC.
+permission!(
+    FlowSectorConsolidationsUpdate,
+    ["flow", "sector_consolidations"],
+    Update
+);
 
 // tmu advisories (ADVZY documents) — the catalog strings and migration rows have existed since
 // 0008_tmu.sql; these are the markers that finally let a handler gate on them (#457).

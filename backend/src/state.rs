@@ -8,8 +8,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
-    runway_db::RunwayDb, sector_limits::SectorLimits, sectors::SectorTable, taxi_estimate,
-    tracon::TraconState, trajectory::ProfileTable, winds::Winds,
+    runway_db::RunwayDb, sector_consolidations::SectorConsolidations, sector_limits::SectorLimits,
+    sectors::SectorTable, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
+    winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -47,6 +48,10 @@ pub struct AppState {
     /// reloaded by `jobs::spawn_sector_limits_refresh`, and force-reloaded by `handlers::sector_limits`
     /// after each write, so an edit recolours at once for every viewer of this replica.
     pub sector_limits: Arc<ArcSwap<SectorLimits>>,
+    /// Sector consolidations (#723), flat. Starts empty (every sector its own row) and is reloaded by
+    /// `jobs::spawn_sector_consolidations_refresh`, and force-reloaded by
+    /// `handlers::sector_consolidations` after each write, so a merge shows at once on this replica.
+    pub sector_consolidations: Arc<ArcSwap<SectorConsolidations>>,
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
@@ -111,6 +116,8 @@ impl AppState {
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let sector_limits = Arc::new(ArcSwap::from_pointee(SectorLimits::default()));
+        let sector_consolidations =
+            Arc::new(ArcSwap::from_pointee(SectorConsolidations::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
@@ -154,6 +161,7 @@ impl AppState {
                 aircraft_profiles,
                 airspace_sectors,
                 sector_limits,
+                sector_consolidations,
                 gates,
                 flight_exclusions,
                 taxi_estimate_samples,
@@ -181,6 +189,7 @@ impl AppState {
             aircraft_profiles,
             airspace_sectors,
             sector_limits,
+            sector_consolidations,
             gates,
             flight_exclusions,
             taxi_estimate_samples,
@@ -209,6 +218,7 @@ impl AppState {
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             sector_limits: Arc::new(ArcSwap::from_pointee(SectorLimits::default())),
+            sector_consolidations: Arc::new(ArcSwap::from_pointee(SectorConsolidations::default())),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),

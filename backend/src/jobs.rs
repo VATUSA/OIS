@@ -15,6 +15,7 @@ use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
+use crate::feed::sector_consolidations::SectorConsolidations;
 use crate::feed::sector_limits::SectorLimits;
 use crate::feed::sectors::SectorTable;
 use crate::feed::trajectory::ProfileTable;
@@ -30,6 +31,7 @@ use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::integration as integration_repo;
+use crate::repos::sector_consolidations as sector_consolidations_repo;
 use crate::repos::sector_limits as sector_limits_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
@@ -136,6 +138,10 @@ const AIRSPACE_SECTORS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often to reload sector limit overrides (#722). The handler force-reloads on write, so this
 /// tick only carries another replica's edits to this one.
 const SECTOR_LIMITS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often to reload sector consolidations (#723). The handler force-reloads on write, so this tick
+/// only carries another replica's edits to this one.
+const SECTOR_CONSOLIDATIONS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
@@ -539,6 +545,35 @@ pub fn spawn_sector_limits_refresh(
                         let n = limits.len();
                         cache.store(Arc::new(limits));
                         Ok(format!("{n} overrides"))
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                }
+            }
+        },
+    ));
+}
+
+/// Keep the sector consolidations (#723) current for the DB-less feed: load at startup, then reload
+/// periodically so another replica's edit reaches this one. Fails safe — a failed load keeps the
+/// current arrangement (initially empty, every sector its own row).
+pub fn spawn_sector_consolidations_refresh(
+    reg: Arc<JobRegistry>,
+    pool: PgPool,
+    cache: Arc<ArcSwap<SectorConsolidations>>,
+) {
+    tokio::spawn(run_interval(
+        reg,
+        "sector_consolidations_refresh",
+        "Reload sector consolidations from the DB",
+        SECTOR_CONSOLIDATIONS_INTERVAL,
+        move || {
+            let (pool, cache) = (pool.clone(), cache.clone());
+            async move {
+                match sector_consolidations_repo::load_all(&pool).await {
+                    Ok(consolidations) => {
+                        let n = consolidations.len();
+                        cache.store(Arc::new(consolidations));
+                        Ok(format!("{n} consolidations"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }

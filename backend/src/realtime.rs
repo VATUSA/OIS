@@ -172,10 +172,13 @@ pub mod topic {
     /// A sector's occupancy limit was set or reset (#722). Shared state: everyone watching the ARTCC
     /// must judge its counts against the same numbers, so every client refetches at once.
     pub const SECTOR_LIMITS: &str = "flow.sector_limits";
+    /// A sector was worked at another sector's position, or released (#723). Shared state: a source's
+    /// row disappears into its target's for everyone watching the ARTCC, so every client refetches.
+    pub const SECTOR_CONSOLIDATIONS: &str = "flow.sector_consolidations";
 
     /// Every topic a client may subscribe to. A new topic must be added here too, or a subscriber
     /// asking for it is refused as `unknown_topic`.
-    pub const ALL: [&str; 15] = [
+    pub const ALL: [&str; 16] = [
         RELEASE,
         FCA,
         GDP,
@@ -190,6 +193,7 @@ pub mod topic {
         ACE,
         RUNWAY,
         SECTOR_LIMITS,
+        SECTOR_CONSOLIDATIONS,
         FEED_TICK,
     ];
 }
