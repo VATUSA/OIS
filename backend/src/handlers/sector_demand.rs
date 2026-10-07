@@ -4,9 +4,9 @@
 //! table.
 //!
 //! Read-only and gated `flow.sectors.read`, like the limit and consolidation reads. Computed per request
-//! from the caches: the feed snapshot, the sector table, limits, consolidations and exclusions. The one
-//! query is the locked wheels-up of the grounded flights (`repos::flow::locked_wheels_up`), and the
-//! neighbour list's facility filter. Projection and binning run under `spawn_blocking`.
+//! from the caches: the feed snapshot, the sector table, limits, consolidations and exclusions. Two
+//! queries: the locked wheels-up of the grounded flights (`repos::flow::locked_wheels_up`) and the
+//! active facilities that filter the neighbour list. Projection and binning run under `spawn_blocking`.
 //!
 //! The page refetches on `feed.tick` (a new cycle), `flow.sector_limits` and
 //! `flow.sector_consolidations` (rows recolour or merge), and on `flow.release`, `flow.cfr` and
