@@ -20,6 +20,7 @@ import {
   cycleAgeDays,
   useFcas,
   useFcaTraffic,
+  useFcaArtccFilter,
   useFcaTrafficMany,
   useRefreshData,
   useTraffic,
@@ -177,6 +178,7 @@ export function FcaMapView({
   initialFcaId,
   embedded = false,
   persistKey,
+  persistArtccFilter = false,
 }: {
   readOnly?: boolean;
   /** ARTCC overview: overlay every active FCA in the selected ARTCC — matched traffic (tinted +
@@ -191,6 +193,8 @@ export function FcaMapView({
   embedded?: boolean;
   /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
   persistKey?: string;
+  /** Save the ARTCC filter to the account and frame the map to it (#789). Only `/ops/fca` sets it. */
+  persistArtccFilter?: boolean;
 }) {
   const { data: me } = useMe();
   const toast = useToast();
@@ -264,7 +268,9 @@ export function FcaMapView({
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
-  const [artccFilter, setArtccFilter] = useState("");
+  // On /ops/fca this is saved per account (#789): it comes back on the next visit, in another
+  // browser and on desktop.
+  const [artccFilter, setArtccFilter] = useFcaArtccFilter(persistArtccFilter);
 
   const [planeIcons, setPlaneIcons] = useState(() => {
     try {
@@ -641,23 +647,27 @@ export function FcaMapView({
     if (from < 0 || to < 0) return;
     setFcaOrder(arrayMove(fcaOrder, from, to));
   }
+  // A saved ARTCC with no FCAs today stays in the list (#789): the selector keeps showing what the
+  // filter is, the list reads "No FCAs.", and the stored choice is never rewritten to ALL.
   const artccOptions = useMemo(
-    () => [...new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean))].sort(),
-    [fcas.data],
+    () =>
+      [...new Set([...(fcas.data ?? []).map((f) => f.artcc), artccFilter].filter(Boolean))].sort(),
+    [fcas.data, artccFilter],
   );
-  // Frame the map to the ARTCC selection in overview mode: a specific ARTCC's extent, or the whole
-  // CONUS for "ALL" (which stacks every FCA nationwide).
+  // Frame the map to the ARTCC selection: a specific ARTCC's extent, or in overview mode the whole
+  // CONUS for "ALL" (which stacks every FCA nationwide). On /ops/fca (#789) a specific ARTCC is
+  // framed when it's restored and on every pick; ALL leaves the camera where map.persistView put it.
   useEffect(() => {
-    if (!overview) return;
+    if (!overview && !persistArtccFilter) return;
     if (!artccFilter) {
-      camera.home();
+      if (overview) camera.home();
       return;
     }
     const feature = facilityFeature(artccFilter);
     const pts = feature ? facilityPoints(feature) : [];
     if (pts.length) camera.fitBounds(pts, { padding: 40, maxZoom: 7 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overview, artccFilter]);
+  }, [overview, persistArtccFilter, artccFilter]);
 
   if (!canRead) {
     return (
