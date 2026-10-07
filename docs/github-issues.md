@@ -25,7 +25,7 @@ mechanism, says what "done" looks like, and is labeled so the board sorts it cor
 | **To Do** | Triaged and cleared to start. |
 | **Returned** | Kicked back for rework (from review or test). |
 | **In build** | Actively being implemented. |
-| **Post build** | Build done — pre-test wrap-up (regenerate the client, apply migrations, self-check, `just ci`). |
+| **Post build** | Build done — pre-test wrap-up (regenerate the client, apply migrations, self-check, `just ci-full`). |
 | **Testing Queue** | PR open, awaiting test. |
 | **In Test** | Under test. |
 | **Code Review** | Tested, PR in review. |
@@ -225,7 +225,7 @@ mark true duplicates `status`/close with a pointer rather than filing again.
   back.
 - **Agents do not self-assign, close issues, or merge PRs, and don't move an issue to Shippable or
   Done** — a human owns review, ship, and close. An agent may move **To Do → In build** when it
-  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci`), open the
+  genuinely starts, run the **Post build** wrap-up (client regen, migrations, `just ci-full`), open the
   PR, and move the card to **Testing Queue**. Work lands on **`next`**, the integration branch, per
   the project's no-branch rule (see `AGENTS.md` § Git workflow); `main` is promoted from `next`
   separately.
@@ -243,8 +243,8 @@ mark true duplicates `status`/close with a pointer rather than filing again.
   already on `next`.
 - **Comment sparingly** — an issue is a spec, not a chat log. Comment only at the moments and
   within the budget in [Comments](#comments-the-three-moments-and-the-budget) below.
-- **No AI attribution:** an agent-drafted issue, comment, commit or PR carries no AI attribution of
-  any kind: no `Drafted by` or `Generated with` footer, no `Co-Authored-By` trailer, no session link.
+- **No AI attribution** on an issue, comment, commit or PR: the rule is in `AGENTS.md` § Git
+  workflow, and the check before posting is in [Comments](#comments-the-three-moments-and-the-budget).
 - **Other repos are read-only.** Reference AvioDeck (or any other repo) for patterns, but never
   create, edit, comment on, or label issues outside `VATUSA/OIS`.
 
@@ -431,7 +431,9 @@ secondary limit that `gh api rate_limit` doesn't show. Repeated `gh project item
 
 - Read a card once per transition, through its own project items. Prefer local git
   (`git branch -r`, `git log origin/<branch>`) when the answer is in the refs.
-- Poll CI a handful of times at most; the local gate is the primary evidence.
+- Read the PR's check-runs once per report (`gh pr checks <n>`, pending included) instead of
+  polling. CI is the verdict: `just ci-full` is the local gate, and a gate is green only when the
+  check-runs say so.
 - When GraphQL is throttled, REST still works for everything except the board move. Post the
   comment through REST and retry the move later:
 

@@ -58,7 +58,8 @@ question and what would settle it.
    catalog string), its tests, and any doc mentions. Removing a `ToSchema` model or an endpoint
    needs a client regen. Retiring a permission or role needs a new migration; never edit an
    applied one.
-4. Name the gates to run afterward: `just ci`, clippy, and `pnpm typecheck` after the regen.
+4. Name the gates to run afterward: `just ci-full` (after the client regen when a contract moved),
+   then the PR's check-runs.
 
 ## Output
 

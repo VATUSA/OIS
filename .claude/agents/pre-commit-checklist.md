@@ -27,13 +27,14 @@ Go through every item. Mark each one **pass**, **fail** or **n/a**, with the evi
 
 ### Gates
 
-1. **`just ci` ran and passed.** Ask for, or run, the output, and read the `test result:` lines
-   and the typecheck output, not the exit code.
-2. **Clippy ran** for any Rust change: `cargo clippy --workspace --all-targets -- -D warnings`.
-   `just ci` doesn't run it (`AGENTS.md` § Commands).
-3. **CI-only checks considered.** `just ci` also skips `pnpm test`, doc tests, `pnpm audit`,
-   `cargo deny` and client drift. For a web change, `pnpm test` ran. For a dependency change,
-   `cargo deny check` or `pnpm audit` ran.
+1. **`just ci-full` ran and every step passed.** Ask for, or run, the output, and read its
+   PASS/FAIL/SKIPPED summary, the `test result:` lines and the typecheck output, not the exit code.
+   `just ci` alone is not enough: it skips clippy, `pnpm test`, doc tests, the audits and client
+   drift (`AGENTS.md` § Commands).
+2. **Every SKIPPED step is named** for the PR's test plan, never counted as passed. A web change
+   needs `pnpm test` to have run; a dependency change, `cargo deny check` or `pnpm audit`.
+3. **CI's check-runs read** once a PR exists (`gh pr checks <n>`, pending included). The local gate
+   is not the verdict: report what the check-runs say, not what `just ci-full` predicted.
 
 ### Every layer exists
 
@@ -76,7 +77,7 @@ Go through every item. Mark each one **pass**, **fail** or **n/a**, with the evi
     the fork shows up) lists every intended file and nothing unintended.
 17. **Branch.** Not `next` or `main`. The name matches `{feat|fix|chore}/{issue}/{desc}`.
 18. **Message.** Conventional `type(scope): summary`, a short body, `Closes #N` when it maps to an
-    issue, and no AI attribution: no `Co-Authored-By`, session link or "Generated with" line.
+    issue, and no AI attribution of any kind (`AGENTS.md` § Git workflow).
 19. **Squash base.** If the branch was squashed, it was reset onto the merge base or a pinned SHA,
     not a moving remote ref. `git diff --stat origin/next...HEAD` shows only this change.
 

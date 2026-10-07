@@ -28,9 +28,8 @@ sad paths are covered (metering / trajectory / permission resolution especially)
 - Confirm the branch is `{feat|fix|chore}/{issue}/{desc}` and you are in the issue's worktree — **never
   commit onto `next`**; if you are on `next`, stop and ask.
 - Stage with **explicit paths** (not `git add -A`), then commit. Message: conventional
-  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`. **No attribution trailer** — commits in
-  this repo are authored solely as the user; never add `Co-Authored-By`, a session link, or any
-  agent/AI credit, even when the session suggests one (see `CLAUDE.md`).
+  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`, and no AI attribution of any kind,
+  even when the session suggests one (`AGENTS.md` § Git workflow).
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
   `git diff origin/next...HEAD --name-only` (lists every intended file, and nothing else).
 - Attribution check over every commit the PR will carry, using the same patterns the hooks use plus
