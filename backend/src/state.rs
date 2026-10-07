@@ -52,6 +52,10 @@ pub struct AppState {
     /// `jobs::spawn_sector_consolidations_refresh`, and force-reloaded by
     /// `handlers::sector_consolidations` after each write, so a merge shows at once on this replica.
     pub sector_consolidations: Arc<ArcSwap<SectorConsolidations>>,
+    /// Each ARTCC's sector demand (#725), computed once per feed snapshot and the config it reads,
+    /// not once per request. Filled by `handlers::sector_demand` on the first read after a change; see
+    /// `handlers::sector_demand_cache`.
+    pub sector_demand: Arc<crate::handlers::sector_demand_cache::SectorDemandCache>,
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
@@ -162,6 +166,7 @@ impl AppState {
                 airspace_sectors,
                 sector_limits,
                 sector_consolidations,
+                sector_demand: Arc::default(),
                 gates,
                 flight_exclusions,
                 taxi_estimate_samples,
@@ -190,6 +195,7 @@ impl AppState {
             airspace_sectors,
             sector_limits,
             sector_consolidations,
+            sector_demand: Arc::default(),
             gates,
             flight_exclusions,
             taxi_estimate_samples,
@@ -219,6 +225,7 @@ impl AppState {
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             sector_limits: Arc::new(ArcSwap::from_pointee(SectorLimits::default())),
             sector_consolidations: Arc::new(ArcSwap::from_pointee(SectorConsolidations::default())),
+            sector_demand: Arc::default(),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),

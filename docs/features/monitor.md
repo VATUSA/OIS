@@ -162,12 +162,24 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
 - **Neighbours are view-only on this page.** The flags describe the caller's scope at the requested
   ARTCC, so a national TMU reads `true` for a neighbour too. The page ignores them for neighbour tables;
   the writes stay scoped server-side (a facility TMU gets 403 at a neighbour).
-- **Computed per request.** The database is read for the caller's two edit scopes, the locked wheels-up
-  of the grounded flights and prefiles (`repos::flow::locked_wheels_up`) and the facility list for the
-  neighbours. The rest reads the caches.
-  Projection (`sector_tracks::project_tracks`, boxed to the ARTCC's volumes) and binning (`sector_loads`,
-  over the **whole** table for TRACON precedence) run under `spawn_blocking`. Flights any facility has
-  excluded count nowhere. The bins start from the snapshot's time, not the request's.
+- **Computed once per snapshot, not per request.** Projection (`sector_tracks::project_tracks`, boxed to
+  the ARTCC's volumes) and binning (`sector_loads`, over the **whole** table for TRACON precedence) run
+  under `spawn_blocking` once per ARTCC per change, into `AppState::sector_demand`
+  (`handlers::sector_demand_cache`), and every viewer, table and neighbour read of that ARTCC is served
+  from it. An entry is reused while the feed snapshot, the airport, nav, profile, wind and sector tables
+  (by identity), the consolidations, the excluded callsigns and the grounded flights' wheels-up (by value)
+  are the ones it was built from. A consolidation write force-reloads its cache, so the next read
+  re-projects; a limit write only re-judges the cached rows; a refresh job's reload that changes nothing
+  costs nothing. The first read after a change computes and concurrent reads of the same ARTCC wait for it
+  (single-flight); nothing is computed for an ARTCC nobody reads, so the feed tick does no extra work.
+- **Per request,** the database is read for the caller's two edit scopes, the locked wheels-up of the
+  grounded flights and prefiles (`repos::flow::locked_wheels_up`, part of the key) and the facility list
+  for the neighbours. Flights any facility has excluded count nowhere. The bins start from the
+  snapshot's time, not the request's.
+- **The walk skips what the box can't see.** A track is resolved minute by minute with the trajectory
+  model's `distance_after`, but only for the minutes on legs that can reach the ARTCC's box (each leg cut
+  into 20 nm pieces and bounded around its great circle), found by bisecting the minutes. The fixes are
+  bit-for-bit those of the every-minute walk (`sector_tracks`' tests pin it).
 
 **Realtime.** No new topic. The web query key is `["sector-demand", artcc]` (`useSectorDemand`,
 `web/src/features/sector-demand/sector-demand.ts`), and `web/src/lib/realtime.ts` refetches it on:

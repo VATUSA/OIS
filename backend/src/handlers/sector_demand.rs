@@ -3,11 +3,11 @@
 //! (#723) applied and each bin judged against the row's limit (#722), split into an enroute and a TRACON
 //! table.
 //!
-//! Read-only and gated `flow.sectors.read`, like the limit and consolidation reads. Computed per request
-//! from the caches: the feed snapshot, the sector table, limits, consolidations and exclusions. The
-//! database is read for the caller's two edit scopes, the locked wheels-up of the grounded flights
-//! (`repos::flow::locked_wheels_up`) and the active facilities that filter the neighbour list.
-//! Projection and binning run under `spawn_blocking`.
+//! Read-only and gated `flow.sectors.read`, like the limit and consolidation reads. Computed from the
+//! caches (the feed snapshot, the sector table, limits, consolidations and exclusions) once per ARTCC per
+//! change, not per request: see `handlers::sector_demand_cache`. The database is read for the caller's
+//! two edit scopes, the locked wheels-up of the grounded flights (`repos::flow::locked_wheels_up`) and the
+//! active facilities that filter the neighbour list.
 //!
 //! The page refetches on `feed.tick` (a new cycle), `flow.sector_limits` and
 //! `flow.sector_consolidations` (rows recolour or merge), and on `flow.release`, `flow.cfr`, `tmu.gdp`
@@ -27,14 +27,14 @@ use crate::{
         neighbors,
         sector_consolidations::row_limit,
         sector_limits::{DEFAULT_LIMIT, SectorLimits, level},
-        sector_load::{BIN_MIN, SectorLoad, Track, sector_loads},
-        sector_tracks::{AIRBORNE_GS_KT, Bbox, project_tracks},
+        sector_load::{BIN_MIN, SectorLoad},
+        sector_tracks::AIRBORNE_GS_KT,
         sectors::{APPROACH_TIER, SectorTable},
         vatsim::VatsimData,
     },
     handlers::{
         flow::all_excluded_callsigns, sector_consolidations::SECTOR_CONSOLIDATIONS_UPDATE,
-        sector_limits::SECTOR_LIMITS_UPDATE,
+        sector_demand_cache::Inputs, sector_limits::SECTOR_LIMITS_UPDATE,
     },
     models::{
         SectorDemandBin, SectorDemandBody, SectorDemandRow, SectorDemandStatus, SectorDemandTable,
@@ -59,7 +59,7 @@ fn count(n: usize) -> i32 {
 /// `loads` (one ARTCC's rows from the engine) as the page's two tables, each row judged against its
 /// limit — a combined row against its target's ([`row_limit`]). Ordered by `sector_id` within each.
 pub(crate) fn tables(
-    loads: Vec<SectorLoad>,
+    loads: &[SectorLoad],
     table: &SectorTable,
     artcc: &str,
     limits: &SectorLimits,
@@ -67,7 +67,7 @@ pub(crate) fn tables(
     let names: HashMap<String, Option<String>> = table.sectors_of(artcc).into_iter().collect();
     let (mut enroute, mut tracon) = (Vec::new(), Vec::new());
     for load in loads {
-        let limit = row_limit(limits, &load);
+        let limit = row_limit(limits, load);
         let row = SectorDemandRow {
             name: names.get(&load.sector_id).cloned().flatten(),
             limit,
@@ -82,9 +82,9 @@ pub(crate) fn tables(
                     level: level(bin, limit),
                 })
                 .collect(),
-            consolidated: load.consolidated,
-            tier: load.tier,
-            sector_id: load.sector_id,
+            consolidated: load.consolidated.clone(),
+            tier: load.tier.clone(),
+            sector_id: load.sector_id.clone(),
         };
         if row.tier == APPROACH_TIER {
             tracon.push(row);
@@ -196,54 +196,24 @@ pub async fn get_sector_demand(
     let excluded = all_excluded_callsigns(&state.flight_exclusions.load());
     let wheels_up =
         flow_repo::locked_wheels_up(pool, &grounded_callsigns(&snapshot.data, &excluded)).await?;
-    let nav = state.nav.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let winds = state.winds.load_full();
-    let consolidations = state.sector_consolidations.load_full();
-    // The cycle is the clock: positions are as of the snapshot, so the bins start from it too.
-    let cycle_at = snapshot.fetched_at;
-    let now_ms = cycle_at.timestamp_millis();
-
-    let loads = {
-        let (table, artcc) = (table.clone(), artcc.clone());
-        tokio::task::spawn_blocking(move || {
-            let owned = project_tracks(
-                &snapshot.data,
-                &nav,
-                &airports,
-                &profiles,
-                &winds,
-                &wheels_up,
-                &excluded,
-                now_ms,
-                Bbox::of_artcc(&table, &artcc),
-            );
-            let tracks: Vec<Track> = owned
-                .iter()
-                .map(|t| Track {
-                    id: &t.id,
-                    population: t.population,
-                    fixes: &t.fixes,
-                })
-                .collect();
-            // The whole table, never this ARTCC's slice: TRACON precedence is global (#726).
-            sector_loads(&table, &consolidations, &tracks, now_ms)
-                .into_iter()
-                .filter(|l| l.artcc == artcc)
-                .collect::<Vec<_>>()
-        })
-        .await
-        .map_err(|_| ApiError::Internal)?
+    let inputs = Inputs {
+        snapshot,
+        airports,
+        nav: state.nav.load_full(),
+        profiles: state.aircraft_profiles.load_full(),
+        winds: state.winds.load_full(),
+        table,
+        consolidations: state.sector_consolidations.load_full(),
+        excluded,
+        wheels_up,
+        limits: state.sector_limits.load_full(),
     };
+    let demand = state.sector_demand.demand(&artcc, inputs).await?;
 
     body.status = SectorDemandStatus::Ready;
-    body.cycle_at = Some(cycle_at);
-    body.bin_starts_ms = loads
-        .first()
-        .map(|l| l.bins.iter().map(|b| b.start_ms).collect())
-        .unwrap_or_default();
-    let (enroute, tracon) = tables(loads, &table, &artcc, &state.sector_limits.load());
-    body.enroute.rows = enroute;
-    body.tracon.rows = tracon;
+    body.cycle_at = Some(demand.cycle_at);
+    body.bin_starts_ms = demand.bin_starts_ms.clone();
+    body.enroute.rows = demand.enroute.clone();
+    body.tracon.rows = demand.tracon.clone();
     Ok(Json(body))
 }

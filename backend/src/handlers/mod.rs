@@ -33,6 +33,7 @@ pub mod restriction_artcc;
 pub mod runway;
 pub mod sector_consolidations;
 pub mod sector_demand;
+pub mod sector_demand_cache;
 pub mod sector_limits;
 pub mod service_accounts;
 pub mod stats;

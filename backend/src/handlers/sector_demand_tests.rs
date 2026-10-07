@@ -105,13 +105,16 @@ fn airborne(callsign: &str) -> Pilot {
     }
 }
 
-/// Install a feed cycle at `fetched_at` holding `data`, with KJFK and KDCA known.
+/// Install a feed cycle at `fetched_at` holding `data`, with KJFK and KDCA known. The airport table is
+/// installed once and kept, as the feed keeps it between cycles, so a new cycle changes only the snapshot.
 async fn cycle(state: &AppState, data: VatsimData, fetched_at: DateTime<Utc>) {
     let mut feed = state.feed.write().await;
-    feed.airports = Arc::new(HashMap::from([
-        ("KJFK".to_string(), Airport::at(40.64, -73.78)),
-        ("KDCA".to_string(), Airport::at(38.85, -77.04)),
-    ]));
+    if feed.airports.is_empty() {
+        feed.airports = Arc::new(HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]));
+    }
     feed.snapshot = Some(Arc::new(Snapshot {
         fetched_at,
         source_timestamp: String::new(),
@@ -754,4 +757,343 @@ async fn writes_refresh_the_demand_and_a_neighbours_are_refused(pool: PgPool) {
     let zny = get(&state, "ZNY", &zdc_reader).await;
     assert_eq!(zny["status"], "ready");
     assert_eq!(zny["enroute"]["rows"].as_array().unwrap().len(), 2);
+}
+
+// ---- #725 QA: computed once per snapshot, not once per request ----
+
+/// How many projections and renders `state`'s demand cache has run.
+fn runs(state: &AppState) -> (u64, u64) {
+    (
+        state.sector_demand.projections(),
+        state.sector_demand.renders(),
+    )
+}
+
+/// Three airborne flights in `010` and one prefile out of KJFK whose CFR wheels-up has passed, so both
+/// populations are on the grid and a recomputation would have something to get wrong.
+async fn busy_cycle(state: &AppState, pool: &PgPool, at: DateTime<Utc>) {
+    sqlx::query(
+        "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('DAL9', 'KDCA', $1) \
+         on conflict (callsign) do update set wheels_up = excluded.wheels_up",
+    )
+    .bind(at - chrono::Duration::minutes(5))
+    .execute(pool)
+    .await
+    .unwrap();
+    cycle(state, busy_data(), at).await;
+}
+
+/// [`busy_cycle`]'s flights.
+fn busy_data() -> VatsimData {
+    let mut data = VatsimData {
+        pilots: ["AAL1", "AAL2", "AAL3"].map(airborne).into(),
+        ..Default::default()
+    };
+    data.prefiles.push(Prefile {
+        callsign: "DAL9".into(),
+        flight_plan: Some(plan()),
+        ..Default::default()
+    });
+    data
+}
+
+/// QA's finding 1: every viewer of an ARTCC, as their own facility or as a neighbour, reads one
+/// projection per cycle. Two viewers of ZDC read it three times between them and it is projected once;
+/// ZNY, a different ARTCC, is projected on its own. The bodies are the same numbers.
+#[sqlx::test]
+async fn reads_in_one_cycle_project_each_artcc_once(pool: PgPool) {
+    let state = state(pool.clone());
+    let (first, second) = (user(&pool, &[]).await, user(&pool, &[]).await);
+    busy_cycle(&state, &pool, Utc::now()).await;
+
+    let a = get(&state, "ZDC", &first).await;
+    assert_eq!(runs(&state), (1, 1));
+    assert_eq!(
+        row(&a, "enroute", "010")["bins"][0],
+        json!({ "active": 3, "proposed": 1, "combined": 4, "level": "ok" })
+    );
+    let b = get(&state, "ZDC", &second).await;
+    let c = get(&state, "zdc", &first).await;
+    assert_eq!(
+        runs(&state),
+        (1, 1),
+        "the second and third reads compute nothing"
+    );
+    assert_eq!(b, a);
+    assert_eq!(c, a);
+
+    get(&state, "ZNY", &second).await;
+    assert_eq!(runs(&state), (2, 2), "another ARTCC is its own projection");
+    get(&state, "ZNY", &first).await;
+    get(&state, "ZDC", &second).await;
+    assert_eq!(runs(&state), (2, 2));
+}
+
+/// A new feed cycle is a new projection, even with the same flights and wheels-up: the bins start
+/// from it.
+#[sqlx::test]
+async fn a_new_cycle_projects_again(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    let at: DateTime<Utc> = "2026-10-07T14:07:31Z".parse().unwrap();
+    busy_cycle(&state, &pool, at).await;
+    let before = get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state).0, 1);
+
+    let later = at + chrono::Duration::minutes(15);
+    cycle(&state, busy_data(), later).await;
+    let after = get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state).0, 2);
+    assert_eq!(after["cycle_at"], "2026-10-07T14:22:31Z");
+    assert_ne!(after["bin_starts_ms"], before["bin_starts_ms"]);
+    get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state).0, 2);
+}
+
+/// A limit write through the real route re-judges the cached rows at once, with no new projection; a
+/// consolidation write through its route re-projects at once, since it changes which volumes make a
+/// row. Neither waits for the next cycle.
+#[sqlx::test]
+async fn a_limit_write_rejudges_and_a_consolidation_write_reprojects(pool: PgPool) {
+    let state = state(pool.clone());
+    let tmu = user(
+        &pool,
+        &[
+            ("flow.sector_limits.update", "ZDC"),
+            ("flow.sector_consolidations.update", "ZDC"),
+        ],
+    )
+    .await;
+    busy_cycle(&state, &pool, Utc::now()).await;
+    let put = |uri: String, body: Value| {
+        let (state, tmu) = (state.clone(), tmu.clone());
+        async move { send(&state, Method::PUT, &uri, &tmu, Some(body)).await }
+    };
+
+    let body = get(&state, "ZDC", &tmu).await;
+    assert_eq!(row(&body, "enroute", "010")["bins"][0]["level"], "ok");
+    assert_eq!(runs(&state), (1, 1));
+
+    let limit = "/api/v1/flow/sector-limits/ZDC/010".to_string();
+    assert_eq!(put(limit, json!({ "limit": 3 })).await, StatusCode::OK);
+    let body = get(&state, "ZDC", &tmu).await;
+    assert_eq!(row(&body, "enroute", "010")["limit"], 3);
+    assert_eq!(
+        row(&body, "enroute", "010")["bins"][0]["level"],
+        "watch",
+        "combined 4 over the new limit of 3, active 3 not"
+    );
+    assert_eq!(runs(&state), (1, 2), "re-judged, not re-projected");
+    get(&state, "ZDC", &tmu).await;
+    assert_eq!(runs(&state), (1, 2));
+
+    let consolidate = "/api/v1/flow/sector-consolidations/ZDC/020".to_string();
+    assert_eq!(
+        put(consolidate, json!({ "target_sector_id": "010" })).await,
+        StatusCode::OK
+    );
+    let body = get(&state, "ZDC", &tmu).await;
+    assert_eq!(body["enroute"]["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(row(&body, "enroute", "010")["consolidated"], json!(["020"]));
+    assert_eq!(runs(&state), (2, 3));
+}
+
+/// The refresh jobs reload limits and consolidations every 30 s whether or not anything changed. A
+/// reload that changes nothing must not cost a projection (or a render); one that does, must.
+#[sqlx::test]
+async fn a_reload_that_changes_nothing_computes_nothing(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    busy_cycle(&state, &pool, Utc::now()).await;
+    let limits = HashMap::from([(("ZDC".to_string(), "010".to_string()), 7)]);
+    let consolidations =
+        HashMap::from([(("ZDC".to_string(), "020".to_string()), "010".to_string())]);
+    state.sector_limits.store(Arc::new(limits.clone()));
+    state
+        .sector_consolidations
+        .store(Arc::new(consolidations.clone()));
+    let before = get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state), (1, 1));
+
+    state.sector_limits.store(Arc::new(limits));
+    state.sector_consolidations.store(Arc::new(consolidations));
+    assert_eq!(get(&state, "ZDC", &cookie).await, before);
+    assert_eq!(runs(&state), (1, 1));
+
+    state.sector_consolidations.store(Arc::new(HashMap::new()));
+    get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state), (2, 2));
+    state.sector_limits.store(Arc::new(HashMap::new()));
+    get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state), (2, 3));
+}
+
+/// A release, CFR, GDP or FCA write moves a wheels-up in the database, not in a cache, and the page
+/// refetches on it within the cycle. The changed wheels-up is a new projection; the same one is not.
+#[sqlx::test]
+async fn a_moved_wheels_up_reprojects_within_the_cycle(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    let now = Utc::now();
+    busy_cycle(&state, &pool, now).await;
+    let first_bin = |body: &Value| row(body, "enroute", "010")["bins"][0].clone();
+    assert_eq!(first_bin(&get(&state, "ZDC", &cookie).await)["proposed"], 1);
+
+    sqlx::query("update tmu.issued_cfrs set wheels_up = $1 where callsign = 'DAL9'")
+        .bind(now + chrono::Duration::hours(3))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(first_bin(&get(&state, "ZDC", &cookie).await)["proposed"], 0);
+    assert_eq!(runs(&state).0, 2);
+    get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state).0, 2);
+}
+
+/// Concurrent first reads of one ARTCC wait for one projection instead of each running their own.
+#[sqlx::test]
+async fn concurrent_reads_share_one_projection(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    busy_cycle(&state, &pool, Utc::now()).await;
+
+    let mut reads = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let (state, cookie) = (state.clone(), cookie.clone());
+        reads.spawn(async move { get(&state, "ZDC", &cookie).await });
+    }
+    let bodies = reads.join_all().await;
+    assert_eq!(
+        runs(&state),
+        (1, 1),
+        "eight concurrent reads, one projection"
+    );
+    assert!(bodies.iter().all(|b| *b == bodies[0]));
+}
+
+/// The cache changes when the numbers are computed, never what they are: after a hit and after a
+/// limit-only re-judge, the body is the one a fresh cache (the per-request path) computes from the same
+/// inputs.
+#[sqlx::test]
+async fn the_cached_demand_is_the_uncached_demand(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    busy_cycle(&state, &pool, Utc::now()).await;
+    let fresh = |state: &AppState| AppState {
+        sector_demand: Arc::default(),
+        ..state.clone()
+    };
+
+    get(&state, "ZDC", &cookie).await;
+    let hit = get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state), (1, 1));
+    assert_eq!(hit, get(&fresh(&state), "ZDC", &cookie).await);
+
+    state.sector_limits.store(Arc::new(HashMap::from([(
+        ("ZDC".to_string(), "010".to_string()),
+        2,
+    )])));
+    let rejudged = get(&state, "ZDC", &cookie).await;
+    assert_eq!(runs(&state), (1, 2));
+    assert_eq!(row(&rejudged, "enroute", "010")["bins"][0]["level"], "over");
+    assert_eq!(rejudged, get(&fresh(&state), "ZDC", &cookie).await);
+}
+
+/// A request that read the feed just before a new cycle landed computes its own answer but leaves the
+/// newer cycle's entry in place, so the next read of the new cycle is still a hit.
+#[tokio::test]
+async fn an_older_cycle_never_replaces_a_newer_one() {
+    use crate::{feed::Snapshot, handlers::sector_demand_cache::Inputs};
+
+    let state = AppState::without_db();
+    let table = Arc::new(SectorTable {
+        volumes: vec![corridor("ZDC", "01001", "high")],
+    });
+    let snapshot = |at: &str| {
+        Arc::new(Snapshot {
+            fetched_at: at.parse().unwrap(),
+            source_timestamp: String::new(),
+            data: VatsimData::default(),
+        })
+    };
+    let (older, newer) = (
+        snapshot("2026-10-07T14:00:00Z"),
+        snapshot("2026-10-07T14:00:15Z"),
+    );
+    let airports = Arc::default();
+    let inputs = |snapshot: &Arc<Snapshot>| Inputs {
+        snapshot: snapshot.clone(),
+        airports: Arc::clone(&airports),
+        nav: state.nav.load_full(),
+        profiles: state.aircraft_profiles.load_full(),
+        winds: state.winds.load_full(),
+        table: table.clone(),
+        consolidations: Arc::default(),
+        excluded: HashSet::new(),
+        wheels_up: HashMap::new(),
+        limits: Arc::default(),
+    };
+    let cache = &state.sector_demand;
+
+    let n = cache.demand("ZDC", inputs(&newer)).await.unwrap();
+    let o = cache.demand("ZDC", inputs(&older)).await.unwrap();
+    assert_eq!(
+        (o.cycle_at, n.cycle_at),
+        (older.fetched_at, newer.fetched_at)
+    );
+    assert_eq!(cache.projections(), 2);
+    cache.demand("ZDC", inputs(&newer)).await.unwrap();
+    assert_eq!(cache.projections(), 2, "the newer cycle's entry was kept");
+}
+
+/// Every other input re-projects when it changes within a cycle: an exclusion (a write force-reloads it),
+/// and a reload of the sector, airport, nav, aircraft-profile or wind table by its refresh job. One
+/// projection each, and a read after each with nothing changed is a hit.
+#[sqlx::test]
+async fn each_reloaded_input_reprojects_once(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    busy_cycle(&state, &pool, Utc::now()).await;
+    let first_bin = |body: &Value| row(body, "enroute", "010")["bins"][0].clone();
+    assert_eq!(first_bin(&get(&state, "ZDC", &cookie).await)["active"], 3);
+
+    state.flight_exclusions.store(Arc::new(HashMap::from([(
+        "ZDC".to_string(),
+        HashSet::from(["AAL1".to_string()]),
+    )])));
+    assert_eq!(first_bin(&get(&state, "ZDC", &cookie).await)["active"], 2);
+    assert_eq!(runs(&state).0, 2);
+
+    type Reload<'a> = (&'static str, Box<dyn Fn() + 'a>);
+    let reloads: [Reload; 5] = [
+        (
+            "sectors",
+            Box::new(|| {
+                let table = SectorTable::clone(&state.airspace_sectors.load());
+                state.airspace_sectors.store(Arc::new(table));
+            }),
+        ),
+        (
+            "nav",
+            Box::new(|| state.nav.store(Arc::new(crate::feed::nav::NavData::load()))),
+        ),
+        (
+            "profiles",
+            Box::new(|| state.aircraft_profiles.store(Arc::default())),
+        ),
+        ("winds", Box::new(|| state.winds.store(Arc::default()))),
+        (
+            "airports",
+            Box::new(|| {
+                let mut feed = state.feed.try_write().unwrap();
+                feed.airports = Arc::new(HashMap::clone(&feed.airports));
+            }),
+        ),
+    ];
+    for (n, (what, reload)) in reloads.iter().enumerate() {
+        reload();
+        get(&state, "ZDC", &cookie).await;
+        get(&state, "ZDC", &cookie).await;
+        assert_eq!(runs(&state).0, 3 + n as u64, "a {what} reload");
+    }
 }
