@@ -132,6 +132,34 @@ describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {
   });
 });
 
+describe("sector demand topics (VATUSA/OIS#725)", () => {
+  async function nudge(topic: string) {
+    const dispose = connectRealtime(qc);
+    await flush();
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    invalidated.length = 0; // drop the reconnect catch-up
+    socket.onmessage?.({ data: JSON.stringify({ topic }) });
+    dispose();
+    return [...invalidated];
+  }
+
+  // #723 left the consolidation topic to this page: a merge or split must redraw the rows at once,
+  // and a limit must recolour them. A moved wheels-up (release, CFR, GDP slot, an FCA switched off)
+  // moves the proposed counts.
+  it.each(["flow.sector_consolidations", "flow.sector_limits", "flow.release", "flow.cfr", "tmu.gdp", "flow.fca"])(
+    "%s refreshes every ARTCC's sector demand",
+    async (topic) => {
+      expect(await nudge(topic)).toContainEqual({ queryKey: ["sector-demand"] });
+    },
+  );
+
+  it("an unrelated topic leaves it alone", async () => {
+    const seen = await nudge("tmu.advisory");
+    expect(seen).toEqual([{ queryKey: ["advisories"] }]);
+  });
+});
+
 // ==== VATUSA/OIS#648: the feed tick ==================================================================
 
 const FEED = [

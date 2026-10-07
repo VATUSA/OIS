@@ -403,6 +403,63 @@ async fn a_combined_row_lists_its_sources_and_reads_the_targets_limit(pool: PgPo
     assert_eq!(rows[0]["limit"], 14);
 }
 
+/// Epic AC "a combined row is a union of the polygons, never a sum of the rows", through the route.
+/// `060` is a second high sector over the corridor, so the three FL240 flights are inside both `010` and
+/// `060` in the same minutes: apart, each row reads 3. Worked at `010`, the combined row counts each
+/// flight once — 3, not the 6 a sum of the rows would read — and against `010`'s limit of 4 it stays
+/// green where the sum would be red. The control before the consolidation proves both rows carry the
+/// traffic, so the 3 is a union and not a dropped source.
+#[sqlx::test]
+async fn a_combined_row_counts_a_flight_in_two_sources_once(pool: PgPool) {
+    let state = state(pool.clone());
+    let mut volumes = state.airspace_sectors.load().volumes.clone();
+    volumes.push(corridor("ZDC", "06001", "high"));
+    state
+        .airspace_sectors
+        .store(Arc::new(SectorTable { volumes }));
+    state.sector_limits.store(Arc::new(HashMap::from([(
+        ("ZDC".to_string(), "010".to_string()),
+        4,
+    )])));
+    let cookie = user(&pool, &[]).await;
+    let data = VatsimData {
+        pilots: ["AAL1", "AAL2", "AAL3"].map(airborne).into(),
+        ..Default::default()
+    };
+    cycle(&state, data, Utc::now()).await;
+    let first_bin = |body: &Value, sector: &str| row(body, "enroute", sector)["bins"][0].clone();
+
+    let apart = get(&state, "ZDC", &cookie).await;
+    assert_eq!(first_bin(&apart, "010")["active"], 3);
+    assert_eq!(first_bin(&apart, "060")["active"], 3);
+
+    state.sector_consolidations.store(Arc::new(HashMap::from([(
+        ("ZDC".to_string(), "060".to_string()),
+        "010".to_string(),
+    )])));
+    let combined = get(&state, "ZDC", &cookie).await;
+    let ids: Vec<&Value> = combined["enroute"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["sector_id"])
+        .collect();
+    assert_eq!(
+        ids,
+        [&json!("010"), &json!("020")],
+        "060 is folded into 010"
+    );
+    assert_eq!(
+        row(&combined, "enroute", "010")["consolidated"],
+        json!(["060"])
+    );
+    assert_eq!(
+        first_bin(&combined, "010"),
+        json!({ "active": 3, "proposed": 0, "combined": 3, "level": "ok" }),
+        "each flight once, judged against the target's limit of 4"
+    );
+}
+
 /// The edit flags follow each permission's own scope: a ZDC TMU holding only the limit grant may set
 /// ZDC's limits and nothing else, and nothing at ZNY.
 #[sqlx::test]

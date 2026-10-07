@@ -333,6 +333,53 @@ describe("the Sector Monitor page (#725)", () => {
     expect(again.host.querySelector("button[aria-expanded]")!.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("draws each bin in the level the server judged it, never all green", async () => {
+    // The server owns the alert rule (#722); the page must carry its verdict to the cell, or an
+    // overload reads as a quiet sky. ZDC80 is red in its first bin; ZDC06 yellow at 1700Z.
+    const {host} = await mount(READER, [demand("ZDC")]);
+    const levels = (name: string) => [...levelCells(section(host, name))].map((c) => c.getAttribute("data-level"));
+    const tracon = levels("ZDC TRACON sectors");
+    expect(tracon[0]).toBe("over");
+    expect(tracon.slice(1).every((l) => l === "ok")).toBe(true);
+    const enroute = levels("ZDC Enroute sectors");
+    // Row-major, 16 bins a row: ZDC05 green throughout, ZDC06 yellow at its bin 12 only.
+    expect(enroute.slice(0, 16).every((l) => l === "ok")).toBe(true);
+    expect(enroute.slice(16).map((l, i) => (l === "ok" ? null : `${i}:${l}`)).filter(Boolean)).toEqual(["12:watch"]);
+  });
+
+  it("keeps the three empty states distinct, none of them a grid", async () => {
+    const empty = {cycle_at: null, bin_starts_ms: [], enroute: {has_sector_data: false, rows: []}, tracon: {has_sector_data: false, rows: []}};
+    const {host} = await mount(READER, [
+      demand("ZDC", {...empty, status: "pending", enroute: {has_sector_data: true, rows: []}, tracon: {has_sector_data: true, rows: []}}),
+      demand("ZLA", {...empty, status: "no_sector_data"}),
+      demand("ZNY"),
+    ]);
+    const shown = async (artcc: string) => {
+      await setValue(control(host, "Facility"), artcc);
+      return host.textContent ?? "";
+    };
+    const pending = await shown("ZDC");
+    const noData = await shown("ZLA");
+    expect(host.querySelector("table")).toBeNull();
+    await shown("ZNY");
+    await click(control(host, "ZNY Enroute: only sectors alerting"));
+    await setValue(control(host, "ZNY Enroute alert span"), "1");
+    const noneAlerting = section(host, "ZNY Enroute sectors")!.textContent ?? "";
+    expect(section(host, "ZNY Enroute sectors")!.querySelector("table")).toBeNull();
+
+    expect(pending).toContain("Waiting for the first feed cycle");
+    expect(noData).toContain("No sector data for ZLA");
+    expect(noneAlerting).toContain("No ZNY sectors alerting in the next 1.00 h");
+    // Each says only its own thing.
+    for (const [text, others] of [
+      [pending, ["No sector data", "alerting in the next"]],
+      [noData, ["Waiting for the first feed cycle", "alerting in the next"]],
+      [noneAlerting, ["Waiting for the first feed cycle", "No sector data"]],
+    ] as const) {
+      for (const other of others) expect(text).not.toContain(other);
+    }
+  });
+
   it("replaces the whole set on a facility switch", async () => {
     const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZOB", {neighbours: ["ZID"]})]);
     expect(section(host, "ZDC Enroute sectors")).not.toBeNull();

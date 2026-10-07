@@ -1,4 +1,4 @@
-import {readdirSync, readFileSync} from "node:fs";
+import {readdirSync, readFileSync, statSync} from "node:fs";
 import {resolve} from "node:path";
 
 import {describe, expect, it} from "vitest";
@@ -14,10 +14,13 @@ const PALETTE_CLASS =
   /\b(bg|text|border|ring|fill|stroke|from|to|via|outline|decoration|accent|caret)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|black|white)(-\d{2,3})?\b/;
 
 const src = resolve(__dirname, "../..");
-const sourcesIn = (dir: string) =>
-  readdirSync(resolve(src, dir))
-    .filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f))
-    .map((f) => resolve(src, dir, f));
+/** Every non-test source under `dir`, subdirectories included, so a file added below it is covered. */
+const sourcesIn = (dir: string): string[] =>
+  readdirSync(resolve(src, dir)).flatMap((f) => {
+    const path = resolve(src, dir, f);
+    if (statSync(path).isDirectory()) return sourcesIn(`${dir}/${f}`);
+    return /\.(tsx?|css)$/.test(f) && !/\.test\.tsx?$/.test(f) ? [path] : [];
+  });
 
 const SOURCES = [
   ...sourcesIn("features/sector-demand"),
@@ -29,7 +32,8 @@ const offenders = (text: string) =>
   text
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split("\n")
-    .map((l) => l.replace(/\/\/.*$/, ""))
+    // A line comment, but not the `//` of a URL inside a string, which would hide the rest of its line.
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .filter((l) => LITERAL_COLOUR.test(l) || PALETTE_CLASS.test(l));
 
 describe("sector demand colours (#725)", () => {
@@ -58,5 +62,8 @@ describe("sector demand colours (#725)", () => {
       expect(offenders(bad), bad).toHaveLength(1);
     }
     expect(offenders('className="bg-level-over/20 border-line-soft text-ink accent-brand"')).toEqual([]);
+    // A comment is prose, not a colour; a URL's `//` is not a comment.
+    expect(offenders("// FSM's beige was #EFDFCE")).toEqual([]);
+    expect(offenders('const u = "https://x.test"; const c = "#EFDFCE";')).toHaveLength(1);
   });
 });
