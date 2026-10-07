@@ -60,7 +60,8 @@ fn elsewhere(artcc: &str, volume_id: &str, tier: &str) -> SectorVolume {
 }
 
 /// ZDC: `010` (high, over the corridor), `020` (low, elsewhere) and `070` (approach, elsewhere). ZSE has
-/// enroute volumes only, as in the real dataset. ZOB has none.
+/// enroute volumes only, as in the real dataset. ZNY has `010` and `030` (high, elsewhere): a neighbour
+/// with sectors of its own to refuse edits on. ZOB has none.
 fn state(pool: PgPool) -> AppState {
     let state = test_state(pool, HashMap::new());
     state.airspace_sectors.store(Arc::new(SectorTable {
@@ -70,6 +71,8 @@ fn state(pool: PgPool) -> AppState {
             elsewhere("ZDC", "07001", "approach"),
             elsewhere("ZSE", "03001", "low"),
             elsewhere("ZSE", "04001", "ultra_high"),
+            elsewhere("ZNY", "01001", "high"),
+            elsewhere("ZNY", "03001", "high"),
         ],
     }));
     state
@@ -237,10 +240,11 @@ async fn a_quiet_cycle_is_two_tables_of_zero_rows_on_zulu_quarter_hours(pool: Pg
     );
 }
 
-/// #722's rule through the real router: three flights airborne in `010` read active 3. A limit of 3
-/// (equal) is `ok`, a limit of 2 is `over`. A fourth flight on the ground holding an issued CFR is
-/// proposed: at a limit of 3 only active + proposed (4) exceeds it, so the bin is `watch`. A manually
-/// excluded flight counts nowhere.
+/// #722's rule through the real router, at both sides of each boundary. Three flights airborne in
+/// `010` read active 3: against limits 2, 3 and 4 that is `over`, `ok` (equal never alerts) and `ok`.
+/// A fourth flight on the ground holding an issued CFR is proposed, so combined reads 4: against limits
+/// 2, 3, 4 and 5 that is `over` (active alone exceeds), `watch` (only active + proposed does), `ok`
+/// (equal) and `ok`. A manually excluded flight counts nowhere.
 #[sqlx::test]
 async fn each_bin_is_judged_against_the_rows_limit_strictly(pool: PgPool) {
     let state = state(pool.clone());
@@ -263,19 +267,17 @@ async fn each_bin_is_judged_against_the_rows_limit_strictly(pool: PgPool) {
         )])));
     };
 
-    set_limit(3);
-    let body = get(&state, "ZDC", &cookie).await;
-    assert_eq!(
-        first_bin(&body),
-        json!({ "active": 3, "proposed": 0, "combined": 3, "level": "ok" }),
-        "a peak equal to the limit is ok, and the excluded flight is not counted"
-    );
-    assert_eq!(row(&body, "enroute", "010")["limit"], 3);
-    assert_eq!(row(&body, "enroute", "010")["limit_overridden"], true);
-
-    set_limit(2);
-    let body = get(&state, "ZDC", &cookie).await;
-    assert_eq!(first_bin(&body)["level"], "over", "active alone exceeds 2");
+    for (limit, level) in [(2, "over"), (3, "ok"), (4, "ok")] {
+        set_limit(limit);
+        let body = get(&state, "ZDC", &cookie).await;
+        assert_eq!(
+            first_bin(&body),
+            json!({ "active": 3, "proposed": 0, "combined": 3, "level": level }),
+            "active 3 against {limit}, the excluded flight not counted"
+        );
+        assert_eq!(row(&body, "enroute", "010")["limit"], limit);
+        assert_eq!(row(&body, "enroute", "010")["limit_overridden"], true);
+    }
 
     // A prefile out of KJFK holding a wheels-up that has already passed departs now, inside `010`.
     sqlx::query(
@@ -295,13 +297,86 @@ async fn each_bin_is_judged_against_the_rows_limit_strictly(pool: PgPool) {
         ..Default::default()
     });
     cycle(&state, data, now).await;
-    set_limit(3);
-    let body = get(&state, "ZDC", &cookie).await;
-    assert_eq!(
-        first_bin(&body),
-        json!({ "active": 3, "proposed": 1, "combined": 4, "level": "watch" }),
-        "only active + proposed exceeds 3"
-    );
+    for (limit, level) in [(2, "over"), (3, "watch"), (4, "ok"), (5, "ok")] {
+        set_limit(limit);
+        let body = get(&state, "ZDC", &cookie).await;
+        assert_eq!(
+            first_bin(&body),
+            json!({ "active": 3, "proposed": 1, "combined": 4, "level": level }),
+            "active 3, combined 4 against {limit}"
+        );
+    }
+}
+
+/// One volume, `050` (high), over KJFK and the first few minutes of the corridor (40.0–40.7N,
+/// 73.6–74.15W). The airborne flight at 40.2N 74.0W heading for RBV leaves it within two minutes; a
+/// departure from KJFK is inside it from wheels-up.
+fn departure_box(pool: PgPool) -> AppState {
+    let state = test_state(pool, HashMap::new());
+    state.airspace_sectors.store(Arc::new(SectorTable {
+        volumes: vec![SectorVolume {
+            tier: "high".into(),
+            base_alt_ft: 0,
+            top_alt_ft: 60_000,
+            rings: vec![vec![
+                [40.0, -74.15],
+                [40.0, -73.6],
+                [40.7, -73.6],
+                [40.7, -74.15],
+                [40.0, -74.15],
+            ]],
+            ..volume("ZDC", "05001")
+        }],
+    }));
+    state
+}
+
+/// Epic AC "the combined peak is computed minute by minute then maxed", through the real router: one
+/// active flight is in `050` in the bin's first minutes and gone; one proposed flight departs KJFK into
+/// it eight minutes later. Each population peaks at 1 and the combined peak is 1, not 2, so against a
+/// limit of 1 the bin is green — the sum of the two peaks would read `watch`. The control, the same
+/// departure with a wheels-up already passed, is in the sector in the same minute as the active flight
+/// and reads combined 2, `watch`: the fixture can tell a sum from a per-minute max.
+#[sqlx::test]
+async fn the_combined_peak_is_maxed_per_minute_never_summed(pool: PgPool) {
+    let state = departure_box(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    state.sector_limits.store(Arc::new(HashMap::from([(
+        ("ZDC".to_string(), "050".to_string()),
+        1,
+    )])));
+    // 30 s into the 1400Z bin, so a wheels-up 8 minutes on is still inside it.
+    let at: DateTime<Utc> = "2026-10-07T14:00:30Z".parse().unwrap();
+    let mut data = VatsimData {
+        pilots: vec![airborne("AAL1")],
+        ..Default::default()
+    };
+    data.prefiles.push(Prefile {
+        callsign: "DAL9".into(),
+        flight_plan: Some(plan()),
+        ..Default::default()
+    });
+    cycle(&state, data, at).await;
+
+    for (wheels_up, combined, level) in [
+        (at + chrono::Duration::minutes(8), 1, "ok"),
+        (at - chrono::Duration::minutes(5), 2, "watch"),
+    ] {
+        sqlx::query(
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('DAL9', 'KDCA', $1) \
+             on conflict (callsign) do update set wheels_up = excluded.wheels_up",
+        )
+        .bind(wheels_up)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = get(&state, "ZDC", &cookie).await;
+        assert_eq!(
+            row(&body, "enroute", "050")["bins"][0],
+            json!({ "active": 1, "proposed": 1, "combined": combined, "level": level }),
+            "wheels-up {wheels_up}"
+        );
+    }
 }
 
 /// #723's hand-off: a consolidated sector has no row of its own; its target's row lists it and reads
@@ -405,4 +480,140 @@ async fn reading_demand_needs_flow_sectors_read(pool: PgPool) {
         send(&state, Method::GET, uri, "", None).await,
         StatusCode::UNAUTHORIZED
     );
+}
+
+/// #726 through the route: the engine runs over the whole table, so 3D containment and TRACON
+/// precedence hold. Under the corridor ZDC has `080`, an approach volume, and `090`, an enroute low,
+/// both surface to 10,000 ft. The three flights at FL240 count in the enroute `010` above and in neither
+/// below. A flight at 5,000 ft is inside both `080` and `090`: precedence counts it in the TRACON only.
+#[sqlx::test]
+async fn a_flight_counts_in_the_tracon_only_when_inside_it(pool: PgPool) {
+    let state = state(pool.clone());
+    let mut volumes = state.airspace_sectors.load().volumes.clone();
+    for (volume_id, tier) in [("08001", "approach"), ("09001", "low")] {
+        volumes.push(SectorVolume {
+            top_alt_ft: 10_000,
+            ..corridor("ZDC", volume_id, tier)
+        });
+    }
+    state
+        .airspace_sectors
+        .store(Arc::new(SectorTable { volumes }));
+    let cookie = user(&pool, &[]).await;
+    let first_active = |body: &Value, table: &str, sector: &str| {
+        row(body, table, sector)["bins"][0]["active"].clone()
+    };
+
+    let data = VatsimData {
+        pilots: ["AAL1", "AAL2", "AAL3"].map(airborne).into(),
+        ..Default::default()
+    };
+    cycle(&state, data, Utc::now()).await;
+    let body = get(&state, "ZDC", &cookie).await;
+    assert_eq!(first_active(&body, "enroute", "010"), 3);
+    assert_eq!(first_active(&body, "tracon", "080"), 0);
+    assert_eq!(first_active(&body, "enroute", "090"), 0);
+
+    let low = Pilot {
+        altitude: 5_000,
+        groundspeed: 250,
+        ..airborne("UAL5")
+    };
+    let data = VatsimData {
+        pilots: vec![low],
+        ..Default::default()
+    };
+    cycle(&state, data, Utc::now()).await;
+    let body = get(&state, "ZDC", &cookie).await;
+    assert_eq!(first_active(&body, "tracon", "080"), 1);
+    assert_eq!(first_active(&body, "enroute", "090"), 0, "{body}");
+}
+
+/// A write refreshes the page at once and only at the writer's facility. A ZDC TMU's limit and
+/// consolidation writes reload the caches in the request — the next demand read recolours and merges,
+/// no job tick — and each publishes the topic the page refetches on. The same TMU's writes at the
+/// neighbour ZNY are refused (403) by the real router, publish nothing and leave ZNY's demand as it
+/// was, and ZNY's demand tells the page so (`*_editable` false). A reader scoped to ZDC alone still
+/// reads ZNY's demand: neighbour tables are view-only, not hidden.
+#[sqlx::test]
+async fn writes_refresh_the_demand_and_a_neighbours_are_refused(pool: PgPool) {
+    use crate::realtime::topic;
+
+    let state = state(pool.clone());
+    let tmu = user(
+        &pool,
+        &[
+            ("flow.sector_limits.update", "ZDC"),
+            ("flow.sector_consolidations.update", "ZDC"),
+        ],
+    )
+    .await;
+    let data = VatsimData {
+        pilots: ["AAL1", "AAL2", "AAL3"].map(airborne).into(),
+        ..Default::default()
+    };
+    cycle(&state, data, Utc::now()).await;
+    let mut rx = state.events.subscribe();
+    let mut topics = || {
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event.topic);
+        }
+        seen
+    };
+    let limit = |artcc: &str, sector: &str, limit: i32| {
+        (
+            format!("/api/v1/flow/sector-limits/{artcc}/{sector}"),
+            json!({ "limit": limit }),
+        )
+    };
+    let consolidate = |artcc: &str, source: &str, target: &str| {
+        (
+            format!("/api/v1/flow/sector-consolidations/{artcc}/{source}"),
+            json!({ "target_sector_id": target }),
+        )
+    };
+    let put = |(uri, body): (String, Value)| {
+        let (state, tmu) = (state.clone(), tmu.clone());
+        async move { send(&state, Method::PUT, &uri, &tmu, Some(body)).await }
+    };
+
+    let zny_before = get(&state, "ZNY", &tmu).await;
+    assert_eq!(zny_before["limits_editable"], false);
+    assert_eq!(zny_before["consolidations_editable"], false);
+    assert_eq!(put(limit("ZNY", "010", 2)).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        put(consolidate("ZNY", "030", "010")).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(topics().is_empty(), "a refused write publishes nothing");
+    let zny_after = get(&state, "ZNY", &tmu).await;
+    assert_eq!(zny_after["enroute"], zny_before["enroute"]);
+    assert_eq!(row(&zny_after, "enroute", "010")["limit"], 10);
+    assert_eq!(row(&zny_after, "enroute", "030")["consolidated"], json!([]));
+
+    assert_eq!(
+        row(&get(&state, "ZDC", &tmu).await, "enroute", "010")["bins"][0]["level"],
+        "ok"
+    );
+    assert_eq!(put(limit("ZDC", "010", 2)).await, StatusCode::OK);
+    assert_eq!(topics(), [topic::SECTOR_LIMITS]);
+    let body = get(&state, "ZDC", &tmu).await;
+    assert_eq!(row(&body, "enroute", "010")["limit"], 2);
+    assert_eq!(row(&body, "enroute", "010")["bins"][0]["level"], "over");
+
+    assert_eq!(put(consolidate("ZDC", "020", "010")).await, StatusCode::OK);
+    assert_eq!(topics(), [topic::SECTOR_CONSOLIDATIONS]);
+    let body = get(&state, "ZDC", &tmu).await;
+    let rows = body["enroute"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "020 is folded into 010: {body}");
+    assert_eq!(rows[0]["consolidated"], json!(["020"]));
+    assert_eq!(rows[0]["limit"], 2);
+
+    let id = seed_user(&pool).await;
+    grant(&pool, &id, READ, Some("ZDC")).await;
+    let zdc_reader = session_cookie(&pool, &id).await;
+    let zny = get(&state, "ZNY", &zdc_reader).await;
+    assert_eq!(zny["status"], "ready");
+    assert_eq!(zny["enroute"]["rows"].as_array().unwrap().len(), 2);
 }
