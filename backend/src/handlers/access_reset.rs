@@ -464,6 +464,38 @@ mod tests {
         (all, detached, audits, service_roles)
     }
 
+    /// The member's latest `USER_ACCESS` audit snapshots, `(before, after)`.
+    async fn snapshot(pool: &PgPool, user: &str) -> (serde_json::Value, serde_json::Value) {
+        let (before, after): (String, String) = sqlx::query_as(
+            "select before_state::text, after_state::text from access.audit_logs \
+             where resource_type = 'USER_ACCESS' and resource_id = $1 \
+             order by created_at desc limit 1",
+        )
+        .bind(user)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (
+            serde_json::from_str(&before).unwrap(),
+            serde_json::from_str(&after).unwrap(),
+        )
+    }
+
+    /// The group names a snapshot lists at one scope (`None` = national); empty when the scope is
+    /// absent.
+    fn scope_roles(snapshot: &serde_json::Value, artcc: Option<&str>) -> Vec<String> {
+        let mut roles: Vec<String> = snapshot["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["artcc_id"].as_str() == artcc)
+            .flat_map(|s| s["role_names"].as_array().unwrap().iter())
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect();
+        roles.sort();
+        roles
+    }
+
     fn admin_user(w: &World) -> CurrentUser {
         CurrentUser {
             id: w.admin.clone(),
@@ -505,8 +537,18 @@ mod tests {
         let w = world(pool).await;
         let (_, _, _, service_roles_before) = everything(&w.pool).await;
 
+        let mut nudges = w.state.events.subscribe();
         let body = reset(&w).await.ok().unwrap();
 
+        let nudge = nudges
+            .try_recv()
+            .expect("the reset tells signed-in browsers");
+        assert_eq!(nudge.topic, crate::realtime::topic::ACCESS_GRANTED);
+        assert!(reset(&w).await.ok().unwrap().users.is_empty());
+        assert!(
+            nudges.try_recv().is_err(),
+            "a reset that changes nothing tells no one"
+        );
         assert_eq!(rows(&w.pool, &w.member).await, member_after());
         assert!(!is_detached(&w.pool, &w.member).await);
         assert_eq!(
@@ -559,6 +601,20 @@ mod tests {
         let (by, reason, snapshots) = &member[0];
         assert_eq!(by, &actor);
         assert!(snapshots);
+        // The before-state is the undo trail: it must hold what the reset took away, and the
+        // after-state must not.
+        let (before, after) = snapshot(&w.pool, &w.member).await;
+        assert_eq!(
+            scope_roles(&before, Some("ZDC")),
+            ["ACE", "AEC", "CONTROLLER", "EC"]
+        );
+        assert_eq!(
+            before["scopes"][1]["permissions"],
+            json!({"access": {"users": ["read"]}})
+        );
+        assert_eq!(scope_roles(&after, Some("ZDC")), ["CONTROLLER", "EC"]);
+        assert_eq!(scope_roles(&after, Some("ZJX")), ["EC"]);
+        assert_eq!(scope_roles(&before, Some("ZJX")), Vec::<String>::new());
         assert!(
             reason.starts_with("Reset to VATUSA: back to VATUSA ("),
             "{reason}"
@@ -814,5 +870,98 @@ mod tests {
         )
         .await;
         assert_eq!(status, http::StatusCode::OK);
+    }
+
+    /// Only members a reset can change are examined, and every kind of drift is found: an attached
+    /// member with only a hand-made group, only a hand-made permission, only a stale `vatusa` grant, or
+    /// only a VATUSA-justified grant they lack, and a member with no CID. A member already in line is
+    /// left alone.
+    #[sqlx::test]
+    async fn every_kind_of_drift_is_found(pool: PgPool) {
+        let w = world(pool).await;
+        let only_group = user(&w.pool, 1_795_020, "Only Group").await;
+        group(&w.pool, &only_group, "ACE", None, "manual").await;
+        let only_permission = user(&w.pool, 1_795_021, "Only Permission").await;
+        grant(&w.pool, &only_permission, "access.users.read", None).await;
+        let only_stale = user(&w.pool, 1_795_022, "Only Stale").await;
+        group(&w.pool, &only_stale, "AEC", Some("ZDC"), "vatusa").await;
+        let only_missing = user(&w.pool, 1_795_023, "Only Missing").await;
+        vatusa_role(&w.pool, 1_795_023, "ZDC", "EVENT_COORDINATOR").await;
+        let no_cid: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('No CID', 'No CID') \
+             returning id",
+        )
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        grant(&w.pool, &no_cid, "access.users.read", None).await;
+
+        let body = reset(&w).await.ok().unwrap();
+
+        for (who, left) in [
+            (&only_group, vec![]),
+            (&only_permission, vec![]),
+            (&only_stale, vec![]),
+            (
+                &only_missing,
+                row("group", "EC", Some("ZDC"), "vatusa", true),
+            ),
+            (&no_cid, vec![]),
+        ] {
+            assert_eq!(rows(&w.pool, who).await, left, "{who}");
+            assert_eq!(audits(&w.pool, who).await.len(), 1, "{who}");
+        }
+        let names: Vec<&str> = body.users.iter().map(|u| u.display_name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Admin",
+                "Member",
+                "Only Group",
+                "Only Permission",
+                "Only Stale",
+                "Only Missing",
+                "No CID"
+            ]
+        );
+        assert_eq!(body.users_checked, 8, "every member is counted");
+        assert_eq!(audits(&w.pool, &w.steady).await, []);
+    }
+
+    /// AC5 and AC7 surface to the admin through this body: the cause and how many were reset.
+    #[tokio::test]
+    async fn a_failure_reaches_the_admin_with_its_cause_and_count() {
+        let response = ResetError::Failed(
+            http::StatusCode::BAD_GATEWAY,
+            AccessResetFailure {
+                error: "vatusa_pull_failed".into(),
+                message: "VATUSA division pull failed: 502".into(),
+                users_reset: 3,
+            },
+        )
+        .into_response();
+        assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({"error": "vatusa_pull_failed", "message": "VATUSA division pull failed: 502", "users_reset": 3})
+        );
+    }
+
+    /// The route's own pull reads the configured key. A source scan, because a test cannot set
+    /// `VATUSA_API_KEY` without racing every other test, and a configured key would reach VATUSA.
+    #[test]
+    fn the_route_pulls_with_the_configured_key() {
+        let source = include_str!("access_reset.rs");
+        let handler = &source[source.find("pub async fn apply_vatusa_reset").unwrap()..];
+        let handler = &handler[..handler.find("\n}\n").unwrap()];
+        assert!(
+            handler.contains("division_pull(pool, &state.events, crate::config::vatusa_api_key())"),
+            "apply_vatusa_reset must pull with the configured VATUSA key"
+        );
+        assert!(handler.contains("reset_to_vatusa("));
     }
 }

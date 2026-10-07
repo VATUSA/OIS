@@ -1,4 +1,5 @@
 import {useState} from "react";
+import {useQueryClient} from "@tanstack/react-query";
 import {Button, Input, Modal, QueryState, StatusPill} from "@ois/ui";
 import {RotateCcw} from "lucide-react";
 
@@ -21,8 +22,11 @@ export function VatusaResetAction() {
   const [confirmWord, setConfirmWord] = useState("");
   const preview = useVatusaResetPreview(open);
   const reset = useVatusaReset();
+  const queryClient = useQueryClient();
 
   function close() {
+    // The next opening runs a fresh dry run.
+    queryClient.removeQueries({queryKey: ["vatusa-reset-preview"]});
     setOpen(false);
     setReason("");
     setConfirmWord("");

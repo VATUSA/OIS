@@ -205,6 +205,9 @@ export function useVatusaResetPreview(enabled: boolean) {
   return useQuery({
     enabled,
     retry: false,
+    // A dry run walks every member who could change: run it once per opening, not on every focus.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
     queryKey: ["vatusa-reset-preview"],
     queryFn: async () => {
       const { data, error } = await ois.GET("/api/v1/admin/access/vatusa-reset");

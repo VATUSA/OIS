@@ -100,7 +100,10 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
   it("is offered to the server admin only", async () => {
     const admin = await mount(true);
     await vi.waitFor(() => expect(resetButton(admin)).toBeDefined());
+    // A fresh mount, so the wait below is for this mount's own `/me`.
+    get.mockClear();
     const other = await mount(false);
+    expect(other.querySelector('input[aria-label="Search users"]')).not.toBeNull();
     expect(resetButton(other)).toBeUndefined();
     expect(get).not.toHaveBeenCalledWith("/api/v1/admin/access/vatusa-reset");
   });
@@ -137,5 +140,25 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
 
     await act(async () => apply().click());
     expect(post).toHaveBeenCalledWith("/api/v1/admin/access/vatusa-reset", {body: {reason: "drift cleanup"}});
+  });
+
+  it("cannot apply without a dry run to show", async () => {
+    const host = await mount(true);
+    get.mockImplementation(async (path: string) =>
+      path === "/api/v1/admin/access/vatusa-reset"
+        ? {data: undefined, error: {status: 500}}
+        : {data: {server_admin: true}, error: undefined},
+    );
+    const open = await vi.waitFor(() => {
+      const b = resetButton(host);
+      if (!b) throw new Error("no reset button yet");
+      return b;
+    });
+    await act(async () => open.click());
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Couldn't load the dry run."));
+    type("Reason", "drift cleanup");
+    type("Confirmation", "RESET");
+    const apply = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
+    expect(apply.disabled).toBe(true);
   });
 });

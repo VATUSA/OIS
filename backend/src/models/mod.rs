@@ -151,7 +151,8 @@ pub struct AccessResetBody {
     /// The VATUSA division pull the reset ran first. `None` for a dry run, which reads the VATUSA
     /// data the last pull stored.
     pub pull_summary: Option<String>,
-    /// How many members were checked.
+    /// How many members there are. Only those a reset can change are examined: detached, holding a
+    /// hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
     pub users_checked: i64,
     /// How many members were reset (or, in a dry run, would be).
     pub users_reset: i64,

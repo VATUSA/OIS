@@ -595,38 +595,86 @@ pub enum ResetMode<'a> {
 /// The outcome of a reset over every member. `failure` is set when it stopped part-way: the members
 /// in `changed` are reset (or, in a dry run, would be) and the rest are untouched.
 pub struct ResetRun {
+    /// Every member, examined or not.
     pub users_checked: usize,
     pub changed: Vec<MemberReset>,
     pub failure: Option<ApiError>,
 }
 
-/// Reset every member (#795), one transaction each, in CID order. A member's reset, its audit entry
-/// and its re-attach commit together, so a failure part-way leaves no member half-reset; it stops the
-/// run and is returned beside the members already reset. A member with no change gets no audit entry.
+/// The members a reset can change, in CID order: detached, holding a `manual` row other than a
+/// [`RESET_KEEPS_GROUPS`] group, or holding `vatusa` group grants that differ from what their stored
+/// VATUSA roles justify. Everyone else already holds exactly their `system` grants plus VATUSA's, so
+/// [`reset_member`] would change nothing for them. The roster is about 10,000 controllers and most are
+/// in the last group only after a pull fails, so this keeps a reset to the members it touches.
+///
+/// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once.
+async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar(
+        r#"
+        with justified(cid, role_name, artcc_id) as (
+            select vr.cid, m.role_name, case when vr.facility = 'ZHQ' then null else f.id end
+            from identity.vatusa_roles vr
+            join access.vatusa_role_mappings m
+              on m.vatusa_role = vr.role and (m.facility is null or m.facility = vr.facility)
+            left join org.facilities f on f.id = vr.facility
+            where vr.facility = 'ZHQ' or f.id is not null
+            union
+            select u.cid, $2, f.id
+            from identity.users u join org.facilities f on f.id = u.home_facility
+            union
+            select v.cid, $2, f.id
+            from identity.vatusa_visits v join org.facilities f on f.id = v.facility
+        )
+        select u.id from identity.users u
+        where u.vatusa_roles_detached_at is not null
+           or exists (select 1 from access.user_roles r
+                      where r.user_id = u.id and r.source = 'manual' and r.role_name <> all($1))
+           or exists (select 1 from access.user_permissions p
+                      where p.user_id = u.id and p.source = 'manual')
+           or exists (select j.role_name, j.artcc_id from justified j where j.cid = u.cid
+                      except
+                      select r.role_name, r.artcc_id from access.user_roles r
+                      where r.user_id = u.id and r.source = 'vatusa')
+           or exists (select r.role_name, r.artcc_id from access.user_roles r
+                      where r.user_id = u.id and r.source = 'vatusa'
+                      except
+                      select j.role_name, j.artcc_id from justified j where j.cid = u.cid)
+        order by u.cid nulls last, u.id
+        "#,
+    )
+    .bind(RESET_KEEPS_GROUPS)
+    .bind(ROSTER_GROUP)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Reset every member (#795) a reset can change ([`reset_candidates`]), one transaction each, in CID
+/// order. A member's reset, its audit entry and its re-attach commit together, so a failure part-way
+/// leaves no member half-reset; it stops the run and is returned beside the members already reset. A
+/// member with no change gets no audit entry.
 pub async fn reset_all(pool: &PgPool, mode: &ResetMode<'_>) -> ResetRun {
     let mut run = ResetRun {
         users_checked: 0,
         changed: Vec::new(),
         failure: None,
     };
-    let users: Vec<String> =
-        match sqlx::query_scalar("select id from identity.users order by cid nulls last, id")
-            .fetch_all(pool)
-            .await
-        {
-            Ok(users) => users,
-            Err(_) => {
-                run.failure = Some(ApiError::Internal);
-                return run;
-            }
-        };
+    let total: Result<i64, _> = sqlx::query_scalar("select count(*) from identity.users")
+        .fetch_one(pool)
+        .await;
+    let (total, users) = match (total, reset_candidates(pool).await) {
+        (Ok(total), Ok(users)) => (total, users),
+        (Err(_), _) | (_, Err(_)) => {
+            run.failure = Some(ApiError::Internal);
+            return run;
+        }
+    };
+    run.users_checked = total as usize;
     for user_id in &users {
         match reset_one(pool, user_id, mode).await {
-            Ok(change) => {
-                run.users_checked += 1;
-                run.changed.extend(change);
-            }
+            Ok(change) => run.changed.extend(change),
             Err(e) => {
+                tracing::error!(user_id, error = %e, "access reset to VATUSA failed for a member");
                 run.failure = Some(e);
                 break;
             }

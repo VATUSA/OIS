@@ -50,10 +50,12 @@ export interface paths {
         get: operations["preview_vatusa_reset"];
         put?: never;
         /**
-         * Reset every member's access to VATUSA (#795): pull the division fresh, then, one transaction per
+         * Reset every member's access to VATUSA (#795): pull the division fresh (refused with 503 when
+         *     VATUSA is not configured), then, one transaction per
          *     member, put them back on role sync, delete every hand-made grant except the baseline `USER` and
          *     `SERVER_ADMIN` groups, and reconcile their VATUSA grants. `system` grants are left alone. Each
-         *     changed member gets one `USER_ACCESS` audit entry with the reason. Server admin only.
+         *     changed member gets one `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the
+         *     result can differ from the dry run if VATUSA changed since the last pull. Server admin only.
          */
         post: operations["apply_vatusa_reset"];
         delete?: never;
@@ -3704,7 +3706,8 @@ export interface components {
             users: components["schemas"]["AccessResetUser"][];
             /**
              * Format: int64
-             * @description How many members were checked.
+             * @description How many members there are. Only those a reset can change are examined: detached, holding a
+             *     hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
              */
             users_checked: number;
             /**
