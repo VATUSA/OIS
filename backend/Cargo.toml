@@ -67,6 +67,8 @@ base64 = "0.22"
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
 governor = "0.10.4"
+# Streams a large query row by row instead of `fetch_all` (#776). Already in the tree via axum/sqlx.
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # Only for driving the real `Router` through `ServiceExt::oneshot` in the HTTP-metrics test —

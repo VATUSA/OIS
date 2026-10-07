@@ -1837,9 +1837,9 @@ mod tests {
         taxi_sec: i32,
     ) -> taxi_estimate::TaxiSample {
         taxi_estimate::TaxiSample {
-            gate_id: Some(gate.to_string()),
-            aircraft: Some(aircraft.to_string()),
-            runway: Some(runway.to_string()),
+            gate_id: Some(gate.into()),
+            aircraft: Some(aircraft.into()),
+            runway: Some(runway.into()),
             pushback_sec: Some(50),
             startup_sec: Some(40),
             taxi_sec,

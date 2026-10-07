@@ -3,15 +3,21 @@
 //! — `repos::stats::taxi_samples_for_airport` fetches the sample set this operates over. No
 //! trajectory/ETA wiring here; that's sub-issue E.
 
+use std::sync::Arc;
+
 use super::predict::GROUND_TAXI_SEC;
 
 /// One persisted observation. `repos::stats::taxi_samples_for_airport` queries straight into this
-/// (the `FromRow` derive is harmless for unit-testing this module — nothing here needs a live DB).
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// (the `FromRow` impl is harmless for unit-testing this module — nothing here needs a live DB).
+///
+/// The labels are `Arc<str>` so the feed's all-airport cache (`AppState::taxi_estimate_samples`)
+/// can share one allocation per distinct gate, type and runway across hundreds of thousands of
+/// samples instead of three heap strings per sample (#776, `repos::stats::load_all_taxi_samples`).
+#[derive(Debug, Clone)]
 pub struct TaxiSample {
-    pub gate_id: Option<String>,
-    pub aircraft: Option<String>,
-    pub runway: Option<String>,
+    pub gate_id: Option<Arc<str>>,
+    pub aircraft: Option<Arc<str>>,
+    pub runway: Option<Arc<str>>,
     /// `Some(0)` is a departure that genuinely did not push back — a no-tug gate-out, powerback or
     /// GA departure — and counts toward the median. `None` means the observer couldn't measure the
     /// phase (a push reclassified as taxi, one that collapsed inside a single poll, or a bound that
@@ -21,6 +27,24 @@ pub struct TaxiSample {
     /// `Some(0)`/`None` for the same reasons as [`Self::pushback_sec`].
     pub startup_sec: Option<i32>,
     pub taxi_sec: i32,
+}
+
+/// By hand because sqlx decodes no `Arc<str>`: each label is read as `&str` and copied once.
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for TaxiSample {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let label = |column: &str| -> Result<Option<Arc<str>>, sqlx::Error> {
+            Ok(row.try_get::<Option<&str>, _>(column)?.map(Arc::from))
+        };
+        Ok(Self {
+            gate_id: label("gate_id")?,
+            aircraft: label("aircraft")?,
+            runway: label("runway")?,
+            pushback_sec: row.try_get("pushback_sec")?,
+            startup_sec: row.try_get("startup_sec")?,
+            taxi_sec: row.try_get("taxi_sec")?,
+        })
+    }
 }
 
 /// Which ladder rung produced an estimate — least to most generic.
@@ -245,9 +269,9 @@ mod tests {
         taxi: i32,
     ) -> TaxiSample {
         TaxiSample {
-            gate_id: Some(gate.to_string()),
-            aircraft: Some(aircraft.to_string()),
-            runway: Some(runway.to_string()),
+            gate_id: Some(gate.into()),
+            aircraft: Some(aircraft.into()),
+            runway: Some(runway.into()),
             pushback_sec: pushback,
             startup_sec: pushback.map(|_| 90),
             taxi_sec: taxi,

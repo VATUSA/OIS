@@ -449,9 +449,9 @@ mod tests {
 
         let samples: Vec<TaxiSample> = (0..6)
             .map(|i| TaxiSample {
-                gate_id: Some(gate.clone()),
-                aircraft: Some("B738".to_string()),
-                runway: Some("27L".to_string()),
+                gate_id: Some(gate.as_str().into()),
+                aircraft: Some("B738".into()),
+                runway: Some("27L".into()),
                 pushback_sec: Some(60),
                 startup_sec: Some(90),
                 taxi_sec: 200 + i,

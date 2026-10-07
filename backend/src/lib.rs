@@ -1,4 +1,6 @@
 pub mod advisory;
+#[cfg(test)]
+mod alloc_probe;
 pub mod audit;
 pub mod auth;
 pub mod config;
