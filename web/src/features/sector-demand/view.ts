@@ -19,8 +19,12 @@ export const RANGE_MAX_H = 6;
 export const SPAN_MIN_H = BIN_H;
 export const SPAN_MAX_H = 6;
 
-/** The 2–6 h range defaults to 4 h; the filter's span to 2 h, switched off so nothing starts hidden. */
-export const DEFAULT_VIEW: DemandView = { rangeH: 4, alertOnly: false, alertSpanH: 2 };
+/**
+ * The 2–6 h range defaults to 4 h, and the filter starts on at a 2 h span (owner decision, #725): a
+ * table opens on the sectors that need attention soon. Switching it off is remembered like any other
+ * control, per browser per facility per table.
+ */
+export const DEFAULT_VIEW: DemandView = { rangeH: 4, alertOnly: true, alertSpanH: 2 };
 
 /** The filter's span choices, one per quarter-hour up to six hours. */
 export const SPAN_CHOICES_H: readonly number[] = Array.from(

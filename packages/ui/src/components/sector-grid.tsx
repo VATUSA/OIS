@@ -144,7 +144,7 @@ export function SectorGrid({
 }
 
 /** The editable limit: commits a positive whole number on Enter or blur, reverts on Escape. */
-export function SectorLimitInput({
+function SectorLimitInput({
   sectorId,
   limit,
   onCommit,

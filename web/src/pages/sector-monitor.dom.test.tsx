@@ -20,6 +20,7 @@ import {
   type SectorDemandRow,
   sectorDemandKey,
 } from "@/features/sector-demand/sector-demand";
+import {DEFAULT_VIEW, saveView} from "@/features/sector-demand/view";
 import {SectorMonitorPage} from "./sector-monitor";
 
 declare global {
@@ -96,9 +97,20 @@ function demand(artcc: string, patch: Partial<SectorDemand> = {}): SectorDemand 
   };
 }
 
-/** Mounts the page on a cache seeded with `me`, the facilities and each demand body. */
-async function mount(me: Me | null, bodies: SectorDemand[] = []) {
+/**
+ * Mounts the page on a cache seeded with `me`, the facilities and each demand body.
+ *
+ * The alert filter starts on (owner decision, #725), which would hide most of these fixtures' quiet
+ * rows. A test about something else draws every row by remembering the filter as off for each body's
+ * facility, the way a viewer who switched it off would; `{defaults: true}` mounts on a clean browser.
+ */
+async function mount(me: Me | null, bodies: SectorDemand[] = [], {defaults = false}: {defaults?: boolean} = {}) {
   get.mockReturnValue(new Promise(() => {}));
+  if (!defaults) {
+    for (const b of bodies) {
+      for (const kind of ["enroute", "tracon"] as const) saveView(b.artcc, kind, {...DEFAULT_VIEW, alertOnly: false});
+    }
+  }
   const qc = new QueryClient({
     defaultOptions: {
       queries: {
@@ -233,21 +245,49 @@ describe("the Sector Monitor page (#725)", () => {
   });
 
   it("remembers each table's controls per browser per facility", async () => {
-    const first = await mount(READER, [demand("ZDC"), demand("ZNY")]);
+    const first = await mount(READER, [demand("ZDC"), demand("ZNY")], {defaults: true});
     await setValue(control(first.host, "ZDC Enroute range"), "3");
     await setValue(control(first.host, "ZDC Enroute alert span"), "1.5");
     await click(control(first.host, "ZDC Enroute: only sectors alerting"));
     await first.unmount();
 
-    const again = await mount(READER, [demand("ZDC"), demand("ZNY")]);
+    const again = await mount(READER, [demand("ZDC"), demand("ZNY")], {defaults: true});
     expect(control<HTMLInputElement>(again.host, "ZDC Enroute range").value).toBe("3");
     expect(control<HTMLSelectElement>(again.host, "ZDC Enroute alert span").value).toBe("1.5");
-    expect(control(again.host, "ZDC Enroute: only sectors alerting").getAttribute("aria-checked")).toBe("true");
-    // Another table, and another facility, keep the defaults.
+    // Switched off, and remembered off: the default does not come back on a reload.
+    expect(control(again.host, "ZDC Enroute: only sectors alerting").getAttribute("aria-checked")).toBe("false");
+    expect(sectorIds(section(again.host, "ZDC Enroute sectors"))).toEqual(["ZDC05", "ZDC06"]);
+    // Another table, and another facility, keep the defaults: filter on at 2 h.
     expect(control<HTMLInputElement>(again.host, "ZDC TRACON range").value).toBe("4");
+    expect(control(again.host, "ZDC TRACON: only sectors alerting").getAttribute("aria-checked")).toBe("true");
     await setValue(control(again.host, "Facility"), "ZNY");
     expect(control<HTMLInputElement>(again.host, "ZNY Enroute range").value).toBe("4");
-    expect(control(again.host, "ZNY Enroute: only sectors alerting").getAttribute("aria-checked")).toBe("false");
+    expect(control(again.host, "ZNY Enroute: only sectors alerting").getAttribute("aria-checked")).toBe("true");
+    expect(control<HTMLSelectElement>(again.host, "ZNY Enroute alert span").value).toBe("2");
+  });
+
+  it("opens filtered to the sectors alerting in the next 2 hours", async () => {
+    // ZDC06 alerts at 1645Z (2h45 out), ZDC07 at 1545Z (1h45, the span's last bin), ZDC05 never.
+    const enrouteRows = [row("ZDC05"), row("ZDC06", {11: "watch"}), row("ZDC07", {7: "over"})];
+    const {host} = await mount(READER, [demand("ZDC", {enroute: {has_sector_data: true, rows: enrouteRows}})], {defaults: true});
+    for (const table of ["ZDC Enroute", "ZDC TRACON"]) {
+      expect(control(host, `${table}: only sectors alerting`).getAttribute("aria-checked"), table).toBe("true");
+      expect(control<HTMLSelectElement>(host, `${table} alert span`).value, table).toBe("2");
+    }
+    expect(sectorIds(section(host, "ZDC Enroute sectors"))).toEqual(["ZDC07"]);
+    expect(sectorIds(section(host, "ZDC TRACON sectors"))).toEqual(["ZDC80"]);
+    // Nothing is hidden for good: switching it off draws every row, and the range is untouched.
+    await click(control(host, "ZDC Enroute: only sectors alerting"));
+    expect(sectorIds(section(host, "ZDC Enroute sectors"))).toEqual(["ZDC05", "ZDC06", "ZDC07"]);
+    expect(levelCells(section(host, "ZDC Enroute sectors"))).toHaveLength(3 * 16);
+  });
+
+  it("says nothing is alerting, rather than drawing an empty grid, when the default hides every row", async () => {
+    const {host} = await mount(READER, [demand("ZDC")], {defaults: true});
+    // ZDC05 is quiet and ZDC06 alerts three hours out: neither is inside the default 2 h.
+    const enroute = section(host, "ZDC Enroute sectors")!;
+    expect(enroute.querySelector("table")).toBeNull();
+    expect(enroute.textContent).toContain("No ZDC sectors alerting in the next 2.00 h");
   });
 
   it("still works when browser storage throws", async () => {
@@ -258,9 +298,14 @@ describe("the Sector Monitor page (#725)", () => {
       throw new Error("blocked");
     });
     const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZNY")]);
+    // Nothing could be read, so the defaults apply: a 4 h range, filtered to the next 2 h.
     expect(control<HTMLInputElement>(host, "ZDC Enroute range").value).toBe("4");
-    await setValue(control(host, "ZDC Enroute range"), "2");
-    expect(levelCells(section(host, "ZDC Enroute sectors"))).toHaveLength(2 * 8);
+    expect(control(host, "ZDC Enroute: only sectors alerting").getAttribute("aria-checked")).toBe("true");
+    expect(sectorIds(section(host, "ZDC TRACON sectors"))).toEqual(["ZDC80"]);
+    await setValue(control(host, "ZDC TRACON range"), "2");
+    expect(levelCells(section(host, "ZDC TRACON sectors"))).toHaveLength(8);
+    await click(control(host, "ZDC Enroute: only sectors alerting"));
+    expect(sectorIds(section(host, "ZDC Enroute sectors"))).toEqual(["ZDC05", "ZDC06"]);
     await click(host.querySelector<HTMLElement>("button[aria-expanded]")!);
     expect(section(host, "ZNY Enroute sectors")).not.toBeNull();
   });
@@ -308,6 +353,63 @@ describe("the Sector Monitor page (#725)", () => {
     expect(host.querySelector<HTMLInputElement>('input[aria-label="Limit for ZDC05"]')!.value).toBe("10");
     expect(document.body.textContent).toContain("Couldn't set ZDC05's limit");
     expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(false);
+  });
+
+  // #722's limit editor was a separate table, never placed on a page; its cases now run against the
+  // grid's inline input, which is where limits are edited (#725 owner decision 5). Each entry fails
+  // "positive whole number" or equals the stored value, and none may reach the API or clear the override.
+  describe("an inline limit entry that is not a change (#722)", () => {
+    const overridden = () =>
+      demand("ZDC", {limits_editable: true, enroute: {has_sector_data: true, rows: [row("ZDC05", {}, {limit: 14, limit_overridden: true})]}});
+    const limitInput = (host: HTMLElement) => host.querySelector<HTMLInputElement>('input[aria-label="Limit for ZDC05"]')!;
+    const key = (input: HTMLInputElement, k: string) =>
+      act(async () => input.dispatchEvent(new KeyboardEvent("keydown", {key: k, bubbles: true})));
+    const settle = () => act(async () => new Promise((r) => setTimeout(r, 0)));
+
+    it.each([
+      ["zero", "0"],
+      ["negative", "-3"],
+      ["non-numeric", "abc"],
+      ["empty", ""],
+      ["fractional", "1.5"],
+      ["unchanged", "14"],
+    ])("cancels a %s entry on Enter and on blur: no PUT, no refetch, the override stands", async (_case, entry) => {
+      const {host, qc} = await mount(READER, [overridden()]);
+      for (const commit of [(i: HTMLInputElement) => key(i, "Enter"), (i: HTMLInputElement) => act(async () => i.blur())]) {
+        const input = limitInput(host);
+        await act(async () => input.focus());
+        await setValue(input, entry);
+        await commit(input);
+        await settle();
+        expect(put).not.toHaveBeenCalled();
+        expect(limitInput(host).value).toBe("14");
+      }
+      expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(false);
+    });
+
+    it("Escape discards a valid draft without a write", async () => {
+      const {host} = await mount(READER, [overridden()]);
+      const input = limitInput(host);
+      await act(async () => input.focus());
+      await setValue(input, "20");
+      await key(input, "Escape");
+      await settle();
+      expect(put).not.toHaveBeenCalled();
+      expect(limitInput(host).value).toBe("14");
+    });
+
+    it("setting the default over an override is a write (the server's reset), not a cancel", async () => {
+      put.mockResolvedValue({data: {sector_id: "ZDC05", tier: "high", limit: 10, overridden: false}});
+      const {host, qc} = await mount(READER, [overridden()]);
+      const input = limitInput(host);
+      await act(async () => input.focus());
+      await setValue(input, "10");
+      await act(async () => input.blur());
+      await settle();
+      expect(put).toHaveBeenCalledTimes(1);
+      expect(put.mock.calls[0][1]).toMatchObject({params: {path: {artcc: "ZDC", sector_id: "ZDC05"}}, body: {limit: 10}});
+      expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(true);
+    });
   });
 
   it("collapses neighbours by default, fetches one only when opened, and never offers its limits for editing", async () => {
@@ -395,8 +497,8 @@ describe("the Sector Monitor page (#725)", () => {
   });
 
   it("replaces the whole set on a facility switch", async () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {});
     const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZOB", {neighbours: ["ZID"]}), demand("ZNY")]);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {});
     // Change ZDC's controls and open its neighbour first (storage swallowed, so only live state carries).
     await setValue(control(host, "ZDC Enroute range"), "2");
     await click(host.querySelector<HTMLElement>("button[aria-expanded]")!);

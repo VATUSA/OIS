@@ -185,9 +185,15 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
 `web/src/features/sector-demand/sector-demand.ts`), and `web/src/lib/realtime.ts` refetches it on:
 
 - `feed.tick` (a new cycle; at most once a minute);
-- `flow.sector_limits` (cells recolour);
-- `flow.sector_consolidations` (rows merge or split);
-- `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did).
+- `flow.sector_limits` (cells recolour) and `flow.sector_consolidations` (rows merge or split), at once:
+  each is a deliberate, rare edit someone is waiting to see;
+- `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did),
+  **coalesced into the next `feed.tick`** (`COALESCED_KEYS`). These can arrive several times a minute
+  while a program runs, and each wheels-up change is a fresh projection per open ARTCC on the server.
+  Held until the tick, a burst becomes one refetch that every client makes against the same new
+  snapshot, so the server projects once per ARTCC per publish however many nudges came; the change
+  shows within one publish (~15 s). With no tick, `COALESCE_MS` (20 s) refetches it anyway. A
+  reconnect's catch-up drops anything held.
 
 ## Operations page (#725): the page
 
@@ -201,9 +207,11 @@ through `CONTROLLER` (migration 0129); a grant at their facility reads every ART
   one's tables. The set is keyed by facility, so a switch replaces every table, control and neighbour.
 - **Top to bottom:** the facility's enroute table, its TRACON table, then each neighbour, collapsed and
   fetched only when opened. Neighbour grids get no limit editor whatever `limits_editable` says; the
-  facility's own grid edits limits only when it is `true` (the write's 403 is the real gate).
+  facility's own grid edits limits only when it is `true` (the write's 403 is the real gate). Limits are
+  edited only here, inline in the grid; #722's standalone limit table was never placed and is gone, and
+  the web no longer calls `GET /flow/sector-limits/{artcc}`. Consolidations have no editor yet (#792).
 - **Controls, per table:** a 2–6 h range slider (default 4 h) and "only alerting in the next N h" (a
-  quarter-hour span up to 6 h, default 2 h, off by default). The span is judged over all six computed
+  quarter-hour span up to 6 h, **on by default at 2 h**; switching it off is remembered like the rest). The span is judged over all six computed
   hours, independent of the range, and both only slice what the server sent, never refetching.
 - **Remembered per browser:** each table's controls under `ois.sectorDemand.view.<ARTCC>.<table>`, and a
   neighbour's open state under `ois.sectorDemand.open.<facility>.<neighbour>`, in `localStorage`. Every

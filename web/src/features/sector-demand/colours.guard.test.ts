@@ -44,7 +44,7 @@ describe("sector demand colours (#725)", () => {
         "features/sector-demand/SectorDemand.tsx",
         "features/sector-demand/view.ts",
         "features/sector-demand/sector-demand.ts",
-        "features/sector-limits/SectorLimitEditor.tsx",
+        "features/sector-limits/sector-limits.ts",
         "pages/sector-monitor.tsx",
       ]),
     );

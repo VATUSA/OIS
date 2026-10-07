@@ -39,10 +39,11 @@ describe("isAlerting", () => {
 
 describe("visibleGrid", () => {
   it("cuts every row and the time axis to the drawn range", () => {
-    const g = visibleGrid([row("05")], BINS, { ...DEFAULT_VIEW, rangeH: 2 });
+    const all = { ...DEFAULT_VIEW, alertOnly: false };
+    const g = visibleGrid([row("05")], BINS, { ...all, rangeH: 2 });
     expect(g.binStarts).toEqual(BINS.slice(0, 8));
     expect(g.rows[0].cells).toHaveLength(8);
-    expect(visibleGrid([row("05")], BINS, { ...DEFAULT_VIEW, rangeH: 6 }).rows[0].cells).toHaveLength(24);
+    expect(visibleGrid([row("05")], BINS, { ...all, rangeH: 6 }).rows[0].cells).toHaveLength(24);
   });
 
   it("filters on its own span, independent of the range", () => {
@@ -60,7 +61,13 @@ describe("visibleGrid", () => {
   });
 
   it("hides nothing while the filter is off", () => {
-    expect(visibleGrid([row("A"), row("B", 3)], BINS, DEFAULT_VIEW).rows).toHaveLength(2);
+    expect(visibleGrid([row("A"), row("B", 3)], BINS, { ...DEFAULT_VIEW, alertOnly: false }).rows).toHaveLength(2);
+  });
+
+  it("shows only what alerts in the next 2 h by default", () => {
+    // B alerts at 0h45, C at 1h45 (the span's last bin), D at 2h00 (the first bin past it).
+    const rows = [row("A"), row("B", 3), row("C", 7), row("D", 8)];
+    expect(visibleGrid(rows, BINS, DEFAULT_VIEW).rows.map((r) => r.id)).toEqual(["B", "C"]);
   });
 
   it("carries a combined row's sources and the server's levels through untouched", () => {
@@ -84,8 +91,8 @@ describe("controls", () => {
     expect(SPAN_CHOICES_H).toHaveLength(24);
   });
 
-  it("defaults to a 4-hour range and a 2-hour span with nothing hidden", () => {
-    expect(DEFAULT_VIEW).toEqual({ rangeH: 4, alertOnly: false, alertSpanH: 2 });
+  it("defaults to a 4-hour range, filtered to sectors alerting in the next 2 hours", () => {
+    expect(DEFAULT_VIEW).toEqual({ rangeH: 4, alertOnly: true, alertSpanH: 2 });
     // No browser storage here at all: the defaults, not a throw.
     expect(loadView("ZDC", "enroute")).toEqual(DEFAULT_VIEW);
   });
