@@ -6,7 +6,7 @@ write-ups, issue comments, design notes in `docs/`, and hand-off reports. Word c
 
 Source: ported from the house engineering-prose rule. Comment and commit-body content rules live
 in `AGENTS.md` § Conventions & gotchas; commit format and the no-attribution rule live in
-`CLAUDE.md` § Standing working agreements. This file does not restate either.
+`AGENTS.md` § Git workflow. This file does not restate either.
 
 Write like a competent engineer: specific, direct, and willing to commit to a claim. No single
 tell proves a text was machine-written. The smell is density, so stop reaching for the patterns.
@@ -67,7 +67,7 @@ A PR body also carries:
 - The body says what changed and why. Name the root cause and the fix and skip the debugging
   play-by-play. Repro detail belongs in the test.
 - Don't restate the diff. Explain what the diff cannot show.
-- No attribution trailer of any kind; see `CLAUDE.md`.
+- No attribution trailer of any kind; see `AGENTS.md` § Git workflow.
 
 ## Write the mechanism only after you have proved it
 
