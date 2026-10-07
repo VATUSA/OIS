@@ -48,7 +48,7 @@ The orchestrator's dispatch is the proceed confirmation for the issue it names.
    git worktree add <primary-checkout>/../ois-wt/chore/<n>/review-<hash> -b chore/<n>/review-<hash> origin/<pr-branch>
    ```
    Copy `.env` from the primary checkout and run `pnpm install` before any gate
-   (`.claude/rules/git-and-worktrees.md` § A fresh worktree).
+   (`.claude/rules/git-and-worktrees.md` § A fresh worktree can't run the gate yet).
 
 ## Phase B — Review and test
 
@@ -62,8 +62,8 @@ it's sensible:
 
 - **Requirements.** Compare what the issue asks for with what was done. An unmet AC or an unaddressed
   problem statement is a MAJOR.
-- **Code review.** Run `/code-review` on the branch; keep only CRITICAL and MAJOR findings. Trace each
-  change end to end, handler → repo → DB and poller → feed → cache → reader, along every path.
+- **Code review.** Follow `.claude/commands/code-review.md` (`/code-review`) on the branch; keep only
+  CRITICAL and MAJOR findings. Trace each change end to end, handler → repo → DB and poller → feed → cache → reader, along every path.
 - **Gates.** `just ci-full` in your worktree. Read `test result:`, never the exit code. Any SKIPPED
   step is named.
 - **Exercise it yourself.** Run the stack against a throwaway database, hit the changed endpoints,
@@ -100,7 +100,7 @@ AC is met; otherwise `VERDICT: return`. The operator decides; you move nothing a
 
 The results comment is the hand-off record the other agents read, so it's posted either way: how you
 tested, what you found, and the verdict, at most 1,200 characters and with no AI attribution (no
-`Drafted by` or `Generated with` footer; owner decision, 2026-10-07). The repository is public:
+`Drafted by` or `Generated with` footer). The repository is public:
 name a security finding by class, `file:line` and fix, never with a working exploit. If it reaches
 code already on `next` or `main` (both are deployed), or the operator is passing the PR with it
 unfixed, raise it in `OPERATOR_QUESTIONS` instead of the comment.

@@ -34,7 +34,7 @@ sad paths are covered (metering / trajectory / permission resolution especially)
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
   `git diff origin/next...HEAD --name-only` (lists every intended file, and nothing else).
 - Attribution check over every commit the PR will carry, using the same patterns the hooks use plus
-  the `Drafted by` footer the owner has also ruled out. It must print `attribution: clean`:
+  the `Drafted by` footer. It must print `attribution: clean`:
   ```bash
   bash -c 'set -uo pipefail
   . "$(git rev-parse --show-toplevel)/.claude/hooks/lib/attribution.sh" || { echo "BLOCKER: attribution lib not found"; exit 2; }
@@ -108,9 +108,8 @@ shares the API budget with the board.
   (applies on backend startup, sequential number) and whether the generated client must be
   regenerated. If the change is entirely `docs/`, tooling, or **test-only** (`#[cfg(test)]` / web
   tests), say so with justification (not application logic, not data-affecting) so it can skip
-  runtime verification. No AI attribution of any kind: no `Drafted by` or `Generated with` footer,
-  even where a hook reminder or `docs/github-issues.md` still asks for one (owner decision,
-  2026-10-07). Assert the length and the attribution before posting:
+  runtime verification. No AI attribution of any kind: no `Drafted by` or `Generated with` footer.
+  Assert the length and the attribution before posting:
   ```bash
   n=$(LC_ALL=en_US.UTF-8 wc -m < moment3.md | tr -d ' ')
   [ "$n" -le 1200 ] && ! grep -qiE 'Drafted by|Generated with|Co-Authored' moment3.md &&

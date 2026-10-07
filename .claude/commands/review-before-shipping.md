@@ -15,8 +15,10 @@ Under `/ticket-loop` this runs inside the `ticket-worker` subagent: every "ask m
 - If the API contract moved (an endpoint, or a `#[derive(ToSchema)]` model or its `///` doc
   comments), **regenerate the client first** (`AGENTS.md` § The API contract → typed client) and
   commit it, so the pinned commit already carries it.
-- `git status --porcelain` must print nothing. If it prints anything, commit it (or remove it)
-  first; the review is of a commit, not a tree.
+- `git status --porcelain --untracked-files=no` must print nothing: commit any tracked change (or
+  revert it) first; the review is of a commit, not a tree. Then read `git status --porcelain`: every
+  `??` line must be something that is not part of the change (a new module never `git add`ed still
+  compiles locally but is missing from the reviewed commit). Add it, or say why it stays out.
 - Pin HEAD, the full 40-character **reviewed SHA**, with the snippet below. Every phase reviews that
   commit, and Phase 6 writes the marker for the pinned SHA only while HEAD still equals it. The pin
   lives in this worktree's own git dir, so parallel worktrees never share one.
@@ -74,7 +76,9 @@ Phase 5 as CRITICAL.
 
 Dispatch all three **in one message** as fresh subagents, so they run concurrently and none shares
 this session's assumptions. Give each only the branch name, the reviewed SHA, the base
-(`origin/next`), and the issue number. No summary of what you built, and no opinion on it.
+(`origin/next`), the issue number, and where to read the code: "read files at `<sha>` with
+`git show <sha>:<path>` (the worktree is `<abs path>`)", since a reviewer's own checkout may be
+`next`. No summary of what you built, and no opinion on it.
 
 | Agent | Looks for | Blocks on |
 | --- | --- | --- |
@@ -103,8 +107,8 @@ evidence before the marker is written.
 running them. Run each one it describes; mutate every case `test-quality.md` makes mandatory that
 the diff touches (a permission or scope check, a destructive statement, a time window, a dedup key, a
 tuning constant); and for a fix branch revert the actual bug. Follow
-`.claude/rules/test-quality.md` § Prove the test can fail (commit a checkpoint first; confirm the
-mutation applied; never mutate while a suite is building in the same tree). A test that stays green is
+`.claude/rules/test-quality.md` § Prove the test can fail: mutation (commit a checkpoint first; confirm
+the mutation applied; never mutate while a suite is building in the same tree). A test that stays green is
 a MAJOR. Record each mutation and whether it went red for the Phase 7 report.
 
 Fix every surviving CRITICAL and MAJOR **as a new commit** (never amend the reviewed commit).

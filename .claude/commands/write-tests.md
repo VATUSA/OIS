@@ -106,7 +106,8 @@ what the user sees and what is sent, not component internals.
 
 ## Phase 4 — Run, then prove each test can fail
 
-1. Run the new tests: `cargo test -p <crate> <test_name>` or `pnpm --filter web test -- <file>`.
+1. Run the new tests: `cargo test -p <crate> <test_name> -- --test-threads=1`
+   (parallel `#[sqlx::test]`s collide on the shared harness) or `pnpm --filter web test -- <file>`.
    Read cargo's `test result:` line (not `0 passed` from a filter typo) or vitest's `Test Files` and
    `Tests` lines (not "No test files found").
 2. **Mutate**: for each new test, make the smallest plausible bug in the code it guards (flip a

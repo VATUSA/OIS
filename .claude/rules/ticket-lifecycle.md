@@ -25,7 +25,8 @@ Sources: ported from the house ticket-lifecycle rule; OIS lessons from #411, #44
 
 `Shippable` and `Done` are a human's to set, and agents never merge. The one agent move past
 `Testing Queue` is the QA reviewer's: `In Test` when it claims a card, then `Code Review` on a pass
-the operator approved (`.claude/agents/ticket-reviewer.md`).
+the operator approved, or `Returned` on a return the operator confirmed
+(`.claude/agents/ticket-reviewer.md`).
 
 If work comes back as `Returned`, treat it as a fresh build: read why, fix, and run the whole ship
 sequence again.
@@ -36,7 +37,8 @@ The board column does not prove a card is free. Parallel sessions claim within m
 before any branch is pushed. Before claiming, and again right before pushing:
 
 - `git fetch` and `git branch -r --list "*<n>*"`: a pushed `…/<n>/…` or `rework-<sha>` branch
-  with no PR is someone mid-cycle (#411).
+  with no PR is someone mid-cycle (#411). The exception is a `chore/<n>/rules-<hash>` branch: a
+  reviewer's `.claude/` rules change from a returned round, not a holder.
 - `git branch --list "*/<n>/*"` and `git worktree list | grep "/<n>/"` in the primary checkout: a
   local branch or worktree means someone owns it, even with no remote branch and no card move
   (#688).

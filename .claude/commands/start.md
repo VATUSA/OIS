@@ -32,9 +32,9 @@ worker returns an `OPERATOR_QUESTIONS` block instead and waits for the relayed a
 - Confirm with me whether to work it now — let me answer **yes / no / skip** (AskUserQuestion).
 - Check nobody else holds it (`.claude/rules/ticket-lifecycle.md` § Check nobody else holds the card):
   `git fetch origin`, then `git branch -r --list "*$ARGUMENTS*"`, `git branch --list "*/$ARGUMENTS/*"`,
-  `git worktree list`,
-  and the card's own status read just now. A `chore/<n>/rules-<hash>` branch with no PR is a
-  reviewer's `.claude/` rules change from a returned round, not a holder.
+  `git worktree list`, `gh pr list --repo VATUSA/OIS --state all --search "$ARGUMENTS in:body"`,
+  and the card's own status and latest comment read just now. A `chore/<n>/rules-<hash>` branch
+  with no PR is a reviewer's `.claude/` rules change from a returned round, not a holder.
 - On **yes**, immediately claim it so a concurrent agent doesn't:
   `.claude/scripts/board-status.sh $ARGUMENTS "In build"`.
 
@@ -50,8 +50,9 @@ worker returns an `OPERATOR_QUESTIONS` block instead and waits for the relayed a
   ```
   Branch format: `{type}/{issue}/{2-4-word-desc}`, max 50 chars, `type` ∈ `feat|fix|chore`
   (e.g. `feat/47/save-event-replays`). Work only inside that worktree.
-- A fresh worktree has no `.env` and no `node_modules`: copy `.env` from the primary checkout and run
-  `pnpm install` before any gate (`.claude/rules/git-and-worktrees.md` § A fresh worktree).
+- A fresh worktree has no `.env` and no `node_modules`: copy `.env` from the primary checkout, run
+  `pnpm install`, and load it (`set -a; . ./.env; set +a`) before any gate
+  (`.claude/rules/git-and-worktrees.md` § A fresh worktree can't run the gate yet).
 
 ## 4. Validate the baseline
 
@@ -64,7 +65,8 @@ worker returns an `OPERATOR_QUESTIONS` block instead and waits for the relayed a
 
 ## 5. Research before planning
 
-Dispatch these as fresh subagents, in parallel in one message, and wait for both before planning:
+Dispatch these as fresh subagents, in parallel in one message, and wait for every agent
+you dispatched before planning:
 
 - **`codebase-researcher`** — always. Give it the confirmed ACs and ask for the `file:line` map of
   every path the change reaches (route → handler → repo → feed → the web hook that consumes it), the
@@ -93,8 +95,8 @@ a decision for you.
 - **Moment 2:** post one comment on the issue — what you are building and any decision that changes
   what the issue asked for, at most 600 characters (`.claude/hooks/plan-approved-reminder.sh` holds
   the budget). Count the characters before posting. No AI attribution of any kind: no footer, no
-  `Drafted by` or `Generated with` line, even where a hook reminder or `docs/github-issues.md` still
-  asks for one (owner decision, 2026-10-07).
+  `Drafted by` or `Generated with` line; check before posting with
+  `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>`.
 - **Tests first (optional, recommended for logic changes):** dispatch `tdd-planner` with the approved
   plan and the ACs. It writes compiling, pending test skeletons and a coverage matrix and touches only
   test code; turn them green one at a time as you build. Skip it for docs, tooling or a one-line fix,

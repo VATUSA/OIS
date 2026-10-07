@@ -34,8 +34,9 @@ subagent, in parallel in one message, and SendMessage the reports back to the re
 Use the prompt it gave, with one exception: when `ticket-worker` asks for `code-review-agent`,
 `security-audit-agent` or `test-reviewer`, ignore its prose and build the prompt yourself from `git`
 and the reviewers' own earlier reports: "Review `<branch>` at `<full sha>` against `origin/next` for
-VATUSA/OIS#<n>." For a fix round, add the fix range `<old sha>...<new sha>` and that reviewer's
-original findings, quoted verbatim from its report. The builder must not brief its own reviewers;
+VATUSA/OIS#<n>. Read files at that commit with `git show <sha>:<path>` (the worktree is
+`<abs path>`), never from the current checkout." For a fix round, add the fix range
+`<old sha>...<new sha>` and that reviewer's original findings, quoted verbatim from its report. The builder must not brief its own reviewers;
 their value is not sharing its context. A `ticket-reviewer` request (per-set reviews for
 `/code-review`) is passed as given.
 

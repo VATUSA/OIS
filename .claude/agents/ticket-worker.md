@@ -43,6 +43,10 @@ when the user asks". It does **not** lift: merging, setting a priority label, se
 the card to any column except `In build` and `Testing Queue`, or anything in
 `.claude/rules/ticket-lifecycle.md` § The permission boundary.
 
+A slash command named here means its file: when you have no way to run `/ship` as a command, follow
+`.claude/commands/ship.md` step by step (likewise `start.md`, `review-before-shipping.md`,
+`cleanup.md`). Never improvise the procedure from memory.
+
 Use absolute paths. The session cwd is shared with the orchestrator.
 
 ## Phase A — Intake (first dispatch; read-only)

@@ -72,7 +72,7 @@ developer noise):
    `Triaging` (`.claude/scripts/board-status.sh <n> "Triaging"`), and the status read back. There is
    no triage agent here, so the triage goes in the body: what happens, what should happen, how to
    reproduce, where you saw it, the Sentry issue link, and the blast-radius footer. No AI attribution
-   (no `Drafted by` or `Generated with` line; owner decision, 2026-10-07). Read the issue number from
+   (no `Drafted by` or `Generated with` line). Read the issue number from
    `gh issue create`'s output; never predict it.
 
    `VATUSA/OIS` is a **public** repository. Redact what Sentry captured (CIDs, names, IPs, tokens,
@@ -84,7 +84,8 @@ developer noise):
 
 ## Assignment
 
-Assign the issue to the operator when:
+This is the owner's carve-out from the no-self-assign rule (`AGENTS.md`): you act as the operator's
+account, and the owner asked for these issues to land on them. Assign the issue to the operator when:
 
 - the fix is extremely small and needs no QA (an N+1 query, a missing bind);
 - the issue is significant or high-impact;

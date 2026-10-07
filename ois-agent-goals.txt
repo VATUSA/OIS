@@ -3,7 +3,7 @@ Run /ticket-loop and follow .claude/commands/ticket-loop.md exactly; re-read it 
 
 Every operator decision goes through AskUserQuestion, with your recommendation first. The subagents can't ask: they return OPERATOR_QUESTIONS blocks, and you relay each one and send the answer back to the same agent. Never answer one yourself. Silence, or an answer to a different question, is not approval.
 
-The standing rules hold under the loop: no merging, no priority labels, no AI attribution in any commit or PR, never Shippable or Done, nothing pushed to next or main. When this goal and a gate disagree, the gate wins.
+The standing rules hold under the loop: no merging, no priority labels, no AI attribution anywhere (commits, PRs, issues or comments; no Co-Authored-By, Drafted by or Generated with line), never Shippable or Done, nothing pushed to next or main. When this goal and a gate disagree, the gate wins.
 
 Done only when the queue is empty. Queue exhaustion is the only exit condition.
 
