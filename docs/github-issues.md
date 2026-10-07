@@ -297,10 +297,11 @@ Every issue has three touchpoints.
    Done: <one sentence on what changed>. PR #<n>.
 
    How to check:
-   1. <a step naming a real route path, file, or control from the diff>
+   1. <(mode, when it matters) a step naming a real route path, file, or control from the diff>
    2. <step>
 
    Blast radius: <trajectory/ETA model · permissions/roles three-in-sync · API contract · none>
+   Data path: <the chain the diff touches, source → … → consumer, or "none">
    Deploy: <migration NNNN applies on backend start · client regenerated · new env var · nothing>
 
    🤖 Drafted by Claude Code
@@ -310,6 +311,24 @@ Every issue has three touchpoints.
    traces to code in the diff; if you can't point at it, drop the line. If the change is entirely
    `docs/`, tooling, or test-only, say so and why it needs no runtime verification. Don't fire
    Moment 3 while more work is coming.
+
+   **Data path** follows the footer's rule in [Body structure](#body-structure): the same chain
+   format and examples, and `none` for a change that moves no runtime data. Write the chain
+   the diff actually touches, so restate the issue's line only if it still holds.
+
+   **Name the mode on each step** whose result depends on it, using the footer's two axes (live vs
+   historical, web vs desktop). A step that reads the same everywhere carries no mode. For a change
+   in shared compute such as `feed/flow.rs::compute`, give a step per side:
+
+   ```
+   1. (live, web) Open /ops/airport?icao=KATL and check the 60-minute demand against its flight
+      list.
+   2. (historical, web) Open /admin/historical/dashboard on a board with a KATL airport-flow
+      widget, scrub to a captured instant, and make the same check there.
+   ```
+
+   A step that crosses auth, origins, CSP, or a Tauri command names `web` or `desktop`; a fix that
+   only one of them needs says which, and a check on the other confirms it didn't regress.
 
 ### The budget
 

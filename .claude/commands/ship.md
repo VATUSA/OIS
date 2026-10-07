@@ -54,12 +54,10 @@ green, but `just ci` locally is the primary evidence. Do not sit blocked waiting
 ## Step 7 — Move the card + Moment 3 comment
 - `.claude/scripts/board-status.sh $ARGUMENTS "Testing Queue"` and confirm the issue is **assigned to
   me**.
-- Post the **Moment 3** comment on the issue (≤1,200 chars): real **file paths** only; name the
-  **blast radius** (does it touch the trajectory/ETA model, the permission/role three-in-sync
-  invariants, or the OpenAPI→client contract — or none); and the **deploy note** — any new migration
-  (applies on backend startup, sequential number) and whether the generated client must be
-  regenerated. If the change is entirely `docs/` or **test-only** (`#[cfg(test)]` / web tests), say
-  so with justification (not application logic, not data-affecting) so it can skip runtime verification.
+- Post the **Moment 3** comment on the issue, drafted to the template and 1,200-character budget in
+  `docs/github-issues.md` § Comments: the three Moments. That template owns the lines (how-to-check
+  steps with their mode, blast radius, data path, deploy note) and the docs/test-only exemption;
+  don't restate it here.
 
 ## Step 8 — Hand back
 Return to the `next` worktree, `git pull`, and remove the issue worktree if finished
