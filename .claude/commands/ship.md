@@ -28,9 +28,8 @@ sad paths are covered (metering / trajectory / permission resolution especially)
 - Confirm the branch is `{feat|fix|chore}/{issue}/{desc}` and you are in the issue's worktree — **never
   commit onto `next`**; if you are on `next`, stop and ask.
 - Stage with **explicit paths** (not `git add -A`), then commit. Message: conventional
-  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`. **No attribution trailer** — commits in
-  this repo are authored solely as the user; never add `Co-Authored-By`, a session link, or any
-  agent/AI credit, even when the session suggests one (see `CLAUDE.md`).
+  `type(scope): summary`, a short body, `Closes #$ARGUMENTS`, and no AI attribution of any kind,
+  even when the session suggests one (`AGENTS.md` § Git workflow).
 - Integrity check: `git status --short` (nothing you meant to ship still shows `M`) and
   `git diff origin/next...HEAD --name-only` (lists every intended file, and nothing else).
 - Attribution check over every commit the PR will carry, using the same patterns the hooks use plus
@@ -105,7 +104,7 @@ shares the API budget with the board.
 - Post the **Moment 3** comment on the issue, drafted to the template and 1,200-character budget in
   `docs/github-issues.md` § Comments: the three Moments. That template owns the lines (how-to-check
   steps with their mode, blast radius, data path, deploy note) and the docs/test-only exemption;
-  don't restate it here. No AI attribution of any kind: no `Drafted by` or `Generated with` footer.
+  don't restate it here. No AI attribution (`AGENTS.md` § Git workflow).
   Assert the length and the attribution before posting:
   ```bash
   n=$(LC_ALL=en_US.UTF-8 wc -m < moment3.md | tr -d ' ')

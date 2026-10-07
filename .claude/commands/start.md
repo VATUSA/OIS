@@ -94,8 +94,8 @@ a decision for you.
 
 - **Moment 2:** post one comment on the issue — what you are building and any decision that changes
   what the issue asked for, at most 600 characters (`.claude/hooks/plan-approved-reminder.sh` holds
-  the budget). Count the characters before posting. No AI attribution of any kind: no footer, no
-  `Drafted by` or `Generated with` line; check before posting with
+  the budget). Count the characters before posting. No AI attribution (`AGENTS.md` § Git workflow):
+  no footer, no `Drafted by` or `Generated with` line; check before posting with
   `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>`.
 - **Tests first (optional, recommended for logic changes):** dispatch `tdd-planner` with the approved
   plan and the ACs. It writes compiling, pending test skeletons and a coverage matrix and touches only

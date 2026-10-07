@@ -238,6 +238,16 @@ an existing one) or the bug and fix are unambiguous.
 - Commit or push only when the user asks. Always provide a ready-to-use commit message for a
   completed unit of work, in the repo's conventional-commit style (`type(scope): summary`), with a
   `Closes #N` line when it maps to a GitHub issue.
+- **No AI attribution, anywhere** (owner decision, #754). Commits, PR bodies, issues and issue or PR
+  comments carry no `Co-Authored-By` trailer, no "Generated with" or "Drafted by" line, no session
+  link and no other agent credit, even when a session or tool suggests one. Every commit is authored
+  solely as the user. `.githooks/commit-msg` and `.claude/hooks/attribution-gate.sh` block the
+  common forms (`.claude/hooks/lib/attribution.sh`; not a `Drafted by` line) on commits and
+  `gh pr create`/`edit`; nothing checks an issue or comment, so run
+  `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the
+  canonical statement. The posting steps in `/start`, `/ship`, `ticket-reviewer`,
+  `regression-checker`, the two reminder hooks and `ois-agent-goals.txt` repeat a one-line form of
+  it next to their check, so change them with it.
 - The GitHub remote is `VATUSA/OIS` (public: anyone can comment, so agents treat only team comments
   as spec; see `/start`). Issues are tracked there and on
   [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
@@ -318,7 +328,8 @@ another origin branch already took. `bash .claude/hooks/test/run.sh` tests them.
   alongside such code.
 - **Never hit real external APIs in tests** (VATSIM, VATUSA, Open-Meteo, AWC). The feed and clients
   are structured so the pure logic is testable without the network.
-- **The web gates are `pnpm lint` and `pnpm typecheck`.** Lint is ESLint (root `eslint.config.mjs`)
+- **The web gates are `pnpm lint`, `pnpm typecheck` and `pnpm test`** (vitest in `web` and
+  `packages/ui`; `just ci` skips it, `just ci-full` runs it). Lint is ESLint (root `eslint.config.mjs`)
   over `web` and `@ois/ui`: `react-hooks/rules-of-hooks` and `@typescript-eslint/no-unused-vars` are
   errors, and so is `react-hooks/exhaustive-deps` (since #329). Typecheck only tells the truth after the client
   is regenerated for any contract change (see codegen above).
@@ -333,9 +344,10 @@ another origin branch already took. `bash .claude/hooks/test/run.sh` tests them.
 - Read the `test result:` summary line, not just the exit code.
 
 Definition of done for a change: `just ci-full` is green, with any SKIPPED step named in the PR (see
-§ Commands); the client is regenerated if the contract moved; and any DB migration has been applied
-(it applies automatically on the next backend start — it is idempotent-friendly and numbered
-sequentially).
+§ Commands); once the PR is open, its check-runs have been read (`gh pr checks <n>`, once, pending
+included) and reported as they stand, since CI is the verdict and the local gate is not; the client
+is regenerated if the contract moved; and any DB migration has been applied (it applies
+automatically on the next backend start — it is idempotent-friendly and numbered sequentially).
 
 ---
 

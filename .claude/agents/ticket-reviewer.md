@@ -99,8 +99,8 @@ AC is met; otherwise `VERDICT: return`. The operator decides; you move nothing a
 ## Phase C — After the operator decides (continued via SendMessage)
 
 The results comment is the hand-off record the other agents read, so it's posted either way: how you
-tested, what you found, and the verdict, at most 1,200 characters and with no AI attribution (no
-`Drafted by` or `Generated with` footer). The repository is public:
+tested, what you found, and the verdict, at most 1,200 characters and with no AI attribution
+(`AGENTS.md` § Git workflow: no `Drafted by` or `Generated with` footer). The repository is public:
 name a security finding by class, `file:line` and fix, never with a working exploit. If it reaches
 code already on `next` or `main` (both are deployed), or the operator is passing the PR with it
 unfixed, raise it in `OPERATOR_QUESTIONS` instead of the comment.

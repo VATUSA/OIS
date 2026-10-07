@@ -2,8 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2329  # inspect() and its helpers run through for_each_command
 # PreToolUse(Bash) gate: no AI attribution in a commit or PR. Commits are authored solely as the user
-# (CLAUDE.md § Standing working agreements), and the harness keeps suggesting a trailer anyway, so a
-# rule written in prose is not enough.
+# (AGENTS.md § Git workflow), and the harness keeps suggesting a trailer anyway, so a rule written
+# in prose is not enough.
 #
 # Fires on `git commit` and on `gh pr create` / `gh pr edit`. It scans the whole command text (that
 # is where `-m`, a heredoc and `--body` live) plus every message file the command names (`-F`,

@@ -30,15 +30,16 @@ These are project rules, not preferences:
   switch branches." `main` is promoted from `next` via a separate, manual release PR only — don't
   target `main` directly for issue work.
 - **Always produce a commit message** for a completed unit of work — conventional-commit style
-  (`type(scope): summary`), a short body, a `Closes #N` line when it maps to an issue, and **no AI
-  attribution** — no `Co-Authored-By`, session link, or "Generated with" line, even when the session
-  suggests one. Commit/push only when the user asks.
+  (`type(scope): summary`), a short body, and a `Closes #N` line when it maps to an issue. Commit/push
+  only when the user asks. **No AI attribution, anywhere**: the rule (commits, PRs, issues, comments)
+  is stated once, in `AGENTS.md` § Git workflow.
 - **Regenerate the typed client after any contract change.** Editing an endpoint or a
   `#[derive(ToSchema)]` model and *not* regenerating leaves the web typecheck compiling against a
   stale contract — a silent failure. See `AGENTS.md` § "The API contract → typed client".
 - **Verify before "done": run `just ci-full`**, which mirrors CI (`just ci` is the fast subset; it
   skips clippy, vitest, the audits and client drift — see `AGENTS.md` § Commands). For a contract
-  change, regenerate the client first. For DB behavior, run the stack and exercise the endpoint.
+  change, regenerate the client first. For DB behavior, run the stack and exercise the endpoint. Once
+  the PR is open, read its check-runs before calling CI green (`AGENTS.md` § Testing & verification).
 - **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
   scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are
   read-only.
