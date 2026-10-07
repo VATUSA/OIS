@@ -229,7 +229,8 @@ on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb`
   in the same token — the colour is a non-text signal (≥ 3:1 on each theme's ground, tested), because
   the light theme's green is too faint for small coloured text; hover carries both figures, combined
   peak and airborne alone; the footer labels each bin's start in `HHMM` Zulu; the limit cell is
-  editable only where the viewer may edit, and is plain text with no affordance otherwise.
+  editable only where the viewer may edit, and is plain text with no affordance otherwise; a combined
+  row lists the sectors it carries under its id, in `--ink-3`, truncated inside the sticky column.
 - **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
   fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
   150–220ms ease-out, no bounce.

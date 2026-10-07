@@ -98,6 +98,20 @@ describe("SectorGrid (#724)", () => {
     expect(cells(host)[2].className).toContain("level-over");
   });
 
+  it("labels a combined row with the sectors it carries, and leaves a plain row unlabelled", async () => {
+    const [plain] = rows(1);
+    const host = await mount([{...plain, id: "ZLA20", carries: ["ZLA21", "ZLA22"]}, plain]);
+    const [combined, single] = [...host.querySelectorAll("tbody th")];
+    const label = combined.querySelector<HTMLElement>("[data-carries]")!;
+    expect(label.textContent).toBe("carries +ZLA21 +ZLA22");
+    expect(label.title).toBe("ZLA20 carries ZLA21, ZLA22");
+    // Under the id, inside the sticky column's width, so the limit column's offset still holds.
+    expect(label.className).toMatch(/\bblock\b/);
+    expect(label.className).toMatch(/\btruncate\b/);
+    expect(single.querySelector("[data-carries]")).toBeNull();
+    expect(single.textContent).toBe("ZLA10");
+  });
+
   it("offers no affordance on the limit when the viewer can't edit it", async () => {
     const host = await mount(rows(1));
     const limit = host.querySelector("tbody td")!;

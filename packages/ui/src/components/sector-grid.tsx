@@ -18,6 +18,11 @@ export interface SectorGridRow {
   id: string;
   name?: string;
   limit: number;
+  /**
+   * The sectors worked at this one (#723), when it is a combined row. Listed under its id so a merged
+   * row never reads as the target sector alone; its limit is still the target's.
+   */
+  carries?: readonly string[];
   /** One per column of `binStarts`, in the same order. */
   cells: SectorGridCell[];
 }
@@ -84,6 +89,15 @@ export function SectorGrid({
               <th scope="row" className={cn(STICKY, "left-0 w-28 min-w-28 px-2 py-1 text-left font-semibold text-ink")}>
                 {row.id}
                 {row.name && <span className="ml-1.5 font-sans text-ink-3">{row.name}</span>}
+                {row.carries && row.carries.length > 0 && (
+                  <span
+                    data-carries=""
+                    title={`${row.id} carries ${row.carries.join(", ")}`}
+                    className="block max-w-24 truncate font-normal text-ink-3"
+                  >
+                    <span className="sr-only">carries </span>+{row.carries.join(" +")}
+                  </span>
+                )}
               </th>
               <td className={cn(STICKY, "left-28 w-14 min-w-14 border-r border-line-soft px-1 py-1 text-right text-ink-2")}>
                 {onLimitChange ? (

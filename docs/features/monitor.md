@@ -1,9 +1,9 @@
 # Sector dataset — altitude-bounded ATC sector volumes
 
-> **Status: dataset kept; the Airspace Monitor was removed (#719).** The Monitor (#593, #594–#602) is
-> gone: its MAPs, consolidation, alert ladder, page and `flow.monitor.*` permissions were dropped by
-> migration 0125. What stays is the sector **dataset**, its importer, and the admin sector viewer, as the
-> input to a rebuilt feature (its own epic). Known coverage gaps: #728.
+> **Status: rebuilt (#720).** The old Airspace Monitor (#593, #594–#602) was removed in #719 (migration
+> 0125). The sector **dataset**, its importer and the admin sector viewer stayed, and the rebuild reads
+> them: occupancy (#721), limits (#722), consolidation (#723), `SectorGrid` (#724), TRACON strata (#726)
+> and the Operations page (#725). Known coverage gaps: #727, #728.
 
 ## Data model
 
@@ -175,6 +175,32 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
 - `flow.sector_limits` (cells recolour);
 - `flow.sector_consolidations` (rows merge or split);
 - `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did).
+
+## Operations page (#725): the page
+
+**Operations → Sector Monitor** (`/ops/sectors`, `web/src/pages/sector-monitor.tsx`, components in
+`web/src/features/sector-demand/`). The nav item and the page are gated on `flow.sectors.read`, the
+endpoint's own gate; without it the page says so and asks for nothing.
+
+- **The set follows the facility selector and nothing else.** It opens on the viewer's VATUSA home
+  facility and the pick is not remembered, so a controller who moves facilities does not keep the old
+  one's tables. The set is keyed by facility, so a switch replaces every table, control and neighbour.
+- **Top to bottom:** the facility's enroute table, its TRACON table, then each neighbour, collapsed and
+  fetched only when opened. Neighbour grids get no limit editor whatever `limits_editable` says; the
+  facility's own grid edits limits only when it is `true` (the write's 403 is the real gate).
+- **Controls, per table:** a 2–6 h range slider (default 4 h) and "only alerting in the next N h" (a
+  quarter-hour span up to 6 h, default 2 h, off by default). The span is judged over all six computed
+  hours, independent of the range, and both only slice what the server sent, never refetching.
+- **Remembered per browser:** each table's controls under `ois.sectorDemand.view.<ARTCC>.<table>`, and a
+  neighbour's open state under `ois.sectorDemand.open.<facility>.<neighbour>`, in `localStorage`. Every
+  access is guarded; with storage blocked, the defaults apply.
+- **States:** `no_sector_data` reads "No sector data for ZLA"; `pending` reads "Waiting for the first
+  feed cycle"; a table without volumes reads "No TRACON sector data for ZSE"; a filter that hides every
+  row reads "No ZDC sectors alerting in the next 2.00 h" ("No ZDC TRACON sectors…" for TRACON). None of
+  them is a grid.
+- **A combined row** lists the sectors it carries under its id (`SectorGrid`'s `carries`).
+- **Colour** is tokens only, pinned by `web/src/features/sector-demand/colours.guard.test.ts` over the
+  feature and the page, alongside the grid's own guard in `packages/ui`.
 
 ## The sector dataset
 
