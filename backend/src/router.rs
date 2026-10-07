@@ -17,7 +17,8 @@ use crate::{
         airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
         events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
         health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences, public,
-        runway, sector_limits, service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        runway, sector_consolidations, sector_limits, service_accounts, stats, taxi_insights, tmu,
+        users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -432,6 +433,16 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/flow/sector-limits/{artcc}/{sector_id}",
             put(sector_limits::set_sector_limit),
+        )
+        // Sector consolidation (#723): read with the sector data, changed per ARTCC by its TMU
+        .route(
+            "/api/v1/flow/sector-consolidations/{artcc}",
+            get(sector_consolidations::list_sector_consolidations),
+        )
+        .route(
+            "/api/v1/flow/sector-consolidations/{artcc}/{sector_id}",
+            put(sector_consolidations::consolidate_sector)
+                .delete(sector_consolidations::release_sector),
         )
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))

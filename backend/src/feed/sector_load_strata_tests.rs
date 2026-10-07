@@ -60,7 +60,7 @@ fn first_bins(table: &SectorTable, fixes: &[Fix]) -> BTreeMap<String, usize> {
         population: Population::Active,
         fixes,
     };
-    sector_loads(table, &[track], now())
+    sector_loads(table, &Default::default(), &[track], now())
         .into_iter()
         .map(|l| (format!("{}/{}", l.artcc, l.sector_id), l.bins[0].active))
         .collect()
@@ -235,7 +235,7 @@ fn a_facility_without_tracon_data_is_distinct_from_a_quiet_tracon() {
             vol("ZTL", "07001", "70", "approach", 0, 4_000),
         ],
     };
-    let loads = sector_loads(&table, &[], now());
+    let loads = sector_loads(&table, &Default::default(), &[], now());
 
     let zse: Vec<&str> = loads
         .iter()
@@ -392,7 +392,7 @@ async fn the_real_table_counts_each_fix_in_its_expected_stratum() {
             population: Population::Active,
             fixes: &fixes,
         };
-        sector_loads(&table, &[track], now())
+        sector_loads(&table, &Default::default(), &[track], now())
             .into_iter()
             .filter(|l| l.bins[0].active > 0)
             .map(|l| (l.artcc, l.sector_id))

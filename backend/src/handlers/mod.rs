@@ -31,6 +31,7 @@ pub mod public;
 pub mod release_authority;
 pub mod restriction_artcc;
 pub mod runway;
+pub mod sector_consolidations;
 pub mod sector_limits;
 pub mod service_accounts;
 pub mod stats;
@@ -42,6 +43,8 @@ pub mod webhooks;
 #[cfg(test)]
 mod topic_publish_tests;
 
+#[cfg(test)]
+mod sector_consolidations_tests;
 #[cfg(test)]
 mod sector_limits_tests;
 

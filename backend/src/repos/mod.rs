@@ -26,6 +26,9 @@ pub mod org;
 pub mod preferences;
 pub mod public;
 pub mod runway;
+pub mod sector_consolidations;
+#[cfg(test)]
+mod sector_consolidations_tests;
 pub mod sector_limits;
 #[cfg(test)]
 mod sector_limits_tests;
