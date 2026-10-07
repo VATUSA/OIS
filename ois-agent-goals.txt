@@ -18,7 +18,7 @@ Follow-ups / review findings:
 - Never set a priority label yourself -> give me options + a recommendation, let me pick.
 Search before filing: search the SYMBOL (type, function, module, migration, permission string), not your phrasing, with `--state all`; a closed duplicate is the strongest signal. Don't create duplicates.
 
-After /ship: verify the PR is open, linked to the issue (the PR body's `Closes #N`), moved to 'Testing Queue', & assigned to me. Post the Moment 3 comment (<=1,200 chars): real file paths only; name the blast radius (trajectory/ETA model; permission/role three-in-sync; OpenAPI->client contract — or none); include the deploy note (any new migration + whether the client must be regenerated). If the change is entirely docs/ or test-only (`#[cfg(test)]` / web tests), say so with justification (not app logic, not data-affecting) so it skips runtime verification.
+After /ship: verify the PR is open, linked to the issue (the PR body's `Closes #N`), moved to 'Testing Queue', & assigned to me. Post the Moment 3 comment (<=1,200 chars, counted before posting) drafted to the template in docs/github-issues.md § Comments: the three Moments — it lists the required lines (per-step mode, blast radius, data path, deploy note, the docs/test-only exemption). No attribution footer.
 
 Then verify you're back in the primary `next` checkout & pull. Refresh your inventory from the board, not memory. Done only when the queue is empty — queue exhaustion is the only exit condition.
 

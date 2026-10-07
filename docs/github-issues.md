@@ -243,8 +243,8 @@ mark true duplicates `status`/close with a pointer rather than filing again.
   already on `next`.
 - **Comment sparingly** — an issue is a spec, not a chat log. Comment only at the moments and
   within the budget in [Comments](#comments-the-three-moments-and-the-budget) below.
-- **Attribution:** an agent-drafted issue or comment ends with a `🤖 Drafted by Claude Code` line so
-  its origin is clear.
+- **No AI attribution** on issues or comments: no `Drafted by` or `Generated with` line and no
+  session link (owner decision on #754, 2026-10-07).
 - **Other repos are read-only.** Reference AvioDeck (or any other repo) for patterns, but never
   create, edit, comment on, or label issues outside `VATUSA/OIS`.
 
@@ -303,8 +303,6 @@ Every issue has three touchpoints.
    Blast radius: <trajectory/ETA model · permissions/roles three-in-sync · API contract · none>
    Data path: <the chain the diff touches, source → … → consumer, or "none">
    Deploy: <migration NNNN applies on backend start · client regenerated · new env var · nothing>
-
-   🤖 Drafted by Claude Code
    ```
 
    Use real file paths and route paths (`/admin/access`), never a host. Every described behavior
@@ -341,15 +339,14 @@ At most one comment per purpose per round of work:
 | Verification notes (Moment 3) | `/ship` pushed and opened the PR | 1,200 characters |
 | Failure response | verification failed and you fixed it | 1,200 characters |
 
-The budget counts the body, not the attribution footer. **Count characters, not bytes, and count
-before you post.** `wc -c` counts bytes, and `—` or `→` is three of them. Make the count a gate
+The budget counts the whole comment. **Count characters, not bytes, and count before you
+post.** `wc -c` counts bytes, and `—` or `→` is three of them. Make the count a gate
 that stops the post, not a message printed above it:
 
 ```bash
 LIMIT=1200   # the row's budget: 600 for a plan, 400 for a spec correction
 python3 -c 'import sys; n = len(open("body.md").read().rstrip()); print(n); sys.exit(n > int(sys.argv[1]))' "$LIMIT" \
-  && printf '%s\n\n🤖 Drafted by Claude Code\n' "$(cat body.md)" > comment.md \
-  && gh issue comment <n> --repo VATUSA/OIS --body-file comment.md
+  && gh issue comment <n> --repo VATUSA/OIS --body-file body.md
 ```
 
 Draft to about 1,000 characters to leave room. When you are over, don't compress the prose; move
