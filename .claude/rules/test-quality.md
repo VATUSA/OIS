@@ -102,7 +102,7 @@ one session (#428, #433 twice, #419) had a well-tested unit and an untested call
 real bug left the suite green. **Before shipping, revert the actual bug and run the suite.** If it
 stays green, the test does not defend the fix. Four shapes have precedent:
 
-- **A source scan over call sites** (`web/src/router.window-chrome.test.ts`,
+- **A source scan over call sites** (`web/src/components/shell/window-chrome.guard.test.ts`,
   `web/src/components/sign-in-button.guard.test.ts`).
 - **A handler-level `#[sqlx::test]`.** If the extractors get in the way, split the handler into a
   thin `get_x` and an `x(pool, …)` that holds the logic; never add a test-only constructor to a

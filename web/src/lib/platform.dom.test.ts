@@ -6,7 +6,6 @@ import {
   can,
   capabilities,
   invokeDesktop,
-  isMacOS,
   isMainWindow,
   isTauri,
   platform,
@@ -31,24 +30,10 @@ function pretendDesktop() {
   window.__TAURI_INTERNALS__ = {};
 }
 
-/** The real user agents of the three webviews Tauri runs the app in. */
-const AGENTS = {
-  wkWebView:
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-  webView2:
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  webKitGtk:
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-} as const;
-
-function pretendAgent(ua: string) {
-  Object.defineProperty(navigator, "userAgent", {value: ua, configurable: true});
-}
 
 afterEach(() => {
   delete window.__TAURI_INTERNALS__;
   invoke.mockReset();
-  pretendAgent(AGENTS.webView2);
   // Back to the default label: tests below install their own, including one that throws, and a
   // leaked implementation would decide a later test's answer.
   currentLabel.mockImplementation(() => "main");
@@ -90,9 +75,8 @@ describe("capabilities", () => {
       "tray",
       "globalHotkeys",
       "audioAlerts",
-      "windowControls",
       "diagnostics",
-    ]; // #347-#353, #402, #629
+    ]; // #347-#353, #629
     for (const [name, available] of Object.entries(capabilities())) {
       const expected = shipped.includes(name as Capability);
       expect(available, `${name} availability on desktop`).toBe(expected);
@@ -185,9 +169,8 @@ describe("window identity", () => {
    * #403: "couldn't tell" must answer *not* the main window, and this is the only place that
    * answer is made. `window-controls.tsx` and `popout.ts` each had their own `catch` until the
    * three copies were collapsed into this helper; now the fallback below is the only thing
-   * standing between an unreadable window and a route window that thinks it is `main` — drawing a
-   * second set of controls over the OS's, and, in `restoreWindows`, relaunching the whole set from
-   * a window that was itself restored.
+   * standing between an unreadable window and a route window that thinks it is `main` — in
+   * `restoreWindows`, relaunching the whole set from a window that was itself restored.
    *
    * Flipping the fallback to `MAIN_WINDOW_LABEL`, or deleting the `catch` so the throw escapes,
    * must fail here.
@@ -203,39 +186,3 @@ describe("window identity", () => {
   });
 });
 
-
-/**
- * `isMacOS` decides who draws the window's buttons (#419), and it is the one predicate here with no
- * Tauri call behind it to stand in for — it reads the user agent directly. Both wrong answers are
- * shipping defects, which is why both directions are pinned: answering `true` on Windows draws no
- * replica in an undecorated window, leaving it with no close button at all; answering `false` on
- * macOS draws a replica on top of the real traffic lights the OS already put there.
- */
-describe("host OS", () => {
-  it("knows macOS from WKWebView's user agent", () => {
-    pretendDesktop();
-    pretendAgent(AGENTS.wkWebView);
-    expect(isMacOS()).toBe(true);
-  });
-
-  it("does not mistake Windows' WebView2 for macOS, or the window loses its only close button", () => {
-    pretendDesktop();
-    pretendAgent(AGENTS.webView2);
-    expect(isMacOS()).toBe(false);
-  });
-
-  it("does not mistake Linux's WebKitGTK for macOS, though it is a WebKit too", () => {
-    // The trap: WebKitGTK's agent carries `AppleWebKit` and `Safari` like WKWebView's does, and
-    // differs only in the platform token — a looser test than `Mac` would pass here wrongly.
-    pretendDesktop();
-    pretendAgent(AGENTS.webKitGtk);
-    expect(isMacOS()).toBe(false);
-  });
-
-  it("answers false in a browser on a Mac, where the question is meaningless", () => {
-    // No Tauri global: this is the web build, the browser draws its own chrome, and nothing in the
-    // page may reserve room for window buttons however Apple-shaped the host is.
-    pretendAgent(AGENTS.wkWebView);
-    expect(isMacOS()).toBe(false);
-  });
-});

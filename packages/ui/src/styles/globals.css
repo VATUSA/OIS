@@ -23,7 +23,7 @@
    ============================================================ */
 :root {
   --radius: 12px;   /* shadcn components that read var(--radius) directly */
-  --pill: 999px;    /* DESIGN.md's pill radius — buttons, chips, status pills, traffic lights */
+  --pill: 999px;    /* DESIGN.md's pill radius — buttons, chips, status pills */
 
   /* surfaces & ink */
   --ground: #ffffff;
@@ -78,17 +78,6 @@
   --border: var(--line);
   --input: var(--line);
   --ring: var(--brand);
-
-  /* --- window chrome (#419) ---
-     Apple's three window buttons, drawn by the app only on the platforms whose OS does not draw them
-     (macOS keeps its decorations and gets the real ones). Their own tokens rather than the status
-     hues: these mean "close / minimize / zoom this window", and borrowing --danger for the close dot
-     would make a status colour mean chrome. --traffic-blurred is the grey all three fall to when the
-     window loses focus, as the real buttons do. */
-  --traffic-close: #ff5f57;
-  --traffic-minimize: #febc2e;
-  --traffic-zoom: #28c840;
-  --traffic-blurred: #48484a;
 }
 
 /* ============================================================
@@ -291,67 +280,6 @@
   /* DESIGN.md rule 7: data is mono with tabular figures so columns line up. */
   .font-mono {
     font-variant-numeric: tabular-nums;
-  }
-
-  /* --- the traffic-light replica (#419) ---
-     Windows and Linux run the main window undecorated, so the app draws macOS's three buttons
-     itself; macOS gets the real ones from `trafficLightPosition` and renders nothing here. Written as
-     CSS rather than utility classes because the hover-reveal is a group behaviour keyed on a parent
-     data attribute, and the whole thing is one small, self-contained piece of chrome. */
-  .traffic-lights {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .traffic-light {
-    display: grid;
-    place-items: center;
-    /* A flex item with a definite width still shrinks; these must not, or a row that reserves too
-       little turns the dots into ellipses rather than overflowing visibly (#419 review). */
-    flex: 0 0 12px;
-    width: 12px;
-    height: 12px;
-    border-radius: var(--pill);
-    /* The glyph is Apple's: a dark, thin mark on the coloured dot, not white. */
-    color: rgb(0 0 0 / 0.6);
-    transition: background-color 150ms ease-out;
-  }
-  .traffic-light[data-tone="close"] {
-    background: var(--traffic-close);
-  }
-  .traffic-light[data-tone="minimize"] {
-    background: var(--traffic-minimize);
-  }
-  .traffic-light[data-tone="zoom"] {
-    background: var(--traffic-zoom);
-  }
-  .traffic-light > span {
-    display: grid;
-    place-items: center;
-    opacity: 0;
-    transition: opacity 150ms ease-out;
-  }
-  .traffic-light > span > svg {
-    width: 8px;
-    height: 8px;
-  }
-  /* These are raw buttons rather than the shared `Button`, so the focus ring it carries has to be
-     restored here — they are the only way to close the window on an undecorated one. */
-  .traffic-light:focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: 2px;
-  }
-  /* Hovering anywhere over the group reveals all three glyphs at once, as macOS does — not just the
-     one under the cursor. */
-  .traffic-lights:hover .traffic-light > span {
-    opacity: 1;
-  }
-  /* An unfocused window greys all three out and shows no glyphs, again matching the real buttons. */
-  .traffic-lights[data-blurred] .traffic-light {
-    background: var(--traffic-blurred);
-  }
-  .traffic-lights[data-blurred] .traffic-light > span {
-    opacity: 0;
   }
 }
 

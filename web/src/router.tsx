@@ -4,7 +4,6 @@ import {LayoutGrid, List, Rows3} from "lucide-react";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
-import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
 import {RouteErrorScreen} from "@/components/error-boundary";
 import {SendDiagnosticsButton} from "@/components/send-diagnostics";
 import type {RouteMeta} from "@/components/shell/page-meta";
@@ -81,9 +80,6 @@ function RootLayout() {
   if (me.isError) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
-        {/* This layout is outside `AppShell`, so it carries the frameless window's controls itself
-            (#423) — without them the window has no title bar and no way to close it. */}
-        <WindowChromeBar />
         <p className="text-xl font-bold">Can’t reach OIS</p>
         <p className="max-w-md text-sm text-ink-2">
           The server isn’t responding right now. This page keeps trying and will reconnect
@@ -100,16 +96,8 @@ function RootLayout() {
     );
   }
 
-  // Signed-out visitors land on the public homepage — no app shell, with the site footer. Outside
-  // `AppShell` it has to carry the frameless window's controls itself (#423): this is the first screen
-  // a new desktop user sees, and without them the window cannot be closed from inside the app.
-  if (pathname === "/" && !me.isLoading && me.data === null)
-    return (
-      <>
-        <WindowChromeBar />
-        <LandingPage />
-      </>
-    );
+  // Signed-out visitors land on the public homepage — no app shell, with the site footer.
+  if (pathname === "/" && !me.isLoading && me.data === null) return <LandingPage />;
 
   if (embed) {
     return (

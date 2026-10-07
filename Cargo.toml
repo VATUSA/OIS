@@ -92,11 +92,6 @@ tauri-plugin-notification = "2.4"
 mac-notification-sys = "0.6"
 tauri-winrt-notification = "0.7"
 
-# Rounded corners for the undecorated Windows window (#419, `desktop/src-tauri/src/window_shape.rs`).
-# One DWM call, so only the features that call needs are enabled; the crate is already in the tree
-# under Tauri's own Windows backend.
-windows-sys = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
-
 # Desktop diagnostics (#629): a rotating, redacted log file in the OS log directory, and the
 # user-initiated "Send diagnostics" upload. The plugin is the only new crate; `log` and `regex` are
 # already in the tree, and the upload reuses the workspace reqwest with its multipart feature.
