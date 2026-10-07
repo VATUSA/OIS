@@ -964,4 +964,25 @@ mod tests {
         );
         assert!(handler.contains("reset_to_vatusa("));
     }
+
+    /// A member already in line comes back from `reset_member` as unchanged, so a reset never audits
+    /// them even if one reached them: a positive control first, then the in-line member.
+    #[sqlx::test]
+    async fn reset_member_reports_no_change_for_a_member_in_line(pool: PgPool) {
+        let w = world(pool).await;
+        let mut tx = w.pool.begin().await.unwrap();
+        assert!(
+            vatusa_repo::reset_member(&mut tx, &w.member)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            vatusa_repo::reset_member(&mut tx, &w.steady)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        tx.rollback().await.unwrap();
+    }
 }
