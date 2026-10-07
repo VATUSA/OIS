@@ -121,17 +121,51 @@ re-deciding the approach.
 <!-- footer -->
 Blast radius: <does this touch the trajectory/ETA model · permissions (3-in-sync) · the API
 contract (client regen)? name it, or "none">
+Data path: <source → feed module or handler → repo → API route → consumer (hook → page, or the
+bot), real files and routes only; the mode when it matters; or "none">
 Pre-existing; found while <what you were doing>.   ← provenance, when it's incidental
 Relates to #N / Duplicate of #N.                    ← after a duplicate search
 ```
 
-Two OIS-specific habits in that footer:
+Three OIS-specific habits in that footer:
 
 - **Blast radius.** OIS has a few changes that reach further than they look — the single
-  trajectory/ETA model in `feed/trajectory.rs` (three callers), the permission/role
+  trajectory/ETA model in `feed/trajectory.rs` (several callers; `AGENTS.md` lists them), the permission/role
   "three-places-in-sync" invariants, and the OpenAPI→client contract (needs a regen). If the issue
-  touches one, say so; if it touches none, say "none." (This is OIS's analog of AvioDeck's
-  "Data path" line.)
+  touches one, say so; if it touches none, say "none." Blast radius says *how far* a change
+  reaches; Data path says *how the data gets there*.
+- **Data path.** Trace the chain the issue concerns, in the direction the data moves, so a reviewer
+  doesn't re-derive it and a check can be reproduced. Name only hops that exist — a file, a
+  `module::function`, a route as written in `backend/src/router.rs`, a hook, a page — and skip any
+  hop the path doesn't have. In these examples backend paths are relative to `backend/src/` and web
+  paths to `web/src/`; in an issue, either form is fine as long as it resolves. For example:
+  - Live arrival flow: `VATSIM datafeed (feed/vatsim.rs) → handlers/feed.rs::airport_flow →
+    feed/flow.rs::compute (program + CFRs from repos/tmu.rs) → GET /api/v1/tmu/flow/{icao} →
+    useAirportFlow (web/src/lib/feed.ts) → pages/airport.tsx`
+  - Its historical twin: `stats.flight + stats.position →
+    feed/stats/reconstruct.rs::reconstruct_at → handlers/stats.rs::hist_flow →
+    feed/flow.rs::compute → GET /api/v1/stats/hist/flow/{icao} → useAirportFlow inside
+    HistoricalProvider → features/dashboard/view-widgets.tsx → pages/stats/dashboard.tsx`
+  - A write: `pages/admin/access-control.tsx → useSaveUserAccess (web/src/lib/access.ts) →
+    POST /api/v1/admin/users/{cid}/access → handlers/access.rs::update_user_access →
+    repos/access.rs`
+
+  **Name the mode** when the change, or a check of it, behaves differently across modes; otherwise
+  leave it out:
+  - *Live vs historical.* Historical ("time-machine") mode is the scrubber instant a
+    `HistoricalProvider` (`web/src/lib/historical-context.tsx`) supplies; today only the dashboard
+    replay (`pages/stats/dashboard.tsx`) mounts one. Any hook or component that reads
+    `useHistoricalAt()` switches with it — grep for it in `web/src` rather than trusting a list;
+    `useAirportFlow` above is one. Given an instant, the data hooks call `/api/v1/stats/hist/*`
+    instead of the live route; the `useMode*` hooks in `web/src/lib/historical.ts` take that
+    instant as an explicit `at` argument from their callers (`features/dashboard/sources.ts`).
+    If the issue lives on one side, say which; if it's in shared compute (`feed/flow.rs::compute`
+    above), both twins are affected — say so.
+  - *Web vs desktop.* The desktop app (`desktop/src-tauri`) renders the same `web/` bundle, but
+    signs in with a token (`POST /api/v1/auth/desktop/exchange` and `/refresh`) and has its own
+    origins and CSP. Name it when the path crosses auth, CORS/origins, CSP, or a Tauri command.
+
+  Write `Data path: none` for docs, tooling, CI, and other changes that move no runtime data.
 - **Provenance.** If you noticed the problem while doing something else, say so ("Pre-existing;
   found while QA-ing #42") and label it `technical-debt`.
 
@@ -156,7 +190,11 @@ Two OIS-specific habits in that footer:
 > - [ ] The grant saves.
 > - [ ] A test enumerates markers + catalog and fails if they diverge.
 >
-> Blast radius: permissions (three-in-sync). Pre-existing.
+> Blast radius: permissions (three-in-sync).
+> Data path: `pages/admin/access-control.tsx → useSaveUserAccess → POST
+> /api/v1/admin/users/{cid}/access → handlers/access.rs::update_user_access →
+> repos/access.rs::fetch_access_catalog_names`.
+> Pre-existing; found while adding a flow permission.
 
 ---
 
@@ -259,10 +297,11 @@ Every issue has three touchpoints.
    Done: <one sentence on what changed>. PR #<n>.
 
    How to check:
-   1. <a step naming a real route path, file, or control from the diff>
+   1. <(mode, when it matters) a step naming a real route path, file, or control from the diff>
    2. <step>
 
    Blast radius: <trajectory/ETA model · permissions/roles three-in-sync · API contract · none>
+   Data path: <the chain the diff touches, source → … → consumer, or "none">
    Deploy: <migration NNNN applies on backend start · client regenerated · new env var · nothing>
    ```
 
@@ -270,6 +309,24 @@ Every issue has three touchpoints.
    traces to code in the diff; if you can't point at it, drop the line. If the change is entirely
    `docs/`, tooling, or test-only, say so and why it needs no runtime verification. Don't fire
    Moment 3 while more work is coming.
+
+   **Data path** follows the footer's rule in [Body structure](#body-structure): the same chain
+   format and examples, and `none` for a change that moves no runtime data. Write the chain
+   the diff actually touches, so restate the issue's line only if it still holds.
+
+   **Name the mode on each step** whose result depends on it, using the footer's two axes (live vs
+   historical, web vs desktop). A step that reads the same everywhere carries no mode. For a change
+   in shared compute such as `feed/flow.rs::compute`, give a step per side:
+
+   ```
+   1. (live, web) Open /ops/airport?icao=KATL and check the 60-minute demand against its flight
+      list.
+   2. (historical, web) Open /admin/historical/dashboard on a board with a KATL airport-flow
+      widget, scrub to a captured instant, and make the same check there.
+   ```
+
+   A step that crosses auth, origins, CSP, or a Tauri command names `web` or `desktop`; a fix that
+   only one of them needs says which, and a check on the other confirms it didn't regress.
 
 ### The budget
 

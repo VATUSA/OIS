@@ -46,8 +46,8 @@ Go through every item. Mark each one **pass**, **fail** or **n/a**, with the evi
    (`AGENTS.md` § Permissions).
 7. **New feed-visible config** has its `AppState` cache, a refresh job in `backend/src/jobs.rs`,
    and a force-reload in the write handler.
-8. **A trajectory change** has been checked at every caller: the three in `AGENTS.md` § The
-   trajectory / ETA model, plus any other `trajectory::` user (`backend/src/feed/sector_tracks.rs`).
+8. **A trajectory change** has been checked at every caller listed in `AGENTS.md` § The
+   trajectory / ETA model, re-derived with `git grep 'trajectory::' -- backend/src`.
 9. **A new migration** is numbered above everything on `next` and on every remote branch. Run
    `git ls-remote --heads origin` and compare the `backend/migrations/` numbers on the branches
    that touch migrations. A gap is harmless; a duplicate half-migrates the database.
