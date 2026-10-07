@@ -598,6 +598,63 @@ async fn reading_demand_needs_flow_sectors_read(pool: PgPool) {
     );
 }
 
+/// #725 owner decision 4 (migration 0129): a rostered controller opens the Sector Monitor. The
+/// CONTROLLER group is granted the way the VATUSA sync grants it (#730): one row at the home ARTCC,
+/// `source = 'vatusa'`, no direct `flow.sectors.read`. `flow.sectors.read` is a read gate, which a grant
+/// at any scope satisfies, so a ZDC controller reads ZDC **and** a neighbour (ZNY), the page's view-only
+/// neighbour tables. It edits neither: the edit flags are false at both, and a limit write at their own
+/// ZDC is refused, since CONTROLLER holds no `flow.sector_limits.update`. A signed-in user outside the
+/// group gets the closed response.
+#[sqlx::test]
+async fn a_controller_reads_demand_at_home_and_next_door_and_edits_none(pool: PgPool) {
+    use crate::repos::access::{GrantSource, set_user_role_scoped};
+
+    let state = state(pool.clone());
+    let controller = seed_user(&pool).await;
+    let mut tx = pool.begin().await.unwrap();
+    set_user_role_scoped(
+        &mut tx,
+        &controller,
+        "CONTROLLER",
+        true,
+        Some("ZDC"),
+        GrantSource::Vatusa,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let controller = session_cookie(&pool, &controller).await;
+    let outsider = session_cookie(&pool, &seed_user(&pool).await).await;
+    cycle(&state, VatsimData::default(), Utc::now()).await;
+
+    for artcc in ["ZDC", "ZNY"] {
+        let body = get(&state, artcc, &controller).await;
+        assert_eq!(body["artcc"], artcc);
+        assert_eq!(body["status"], "ready", "{artcc}: {body}");
+        assert_eq!(body["limits_editable"], false, "{artcc}");
+        assert_eq!(body["consolidations_editable"], false, "{artcc}");
+
+        let uri = format!("/api/v1/flow/sector-demand/{artcc}");
+        assert_eq!(
+            send(&state, Method::GET, &uri, &outsider, None).await,
+            StatusCode::UNAUTHORIZED,
+            "{artcc}: outside the group"
+        );
+    }
+    assert_eq!(
+        send(
+            &state,
+            Method::PUT,
+            "/api/v1/flow/sector-limits/ZDC/010",
+            &controller,
+            Some(json!({ "limit": 2 })),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "reading is not editing, even at home"
+    );
+}
+
 /// #726 through the route: the engine runs over the **whole** table, so 3D containment and TRACON
 /// precedence hold across ARTCC lines. Under the corridor the neighbour ZNY has `080`, an approach
 /// volume, and ZDC has `090`, an enroute low, both surface to 10,000 ft. The three flights at FL240

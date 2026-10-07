@@ -193,7 +193,8 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
 
 **Operations → Sector Monitor** (`/ops/sectors`, `web/src/pages/sector-monitor.tsx`, components in
 `web/src/features/sector-demand/`). The nav item and the page are gated on `flow.sectors.read`, the
-endpoint's own gate; without it the page says so and asks for nothing.
+endpoint's own gate; without it the page says so and asks for nothing. A rostered controller holds it
+through `CONTROLLER` (migration 0129); a grant at their facility reads every ARTCC, edits none.
 
 - **The set follows the facility selector and nothing else.** It opens on the viewer's VATUSA home
   facility and the pick is not remembered, so a controller who moves facilities does not keep the old
