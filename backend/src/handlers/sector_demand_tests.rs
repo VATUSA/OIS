@@ -17,10 +17,11 @@ use sqlx::PgPool;
 use crate::{
     feed::{
         Snapshot,
-        airports::Airport,
+        airports::{Airport, AirportDb},
         sectors::{SectorTable, SectorVolume, tests::volume},
         vatsim::{FlightPlan, Pilot, Prefile, VatsimData},
     },
+    handlers::sector_demand_cache::Inputs,
     scope_test_support::{grant, seed_user, send, send_json, session_cookie, test_state},
     state::AppState,
 };
@@ -1056,31 +1057,32 @@ async fn the_cached_demand_is_the_uncached_demand(pool: PgPool) {
     assert_eq!(rejudged, get(&fresh(&state), "ZDC", &cookie).await);
 }
 
-/// A request that read the feed just before a new cycle landed computes its own answer but leaves the
-/// newer cycle's entry in place, so the next read of the new cycle is still a hit.
-#[tokio::test]
-async fn an_older_cycle_never_replaces_a_newer_one() {
-    use crate::{feed::Snapshot, handlers::sector_demand_cache::Inputs};
-
-    let state = AppState::without_db();
+/// The direct-cache fixture: one ZDC volume, an empty airport table and a builder for the inputs the
+/// handler would read with nothing else set.
+fn direct_fixture() -> (AppState, Arc<SectorTable>, Arc<AirportDb>) {
     let table = Arc::new(SectorTable {
         volumes: vec![corridor("ZDC", "01001", "high")],
     });
-    let snapshot = |at: &str| {
-        Arc::new(Snapshot {
-            fetched_at: at.parse().unwrap(),
-            source_timestamp: String::new(),
-            data: VatsimData::default(),
-        })
-    };
-    let (older, newer) = (
-        snapshot("2026-10-07T14:00:00Z"),
-        snapshot("2026-10-07T14:00:15Z"),
-    );
-    let airports = Arc::default();
-    let inputs = |snapshot: &Arc<Snapshot>| Inputs {
+    (AppState::without_db(), table, Arc::default())
+}
+
+fn direct_snapshot(at: &str) -> Arc<Snapshot> {
+    Arc::new(Snapshot {
+        fetched_at: at.parse().unwrap(),
+        source_timestamp: String::new(),
+        data: VatsimData::default(),
+    })
+}
+
+fn direct_inputs(
+    state: &AppState,
+    snapshot: &Arc<Snapshot>,
+    airports: &Arc<AirportDb>,
+    table: &Arc<SectorTable>,
+) -> Inputs {
+    Inputs {
         snapshot: snapshot.clone(),
-        airports: Arc::clone(&airports),
+        airports: airports.clone(),
         nav: state.nav.load_full(),
         profiles: state.aircraft_profiles.load_full(),
         winds: state.winds.load_full(),
@@ -1089,7 +1091,19 @@ async fn an_older_cycle_never_replaces_a_newer_one() {
         excluded: HashSet::new(),
         wheels_up: HashMap::new(),
         limits: Arc::default(),
-    };
+    }
+}
+
+/// A request that read the feed just before a new cycle landed computes its own answer but leaves the
+/// newer cycle's entry in place, so the next read of the new cycle is still a hit.
+#[tokio::test]
+async fn an_older_cycle_never_replaces_a_newer_one() {
+    let (state, table, airports) = direct_fixture();
+    let (older, newer) = (
+        direct_snapshot("2026-10-07T14:00:00Z"),
+        direct_snapshot("2026-10-07T14:00:15Z"),
+    );
+    let inputs = |snapshot: &Arc<Snapshot>| direct_inputs(&state, snapshot, &airports, &table);
     let cache = &state.sector_demand;
 
     let n = cache.demand("ZDC", inputs(&newer)).await.unwrap();
@@ -1101,6 +1115,68 @@ async fn an_older_cycle_never_replaces_a_newer_one() {
     assert_eq!(cache.projections(), 2);
     cache.demand("ZDC", inputs(&newer)).await.unwrap();
     assert_eq!(cache.projections(), 2, "the newer cycle's entry was kept");
+}
+
+/// Concurrent reads of one ARTCC on the same inputs wait for one projection and share its answer.
+/// Driven on one task with `join!`, every read reaches the slot while the first is still projecting,
+/// so this does not depend on how the scheduler interleaves requests, as the router-level
+/// `concurrent_reads_share_one_projection` does.
+#[tokio::test]
+async fn concurrent_reads_of_the_same_inputs_wait_for_one_projection() {
+    let (state, table, airports) = direct_fixture();
+    let snapshot = direct_snapshot("2026-10-07T14:00:00Z");
+    let cache = &state.sector_demand;
+    let read = || cache.demand("ZDC", direct_inputs(&state, &snapshot, &airports, &table));
+
+    let (a, b, c, d) = tokio::join!(read(), read(), read(), read());
+    assert_eq!(
+        cache.projections(),
+        1,
+        "four concurrent reads, one projection"
+    );
+    let a = a.unwrap();
+    for other in [b, c, d] {
+        assert!(
+            Arc::ptr_eq(&a, &other.unwrap()),
+            "every read got the one answer"
+        );
+    }
+}
+
+/// A read dropped mid-projection (its client went away) does not throw the projection away: the
+/// slot's own task finishes it and stores it, so the read queued behind it is a hit, not a second
+/// projection of the same inputs.
+#[tokio::test]
+async fn a_cancelled_read_still_fills_the_slot() {
+    let (state, table, airports) = direct_fixture();
+    let snapshot = direct_snapshot("2026-10-07T14:00:00Z");
+    let cache = state.sector_demand.clone();
+
+    let first = tokio::spawn({
+        let (cache, inputs) = (
+            cache.clone(),
+            direct_inputs(&state, &snapshot, &airports, &table),
+        );
+        async move { cache.demand("ZDC", inputs).await.map(|_| ()) }
+    });
+    while cache.projections() == 0 {
+        tokio::task::yield_now().await;
+    }
+    first.abort();
+    assert!(
+        first.await.unwrap_err().is_cancelled(),
+        "the first read was cancelled while it projected"
+    );
+
+    cache
+        .demand("ZDC", direct_inputs(&state, &snapshot, &airports, &table))
+        .await
+        .unwrap();
+    assert_eq!(
+        cache.projections(),
+        1,
+        "the next read waited for the cancelled read's projection"
+    );
 }
 
 /// Every other input re-projects when it changes within a cycle: an exclusion (a write force-reloads it),

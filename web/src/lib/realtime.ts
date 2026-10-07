@@ -35,7 +35,7 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   { key: ["idst"], minGapMs: 30_000 },
   { key: ["departures"], minGapMs: 60_000 },
   // Six hours of projection per ARTCC, computed once per feed snapshot on the server and shared by
-  // every viewer (`AppState::sector_demand`): a miss costs one projection, 30–125 ms of CPU per ARTCC
+  // every viewer (`AppState::sector_demand`): a miss costs one projection, 32–125 ms of CPU per ARTCC
   // in release; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
   { key: ["sector-demand"], minGapMs: 60_000 },
 ];
@@ -75,8 +75,9 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
  *
  * Held until the next tick instead, a burst collapses into one refetch, and every client makes it
  * together against the new snapshot, which the server projects once per ARTCC for all of them. So
- * these topics cost at most one projection per open ARTCC per feed publish, however many arrive and
- * however many clients hear them, and the change shows within one publish (about 15 s) instead of at
+ * these topics normally cost one projection per open ARTCC per feed publish, however many arrive and
+ * however many clients hear them (a wheels-up the server commits between two clients' refetches on
+ * the same tick costs a second, since it reads wheels-up per request), and the change shows within one publish (about 15 s) instead of at
  * the key's next one-minute tick refetch. If no tick comes, {@link COALESCE_MS} refetches it anyway.
  */
 export const COALESCED_KEYS: Record<string, string[][]> = {
@@ -200,8 +201,6 @@ export function connectRealtime(qc: QueryClient): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
 
-  // Tick-silence watchdog (#648 review): live only while ticks keep arriving, not merely while the
-  // socket claims to be open.
   // Coalesced refetches waiting for the next tick (#725), by key, and the timer that runs them if
   // no tick comes first.
   const pending = new Map<string, string[]>();
@@ -225,6 +224,8 @@ export function connectRealtime(qc: QueryClient): () => void {
     }, COALESCE_MS);
   };
 
+  // Tick-silence watchdog (#648 review): live only while ticks keep arriving, not merely while the
+  // socket claims to be open.
   let tickSubscribed = false;
   let silence: ReturnType<typeof setTimeout> | null = null;
   const quiet = () => {

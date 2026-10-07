@@ -29,7 +29,11 @@ const noneAlerting = (artcc: string, kind: DemandTableKind, spanH: number) =>
   `No ${artcc}${kind === "tracon" ? " TRACON" : ""} sectors alerting in the next ${formatHours(spanH)}`;
 
 /** Limit editing for the selected facility's own tables. Neighbours never get one. */
-type LimitEditing = { onLimitChange: (sectorId: string, limit: number) => void; resets: number };
+type LimitEditing = {
+  onLimitChange: (sectorId: string, limit: number) => void;
+  /** Bumped per sector when a write is refused, to put that sector's input back on the stored value. */
+  resets: Readonly<Record<string, number>>;
+};
 
 /**
  * One of an ARTCC's two tables, with its own controls: the 2–6 h range it draws and the "only sectors
@@ -76,12 +80,11 @@ export function DemandTable({
   } else {
     body = (
       <SectorGrid
-        // A refused write remounts the grid, so a limit input shows the stored value, not the typed one.
-        key={editing?.resets ?? 0}
         rows={grid.rows}
         binStarts={grid.binStarts}
         caption={`${name} sector demand`}
         onLimitChange={editing?.onLimitChange}
+        limitResets={editing?.resets}
       />
     );
   }
@@ -169,7 +172,7 @@ function useLimitEditing(artcc: string): LimitEditing {
   const qc = useQueryClient();
   const toast = useToast();
   const { mutate } = useSetSectorLimit(artcc);
-  const [resets, setResets] = useState(0);
+  const [resets, setResets] = useState<Readonly<Record<string, number>>>({});
   const onLimitChange = useCallback(
     (sectorId: string, limit: number) =>
       mutate(
@@ -177,7 +180,7 @@ function useLimitEditing(artcc: string): LimitEditing {
         {
           onSuccess: () => void qc.invalidateQueries({ queryKey: sectorDemandKey(artcc) }),
           onError: () => {
-            setResets((n) => n + 1);
+            setResets((r) => ({ ...r, [sectorId]: (r[sectorId] ?? 0) + 1 }));
             toast.error(`Couldn't set ${sectorId}'s limit`, { description: "The limit is unchanged." });
           },
         },

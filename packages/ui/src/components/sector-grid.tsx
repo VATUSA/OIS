@@ -50,18 +50,21 @@ const STICKY = "sticky z-10 bg-card";
  * caller.
  *
  * Pass `onLimitChange` only where the viewer may edit limits; without it the limit cell is plain text
- * with no affordance at all.
+ * with no affordance at all. Bump a sector's count in `limitResets` to put its input back on the stored
+ * limit (after a refused write); only that input remounts, so a draft in another row survives.
  */
 export function SectorGrid({
   rows,
   binStarts,
   caption,
   onLimitChange,
+  limitResets,
 }: {
   rows: SectorGridRow[];
   binStarts: number[];
   caption: string;
   onLimitChange?: (sectorId: string, limit: number) => void;
+  limitResets?: Readonly<Record<string, number>>;
 }) {
   const times = binStarts.map(hhmm);
   return (
@@ -101,7 +104,12 @@ export function SectorGrid({
               </th>
               <td className={cn(STICKY, "left-28 w-14 min-w-14 border-r border-line-soft px-1 py-1 text-right text-ink-2")}>
                 {onLimitChange ? (
-                  <SectorLimitInput sectorId={row.id} limit={row.limit} onCommit={onLimitChange} />
+                  <SectorLimitInput
+                    key={limitResets?.[row.id] ?? 0}
+                    sectorId={row.id}
+                    limit={row.limit}
+                    onCommit={onLimitChange}
+                  />
                 ) : (
                   <span className="px-1">{row.limit}</span>
                 )}

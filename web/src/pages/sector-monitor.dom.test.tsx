@@ -355,6 +355,25 @@ describe("the Sector Monitor page (#725)", () => {
     expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(false);
   });
 
+  // #722's deleted editor reset each input on its own key; the grid must too, or a refused write on one
+  // sector throws away what the controller is typing into another.
+  it("a refused write resets only its own input: a draft in another sector survives (#722)", async () => {
+    put.mockResolvedValue({error: {status: 403}});
+    const {host} = await mount(READER, [demand("ZDC", {limits_editable: true})]);
+    const input = (id: string) => host.querySelector<HTMLInputElement>(`input[aria-label="Limit for ${id}"]`)!;
+    // A draft held in ZDC06 (typed, not committed) …
+    await setValue(input("ZDC06"), "17");
+    // … while a write on ZDC05 is refused and raises a toast.
+    await act(async () => input("ZDC05").focus());
+    await setValue(input("ZDC05"), "20");
+    await act(async () => input("ZDC05").dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true})));
+    await act(async () => new Promise((r) => setTimeout(r, 0)));
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain("Couldn't set ZDC05's limit");
+    expect(input("ZDC05").value).toBe("10");
+    expect(input("ZDC06").value).toBe("17");
+  });
+
   // #722's limit editor was a separate table, never placed on a page; its cases now run against the
   // grid's inline input, which is where limits are edited (#725 owner decision 5). Each entry fails
   // "positive whole number" or equals the stored value, and none may reach the API or clear the override.

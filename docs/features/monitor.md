@@ -191,7 +191,8 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
   **coalesced into the next `feed.tick`** (`COALESCED_KEYS`). These can arrive several times a minute
   while a program runs, and each wheels-up change is a fresh projection per open ARTCC on the server.
   Held until the tick, a burst becomes one refetch that every client makes against the same new
-  snapshot, so the server projects once per ARTCC per publish however many nudges came; the change
+  snapshot, so the server normally projects once per ARTCC per publish however many nudges came (a
+  wheels-up committed between two clients' refetches on one tick costs a second); the change
   shows within one publish (~15 s). With no tick, `COALESCE_MS` (20 s) refetches it anyway. A
   reconnect's catch-up drops anything held.
 

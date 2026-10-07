@@ -1,8 +1,8 @@
 //! Sector demand computed once per feed snapshot (#725), not once per request.
 //!
 //! An ARTCC's demand projects six hours of every flight near it (`sector_tracks::project_tracks`) and
-//! bins them against the whole sector table (`sector_loads`): 0.25–0.8 s of CPU in a release build. Every
-//! viewer of an ARTCC, as its own facility or as someone's neighbour, asks for the same numbers, and each
+//! bins them against the whole sector table (`sector_loads`): 32–125 ms of CPU per ARTCC in a release
+//! build, measured against a captured 1,486-pilot feed. Every viewer of an ARTCC, as its own facility or as someone's neighbour, asks for the same numbers, and each
 //! open table refetches on every feed tick and on four flow topics. So the projection runs once per
 //! ARTCC per set of inputs and every other request reads it.
 //!
@@ -22,7 +22,9 @@
 //! **Computed on demand, once.** Nothing is computed for an ARTCC nobody is looking at, and the feed
 //! tick stays as cheap as it was: the first request after a change computes, holding that ARTCC's slot,
 //! and concurrent requests for it wait for that result rather than each projecting (single-flight).
-//! Different ARTCCs compute in parallel. The projection runs under `spawn_blocking`.
+//! Different ARTCCs compute in parallel. The projection runs under `spawn_blocking`, inside a task that
+//! owns the slot until the entry is written, so a request dropped mid-projection (its client went away)
+//! doesn't throw the result away for the requests waiting behind it.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -168,13 +170,12 @@ impl SectorDemandCache {
     /// `artcc`'s demand from `inputs`: the held one when nothing it was built from has changed, its rows
     /// re-judged when only the limits have, and a fresh projection otherwise.
     pub(crate) async fn demand(
-        &self,
+        self: &Arc<Self>,
         artcc: &str,
         inputs: Inputs,
     ) -> Result<Arc<Demand>, ApiError> {
-        let slot = self.slot(artcc);
         // Held across the projection: this is the single flight.
-        let mut held = slot.lock().await;
+        let mut held = self.slot(artcc).lock_owned().await;
         if let Some(entry) = held.as_mut()
             && entry.key.matches(&inputs)
         {
@@ -185,21 +186,28 @@ impl SectorDemandCache {
             return Ok(entry.demand.clone());
         }
 
-        let loads = Arc::new(self.project(artcc, &inputs).await?);
-        let demand = Arc::new(self.render(&loads, &inputs, artcc));
-        // A request that read the feed just before a new cycle landed must not replace that cycle's
-        // entry with its older one: it gets its own answer and the newer entry stays.
-        let cycle_at = inputs.snapshot.fetched_at;
-        if held.as_ref().is_none_or(|e| e.cycle_at <= cycle_at) {
-            *held = Some(Entry {
-                key: Key::of(&inputs),
-                cycle_at,
-                loads,
-                limits: inputs.limits.clone(),
-                demand: demand.clone(),
-            });
-        }
-        Ok(demand)
+        // The slot moves into the task, so dropping this request leaves the projection and the write
+        // running, and the next request in line reads the entry instead of projecting again.
+        let (cache, artcc) = (Arc::clone(self), artcc.to_string());
+        tokio::spawn(async move {
+            let loads = Arc::new(cache.project(&artcc, &inputs).await?);
+            let demand = Arc::new(cache.render(&loads, &inputs, &artcc));
+            // A request that read the feed just before a new cycle landed must not replace that cycle's
+            // entry with its older one: it gets its own answer and the newer entry stays.
+            let cycle_at = inputs.snapshot.fetched_at;
+            if held.as_ref().is_none_or(|e| e.cycle_at <= cycle_at) {
+                *held = Some(Entry {
+                    key: Key::of(&inputs),
+                    cycle_at,
+                    loads,
+                    limits: inputs.limits.clone(),
+                    demand: demand.clone(),
+                });
+            }
+            Ok(demand)
+        })
+        .await
+        .map_err(|_| ApiError::Internal)?
     }
 
     /// Project the flights near `artcc` and bin them against the whole table, keeping `artcc`'s rows.

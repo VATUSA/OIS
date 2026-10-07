@@ -143,4 +143,24 @@ describe("SectorGrid (#724)", () => {
     await key(input, "Enter");
     expect(onLimitChange).toHaveBeenCalledWith("ZLA10", 14);
   });
+
+  it("puts back only the input whose reset count moved; a draft in another row survives", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push({root, host});
+    const render = (limitResets: Record<string, number>) =>
+      act(async () => {
+        root.render(
+          <SectorGrid rows={rows(2)} binStarts={BINS} caption="ZLA enroute" onLimitChange={() => {}} limitResets={limitResets} />,
+        );
+      });
+    const input = (id: string) => host.querySelector<HTMLInputElement>(`input[aria-label="Limit for ${id}"]`)!;
+    await render({});
+    await type(input("ZLA10"), "20");
+    await type(input("ZLA11"), "17");
+    await render({ZLA10: 1});
+    expect(input("ZLA10").value).toBe("10");
+    expect(input("ZLA11").value).toBe("17");
+  });
 });
