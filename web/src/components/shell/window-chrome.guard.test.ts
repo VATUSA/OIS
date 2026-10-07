@@ -15,8 +15,9 @@ import {beforeAll, describe, expect, it} from "vitest";
  * as a reverted one. Don't swap it for something narrower.
  *
  * Comments are stripped first, because prose that explains the old chrome is not chrome. The
- * stripping does not know about strings, so a `/*` inside a string literal (a glob such as
- * `"../assets/*.svg"`) hides the code up to the next `*\/` from the scan; that is the accepted limit.
+ * stripping does not know about strings: a `/*` inside a string literal (a glob such as
+ * `"../assets/*.svg"`) hides the code up to the next `*\/`, and a `//` that is not part of `://`
+ * hides the rest of its line. That is the accepted limit.
  */
 const ROOTS = [resolve(process.cwd(), "src"), resolve(process.cwd(), "../packages/ui/src")];
 
@@ -26,7 +27,7 @@ const FORBIDDEN: readonly [name: string, pattern: RegExp][] = [
   ["a call that drags the window", /\bstartDragging\s*\(/],
   ["an app-drawn minimize / maximize button", /\.(?:minimize|maximize|toggleMaximize)\s*\(/],
   // Selectors, class names and tokens, not the words: release notes may still say "traffic light".
-  ["the traffic-light replica", /\.traffic-lights?\b|className=["'`][^"'`]*\btraffic-lights?\b|--traffic-/],
+  ["the traffic-light replica", /\.traffic-lights?\b|(?:className|\bcn\(|\bclsx\()[^\n]*\btraffic-lights?\b|--traffic-/],
 ];
 
 function strip(text: string): string {
@@ -86,6 +87,8 @@ describe("app-drawn window chrome (#796)", () => {
       `onClick={act((win) => win.toggleMaximize())}`,
       `<div className="flex traffic-lights">`,
       `  background: var(--traffic-close);`,
+      `<div className={cn("traffic-lights", blurred && "dim")}>`,
+      "<button className={`traffic-light ${tone}`} />",
     ].join("\n");
     expect(scan("old.tsx", old)).toEqual([
       "old.tsx:1  a Tauri drag region",
@@ -94,6 +97,8 @@ describe("app-drawn window chrome (#796)", () => {
       "old.tsx:4  an app-drawn minimize / maximize button",
       "old.tsx:5  the traffic-light replica",
       "old.tsx:6  the traffic-light replica",
+      "old.tsx:7  the traffic-light replica",
+      "old.tsx:8  the traffic-light replica",
     ]);
 
     const fine = [
