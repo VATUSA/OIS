@@ -112,7 +112,7 @@ fn first_bin(active_min: u32, proposed_min: u32) -> BinPeak {
         track("P2", Population::Proposed, &p[..]),
         track("P3", Population::Proposed, &p[..]),
     ];
-    let loads = sector_loads(&table, &tracks, at(7));
+    let loads = sector_loads(&table, &Default::default(), &tracks, at(7));
     assert_eq!(loads.len(), 1);
     loads[0].bins[0]
 }

@@ -1567,6 +1567,31 @@ pub struct SetSectorLimitRequest {
     pub limit: i32,
 }
 
+/// One sector worked at another sector's position (#723). Its airspace counts in the target's row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorConsolidationBody {
+    pub sector_id: String,
+    /// Where `sector_id` is worked. Never itself worked elsewhere: the arrangement is kept flat.
+    pub target_sector_id: String,
+}
+
+/// An ARTCC's consolidations (#723). A sector not listed is worked on its own.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorConsolidationsBody {
+    pub artcc: String,
+    /// Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`,
+    /// nationally or for this ARTCC).
+    pub editable: bool,
+    /// Ordered by `sector_id`.
+    pub consolidations: Vec<SectorConsolidationBody>,
+}
+
+/// Work a sector at another of the same ARTCC's sectors.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorRequest {
+    pub target_sector_id: String,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.
