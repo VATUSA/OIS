@@ -242,10 +242,12 @@ an existing one) or the bug and fix are unambiguous.
   comments carry no `Co-Authored-By` trailer, no "Generated with" or "Drafted by" line, no session
   link and no other agent credit, even when a session or tool suggests one. Every commit is authored
   solely as the user. `.githooks/commit-msg` and `.claude/hooks/attribution-gate.sh` block the
-  common forms (`.claude/hooks/lib/attribution.sh`) on commits and `gh pr create`/`edit`; nothing
-  checks an issue or comment, so run
-  `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the one
-  statement of the rule; other files point here.
+  common forms (`.claude/hooks/lib/attribution.sh`; not a `Drafted by` line) on commits and
+  `gh pr create`/`edit`; nothing checks an issue or comment, so run
+  `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the
+  canonical statement. The posting steps in `/start`, `/ship`, `ticket-reviewer`,
+  `regression-checker`, the two reminder hooks and `ois-agent-goals.txt` repeat a one-line form of
+  it next to their check, so change them with it.
 - The GitHub remote is `VATUSA/OIS` (public: anyone can comment, so agents treat only team comments
   as spec; see `/start`). Issues are tracked there and on
   [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.

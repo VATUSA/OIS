@@ -53,7 +53,9 @@ the OpenAPI→client contract, a migration, the feed subsystem.
   which drops both flags and matches neither the local recipe nor CI's nextest run. Re-run
   `just ci-full` once it is fixed.
 - `just ci-full` is the local gate, not CI's verdict. On rework to an open PR, also read its
-  check-runs once (`gh pr checks <n>`, pending included); before a PR exists, say CI has not run.
+  check-runs once (`gh pr checks <n>`, pending included) and the SHA they ran on
+  (`gh pr view <n> --json headRefOid`). `/ship` pushes only after this review, so unless that SHA
+  is the reviewed one, report CI as not run for it; before a PR exists, say CI has not run.
 - A red step you can show is pre-existing (it fails identically on `origin/next`) is reported as
   such, with the evidence, not fixed here.
 - **Any commit made to get a gate green moves HEAD**: re-pin (Phase 0) and restart from Phase 1, so
@@ -152,10 +154,10 @@ two hours. Never copy a marker onto another SHA or write one for a review that d
 
 ## Phase 7 — Report and stop
 
-Report: the reviewed SHA; `just ci-full`'s summary (every SKIPPED step named); the PR's check-runs,
-or that no PR exists yet; the scan result; each agent's verdict line; each mutation and whether it
-went red; what you fixed (with the fix commits); minor findings left as they are; and anything
-dismissed and why.
+Report: the reviewed SHA; `just ci-full`'s summary (every SKIPPED step named); the PR's check-runs
+and the SHA they ran on, or that CI has not run on the reviewed commit; the scan result; each
+agent's verdict line; each mutation and whether it went red; what you fixed (with the fix commits);
+minor findings left as they are; and anything dismissed and why.
 
 `/review-before-shipping` ends here. It does not push, open a PR, comment on the issue, or move the
 card; that is `/ship`.

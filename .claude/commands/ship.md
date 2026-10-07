@@ -104,7 +104,7 @@ shares the API budget with the board.
 - Post the **Moment 3** comment on the issue, drafted to the template and 1,200-character budget in
   `docs/github-issues.md` § Comments: the three Moments. That template owns the lines (how-to-check
   steps with their mode, blast radius, data path, deploy note) and the docs/test-only exemption;
-  don't restate it here. No AI attribution of any kind: no `Drafted by` or `Generated with` footer.
+  don't restate it here. No AI attribution (`AGENTS.md` § Git workflow).
   Assert the length and the attribution before posting:
   ```bash
   n=$(LC_ALL=en_US.UTF-8 wc -m < moment3.md | tr -d ' ')
