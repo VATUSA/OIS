@@ -10,6 +10,10 @@
 #     `echo $(git push)` both expose the push;
 #   * the quoted script of `bash -c`, `sh -lc` (any `*sh -…c…`) or `eval` is split as commands too;
 #   * redirections (`> f`, `2>&1`, `<<'EOF'`) and comments are dropped.
+# With `-v mode=quoted` it prints instead the text of every quoted word, each starting on a line of
+# its own (the attribution gate checks a body's lines whatever argument follows its closing quote).
+# A backslash in double quotes is kept unless the shell drops it (`\n` stays `\n`), and the string
+# literals of a quoted GraphQL `mutation` are printed one by one too.
 # POSIX awk only: it runs under macOS's BSD awk as well as gawk/mawk.
 
 { lines[++n] = $0 }
@@ -59,6 +63,10 @@ END {
                 seg = seg "__Q__"
                 continue
             }
+            if (mode == "quoted") {
+                print word
+                if (word ~ /^[ \t\n]*mutation([^A-Za-z0-9_]|$)/) print_literals(word)
+            }
             seg = seg plain(word)
             continue
         }
@@ -99,6 +107,7 @@ function read_quoted(i,    q, ch) {
         ch = substr(text, i, 1)
         if (ch == q) return i + 1
         if (q == "\"" && ch == "\\") {
+            if (mode == "quoted" && index("$`\"\\\n", substr(text, i + 1, 1)) == 0) word = word ch
             word = word substr(text, i + 1, 1)
             i += 2
             continue
@@ -123,6 +132,27 @@ function skip_word(i,    ch) {
     return i
 }
 
+# Prints each double-quoted string literal in w (JSON or GraphQL syntax) on a line of its own.
+function print_literals(w,    j, n, ch, nx, lit, inside) {
+    n = length(w)
+    inside = 0
+    for (j = 1; j <= n; j++) {
+        ch = substr(w, j, 1)
+        if (!inside) {
+            if (ch == "\"") { inside = 1; lit = "" }
+            continue
+        }
+        if (ch == "\\") {
+            nx = substr(w, j + 1, 1)
+            lit = lit ((nx == "\"" || nx == "\\") ? nx : ch nx)
+            j++
+            continue
+        }
+        if (ch == "\"") { print lit; inside = 0; continue }
+        lit = lit ch
+    }
+}
+
 function plain(w) {
     if (w ~ /^[A-Za-z0-9_.\/:@%+=,~^-]*$/) return w
     return "__Q__"
@@ -132,6 +162,6 @@ function emit(    s) {
     s = seg
     gsub(/^[ \t]+/, "", s)
     gsub(/[ \t]+$/, "", s)
-    if (s != "") print s
+    if (s != "" && mode != "quoted") print s
     seg = ""
 }
