@@ -102,6 +102,10 @@ pub struct Flow {
     /// `demand_60min > aar` when a program exists, else null.
     pub over_capacity: Option<bool>,
     pub flights: Vec<FlowFlight>,
+    /// Every STAR the nav data says serves this airport (raw procedure names, e.g. `CAPPS3`),
+    /// sorted, whether or not any traffic is filed on it. Lets a gate be picked before a flight
+    /// files through it; group it with the same normalizer as `FlowFlight.gate`.
+    pub stars: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -381,6 +385,7 @@ pub fn compute(
         demand_60min,
         over_capacity: program.map(|p| demand_60min as i32 > p.aar),
         flights,
+        stars: nav.stars_for(icao).to_vec(),
     }
 }
 
@@ -1246,6 +1251,99 @@ mod tests {
         assert_eq!(
             arrival_gate("DCT CAMRN KJFK", "KJFK").as_deref(),
             Some("CAMRN")
+        );
+    }
+
+    // ---- static gate list (#791) ----
+
+    /// The shared gate-name fixture. `web/src/pages/airport-gates.test.ts` reads the same file.
+    fn gate_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../fixtures/tgui-gate-names.json"))
+            .expect("the TGUI gate-name fixture should parse")
+    }
+
+    fn gate_fixture_nav(fixture: &serde_json::Value) -> NavData {
+        let procedures = fixture["procedures"].to_string();
+        NavData::from_json("{}", "{}", "{}", &procedures, "{}", "{}", "{}")
+    }
+
+    fn strings(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .expect("an array")
+            .iter()
+            .map(|s| s.as_str().expect("a string").to_string())
+            .collect()
+    }
+
+    /// With no traffic at all, the flow still lists the airport's STARs, taken from the nav data's
+    /// `apt` field: the other airport's STAR and the airport's own SID are left out.
+    #[test]
+    fn flow_lists_the_airports_stars_from_nav_data_with_no_traffic() {
+        let fixture = gate_fixture();
+        let icao = fixture["airport"].as_str().unwrap();
+        let flow = compute(
+            icao,
+            None,
+            &VatsimData::default(),
+            &airports(),
+            &gate_fixture_nav(&fixture),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
+
+        assert!(flow.flights.is_empty());
+        assert_eq!(
+            flow.stars,
+            vec!["CAVLR", "CAVLR6", "DELRO5", "SEG6", "WIGOL3"],
+            "KIAD's STARs, sorted; not KDCA's FRDMM5 and not the JCOBY4 SID"
+        );
+        assert_eq!(flow.stars, strings(&fixture["stars"]));
+        // The excluded STAR is reachable for its own airport, so the filter is the airport, not
+        // a parse failure.
+        assert_eq!(gate_fixture_nav(&fixture).stars_for("kdca"), ["FRDMM5"]);
+        assert!(gate_fixture_nav(&fixture).stars_for("KBOS").is_empty());
+    }
+
+    /// The backend half of the shared fixture: `arrival_gate` emits each case's `gate` and the nav
+    /// data emits its `star`. The web test proves both strings land in the same column.
+    #[test]
+    fn arrival_gate_and_static_stars_emit_the_fixture_names() {
+        let fixture = gate_fixture();
+        let icao = fixture["airport"].as_str().unwrap();
+        let nav = gate_fixture_nav(&fixture);
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for c in cases {
+            let name = c["name"].as_str().unwrap();
+            assert_eq!(
+                arrival_gate(c["route"].as_str().unwrap(), icao).as_deref(),
+                c["gate"].as_str(),
+                "{name}: live gate"
+            );
+            let star = c["star"].as_str().unwrap();
+            assert!(
+                nav.stars_for(icao).iter().any(|s| s == star),
+                "{name}: {star} should be in the static list"
+            );
+        }
+    }
+
+    /// The bundled nav data really carries `apt`; the fixture alone can't prove the shipped file
+    /// does.
+    #[test]
+    fn bundled_nav_data_lists_kiad_stars() {
+        let nav = NavData::load();
+        let stars = nav.stars_for("KIAD");
+        assert!(stars.iter().any(|s| s == "CAVLR6"), "{stars:?}");
+        assert!(
+            !stars.iter().any(|s| s == "LUCIT3"),
+            "KIGQ's STAR leaked in"
         );
     }
 

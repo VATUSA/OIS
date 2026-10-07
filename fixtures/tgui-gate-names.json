@@ -1,0 +1,20 @@
+{
+  "why": "VATUSA/OIS#791. TGUI gate options come from two sources: the nav data's STARs for the airport (Flow.stars) and each live flight's arrival_gate (FlowFlight.gate). The web groups both with summaryGateName. backend/src/feed/flow.rs's tests check the backend half (stars_for and arrival_gate emit these exact strings); web/src/pages/airport-gates.test.ts checks the web half (both strings land in the same column). A change on either side that breaks the agreement turns one of them red.",
+  "airport": "KIAD",
+  "procedures": {
+    "CAVLR6": { "type": "STAR", "apt": ["KIAD"], "common": [["CAVLR", 38.0, -78.0]] },
+    "CAVLR": { "type": "STAR", "apt": ["KIAD"], "common": [["CAVLR", 38.0, -78.0]] },
+    "DELRO5": { "type": "STAR", "apt": ["KIAD"], "common": [["DELRO", 39.5, -77.0]] },
+    "SEG6": { "type": "STAR", "apt": ["KIAD"], "common": [["SEG", 40.8, -76.9]] },
+    "WIGOL3": { "type": "STAR", "apt": ["KIAD"], "common": [["WIGOL", 39.2, -78.6]] },
+    "FRDMM5": { "type": "STAR", "apt": ["KDCA"], "common": [["FRDMM", 39.4, -76.6]] },
+    "JCOBY4": { "type": "SID", "apt": ["KIAD"], "common": [["JCOBY", 38.7, -77.9]] }
+  },
+  "stars": ["CAVLR", "CAVLR6", "DELRO5", "SEG6", "WIGOL3"],
+  "cases": [
+    { "name": "versioned STAR", "route": "MERIT HFD DELRO5", "gate": "DELRO5", "star": "DELRO5", "column": "DELRO" },
+    { "name": "dotted transition.STAR", "route": "J6 HVQ.CAVLR6", "gate": "CAVLR6", "star": "CAVLR6", "column": "CAVLR" },
+    { "name": "three-letter STAR", "route": "DCT SEG6 KIAD", "gate": "SEG6", "star": "SEG6", "column": "SEG" },
+    { "name": "STAR filed without its version digit", "route": "DCT WIGOL", "gate": "WIGOL", "star": "WIGOL3", "column": "WIGOL" }
+  ]
+}

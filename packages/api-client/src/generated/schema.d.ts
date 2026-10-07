@@ -5446,6 +5446,12 @@ export interface components {
             /** @description `demand_60min > aar` when a program exists, else null. */
             over_capacity?: boolean | null;
             proposed: number;
+            /**
+             * @description Every STAR the nav data says serves this airport (raw procedure names, e.g. `CAPPS3`),
+             *     sorted, whether or not any traffic is filed on it. Lets a gate be picked before a flight
+             *     files through it; group it with the same normalizer as `FlowFlight.gate`.
+             */
+            stars: string[];
         };
         /**
          * @description An ATC facility (ARTCC/center or TRACON/approach) and the airports it covers — the dashboard's
