@@ -13,7 +13,7 @@ regeneration are in § The API contract → typed client. The visual system is `
 work goes through the shared shell and components in `packages/ui`. The web gates are in
 § Testing & verification. This file adds what has bitten web changes.
 
-Sources: OIS lessons from #312, #336, #405, #477, #531, #539, and #329.
+Sources: OIS lessons from #312, #336, #405, #477, #531, #539, #329, and #725.
 
 ## The contract is generated
 
@@ -85,3 +85,11 @@ in the issue which tree you diagnosed against.
 A mutation that changes flow or TMU state publishes a topic, and the web maps it to Query
 invalidation (`AGENTS.md` § Realtime). When you add a query whose data a realtime topic changes,
 add its key to that mapping, or the screen goes stale until the next poll.
+
+Throttle an expensive key on every topic that invalidates it, not only on `feed.tick`. In
+`web/src/lib/realtime.ts`, `FEED_KEYS` gives each key a `minGapMs` for the tick, but `TOPIC_KEYS`
+invalidates at once, on every open client together. A frequent topic (`flow.release`, `flow.fca`)
+mapped to a query whose request does real server work multiplies that work by viewers × open
+queries. On #725 four flow topics refetched every open sector-demand table, each a fresh six-hour
+projection on the server. Before mapping a topic to such a key, coalesce or throttle the refetch,
+and say in a comment beside the key what one refetch costs the server.

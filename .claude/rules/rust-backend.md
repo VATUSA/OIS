@@ -15,7 +15,7 @@ trajectory model and every caller it reaches, the feed's no-DB rule, realtime, a
 error envelope and auth model are in § Conventions & gotchas. Read those; this file adds what has
 bitten Rust changes and does not repeat them.
 
-Sources: OIS lessons from #433, #436, #457, #508, #591, #537, and the `just ci` / CI comparison
+Sources: OIS lessons from #433, #436, #457, #508, #591, #537, #725, and the `just ci` / CI comparison
 in `AGENTS.md` § Commands.
 
 ## Clippy is the gate `just ci` skips
@@ -46,6 +46,18 @@ Run `cargo clippy --workspace --all-targets -- -D warnings` on every Rust change
 - **Heavy CPU off the async workers.** Route resolution, metering, and similar work run under
   `tokio::task::spawn_blocking` (`fca_counts` in `backend/src/handlers/flow.rs`). Holding a runtime worker
   for long CPU work stalls every request on it.
+- **A read over feed data computes once per snapshot, not per request.** `spawn_blocking` moves
+  the cost off the async workers but doesn't remove it. A handler that projects, routes, or bins
+  the feed's flights repeats that work for every viewer, every open table, and every
+  topic-triggered refetch. Compute it once per feed snapshot into an `AppState` cache keyed by the
+  snapshot and the versions of the config it reads, refresh it the way feed-visible config is
+  refreshed (`AGENTS.md` § Conventions & gotchas, "Config that must reach the feed": a refresh
+  job, plus a force-reload on write), and have the handler only read and slice the cached result.
+  On #725 the sector-demand read recomputed six hours of projection per request: 0.25–0.8 s of CPU
+  per ARTCC in release, about 97% of it in one per-minute `distance_after` loop.
+- **Measure cost in a release build, then name the hot spot.** A debug build overstated #725's
+  cost about tenfold (5.9–9.3 s, against 0.25–0.8 s in release). Bench with `--release` against a
+  captured live feed, and give the `file:line` that dominates before putting a cost to the owner.
 - **No silent skips.** `if let Some(x) = lookup { … }` with no `else` turns misconfiguration into
   a quiet no-op; on #436 that was a 200 with nothing enqueued and nothing logged. Log the `else`
   with `tracing::warn!` and decide whether the caller should see an error.
