@@ -42,9 +42,7 @@ tracks it automatically.
 
 ## Labels
 
-Every issue carries **one `type:`, one `area:`, one `priority:`**, plus any modifiers. (The repo
-currently has only GitHub's default labels — the taxonomy below needs to be created once; see
-"Creating the labels" at the end.)
+Every issue carries **one `type:`, one `area:`, one `priority:`**, plus any modifiers.
 
 **`type:`** — what kind of work it is
 - `type:bug` — something behaves wrong
@@ -84,7 +82,7 @@ OIS has no subscriber tiers, so there is no `tier:` label.
 
 ## Titles
 
-A title is a one-line statement of the problem, specific enough to tell apart from its neighbours —
+A title is a one-line statement of the problem, specific enough to tell apart from its neighbors —
 ideally **symptom → consequence**. Name the real thing, not the fix.
 
 - ✅ `FCA metering uses cruise speed during descent, so arrival ETAs run early`
@@ -95,7 +93,7 @@ ideally **symptom → consequence**. Name the real thing, not the fix.
 
 ## Body structure
 
-Use these sections (drop ones that don't apply — e.g. a pure feature has no "Why the neighbouring
+Use these sections (drop ones that don't apply — e.g. a pure feature has no "Why the neighboring
 path is fine"). Ground every claim in evidence: real file:line references, real captured output, not
 "it should."
 
@@ -107,7 +105,7 @@ prove it with real output/behavior, not a description of it.
 ## Why
 The mechanism / root cause. Which line, why the guard doesn't fire, what the wrong value is.
 
-## Why the neighbouring path is fine   ← for bugs, when relevant
+## Why the neighboring path is fine   ← for bugs, when relevant
 Why the adjacent code that touches the same data does NOT show the problem. (Forces you past a
 premature "found it" and documents the blast radius.)
 
@@ -213,9 +211,9 @@ File a separate `technical-debt` issue when **any** of these is true:
 If none are true, fix it inline and mention it in the PR. When in doubt, file it — a small tracked
 ticket beats a surprise in a diff.
 
-**Before filing, search for a duplicate** (`gh issue list --repo VATUSA/OIS --search "keywords"`,
-include closed). Link related issues (`Relates to #N`) and mark true duplicates `status`/close with a
-pointer rather than filing again.
+**Before filing, search for a duplicate**, closed issues included (see
+[Searching for duplicates](#searching-for-duplicates)). Link related issues (`Relates to #N`) and
+mark true duplicates `status`/close with a pointer rather than filing again.
 
 ---
 
@@ -243,10 +241,8 @@ pointer rather than filing again.
   that transition is a human's (above). Leaving a merged issue sitting in **Returned** is the one
   outcome to avoid: it reads as "needs rework" and invites a second agent to redo work that is
   already on `next`.
-- **Comment sparingly** — an issue is a spec, not a chat log. Comment only at real moments: picking
-  it up, hitting a genuine blocker (say what and why), or finishing (what changed + the verifying
-  test). No running narration, no per-attempt logs, no flight/user IDs or "Reproduced YYYY-MM-DD"
-  stories — that history belongs in the commit and the test.
+- **Comment sparingly** — an issue is a spec, not a chat log. Comment only at the moments and
+  within the budget in [Comments](#comments-the-three-moments-and-the-budget) below.
 - **Attribution:** an agent-drafted issue or comment ends with a `🤖 Drafted by Claude Code` line so
   its origin is clear.
 - **Other repos are read-only.** Reference AvioDeck (or any other repo) for patterns, but never
@@ -254,9 +250,136 @@ pointer rather than filing again.
 
 ---
 
+## Referring to an issue
+
+**Every mention of an issue carries three parts: `#123 [short summary] (Status)`.**
+
+```
+#742 [no .claude/rules for agent standards] (In build)
+#569 [duplicate migration numbers half-migrate the database] (Done)
+```
+
+A bare `#742` makes the reader open a tab to learn what it is, and a list of them is unreadable.
+The summary is yours to shorten: enough of the title to identify it. The status is the board
+column verbatim (`Triaging`, `To Do`, `In build`, `Post build`, `Testing Queue`, `In Test`,
+`Code Review`, `Returned`, `Shippable`, `Blocked`, `Done`), not the GitHub open/closed state.
+
+The status is the part people carry from memory and get wrong, because cards move between reading
+the board and writing about it. Read it fresh from the issue's own project item:
+
+```bash
+gh issue view 742 --repo VATUSA/OIS --json projectItems \
+  --jq '.projectItems[] | select(.title == "OIS Kanban") | .status.name'
+```
+
+This applies everywhere an issue is named: chat, reports, PR descriptions, commit bodies, and
+issue comments.
+
+---
+
+## Comments: the three Moments and the budget
+
+An issue is read by whoever picks the work up next year. It is not a development log.
+
+### The three Moments
+
+Every issue has three touchpoints.
+
+1. **Moment 1, start work.** Read the body and every comment, check nobody else holds it, and move
+   the card to **In build** (`/start`). No comment.
+2. **Moment 2, plan approved.** One comment: what you are building and any decision that changes
+   what the issue asked for. Not the file list, the test plan, or the sequencing; the full plan
+   goes in the PR.
+3. **Moment 3, work complete.** After `/ship` has pushed and opened the PR, move the card to
+   **Testing Queue** and post one comment. Draft to this template and check every line against the diff:
+
+   ```
+   Done: <one sentence on what changed>. PR #<n>.
+
+   How to check:
+   1. <a step naming a real route path, file, or control from the diff>
+   2. <step>
+
+   Blast radius: <trajectory/ETA model · permissions/roles three-in-sync · API contract · none>
+   Deploy: <migration NNNN applies on backend start · client regenerated · new env var · nothing>
+
+   🤖 Drafted by Claude Code
+   ```
+
+   Use real file paths and route paths (`/admin/access`), never a host. Every described behavior
+   traces to code in the diff; if you can't point at it, drop the line. If the change is entirely
+   `docs/`, tooling, or test-only, say so and why it needs no runtime verification. Don't fire
+   Moment 3 while more work is coming.
+
+### The budget
+
+At most one comment per purpose per round of work:
+
+| Purpose | When | Budget |
+| --- | --- | --- |
+| Plan (Moment 2) | the plan is approved | 600 characters |
+| Spec correction | the issue states something your diff proves false | 400 characters |
+| Verification notes (Moment 3) | `/ship` pushed and opened the PR | 1,200 characters |
+| Failure response | verification failed and you fixed it | 1,200 characters |
+
+The budget counts the body, not the attribution footer. **Count characters, not bytes, and count
+before you post.** `wc -c` counts bytes, and `—` or `→` is three of them. Make the count a gate
+that stops the post, not a message printed above it:
+
+```bash
+LIMIT=1200   # the row's budget: 600 for a plan, 400 for a spec correction
+python3 -c 'import sys; n = len(open("body.md").read().rstrip()); print(n); sys.exit(n > int(sys.argv[1]))' "$LIMIT" \
+  && printf '%s\n\n🤖 Drafted by Claude Code\n' "$(cat body.md)" > comment.md \
+  && gh issue comment <n> --repo VATUSA/OIS --body-file comment.md
+```
+
+Draft to about 1,000 characters to leave room. When you are over, don't compress the prose; move
+material into the PR. What survives a trim, in order: the check steps with real paths, the blast
+radius, the deploy note, and the one finding a reader can't get from the diff.
+
+A spec correction that needs more than 400 characters is a scope change: raise it with the user
+instead of writing an essay on the issue.
+
+### What goes in the PR instead
+
+The issue answers "what changed and how do I check it". The PR answers "how was it built". On the
+PR side: implementation reasoning, alternatives considered, why a review suggestion was not taken,
+anything about tests (suite results, coverage, mutation proofs), anything about getting the code
+onto `next` (rebases, conflicts, stacking), notes addressed to a reviewer, and incidental tidy-ups.
+Link the PR once; GitHub cross-links it both ways.
+
+### Comments never to post
+
+There is no status-update comment. If a comment would not change what gets verified or what the
+next engineer needs to know about the product, don't post it. Never post:
+
+- tooling narration ("hooks blocked the push", "clippy is clean now")
+- test-suite results in any form, including "full suite green"
+- rebase, branch, worktree, or merge-conflict reports
+- progress without an outcome ("starting the second half", "still working on this")
+- flight IDs, user IDs, or "Reproduced YYYY-MM-DD" stories; that history belongs in the commit
+  and the test
+- anything you'd describe as being "for the record" rather than for a reader
+
+A genuine blocker is the exception: a real comment with a real ask (what is blocked, what you
+need, what you tried), and a move to **Blocked**.
+
+### Tone
+
+Write as an engineer. Report outcomes, not the steps you followed; first person ("Added the
+delta check"); no internal workflow ("awaiting approval", "as instructed"). Every agent posts as
+the account owner, so never refer to the owner in the third person, and never expose agent
+tooling or its limits ("I couldn't fetch that").
+
+---
+
 ## Commands
 
-Create an issue with labels and drop it on the board:
+### Filing an issue is two steps
+
+`gh issue create` does **not** put the issue on the board, and an issue that isn't on the board
+doesn't exist as work: nobody triages it. `gh project item-add` then adds it with **no Status**, so
+it sits in no column at all. Filing is: create, add to Project 7, set Status to **Triaging**.
 
 ```bash
 gh issue create --repo VATUSA/OIS \
@@ -264,24 +387,70 @@ gh issue create --repo VATUSA/OIS \
   --body-file issue.md \
   --label "type:bug,area:flow,priority:high"
 
-# add it to the board (project 7)
-gh project item-add 7 --owner VATUSA --url <issue-url>
+# then, as separate commands
+gh project item-add 7 --owner VATUSA --url https://github.com/VATUSA/OIS/issues/<n>
+.claude/scripts/board-status.sh <n> "Triaging"
 ```
 
-Duplicate search before filing:
+- **The item isn't queryable the instant `item-add` returns.** If `board-status.sh` says the issue
+  isn't on the board straight afterwards, wait and re-run the move as its own call. Never re-run
+  `item-add`; that's how an issue lands on the board twice.
+- **Read the status back** (the `projectItems` query in
+  [Referring to an issue](#referring-to-an-issue)) before you report the issue as filed.
+  `item-add` prints nothing on success, and a printed "moved" line is not the resource.
+
+### Moving a card
+
+Use `.claude/scripts/board-status.sh <n> "<Status>"`. It resolves the card from the issue's own
+project items instead of listing the board, which keeps it clear of the Projects secondary rate
+limit and of listing truncation. Re-read the card's status immediately before a move; a listing
+taken minutes earlier has overwritten another agent's move.
+
+### The API budget is shared
+
+Every agent and tool on the account shares one GitHub API budget, and the Projects API has a
+secondary limit that `gh api rate_limit` doesn't show. Repeated `gh project item-list` calls and
+`gh pr checks` watch loops have locked `gh project` out for an hour.
+
+- Read a card once per transition, through its own project items. Prefer local git
+  (`git branch -r`, `git log origin/<branch>`) when the answer is in the refs.
+- Poll CI a handful of times at most; the local gate is the primary evidence.
+- When GraphQL is throttled, REST still works for everything except the board move. Post the
+  comment through REST and retry the move later:
+
+  ```bash
+  python3 -c "import json; json.dump({'body': open('comment.md').read()}, open('c.json', 'w'))"
+  gh api --method POST repos/VATUSA/OIS/issues/<n>/comments --input c.json --jq .html_url
+  ```
+
+### Searching for duplicates
+
+Search the entity, not your phrasing: the symbol, file, route, or test name. Two descriptions of
+one defect rarely share a verb. Run two or three narrow searches rather than one long one:
 
 ```bash
-gh issue list --repo VATUSA/OIS --state all --search "metering descent eta"
+gh issue list --repo VATUSA/OIS --state all --search "trajectory descent" --limit 30
+gh issue list --repo VATUSA/OIS --state all --search "metering ETA" --limit 30
 ```
 
-### Creating the labels (one-time)
+Two traps make a search report "no duplicates" falsely:
 
-The repo still has GitHub's default labels. Create the taxonomy above once, e.g.:
+- **`gh search issues` has no `--state all`.** It accepts only `open` or `closed`, the error goes
+  to stderr, and a pipeline then prints nothing, which reads exactly like "no matches". Use
+  `gh issue list --state all --search`, or the REST list
+  (`gh api "repos/VATUSA/OIS/issues?state=all&per_page=100"`), and run a control query for a term
+  you know exists.
+- **Search lags new issues.** The index can miss an issue filed minutes ago (#728 duplicated #727,
+  filed 18 minutes earlier). Also list recent issues directly, which reads the database rather
+  than the index: `gh issue list --repo VATUSA/OIS --state all --limit 30`.
+
+When you find a duplicate, don't drop your finding: comment onto the existing issue whatever yours
+establishes that it doesn't, and don't reopen, relabel, or reassign it.
+
+### Adding a label
+
+The taxonomy above exists on the repo. To add a label to it:
 
 ```bash
-gh label create "type:bug"        --repo VATUSA/OIS --color d73a4a --description "Behaves wrong"
-gh label create "area:flow"       --repo VATUSA/OIS --color 1f77b4 --description "FCAs, metering, runway, trajectory"
-gh label create "priority:high"   --repo VATUSA/OIS --color b60205 --description "Major/blocking; next up"
-gh label create "technical-debt"  --repo VATUSA/OIS --color d4c5f9 --description "Pre-existing, filed per the scope tests"
-# …and the rest of type:/area:/priority: from the tables above
+gh label create "area:example" --repo VATUSA/OIS --color 1f77b4 --description "What it covers"
 ```
