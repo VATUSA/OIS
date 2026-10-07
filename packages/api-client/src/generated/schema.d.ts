@@ -14189,6 +14189,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14257,6 +14258,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14339,6 +14341,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14418,6 +14421,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or a flight holds no release */
             404: {
                 headers: {
                     [name: string]: unknown;
