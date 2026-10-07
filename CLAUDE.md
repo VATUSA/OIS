@@ -60,6 +60,12 @@ From `AGENTS.md`, repeated here only as a checklist because missing one fails si
 - The **feed subsystem has no DB handle** — it reads `AppState` `ArcSwap` caches, never queries
   inline. New feed-visible config follows the "cache + refresh job + force-reload on write" pattern.
 
+## Rules (`.claude/rules/`)
+
+Review, test, git, lifecycle, and prose standards live in `.claude/rules/`. Seven load in every
+session; `rust-backend`, `secure-coding`, `database-postgres`, and `web-frontend` have `paths:`
+frontmatter and load only when Claude reads or edits a matching file. Rules link to `AGENTS.md`.
+
 ## Tool selection
 
 - Use **Explore / Task** for open-ended understanding — "how does metering work?", tracing a call
