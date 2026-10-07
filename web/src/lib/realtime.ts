@@ -34,18 +34,22 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   { key: ["feed-status"], minGapMs: 30_000 },
   { key: ["idst"], minGapMs: 30_000 },
   { key: ["departures"], minGapMs: 60_000 },
+  // Projected over six hours per request; its cells are minute-resolution peaks, so once a minute.
+  { key: ["sector-demand"], minGapMs: 60_000 },
 ];
 
 export const TOPIC_KEYS: Record<string, string[][]> = {
   [FEED_TICK]: FEED_KEYS.map(({ key }) => key),
-  "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
-  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
-  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
+  // A release, CFR or GDP slot moves a wheels-up, so the sector demand's proposed counts move too.
+  "flow.release": [["idst"], ["fca-traffic"], ["departures"], ["sector-demand"]],
+  // Enabling, disabling or deleting an FCA changes which releases hold a wheels-up (#721).
+  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["sector-demand"]],
+  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"], ["sector-demand"]],
   "tmu.tmi": [["tmis"]],
   "tmu.groundstop": [["ground-stops"], ["departures"]],
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
   "tmu.advisory": [["advisories"]],
-  "flow.cfr": [["departures"], ["flow"]],
+  "flow.cfr": [["departures"], ["flow"], ["sector-demand"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
@@ -53,7 +57,9 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "events.reminder": [["my-ace-claims"]],
   "events.ace": [["event-ace"], ["my-ace-claims"]],
   "flow.runway": [["runway"], ["runway-configs"]],
-  "flow.sector_limits": [["sector-limits"]],
+  // A limit recolours the demand cells; a consolidation merges or splits its rows (#725).
+  "flow.sector_limits": [["sector-limits"], ["sector-demand"]],
+  "flow.sector_consolidations": [["sector-demand"]],
 };
 
 /**

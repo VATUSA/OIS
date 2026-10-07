@@ -1592,6 +1592,95 @@ pub struct ConsolidateSectorRequest {
     pub target_sector_id: String,
 }
 
+/// Whether an ARTCC's sector demand can be drawn (#725). Each state has its own message on the page;
+/// none of them is an empty grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SectorDemandStatus {
+    /// The sector dataset has no volume for this ARTCC at all (ZLA, ZAN and HCF today): name the
+    /// facility and say so. Never drawn as an empty or all-green table, which reads as "quiet".
+    NoSectorData,
+    /// The server has not yet received its first feed cycle, so nothing has been counted.
+    Pending,
+    /// Counted from the feed cycle at `cycle_at`.
+    Ready,
+}
+
+/// One 15-minute bin of a sector row (#725): the peak one-minute counts and the level they read
+/// against the row's limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandBin {
+    /// Peak one-minute count of airborne flights alone.
+    pub active: i32,
+    /// Peak one-minute count of flights still on the ground holding a locked wheels-up.
+    pub proposed: i32,
+    /// Peak one-minute count of both together, taken minute by minute; never `active + proposed`.
+    pub combined: i32,
+    /// `over` when `active` alone exceeds the limit, `watch` when only `combined` does, else `ok`. A
+    /// peak equal to the limit is `ok`.
+    pub level: crate::feed::sector_limits::SectorLoadLevel,
+}
+
+/// One row of a sector-demand table (#725): a sector, or a target with the sectors worked at it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandRow {
+    pub sector_id: String,
+    /// The sector's name in the dataset, when it has one.
+    pub name: Option<String>,
+    /// The row's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume.
+    pub tier: String,
+    /// The limit every bin is judged against. A combined row reads its target's (this row's own
+    /// sector's), never a sum or maximum of the sources'.
+    pub limit: i32,
+    /// Whether `limit` is a stored override rather than the default.
+    pub limit_overridden: bool,
+    /// The sectors worked at this one, sorted; non-empty marks a combined row, which counts the union
+    /// of their airspace.
+    pub consolidated: Vec<String>,
+    /// One per entry of the body's `bin_starts_ms`, in the same order.
+    pub bins: Vec<SectorDemandBin>,
+}
+
+/// One of an ARTCC's two sector-demand tables (#725).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandTable {
+    /// Whether the dataset has any volume for this table's tiers in the ARTCC. False is a gap in the
+    /// data (ZSE has no TRACON volumes), to be named, and is distinct from a quiet table of zeros.
+    pub has_sector_data: bool,
+    /// Ordered by `sector_id`. Empty unless the body's status is `ready`.
+    pub rows: Vec<SectorDemandRow>,
+}
+
+/// An ARTCC's predicted sector demand (#725): per sector, peak one-minute occupancy in each Zulu
+/// quarter-hour over the next six hours, judged against its limit. The server always computes all six
+/// hours; how many a view draws is the client's choice.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorDemandBody {
+    pub artcc: String,
+    pub status: SectorDemandStatus,
+    /// The feed cycle the counts were projected from; null unless `status` is `ready`.
+    pub cycle_at: Option<DateTime<Utc>>,
+    /// Width of every bin, in minutes.
+    pub bin_minutes: i32,
+    /// Start of each bin as epoch milliseconds, aligned to absolute Zulu quarter-hours. The first is
+    /// the quarter-hour containing `cycle_at`. Empty unless `status` is `ready`.
+    pub bin_starts_ms: Vec<i64>,
+    /// What a sector's limit reads until it is overridden.
+    pub default_limit: i32,
+    /// Whether the caller may set this ARTCC's limits (`flow.sector_limits.update` here).
+    pub limits_editable: bool,
+    /// Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`
+    /// here).
+    pub consolidations_editable: bool,
+    /// The ARTCCs bordering this one, sorted. Each is its own request, and a neighbour's table is
+    /// view-only on this ARTCC's page whatever the caller may edit there.
+    pub neighbours: Vec<String>,
+    /// Low, High and Ultra High sectors.
+    pub enroute: SectorDemandTable,
+    /// Approach Control sectors, kept apart: a different controller with a different workload.
+    pub tracon: SectorDemandTable,
+}
+
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
 /// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
 /// token, or empty). See migration 0059 and `feed::trajectory`.

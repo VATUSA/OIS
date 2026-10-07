@@ -2153,6 +2153,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/sector-demand/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s predicted sector demand: an enroute and a TRACON table, each row a sector (or a target with
+         *     the sectors worked at it) over 24 Zulu quarter-hours. An ARTCC with no sector data answers
+         *     `no_sector_data` and one asked before the first feed cycle answers `pending`, both with no rows, so
+         *     the page can say which rather than draw an empty grid.
+         */
+        get: operations["get_sector_demand"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/sector-limits/{artcc}": {
         parameters: {
             query?: never;
@@ -6661,6 +6683,116 @@ export interface components {
              *     nationally or for this ARTCC).
              */
             editable: boolean;
+        };
+        /**
+         * @description One 15-minute bin of a sector row (#725): the peak one-minute counts and the level they read
+         *     against the row's limit.
+         */
+        SectorDemandBin: {
+            /**
+             * Format: int32
+             * @description Peak one-minute count of airborne flights alone.
+             */
+            active: number;
+            /**
+             * Format: int32
+             * @description Peak one-minute count of both together, taken minute by minute; never `active + proposed`.
+             */
+            combined: number;
+            /**
+             * @description `over` when `active` alone exceeds the limit, `watch` when only `combined` does, else `ok`. A
+             *     peak equal to the limit is `ok`.
+             */
+            level: components["schemas"]["SectorLoadLevel"];
+            /**
+             * Format: int32
+             * @description Peak one-minute count of flights still on the ground holding a locked wheels-up.
+             */
+            proposed: number;
+        };
+        /**
+         * @description An ARTCC's predicted sector demand (#725): per sector, peak one-minute occupancy in each Zulu
+         *     quarter-hour over the next six hours, judged against its limit. The server always computes all six
+         *     hours; how many a view draws is the client's choice.
+         */
+        SectorDemandBody: {
+            artcc: string;
+            /**
+             * Format: int32
+             * @description Width of every bin, in minutes.
+             */
+            bin_minutes: number;
+            /**
+             * @description Start of each bin as epoch milliseconds, aligned to absolute Zulu quarter-hours. The first is
+             *     the quarter-hour containing `cycle_at`. Empty unless `status` is `ready`.
+             */
+            bin_starts_ms: number[];
+            /**
+             * @description Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`
+             *     here).
+             */
+            consolidations_editable: boolean;
+            /**
+             * Format: date-time
+             * @description The feed cycle the counts were projected from; null unless `status` is `ready`.
+             */
+            cycle_at?: string | null;
+            /**
+             * Format: int32
+             * @description What a sector's limit reads until it is overridden.
+             */
+            default_limit: number;
+            /** @description Low, High and Ultra High sectors. */
+            enroute: components["schemas"]["SectorDemandTable"];
+            /** @description Whether the caller may set this ARTCC's limits (`flow.sector_limits.update` here). */
+            limits_editable: boolean;
+            /**
+             * @description The ARTCCs bordering this one, sorted. Each is its own request, and a neighbour's table is
+             *     view-only on this ARTCC's page whatever the caller may edit there.
+             */
+            neighbours: string[];
+            status: components["schemas"]["SectorDemandStatus"];
+            /** @description Approach Control sectors, kept apart: a different controller with a different workload. */
+            tracon: components["schemas"]["SectorDemandTable"];
+        };
+        /** @description One row of a sector-demand table (#725): a sector, or a target with the sectors worked at it. */
+        SectorDemandRow: {
+            /** @description One per entry of the body's `bin_starts_ms`, in the same order. */
+            bins: components["schemas"]["SectorDemandBin"][];
+            /**
+             * @description The sectors worked at this one, sorted; non-empty marks a combined row, which counts the union
+             *     of their airspace.
+             */
+            consolidated: string[];
+            /**
+             * Format: int32
+             * @description The limit every bin is judged against. A combined row reads its target's (this row's own
+             *     sector's), never a sum or maximum of the sources'.
+             */
+            limit: number;
+            /** @description Whether `limit` is a stored override rather than the default. */
+            limit_overridden: boolean;
+            /** @description The sector's name in the dataset, when it has one. */
+            name?: string | null;
+            sector_id: string;
+            /** @description The row's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume. */
+            tier: string;
+        };
+        /**
+         * @description Whether an ARTCC's sector demand can be drawn (#725). Each state has its own message on the page;
+         *     none of them is an empty grid.
+         * @enum {string}
+         */
+        SectorDemandStatus: "no_sector_data" | "pending" | "ready";
+        /** @description One of an ARTCC's two sector-demand tables (#725). */
+        SectorDemandTable: {
+            /**
+             * @description Whether the dataset has any volume for this table's tiers in the ARTCC. False is a gap in the
+             *     data (ZSE has no TRACON volumes), to be named, and is distinct from a quiet table of zeros.
+             */
+            has_sector_data: boolean;
+            /** @description Ordered by `sector_id`. Empty unless the body's status is `ready`. */
+            rows: components["schemas"]["SectorDemandRow"][];
         };
         /** @description One sector and the occupancy limit its counts are judged against (#722). */
         SectorLimitBody: {
@@ -15239,6 +15371,50 @@ export interface operations {
             };
             /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_sector_demand: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorDemandBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

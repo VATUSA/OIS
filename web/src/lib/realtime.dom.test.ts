@@ -145,6 +145,7 @@ const FEED = [
   ["feed-status"],
   ["idst"],
   ["departures"],
+  ["sector-demand"],
 ];
 
 /** Open the socket the client created and return it. */
@@ -190,6 +191,8 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     ["feed-status", 30_000],
     ["idst", 30_000],
     ["departures", 60_000],
+    // New with #725, not a pre-#648 poll: its hook's fallback poll is the same minute.
+    ["sector-demand", 60_000],
   ] as const)("a tick refetches %s no more often than its old %ims poll", async (prefix, polledMs) => {
     const dispose = connectRealtime(qc);
     const socket = await opened();

@@ -57,7 +57,7 @@ all, which the TRACON view (#725) should report as "no TRACON sector data" rathe
 ## Sector occupancy (#721)
 
 The engine behind the sector-forecasting epic (#720). It is pure and DB-free, reading the cached table
-above. It has no endpoint yet; #725 serves it.
+above. `GET /api/v1/flow/sector-demand/{artcc}` serves it (Operations page, below).
 
 - **Cell value** (`feed/sector_load.rs`, `sector_loads`): for each sector and 15-minute bin, the **peak
   one-minute concurrent occupancy**. Each minute it counts the distinct flights counted by any of the
@@ -126,6 +126,55 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
   Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a
   cache another replica's write has left behind. A write that changes anything also publishes
   `flow.sector_consolidations`.
+
+## Operations page (#725): the serving contract
+
+The page under **Operations** draws one ARTCC's demand as an enroute table and a TRACON table, plus a
+collapsed, view-only table per neighbour. Everything it draws comes from one read.
+
+**`GET /api/v1/flow/sector-demand/{artcc}`** (`handlers/sector_demand.rs`), gated `flow.sectors.read` like
+the limit and consolidation reads. The ARTCC is case-insensitive. There is no range parameter: the server
+always sends all 24 bins, and the 2–6 h slider and the alert filter slice them client-side, with no refetch.
+
+| Field | |
+| --- | --- |
+| `status` | `no_sector_data`, `pending` or `ready` (below) |
+| `cycle_at` | the feed snapshot the counts were projected from; null unless `ready` |
+| `bin_minutes`, `bin_starts_ms` | 15, and each bin's start as epoch ms on absolute Zulu quarter-hours, the first containing `cycle_at` (`SectorGrid`'s `binStarts`) |
+| `default_limit` | what an unset limit reads |
+| `limits_editable`, `consolidations_editable` | the caller's `flow.sector_limits.update` / `flow.sector_consolidations.update` scope covers this ARTCC |
+| `neighbours` | the bordering OIS ARTCCs, sorted (`feed::neighbors::tier1` over the active `org.facilities`) |
+| `enroute`, `tracon` | `{ has_sector_data, rows }`: Low/High/Ultra High rows, and Approach Control rows |
+
+Each row is `sector_id`, `name`, `tier`, `limit`, `limit_overridden`, `consolidated` (the sources worked
+at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `level`.
+
+- **Levels are the server's.** Each bin's `level` is `feed::sector_limits::level` against `row_limit`, so a
+  combined row is judged by its target's limit and a peak equal to the limit is `ok`. The page colours
+  from `level` and never recomputes it.
+- **Consolidation applied.** The engine is called with `AppState::sector_consolidations`, so a source has
+  no row and its target's row lists it in `consolidated`.
+- **The three states, none of them an empty grid.** `no_sector_data`: the dataset has no volume for the
+  ARTCC at all (ZLA, ZAN, HCF until #727); the page names it, "No sector data for ZLA". It wins over
+  `pending`, and an empty dataset reads this way for every ARTCC. `pending`: no feed snapshot yet, so
+  nothing has been counted. `ready`: counted. Within `ready`, a table with `has_sector_data: false` is a
+  gap in the data (ZSE has no TRACON volumes), distinct from a quiet table of zero rows.
+- **Neighbours are view-only on this page.** The flags describe the caller's scope at the requested
+  ARTCC, so a national TMU reads `true` for a neighbour too. The page ignores them for neighbour tables;
+  the writes stay scoped server-side (a facility TMU gets 403 at a neighbour).
+- **Computed per request.** The one query is the locked wheels-up of the grounded flights and prefiles
+  (`repos::flow::locked_wheels_up`), plus the facility list for the neighbours. The rest reads the caches.
+  Projection (`sector_tracks::project_tracks`, boxed to the ARTCC's volumes) and binning (`sector_loads`,
+  over the **whole** table for TRACON precedence) run under `spawn_blocking`. Flights any facility has
+  excluded count nowhere. The bins start from the snapshot's time, not the request's.
+
+**Realtime.** No new topic. The web query key is `["sector-demand", artcc]` (`useSectorDemand`,
+`web/src/features/sector-demand/sector-demand.ts`), and `web/src/lib/realtime.ts` refetches it on:
+
+- `feed.tick` (a new cycle; at most once a minute);
+- `flow.sector_limits` (cells recolour);
+- `flow.sector_consolidations` (rows merge or split);
+- `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did).
 
 ## The sector dataset
 
