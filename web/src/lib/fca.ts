@@ -655,14 +655,22 @@ const FCA_PREFS_NS = "fca";
  *
  * Mirrors `useIdstScope`: nothing is written until the stored value has loaded, so the `""` default
  * shown while it loads can't overwrite a saved ARTCC. A pick made before then (or while signed out,
- * when the load fails) still applies on this page; it just isn't saved.
+ * when the load fails) still applies on this page; it just isn't saved. Until the user picks, a
+ * refetch that brings back a value saved on another device replaces the shown one.
+ *
+ * `ignoreStored` shows ALL in place of the saved ARTCC without touching it: a notification's
+ * `?fca=` deep link must not land on an FCA the saved filter hides (owner decision on #789). A pick
+ * made during that visit still saves.
  */
-export function useFcaArtccFilter(persist: boolean): [string, (artcc: string) => void] {
+export function useFcaArtccFilter(
+  persist: boolean,
+  { ignoreStored = false }: { ignoreStored?: boolean } = {},
+): [string, (artcc: string) => void] {
   const prefs = usePreferences<FcaPrefs>(FCA_PREFS_NS, { enabled: persist });
   const save = useSavePreferences<FcaPrefs>(FCA_PREFS_NS);
   const [picked, setPicked] = useState<string | null>(null);
   // A disabled query still hands back whatever is cached, so `persist` gates the read too.
-  const stored = persist ? prefs.data?.artcc : undefined;
+  const stored = persist && !ignoreStored ? prefs.data?.artcc : undefined;
   const artcc = picked ?? (typeof stored === "string" ? stored : "");
   const setArtcc = (next: string) => {
     setPicked(next);

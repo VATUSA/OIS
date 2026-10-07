@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
-// VATUSA/OIS#789. The /ops/fca ARTCC filter opened on ALL ARTCCs on every visit, so a ZDC controller
-// re-picked ZDC each time. It is now saved in the account's `fca` preferences namespace and restored
-// on load, with the map framed to it. These mount the real FcaMapView against a real query cache, so
-// going back to a bare `useState("")` fails the seeded-ZDC case.
+// VATUSA/OIS#789. On /ops/fca the ARTCC filter is saved in the account's `fca` preferences namespace
+// and restored on load, with the map framed to it; a `?fca=` deep link shows ALL without touching the
+// saved choice. These mount the real FcaMapView against a real query cache, so a bare `useState("")`
+// filter fails the seeded-ZDC case.
 import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
@@ -72,7 +72,8 @@ beforeEach(() => {
   api.PUT.mockResolvedValue({ data: undefined, error: undefined, response: { ok: true, status: 200 } });
 });
 
-async function mount(qc: QueryClient, props: { persistArtccFilter?: boolean } = { persistArtccFilter: true }) {
+type Props = { persistArtccFilter?: boolean; overview?: boolean; readOnly?: boolean; initialFcaId?: string };
+async function mount(qc: QueryClient, props: Props = { persistArtccFilter: true }) {
   qc.setQueryData(["me"], CONTROLLER);
   qc.setQueryData(["fcas"], FCAS);
   const host = document.createElement("div");
@@ -202,6 +203,62 @@ describe("FcaMapView ARTCC filter on /ops/fca (VATUSA/OIS#789)", () => {
     expect(select.value).toBe("");
     expect(options(select)).toEqual(["", "ZNY", "ZOB"]);
     expect(camera.fitBounds).not.toHaveBeenCalled();
+  });
+
+  it("does not save a pick after the saved ARTCC failed to load", async () => {
+    api.GET.mockImplementation((path: string, init?: { params?: { path?: { namespace?: string } } }) =>
+      Promise.resolve(
+        path === PREFS_PATH && init?.params?.path?.namespace === "fca"
+          ? { data: undefined, error: { error: "internal" }, response: { ok: false, status: 500 } }
+          : { data: undefined, error: undefined, response: { ok: true, status: 200 } },
+      ),
+    );
+    const qc = newClient();
+    const select = await mount(qc);
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(qc.getQueryState(["preferences", "fca"])?.status).toBe("error");
+    });
+
+    await pick(select, "ZNY");
+    expect(select.value).toBe("ZNY");
+    expect(fcaPrefPuts()).toHaveLength(0);
+  });
+
+  // A notification lands on `?fca=<id>`; a saved ZDC must not hide a ZNY FCA it links to (owner
+  // decision on #789).
+  it("shows ALL on a ?fca= arrival without framing the map or overwriting the saved ARTCC", async () => {
+    const qc = newClient();
+    qc.setQueryData(["preferences", "fca"], { artcc: "ZDC" });
+    const select = await mount(qc, { persistArtccFilter: true, initialFcaId: "ny1" });
+
+    expect(select.value).toBe("");
+    expect(camera.fitBounds).not.toHaveBeenCalled();
+    expect(fcaPrefPuts()).toHaveLength(0);
+    expect(qc.getQueryData(["preferences", "fca"])).toEqual({ artcc: "ZDC" });
+
+    // A pick during that visit still saves.
+    await pick(select, "ZNY");
+    expect(fcaPrefPuts().map(([, init]) => init.body)).toEqual([{ artcc: "ZNY" }]);
+  });
+
+  it("does not fetch the saved ARTCC where the page doesn't opt in", async () => {
+    await mount(newClient(), {});
+    expect(fcaPrefGets()).toHaveLength(0);
+  });
+
+  // The advisories overview re-centers on CONUS for ALL, as before #789, and saves nothing.
+  it("still sends the advisories overview home on ALL", async () => {
+    const select = await mount(newClient(), { overview: true, readOnly: true });
+    await pick(select, "ZNY");
+    expect(camera.fitBounds).toHaveBeenCalledTimes(1);
+    camera.home.mockReset();
+    await pick(select, "");
+    expect(camera.home).toHaveBeenCalledTimes(1);
+    expect(fcaPrefGets()).toHaveLength(0);
+    expect(fcaPrefPuts()).toHaveLength(0);
   });
 
   // The advisories overview and the event builder keep today's reset-to-ALL (owner decision on #789).

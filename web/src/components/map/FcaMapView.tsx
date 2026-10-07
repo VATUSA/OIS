@@ -269,8 +269,10 @@ export function FcaMapView({
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
   // On /ops/fca this is saved per account (#789): it comes back on the next visit, in another
-  // browser and on desktop.
-  const [artccFilter, setArtccFilter] = useFcaArtccFilter(persistArtccFilter);
+  // browser and on desktop. A `?fca=` arrival shows ALL instead, so the linked FCA is never hidden.
+  const [artccFilter, setArtccFilter] = useFcaArtccFilter(persistArtccFilter, {
+    ignoreStored: !!initialFcaId,
+  });
 
   const [planeIcons, setPlaneIcons] = useState(() => {
     try {
