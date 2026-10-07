@@ -123,7 +123,9 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
   which is separate from `flow.sector_limits.update` and granted to the same five groups. A release
   isn't checked against the dataset, so one left behind by a re-import can still be cleared.
 - **Cache**: `AppState::sector_consolidations`, refreshed every 30 s by `sector_consolidations_refresh`.
-  A write that changes anything force-reloads it and publishes `flow.sector_consolidations`.
+  Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a
+  cache another replica's write has left behind. A write that changes anything also publishes
+  `flow.sector_consolidations`.
 
 ## The sector dataset
 

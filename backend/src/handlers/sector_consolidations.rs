@@ -4,9 +4,10 @@
 //! Reads are gated `flow.sectors.read`. Writes are gated `flow.sector_consolidations.update` **and**
 //! scoped to the ARTCC in the path — the typed extractor says only *whether* the caller holds it, not
 //! *where*. Both sectors are looked up in that ARTCC alone, so a body naming another ARTCC's sector is
-//! an unknown sector, never a cross-ARTCC consolidation. A write force-reloads
-//! `AppState::sector_consolidations` and publishes `topic::SECTOR_CONSOLIDATIONS`, so every viewer's
-//! rows merge or split at once rather than at the next refresh.
+//! an unknown sector, never a cross-ARTCC consolidation. Every write force-reloads
+//! `AppState::sector_consolidations`, so the answer is the table's, never a cache another replica's
+//! write has left behind; one that changed anything also publishes `topic::SECTOR_CONSOLIDATIONS`, so
+//! every viewer's rows merge or split at once rather than at the next refresh.
 
 use std::sync::Arc;
 
@@ -69,12 +70,15 @@ fn body(state: &AppState, artcc: String, editable: bool) -> SectorConsolidations
     }
 }
 
-/// Reload the cache from the table and tell every viewer, so a write is visible at once.
-async fn republish(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiError> {
+/// Reload the cache from the table, and tell every viewer when the write `changed` anything. A no-op
+/// reloads too: on a replica whose cache lags another's write, the answer must still be the table's.
+async fn republish(state: &AppState, pool: &sqlx::PgPool, changed: bool) -> Result<(), ApiError> {
     state
         .sector_consolidations
         .store(Arc::new(repo::load_all(pool).await?));
-    state.publish(topic::SECTOR_CONSOLIDATIONS);
+    if changed {
+        state.publish(topic::SECTOR_CONSOLIDATIONS);
+    }
     Ok(())
 }
 
@@ -137,15 +141,16 @@ pub async fn consolidate_sector(
     if !may_edit(&state, &principal, &artcc).await? {
         return Err(ApiError::Forbidden);
     }
+    // The path's sector is trimmed like the body's, so the two name a sector the same way.
+    let sector_id = sector_id.trim();
     let target = payload.target_sector_id.trim();
-    if !is_sector(&state, &artcc, &sector_id) || !is_sector(&state, &artcc, target) {
+    if !is_sector(&state, &artcc, sector_id) || !is_sector(&state, &artcc, target) {
         return Err(ApiError::NotFound);
     }
-    match repo::consolidate(pool, &artcc, &sector_id, target, principal.user_id()).await? {
+    match repo::consolidate(pool, &artcc, sector_id, target, principal.user_id()).await? {
         Err(Refusal::SelfReference) => return Err(ApiError::BadRequest),
         Err(Refusal::Loop) => return Err(ApiError::Conflict),
-        Ok(true) => republish(&state, pool).await?,
-        Ok(false) => {}
+        Ok(changed) => republish(&state, pool, changed).await?,
     }
     Ok(Json(body(&state, artcc, true)))
 }
@@ -178,8 +183,7 @@ pub async fn release_sector(
     if !may_edit(&state, &principal, &artcc).await? {
         return Err(ApiError::Forbidden);
     }
-    if repo::release(pool, &artcc, &sector_id).await? {
-        republish(&state, pool).await?;
-    }
+    let changed = repo::release(pool, &artcc, sector_id.trim()).await?;
+    republish(&state, pool, changed).await?;
     Ok(Json(body(&state, artcc, true)))
 }

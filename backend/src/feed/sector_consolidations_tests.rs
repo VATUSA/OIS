@@ -220,3 +220,49 @@ fn row_of_resolves_one_artccs_source_only() {
     assert_eq!(row_of(&c, "ZDC", "050"), "050");
     assert_eq!(row_of(&c, "ZNY", "018"), "018", "the same id elsewhere");
 }
+
+/// TRACON precedence (#726) and the union compose: an approach sector worked at an enroute Low (or
+/// the reverse) still counts a flight once. ZDC 070 is a TRACON over the west half to 10,000; ZDC 041
+/// is a Low over the whole square. A flight at 8,000 leaves the TRACON eastward inside one minute: the
+/// TRACON alone counts its west fix (precedence keeps the Low out), the Low its east fix, and the
+/// combined row counts one flight, whichever sector is the target.
+#[test]
+fn an_approach_sector_worked_at_an_enroute_one_counts_a_flight_once() {
+    let table = SectorTable {
+        volumes: vec![
+            SectorVolume {
+                top_alt_ft: 10_000,
+                ..strip("ZDC", "07001", -77.0, -76.5, "approach")
+            },
+            volume("ZDC", "04101"),
+        ],
+    };
+    let fixes = [
+        Fix {
+            alt_ft: Some(8_000.0),
+            ..in_018(at(14, 1, 10))
+        },
+        Fix {
+            alt_ft: Some(8_000.0),
+            ..in_041(at(14, 1, 40))
+        },
+    ];
+    let tracks = [active("X", &fixes)];
+
+    let apart = sector_loads(&table, &SectorConsolidations::new(), &tracks, now());
+    assert_eq!(row(&apart, "ZDC", "070").bins[0].active, 1);
+    assert_eq!(row(&apart, "ZDC", "041").bins[0].active, 1);
+
+    for (source, target, tier) in [("070", "041", "low"), ("041", "070", "approach")] {
+        let c: SectorConsolidations =
+            [(("ZDC".to_string(), source.to_string()), target.to_string())].into();
+        let merged = sector_loads(&table, &c, &tracks, now());
+        assert_eq!(merged.len(), 1, "{source} at {target}");
+        let combined = row(&merged, "ZDC", target);
+        assert_eq!(
+            combined.tier, tier,
+            "{source} at {target}: the target's tier"
+        );
+        assert_eq!(combined.bins[0].active, 1, "{source} at {target}: once");
+    }
+}

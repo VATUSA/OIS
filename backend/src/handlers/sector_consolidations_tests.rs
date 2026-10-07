@@ -458,3 +458,56 @@ async fn a_national_grant_works_any_facility(pool: PgPool) {
     );
     assert_eq!(stored(&pool).await, arrangement(&[("ZNY", "030", "010")]));
 }
+
+/// A save or release that changes nothing still answers from the table, not this replica's cache: here
+/// another replica has consolidated 020 and released 041 behind a cache that has seen neither. The
+/// stale cache is put back before each call, so each no-op has to reload on its own. Neither tells
+/// anyone, since nothing changed.
+#[sqlx::test]
+async fn a_no_op_answers_from_the_table_not_a_stale_cache(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZDC", "041", "010").await;
+    let stale = state.sector_consolidations.load_full();
+    // Another replica's writes, which this replica's cache has not seen.
+    repo::consolidate(&pool, "ZDC", "020", "010", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(repo::release(&pool, "ZDC", "041").await.unwrap());
+    let mut rx = state.events.subscribe();
+
+    let (status, body) = put(&state, "ZDC", "020", "010", &zdc).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["consolidations"], pairs(&[("020", "010")]), "the save");
+
+    state.sector_consolidations.store(stale);
+    let (status, body) = delete(&state, "ZDC", "041", &zdc).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["consolidations"],
+        pairs(&[("020", "010")]),
+        "the release"
+    );
+    assert_eq!(
+        **state.sector_consolidations.load(),
+        arrangement(&[("ZDC", "020", "010")])
+    );
+    assert_eq!(drain(&mut rx), 0);
+}
+
+/// The path's sector is trimmed like the body's target, so ` 020 ` names 020 on a save and a release.
+#[sqlx::test]
+async fn a_path_sector_is_trimmed_like_the_body(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+
+    let (status, body) = put(&state, "ZDC", "%20020%20", "010", &zdc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored(&pool).await, arrangement(&[("ZDC", "020", "010")]));
+    assert_eq!(
+        delete(&state, "ZDC", "%20020%20", &zdc).await.0,
+        StatusCode::OK
+    );
+    assert!(stored(&pool).await.is_empty());
+}
