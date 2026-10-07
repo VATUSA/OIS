@@ -324,35 +324,66 @@ struct AirportTaxiSampleRow {
 
 /// Every taxi observation across every airport, grouped by airport — the sample set the DB-less
 /// feed subsystem's ground-allowance cache is refreshed from (#164 sub-issue E,
-/// `jobs::spawn_taxi_estimate_samples_refresh`), mirroring `airport_surface::load_all_gates`'s
-/// load-all-then-group shape for the sibling `gates` cache.
+/// `jobs::spawn_taxi_estimate_samples_refresh`).
+///
+/// **Builds the map and nothing else (#776).** The refresh job runs this every ten minutes while the
+/// previous map is still live in its `ArcSwap`, over a table that only grows until the
+/// `DELAY_LEG_RETAIN_DAYS` prune. It used to `fetch_all` every row into a `Vec` and then group a
+/// second copy, with every airport's `Vec` left at its doubling capacity: on production's 352k rows
+/// that was ~108 MB of transient allocation over a ~48 MB map, which pushed each backend replica past
+/// its 512 MiB limit ten minutes after it started. Each OOM kill dropped every realtime socket on
+/// that replica. Streaming the rows in airport order lets each airport's samples be trimmed as soon as
+/// they are complete, so a reload costs one trimmed map (~34 MB on the same rows).
 pub async fn load_all_taxi_samples(
     pool: &PgPool,
 ) -> Result<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>, ApiError>
 {
-    let rows: Vec<AirportTaxiSampleRow> = sqlx::query_as(
+    use crate::feed::taxi_estimate::TaxiSample;
+    use futures_util::TryStreamExt;
+    use std::collections::{HashMap, hash_map::Entry};
+
+    fn finish(
+        by_airport: &mut HashMap<String, Vec<TaxiSample>>,
+        airport: String,
+        mut samples: Vec<TaxiSample>,
+    ) {
+        samples.shrink_to_fit();
+        match by_airport.entry(airport) {
+            Entry::Vacant(slot) => {
+                slot.insert(samples);
+            }
+            // Only if the order ever stopped being contiguous: still correct, just not as lean.
+            Entry::Occupied(mut slot) => slot.get_mut().append(&mut samples),
+        }
+    }
+
+    let mut rows = sqlx::query_as::<_, AirportTaxiSampleRow>(
         "select airport, gate_id, aircraft, runway, pushback_sec, startup_sec, taxi_sec \
-         from stats.taxi_observation",
+         from stats.taxi_observation order by airport",
     )
-    .fetch_all(pool)
-    .await
-    .map_err(db)?;
-    let mut by_airport: std::collections::HashMap<
-        String,
-        Vec<crate::feed::taxi_estimate::TaxiSample>,
-    > = std::collections::HashMap::new();
-    for r in rows {
-        by_airport
-            .entry(r.airport)
-            .or_default()
-            .push(crate::feed::taxi_estimate::TaxiSample {
-                gate_id: r.gate_id,
-                aircraft: r.aircraft,
-                runway: r.runway,
-                pushback_sec: r.pushback_sec,
-                startup_sec: r.startup_sec,
-                taxi_sec: r.taxi_sec,
-            });
+    .fetch(pool);
+    let mut by_airport: HashMap<String, Vec<TaxiSample>> = HashMap::new();
+    let mut current: Option<(String, Vec<TaxiSample>)> = None;
+    while let Some(r) = rows.try_next().await.map_err(db)? {
+        let sample = TaxiSample {
+            gate_id: r.gate_id,
+            aircraft: r.aircraft,
+            runway: r.runway,
+            pushback_sec: r.pushback_sec,
+            startup_sec: r.startup_sec,
+            taxi_sec: r.taxi_sec,
+        };
+        match &mut current {
+            Some((airport, samples)) if *airport == r.airport => samples.push(sample),
+            _ => {
+                if let Some((airport, samples)) = current.replace((r.airport, vec![sample])) {
+                    finish(&mut by_airport, airport, samples);
+                }
+            }
+        }
+    }
+    if let Some((airport, samples)) = current {
+        finish(&mut by_airport, airport, samples);
     }
     Ok(by_airport)
 }
@@ -2550,5 +2581,97 @@ mod capture_release_tests {
 
         assert!(!event_capture_is_live(&pool, &id).await.unwrap());
         assert!(discard_capture(&pool, &id).await.unwrap());
+    }
+}
+
+/// #776: the ten-minute taxi-sample reload must not OOM the backend.
+#[cfg(test)]
+mod taxi_reload_tests {
+    use super::*;
+
+    /// `observations` rows over `airports` airports, inserted round-robin so the table's physical order
+    /// is not airport order. One in five of each airport's rows has a runway; none has a gate (that
+    /// column is an FK).
+    async fn seed_taxi_observations(pool: &PgPool, airports: i64, observations: i64) {
+        sqlx::query(
+            "insert into stats.taxi_observation \
+               (airport, aircraft, runway, pushback_sec, startup_sec, taxi_sec, observed_at) \
+             select 'T' || lpad((i % $1)::text, 3, '0'), 'B738', \
+                    case when (i / $1) % 5 = 0 then '27L' end, 120, 60, 300 + (i % 7), now() \
+             from generate_series(0, $2 - 1) i",
+        )
+        .bind(airports)
+        .bind(observations)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// The fewest bytes the returned map can occupy: every sample and string at exactly its size, and
+    /// nothing for the hash table itself.
+    fn least_bytes(
+        map: &std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>,
+    ) -> usize {
+        let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+        map.iter()
+            .map(|(airport, samples)| {
+                airport.len()
+                    + samples.len() * std::mem::size_of::<crate::feed::taxi_estimate::TaxiSample>()
+                    + samples
+                        .iter()
+                        .map(|s| text(&s.gate_id) + text(&s.aircraft) + text(&s.runway))
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// #776: the refresh job reloads every taxi observation every ten minutes while the previous map is
+    /// still live. On production's 352k rows the old loader allocated ~108 MB to build a ~48 MB map,
+    /// which OOM-killed each 512 MiB replica ten minutes after it started and dropped every realtime
+    /// socket on it. A reload may hold the map it builds and little else, and the map must be trimmed.
+    ///
+    /// Sizes are measured against the map actually returned, not derived from the loader: 65 samples
+    /// per airport is the worst case for a doubling `Vec` (capacity 128), so an untrimmed map or a
+    /// second copy of the rows is far outside the bounds below.
+    #[sqlx::test]
+    async fn reloading_taxi_samples_holds_one_trimmed_map(pool: PgPool) {
+        seed_taxi_observations(&pool, 1_000, 65_000).await;
+        // The map the job already holds when it reloads (and a warm connection and statement cache).
+        let previous = load_all_taxi_samples(&pool).await.unwrap();
+
+        let (reloaded, peak, held) =
+            crate::alloc_probe::measure(load_all_taxi_samples(&pool)).await;
+        let reloaded = reloaded.unwrap();
+
+        assert_eq!(reloaded.len(), 1_000, "every airport");
+        assert!(
+            reloaded.values().all(|samples| samples.len() == 65),
+            "every airport's samples, and only its own"
+        );
+        let one = &reloaded["T007"];
+        assert_eq!(
+            one.iter()
+                .filter(|s| s.runway.as_deref() == Some("27L"))
+                .count(),
+            13
+        );
+        assert_eq!(
+            one.iter()
+                .map(|s| s.taxi_sec)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            7
+        );
+
+        let least = least_bytes(&reloaded);
+        assert!(
+            held * 10 <= least * 11,
+            "the map is trimmed: holds {held} bytes for {least} bytes of samples"
+        );
+        assert!(
+            peak * 4 <= least * 5,
+            "a reload peaks at the map it builds: {peak} bytes for {least} bytes of samples"
+        );
+        drop(previous);
     }
 }
