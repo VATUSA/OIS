@@ -429,27 +429,33 @@ async fn a_pilot_connected_on_the_ground_is_proposed_from_its_wheels_up(pool: Pg
 }
 
 /// #723's hand-off: a consolidated sector has no row of its own; its target's row lists it and reads
-/// the **target's** limit, never the source's, a sum or a maximum. The source's limit (14) is above the
-/// target's (5), so a maximum would read 14 and a sum 19.
+/// the **target's** limit, never a source's, a sum, a maximum or a minimum. The target's limit (5) sits
+/// between its sources' (14 and 3), so a maximum would read 14, a minimum 3 and a sum 22.
 #[sqlx::test]
 async fn a_combined_row_lists_its_sources_and_reads_the_targets_limit(pool: PgPool) {
     let state = state(pool.clone());
+    let mut volumes = state.airspace_sectors.load().volumes.clone();
+    volumes.push(elsewhere("ZDC", "05001", "low"));
+    state
+        .airspace_sectors
+        .store(Arc::new(SectorTable { volumes }));
     let cookie = user(&pool, &[]).await;
     cycle(&state, VatsimData::default(), Utc::now()).await;
-    state.sector_consolidations.store(Arc::new(HashMap::from([(
-        ("ZDC".to_string(), "020".to_string()),
-        "010".to_string(),
-    )])));
+    state.sector_consolidations.store(Arc::new(HashMap::from([
+        (("ZDC".to_string(), "020".to_string()), "010".to_string()),
+        (("ZDC".to_string(), "050".to_string()), "010".to_string()),
+    ])));
     state.sector_limits.store(Arc::new(HashMap::from([
         (("ZDC".to_string(), "010".to_string()), 5),
         (("ZDC".to_string(), "020".to_string()), 14),
+        (("ZDC".to_string(), "050".to_string()), 3),
     ])));
 
     let body = get(&state, "ZDC", &cookie).await;
     let rows = body["enroute"]["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "020 is folded into 010: {body}");
+    assert_eq!(rows.len(), 1, "020 and 050 are folded into 010: {body}");
     assert_eq!(rows[0]["sector_id"], "010");
-    assert_eq!(rows[0]["consolidated"], json!(["020"]));
+    assert_eq!(rows[0]["consolidated"], json!(["020", "050"]));
     assert_eq!(rows[0]["limit"], 5);
 }
 
