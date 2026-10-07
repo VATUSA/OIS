@@ -232,6 +232,95 @@ block $G "\$(cat file) that is missing" 'gh pr create --title t --body "$(cat no
 allow $G "pr body from \$(cat clean file)" 'gh pr create --title t --body "$(cat clean-body.md)"'
 allow $G "commit -m from a heredoc substitution" "$(printf 'git commit -m "$(cat <<%sEOF%s\nfix: x\n\nCloses #1\nEOF\n)"' "'" "'")"
 allow $G "body file written by the same heredoc command" "$(printf 'cat > new-body.md <<%sEOF%s\nclean\nEOF\ngh pr create --title t --body "$(cat new-body.md)"' "'" "'")"
+# Issues, comments and the Drafted-by footer (#787). Every attribution form, through every command
+# that posts an issue or comment body, blocks.
+printf 'x\n\nCo-Authored-By: Claude\n' >"$WT/form-coauthor.md"
+printf 'x\n\nReviewed-by: Bot <noreply@anthropic.com>\n' >"$WT/form-noreply.md"
+printf 'x\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n' >"$WT/form-generated.md"
+printf 'x\n\nhttps://claude.ai/code/session_01AbCdEf\n' >"$WT/form-session.md"
+printf 'x\n\n🤖 Drafted by Claude Code\n' >"$WT/form-drafted.md"
+for form in coauthor noreply generated session drafted; do
+    b="form-$form.md"
+    block $G "issue create, $form" "gh issue create --repo VATUSA/OIS --title t --body-file $b"
+    block $G "issue comment, $form" "gh issue comment 5 --body-file $b"
+    block $G "issue edit, $form" "gh issue edit 5 -F $b"
+    block $G "pr comment, $form" "gh pr comment 5 --body-file=$b"
+    block $G "gh api comment PATCH, $form" "gh api -X PATCH repos/VATUSA/OIS/issues/comments/123 -F body=@$b"
+    block $G "gh api comment POST, $form" "gh api repos/VATUSA/OIS/issues/5/comments -F body=@$b"
+done
+# The footer as the forms an agent actually writes it.
+drafted_heredoc="$(printf 'gh issue comment 5 --body-file - <<%sEOF%s\nVerified.\n\n🤖 Drafted by Claude Code\nEOF' "'" "'")"
+block $G "issue comment heredoc with the footer" "$drafted_heredoc"
+block $G "issue create --body with the footer" 'gh issue create --title t --body "Steps.
+
+🤖 Drafted by Claude Code"'
+block $G "issue comment -b with a linked footer" 'gh issue comment 5 -b "Done.
+
+_🤖 Drafted by [Claude Code](https://claude.com/claude-code)_"'
+block $G "pr review --comment with the footer" 'gh pr review 5 --comment -b "Looks fine.
+
+🤖 Drafted by Claude Code"'
+block $G "issue close --comment with the footer" 'gh issue close 5 --comment "Fixed in #9.
+
+🤖 Drafted by Claude Code"'
+block $G "issue reopen --comment with a trailer" 'gh issue reopen 5 --comment "Regressed.
+
+Co-Authored-By: Claude"'
+block $G "pr close --comment with a session link" 'gh pr close 5 -c "Superseded. https://claude.ai/code/session_01AbCdEf"'
+block $G "pr reopen --comment with the footer" 'gh pr reopen 5 --comment "Back.
+
+<sub>🤖 Drafted by Claude Code</sub>"'
+block $G "pr create body with the footer" 'gh pr create --title t --body-file form-drafted.md'
+block $G "commit heredoc with the footer" "$(printf 'git commit -F - <<%sEOF%s\nfix: x\n\nDrafted by Claude Code.\nEOF' "'" "'")"
+block $G "printf body escaped onto one line" "printf 'Done.\\\\n\\\\n🤖 Drafted by Claude Code\\\\n' > new-c.md && gh issue comment 5 --body-file new-c.md"
+block $G "gh api -f body= with the footer" "gh api --method PATCH /repos/VATUSA/OIS/issues/comments/9 -f body='Edited.
+
+🤖 Drafted by Claude Code'"
+block $G "gh api create issue -f body= with a trailer" 'gh api repos/VATUSA/OIS/issues -f title=t -f "body=x Co-Authored-By: Claude"'
+block $G "gh api -XPATCH issue body from \$(cat file)" 'gh api -XPATCH repos/VATUSA/OIS/issues/5 -f body="$(cat form-session.md)"'
+block $G "gh api --field=body=@file" 'gh api -X POST repos/VATUSA/OIS/issues/5/comments --field=body=@form-generated.md'
+block $G "gh api glued -Fbody=@file" 'gh api repos/VATUSA/OIS/issues/5/comments -Fbody=@form-noreply.md'
+printf '{"body": "Verified.\\n\\n🤖 Drafted by Claude Code"}\n' >"$WT/drafted.json"
+block $G "gh api --input JSON with an escaped footer" 'gh api -X PATCH repos/VATUSA/OIS/issues/comments/9 --input drafted.json'
+block $G "gh api --input= JSON with an escaped footer" 'gh api repos/VATUSA/OIS/issues/5/comments --input=drafted.json'
+block $G "gh api --input heredoc with an escaped footer" "$(printf 'gh api repos/VATUSA/OIS/issues/5/comments --input - <<%sEOF%s\n{"body": "ok\\\\n\\\\n🤖 Drafted by Claude Code"}\nEOF' "'" "'")"
+block $G "gh api graphql addComment with the footer" "gh api graphql -f query='mutation(\$b: String!) { addComment(input: {subjectId: \"x\", body: \$b}) { clientMutationId } }' -f b='ok
+
+🤖 Drafted by Claude Code'"
+block $G "gh api write with a method it cannot read" 'gh api -X "$METHOD" repos/VATUSA/OIS/issues/comments/9 -F body=@form-drafted.md'
+# A body it cannot read fails closed, as it does for commits and PRs.
+mkdir -p "$WT/a-dir.md"
+block $G "issue comment body piped to --body-file -" 'cat clean-body.md | gh issue comment 5 --body-file -'
+block $G "issue create body from /dev/stdin" 'gh issue create --title t -F /dev/stdin < clean-body.md'
+block $G "gh api comment body piped to --input -" 'cat drafted.json | gh api -X PATCH repos/VATUSA/OIS/issues/comments/9 --input -'
+block $G "gh api comment body from -F body=@-" 'cat clean-body.md | gh api repos/VATUSA/OIS/issues/5/comments -F body=@-'
+block $G "issue comment body from a missing \$(cat file)" 'gh issue comment 5 --body "$(cat no-such-comment.md)"'
+block $G "issue comment body file that is a directory" 'gh issue comment 5 --body-file a-dir.md'
+block $G "gh api --input that is a directory" 'gh api -X PATCH repos/VATUSA/OIS/issues/comments/9 --input a-dir.md'
+printf 'secret\n' >"$WT/unreadable.md" && chmod 000 "$WT/unreadable.md"
+if [[ ! -r "$WT/unreadable.md" ]]; then
+    block $G "issue comment body file it cannot read" 'gh issue comment 5 --body-file unreadable.md'
+fi
+# Prose that only describes the rule, and ordinary bodies, pass.
+printf '## Decision\nRemove the `🤖 Drafted by Claude Code` requirement from every agent comment.\nNo `Drafted by` or `Generated with` line, ever.\nThe Drafted by Claude Code footer was posted on #756 and edited by hand.\nDrafted by Claude Code footers are banned on every comment.\nNo comment may be signed Drafted by Claude Code.\n' >"$WT/rule-prose.md"
+printf 'Verified on the stack.\n\n- step one\n- step two\n' >"$WT/plain-comment.md"
+printf '{"body": "Remove the `🤖 Drafted by Claude Code` requirement.\\nDone."}\n' >"$WT/prose.json"
+for b in rule-prose.md plain-comment.md; do
+    allow $G "issue create, $b" "gh issue create --title t --body-file $b"
+    allow $G "issue comment, $b" "gh issue comment 5 --body-file $b"
+    allow $G "issue edit, $b" "gh issue edit 5 --body-file $b"
+    allow $G "pr comment, $b" "gh pr comment 5 -F $b"
+    allow $G "gh api comment PATCH, $b" "gh api -X PATCH repos/VATUSA/OIS/issues/comments/123 -F body=@$b"
+    allow $G "gh api comment POST, $b" "gh api repos/VATUSA/OIS/issues/5/comments -F body=@$b"
+done
+allow $G "decision comment quoting the footer inline" 'gh issue comment 754 --body "Owner decision: remove the `🤖 Drafted by Claude Code` requirement."'
+allow $G "gh api --input JSON of prose" 'gh api -X PATCH repos/VATUSA/OIS/issues/comments/9 --input prose.json'
+allow $G "the documented pre-post check" "! grep -qiE 'Drafted by|Generated with|Co-Authored' rule-prose.md && gh issue comment 5 --body-file rule-prose.md"
+allow $G "comment heredoc without a footer" "$(printf 'gh issue comment 5 --body-file - <<%sEOF%s\nVerified.\nEOF' "'" "'")"
+allow $G "gh api GET filtering comments for a trailer" "gh api repos/VATUSA/OIS/issues/5/comments --jq '.[] | select(.body | test(\"Co-Authored-By: Claude\"))'"
+allow $G "gh api -X GET search with fields" 'gh api -X GET search/issues -f q="Co-Authored-By: Claude in:comments"'
+allow $G "gh issue view" 'gh issue view 5 --comments'
+allow $G "gh issue list searching for the footer" 'gh issue list --search "Co-Authored-By: Claude"'
 malformed $G
 
 # --- pre-pr-gate -----------------------------------------------------------------------------------
@@ -320,7 +409,7 @@ echo a >"$REPO/a" && git -C "$REPO" add a
 hook_commit() {
     local want="$1" desc="$2" msg="$3" got
     # --no-verify would skip commit-msg too, so pre-commit runs; it passes on a repo with no .rs files.
-    git -C "$REPO" commit -q -m "$msg" >/dev/null 2>&1
+    git -C "$REPO" commit -q --allow-empty -m "$msg" >/dev/null 2>&1
     got=$?
     if { [[ "$want" == reject ]] && [[ $got -ne 0 ]]; } || { [[ "$want" == accept ]] && [[ $got -eq 0 ]]; }; then
         pass=$((pass + 1))
@@ -331,6 +420,8 @@ hook_commit() {
 }
 hook_commit reject "Co-Authored-By: Claude trailer" $'fix: x\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 hook_commit reject "Generated with Claude Code line" $'fix: x\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)'
+hook_commit reject "Drafted by Claude Code footer" $'fix: x\n\n🤖 Drafted by Claude Code'
+hook_commit accept "prose that names the footer" $'docs: drop the `🤖 Drafted by Claude Code` requirement\n\nNo Drafted by Claude Code footer on comments either.'
 hook_commit accept "clean message" $'fix: x\n\nCloses #1'
 
 # --- review-scan.sh --------------------------------------------------------------------------------

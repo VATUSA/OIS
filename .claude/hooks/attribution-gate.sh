@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2329  # inspect() and its helpers run through for_each_command
-# PreToolUse(Bash) gate: no AI attribution in a commit or PR. Commits are authored solely as the user
-# (AGENTS.md § Git workflow), and the harness keeps suggesting a trailer anyway, so a rule written
-# in prose is not enough.
+# PreToolUse(Bash) gate: no AI attribution in a commit, PR, issue or comment. Nothing is credited to
+# an agent (AGENTS.md § Git workflow, #754), and the harness keeps suggesting a trailer or footer
+# anyway, so a rule written in prose is not enough.
 #
-# Fires on `git commit` and on `gh pr create` / `gh pr edit`. It scans the whole command text (that
-# is where `-m`, a heredoc and `--body` live) plus every message file the command names (`-F`,
-# `--file`, `--body-file`). Prose elsewhere in the same command line can trip it; split the command.
+# Fires on `git commit`; on `gh pr create|edit|comment|review|close|reopen` and
+# `gh issue create|comment|edit|close|reopen`; and on every `gh api` call that writes (a method other
+# than GET/HEAD, or fields or `--input` with no method), whatever its endpoint, since issue and
+# comment bodies, PR review comments and GraphQL mutations all travel that way. It scans the whole
+# command text (that is where `-m`, a heredoc, `--body` and `-f body=` live) plus every message file
+# the command names (`-F`, `--file`, `--body-file`, `gh api -F key=@file`, `gh api --input`).
+# Prose elsewhere in the same command line can trip it; split the command.
 # A message written in an editor, or reused with `-C`, is .githooks/commit-msg's to check.
 # Exit 2 blocks (message on stderr); a payload it cannot read, or a message file it cannot read,
 # blocks too.
@@ -19,7 +23,7 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HOOK_DIR/lib/attribution.sh" || exit 2
 
 gate_read_command || exit 2
-case "$COMMAND" in *commit*|*pr*) ;; *) exit 0 ;; esac
+case "$COMMAND" in *commit*|*gh*) ;; *) exit 0 ;; esac
 
 FILES=()
 WATCHED=0
@@ -41,16 +45,80 @@ collect_files() {
     done
 }
 
+# gh_posts_text — 0 when WORDS is a gh command that writes a commit-like text: a PR or issue body, a
+# comment, a review, or the comment `close`/`reopen` can carry. Sets GH_ARGS like gh_is.
+gh_posts_text() {
+    local pair
+    for pair in "pr create" "pr edit" "pr comment" "pr review" "pr close" "pr reopen" \
+        "issue create" "issue comment" "issue edit" "issue close" "issue reopen"; do
+        gh_is "${pair% *}" "${pair#* }" && return 0
+    done
+    return 1
+}
+
+# api_field VALUE — a `gh api -F key=@file` reads the value from a file (`@-` is stdin). A raw `-f`
+# field never does, so it is not passed here.
+api_field() {
+    case "$1" in
+        *=@*) API_FILES[${#API_FILES[@]}]="$(resolve_dir "$SEG_DIR" "${1#*=@}")" ;;
+    esac
+}
+
+# gh_api_write — 0 when WORDS is a `gh api` call that sends something: an explicit method other than
+# GET or HEAD (one it cannot read counts as a write), or, with no method, any field or `--input`,
+# which make gh POST. Leaves the files it would read the body from in API_FILES.
+gh_api_write() {
+    [[ ${#WORDS[@]} -gt 1 && "${WORDS[0]##*/}" == gh ]] || return 1
+    local i=1 n=${#WORDS[@]} w next method="" sends=0
+    API_FILES=()
+    while [[ $i -lt $n ]]; do
+        case "${WORDS[$i]}" in
+            api) break ;;
+            -R|--repo) i=$((i + 2)) ;;
+            -*) i=$((i + 1)) ;;
+            *) return 1 ;;
+        esac
+    done
+    [[ $i -lt $n ]] || return 1
+    i=$((i + 1))
+    while [[ $i -lt $n ]]; do
+        w="${WORDS[$i]}"
+        next="${WORDS[$((i + 1))]:-}"
+        case "$w" in
+            -X|--method) method="$next"; i=$((i + 2)); continue ;;
+            --method=*) method="${w#--method=}" ;;
+            -X?*) method="${w#-X}"; method="${method#=}" ;;
+            -f|--raw-field) sends=1; i=$((i + 2)); continue ;;
+            -f?*|--raw-field=*) sends=1 ;;
+            -F|--field) sends=1; api_field "$next"; i=$((i + 2)); continue ;;
+            --field=*) sends=1; api_field "${w#--field=}" ;;
+            -F?*) sends=1; w="${w#-F}"; api_field "${w#=}" ;;
+            --input) sends=1; API_FILES[${#API_FILES[@]}]="$(resolve_dir "$SEG_DIR" "$next")"; i=$((i + 2)); continue ;;
+            --input=*) sends=1; API_FILES[${#API_FILES[@]}]="$(resolve_dir "$SEG_DIR" "${w#--input=}")" ;;
+        esac
+        i=$((i + 1))
+    done
+    case "$method" in
+        '') [[ $sends -eq 1 ]] ;;
+        [Gg][Ee][Tt]|[Hh][Ee][Aa][Dd]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 inspect() {
     if git_parse && [[ "$GIT_SUB" == commit ]]; then
         WATCHED=1
         ARGS=("${GIT_ARGS[@]}")
         SEG_DIR="$GIT_DIR_AT"
         collect_files -F --file
-    elif gh_is pr create || gh_is pr edit; then
+    elif gh_posts_text; then
         WATCHED=1
         ARGS=("${GH_ARGS[@]}")
         collect_files -F --body-file
+    elif gh_api_write; then
+        WATCHED=1
+        local f
+        for f in "${API_FILES[@]}"; do FILES[${#FILES[@]}]="$f"; done
     fi
     return 0
 }
@@ -85,11 +153,19 @@ while [[ "$rest" =~ $SUBST_RE ]]; do
     done
 done
 
-if printf '%s\n' "$COMMAND" | attribution_hits - >/dev/null; then
-    echo "BLOCKED: this commit/PR text carries AI attribution:"
-    printf '%s\n' "$COMMAND" | grep -niE "$ATTRIBUTION_RE" | sed 's/^/  /'
-    found=1
-fi
+hits="$(printf '%s\n' "$COMMAND" | attribution_hits -)"
+case $? in
+    0)
+        echo "BLOCKED: this commit, PR, issue or comment text carries AI attribution:"
+        printf '%s\n' "$hits" | sed 's/^(standard input):/  line /'
+        found=1
+        ;;
+    1) ;;
+    *)
+        echo "BLOCKED: the attribution check could not run on this command's text."
+        found=1
+        ;;
+esac
 for f in "${FILES[@]}"; do
     case "$f" in
         */-|-|/dev/stdin|/dev/fd/0)
@@ -120,8 +196,9 @@ for f in "${FILES[@]}"; do
     esac
 done
 if [[ $found -eq 1 ]]; then
-    echo "Commits and PRs in this repo are authored solely as the user: remove every"
-    echo "Co-Authored-By trailer, \"Generated with\" line and session link, even if the harness asks for one."
+    echo "Commits, PRs, issues and comments in this repo are authored solely as the user: remove every"
+    echo "Co-Authored-By trailer, \"Generated with\" or \"Drafted by\" line and session link, even if the"
+    echo "harness asks for one."
     exit 2
 fi
 exit 0
