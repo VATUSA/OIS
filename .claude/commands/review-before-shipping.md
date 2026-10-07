@@ -17,11 +17,19 @@ Under `/ticket-loop` this runs inside the `ticket-worker` subagent: every "ask m
   commit it, so the pinned commit already carries it.
 - `git status --porcelain` must print nothing. If it prints anything, commit it (or remove it)
   first; the review is of a commit, not a tree.
-- `git rev-parse HEAD` — the full 40-character **reviewed SHA**. Every phase reviews that commit, and
-  Phase 6 refuses to write the marker unless HEAD still equals it.
+- Pin HEAD, the full 40-character **reviewed SHA**, with the snippet below. Every phase reviews that
+  commit, and Phase 6 writes the marker for the pinned SHA only while HEAD still equals it. The pin
+  lives in this worktree's own git dir, so parallel worktrees never share one.
 - If a marker for this exact SHA already exists and is under two hours old (Phase 6 shows where),
   the review is already valid for this commit. Say so and stop; don't re-run the pipeline on a
   byte-identical commit.
+
+```bash
+bash -c 'set -euo pipefail
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "BLOCKER: uncommitted changes; commit first"; exit 1; }
+pin="$(git rev-parse --path-format=absolute --git-dir)/ois-reviewed-sha"
+git rev-parse HEAD >"$pin" && echo "reviewed sha: $(cat "$pin")"'
+```
 
 ## Phase 1 — Diff inventory
 
@@ -109,7 +117,7 @@ After the fix commits:
 
 1. Stage explicit paths, commit, and run the integrity check (`git status --short` is clean,
    `git diff origin/next...HEAD --name-only` lists every intended file).
-2. **Re-pin**: the new `git rev-parse HEAD` is now the reviewed SHA.
+2. **Re-pin** (the Phase 0 snippet): the new HEAD is now the reviewed SHA.
 3. Re-run Phase 2 and Phase 3 on it.
 4. Re-dispatch fresh instances of whichever agents raised the fixed findings, scoped to the fix range
    `<old reviewed SHA>...HEAD` plus their original findings: does each fix resolve the finding,
@@ -118,16 +126,17 @@ After the fix commits:
 
 ## Phase 6 — Write the review marker
 
-Only when Phases 2–5 are clean. Write the pinned SHA in literally (a placeholder never matches):
+Only when Phases 2–5 are clean. Run it as written: it reads the SHA Phase 0 pinned, so there is
+nothing to fill in.
 
 ```bash
 bash -c 'set -euo pipefail
-sha="$1"
+sha="$(cat "$(git rev-parse --path-format=absolute --git-dir)/ois-reviewed-sha" 2>/dev/null)" || { echo "BLOCKER: nothing pinned; run Phase 0"; exit 1; }
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "BLOCKER: not a full 40-character sha: $sha"; exit 1; }
 [[ "$(git rev-parse HEAD)" == "$sha" ]] || { echo "BLOCKER: HEAD moved off $sha; review the new HEAD"; exit 1; }
-[[ -z "$(git status --porcelain)" ]] || { echo "BLOCKER: the worktree is dirty; commit first"; exit 1; }
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "BLOCKER: uncommitted changes; commit first"; exit 1; }
 dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.claude/markers/review-shipping"
-mkdir -p "$dir" && date +%s >"$dir/$sha" && echo "review marker: $dir/$sha"' _ <reviewed-sha>
+mkdir -p "$dir" && date +%s >"$dir/$sha" && echo "review marker: $dir/$sha"'
 ```
 
 The marker lives under the **primary checkout's** `.claude` (resolved through the git common dir),
