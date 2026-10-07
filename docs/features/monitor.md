@@ -162,8 +162,9 @@ at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `le
 - **Neighbours are view-only on this page.** The flags describe the caller's scope at the requested
   ARTCC, so a national TMU reads `true` for a neighbour too. The page ignores them for neighbour tables;
   the writes stay scoped server-side (a facility TMU gets 403 at a neighbour).
-- **Computed per request.** The one query is the locked wheels-up of the grounded flights and prefiles
-  (`repos::flow::locked_wheels_up`), plus the facility list for the neighbours. The rest reads the caches.
+- **Computed per request.** The database is read for the caller's two edit scopes, the locked wheels-up
+  of the grounded flights and prefiles (`repos::flow::locked_wheels_up`) and the facility list for the
+  neighbours. The rest reads the caches.
   Projection (`sector_tracks::project_tracks`, boxed to the ARTCC's volumes) and binning (`sector_loads`,
   over the **whole** table for TRACON precedence) run under `spawn_blocking`. Flights any facility has
   excluded count nowhere. The bins start from the snapshot's time, not the request's.

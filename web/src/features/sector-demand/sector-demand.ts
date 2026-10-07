@@ -11,7 +11,7 @@ export type SectorDemandBin = components["schemas"]["SectorDemandBin"];
 
 /**
  * The query key for one ARTCC's sector demand. `feed.tick`, `flow.sector_limits`,
- * `flow.sector_consolidations`, `flow.release`, `flow.cfr` and `tmu.gdp` invalidate every ARTCC's
+ * `flow.sector_consolidations`, `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` invalidate every ARTCC's
  * (`web/src/lib/realtime.ts`).
  */
 export const sectorDemandKey = (artcc: string) => ["sector-demand", artcc];

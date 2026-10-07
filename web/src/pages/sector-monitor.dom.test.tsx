@@ -296,6 +296,20 @@ describe("the Sector Monitor page (#725)", () => {
     expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(true);
   });
 
+  it("keeps a refused limit off the grid: the cell shows the stored value, a toast says so, nothing refetches", async () => {
+    put.mockResolvedValue({error: {status: 403}});
+    const {host, qc} = await mount(READER, [demand("ZDC", {limits_editable: true})]);
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="Limit for ZDC05"]')!;
+    await act(async () => input.focus());
+    await setValue(input, "14");
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true})));
+    await act(async () => new Promise((r) => setTimeout(r, 0)));
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(host.querySelector<HTMLInputElement>('input[aria-label="Limit for ZDC05"]')!.value).toBe("10");
+    expect(document.body.textContent).toContain("Couldn't set ZDC05's limit");
+    expect(qc.getQueryState(sectorDemandKey("ZDC"))!.isInvalidated).toBe(false);
+  });
+
   it("collapses neighbours by default, fetches one only when opened, and never offers its limits for editing", async () => {
     const {host} = await mount(READER, [
       demand("ZDC", {limits_editable: true, neighbours: ["ZNY", "ZOB"]}),
@@ -381,13 +395,40 @@ describe("the Sector Monitor page (#725)", () => {
   });
 
   it("replaces the whole set on a facility switch", async () => {
-    const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZOB", {neighbours: ["ZID"]})]);
-    expect(section(host, "ZDC Enroute sectors")).not.toBeNull();
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {});
+    const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZOB", {neighbours: ["ZID"]}), demand("ZNY")]);
+    // Change ZDC's controls and open its neighbour first (storage swallowed, so only live state carries).
+    await setValue(control(host, "ZDC Enroute range"), "2");
+    await click(host.querySelector<HTMLElement>("button[aria-expanded]")!);
+    expect(section(host, "ZNY Enroute sectors")).not.toBeNull();
     await setValue(control(host, "Facility"), "ZOB");
     expect(host.querySelector('section[aria-label^="ZDC"]')).toBeNull();
+    expect(section(host, "ZNY Enroute sectors")).toBeNull();
     expect(sectorIds(section(host, "ZOB Enroute sectors"))).toEqual(["ZOB05", "ZOB06"]);
-    // ZDC's neighbour is gone with it; only ZOB's own neighbour is listed.
-    const neighbours = [...host.querySelectorAll("button[aria-expanded]")].map((b) => b.textContent);
-    expect(neighbours).toEqual(["ZIDView only"]);
+    // ZOB's tables start from their own state, not ZDC's.
+    expect(control<HTMLInputElement>(host, "ZOB Enroute range").value).toBe("4");
+    // ZDC's neighbour is gone with it; only ZOB's own neighbour is listed, collapsed.
+    const toggles = [...host.querySelectorAll("button[aria-expanded]")];
+    expect(toggles.map((b) => b.textContent)).toEqual(["ZIDView only"]);
+    expect(toggles[0].getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("never remembers the facility pick: a reload opens on the viewer's home facility", async () => {
+    const bodies = [demand("ZDC"), demand("ZOB"), demand("ZLA")];
+    const first = await mount(READER, bodies);
+    await setValue(control(first.host, "Facility"), "ZOB");
+    expect(section(first.host, "ZOB Enroute sectors")).not.toBeNull();
+    await first.unmount();
+
+    const again = await mount(READER, bodies);
+    expect(control<HTMLSelectElement>(again.host, "Facility").value).toBe("ZDC");
+    expect(again.host.querySelector('section[aria-label^="ZOB"]')).toBeNull();
+    await again.unmount();
+
+    // A controller who moved from ZDC to ZLA opens on ZLA, with no ZDC table left over.
+    const moved = await mount(user({flow: {sectors: ["read"]}}, "ZLA"), bodies);
+    expect(control<HTMLSelectElement>(moved.host, "Facility").value).toBe("ZLA");
+    expect(moved.host.querySelector('section[aria-label^="ZDC"]')).toBeNull();
+    expect(Object.keys(localStorage).filter((k) => !k.startsWith("ois.sectorDemand.view.") && !k.startsWith("ois.sectorDemand.open."))).toEqual([]);
   });
 });

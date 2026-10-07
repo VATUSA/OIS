@@ -4,13 +4,14 @@
 //! table.
 //!
 //! Read-only and gated `flow.sectors.read`, like the limit and consolidation reads. Computed per request
-//! from the caches: the feed snapshot, the sector table, limits, consolidations and exclusions. Two
-//! queries: the locked wheels-up of the grounded flights (`repos::flow::locked_wheels_up`) and the
-//! active facilities that filter the neighbour list. Projection and binning run under `spawn_blocking`.
+//! from the caches: the feed snapshot, the sector table, limits, consolidations and exclusions. The
+//! database is read for the caller's two edit scopes, the locked wheels-up of the grounded flights
+//! (`repos::flow::locked_wheels_up`) and the active facilities that filter the neighbour list.
+//! Projection and binning run under `spawn_blocking`.
 //!
 //! The page refetches on `feed.tick` (a new cycle), `flow.sector_limits` and
-//! `flow.sector_consolidations` (rows recolour or merge), and on `flow.release`, `flow.cfr` and
-//! `tmu.gdp` (a wheels-up moved, so the proposed counts did). See `docs/features/monitor.md`.
+//! `flow.sector_consolidations` (rows recolour or merge), and on `flow.release`, `flow.cfr`, `tmu.gdp`
+//! and `flow.fca` (a wheels-up moved, so the proposed counts did). See `docs/features/monitor.md`.
 
 use std::collections::{HashMap, HashSet};
 

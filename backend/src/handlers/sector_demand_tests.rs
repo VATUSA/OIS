@@ -379,8 +379,58 @@ async fn the_combined_peak_is_maxed_per_minute_never_summed(pool: PgPool) {
     }
 }
 
+/// The usual proposed flight is a pilot connected at the gate, not a prefile: the handler must ask for
+/// a grounded pilot's locked wheels-up too, or `project_tracks` drops it and every proposed count reads
+/// low. `DAL9` sits at KJFK with an issued CFR whose wheels-up has passed, so it departs into `010` now
+/// and reads proposed 1. `UAL7` is beside it with no wheels-up and counts nowhere; `AAL1`, airborne,
+/// is active as before.
+#[sqlx::test]
+async fn a_pilot_connected_on_the_ground_is_proposed_from_its_wheels_up(pool: PgPool) {
+    let state = state(pool.clone());
+    let cookie = user(&pool, &[]).await;
+    let now = Utc::now();
+    let at_the_gate = |callsign: &str| Pilot {
+        callsign: callsign.into(),
+        latitude: 40.64,
+        longitude: -73.78,
+        altitude: 0,
+        groundspeed: 0,
+        heading: 220,
+        flight_plan: Some(plan()),
+        ..Default::default()
+    };
+    let data = VatsimData {
+        pilots: vec![airborne("AAL1"), at_the_gate("DAL9"), at_the_gate("UAL7")],
+        ..Default::default()
+    };
+    cycle(&state, data, now).await;
+    let first_bin = |body: &Value| row(body, "enroute", "010")["bins"][0].clone();
+
+    let body = get(&state, "ZDC", &cookie).await;
+    assert_eq!(
+        first_bin(&body),
+        json!({ "active": 1, "proposed": 0, "combined": 1, "level": "ok" }),
+        "no wheels-up locked, so neither grounded pilot is proposed"
+    );
+
+    sqlx::query(
+        "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('DAL9', 'KDCA', $1)",
+    )
+    .bind(now - chrono::Duration::minutes(5))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let body = get(&state, "ZDC", &cookie).await;
+    assert_eq!(
+        first_bin(&body),
+        json!({ "active": 1, "proposed": 1, "combined": 2, "level": "ok" }),
+        "DAL9 is proposed from its CFR; UAL7, holding nothing, is not"
+    );
+}
+
 /// #723's hand-off: a consolidated sector has no row of its own; its target's row lists it and reads
-/// the **target's** limit, never the source's or a sum.
+/// the **target's** limit, never the source's, a sum or a maximum. The source's limit (14) is above the
+/// target's (5), so a maximum would read 14 and a sum 19.
 #[sqlx::test]
 async fn a_combined_row_lists_its_sources_and_reads_the_targets_limit(pool: PgPool) {
     let state = state(pool.clone());
@@ -391,8 +441,8 @@ async fn a_combined_row_lists_its_sources_and_reads_the_targets_limit(pool: PgPo
         "010".to_string(),
     )])));
     state.sector_limits.store(Arc::new(HashMap::from([
-        (("ZDC".to_string(), "010".to_string()), 14),
-        (("ZDC".to_string(), "020".to_string()), 5),
+        (("ZDC".to_string(), "010".to_string()), 5),
+        (("ZDC".to_string(), "020".to_string()), 14),
     ])));
 
     let body = get(&state, "ZDC", &cookie).await;
@@ -400,7 +450,7 @@ async fn a_combined_row_lists_its_sources_and_reads_the_targets_limit(pool: PgPo
     assert_eq!(rows.len(), 1, "020 is folded into 010: {body}");
     assert_eq!(rows[0]["sector_id"], "010");
     assert_eq!(rows[0]["consolidated"], json!(["020"]));
-    assert_eq!(rows[0]["limit"], 14);
+    assert_eq!(rows[0]["limit"], 5);
 }
 
 /// Epic AC "a combined row is a union of the polygons, never a sum of the rows", through the route.
@@ -539,23 +589,32 @@ async fn reading_demand_needs_flow_sectors_read(pool: PgPool) {
     );
 }
 
-/// #726 through the route: the engine runs over the whole table, so 3D containment and TRACON
-/// precedence hold. Under the corridor ZDC has `080`, an approach volume, and `090`, an enroute low,
-/// both surface to 10,000 ft. The three flights at FL240 count in the enroute `010` above and in neither
-/// below. A flight at 5,000 ft is inside both `080` and `090`: precedence counts it in the TRACON only.
+/// #726 through the route: the engine runs over the **whole** table, so 3D containment and TRACON
+/// precedence hold across ARTCC lines. Under the corridor the neighbour ZNY has `080`, an approach
+/// volume, and ZDC has `090`, an enroute low, both surface to 10,000 ft. The three flights at FL240
+/// count in ZDC's enroute `010` above and in neither below. A flight at 5,000 ft is inside both `080`
+/// and `090`: ZNY's approach claims it, so ZDC's `090` reads 0 and ZNY's TRACON `080` reads 1. Counting
+/// ZDC against its own slice of the table would put it in `090`. The control without ZNY's approach
+/// volume shows the same flight does count in `090`, so the 0 is precedence and not a missed fix.
 #[sqlx::test]
 async fn a_flight_counts_in_the_tracon_only_when_inside_it(pool: PgPool) {
     let state = state(pool.clone());
-    let mut volumes = state.airspace_sectors.load().volumes.clone();
-    for (volume_id, tier) in [("08001", "approach"), ("09001", "low")] {
-        volumes.push(SectorVolume {
-            top_alt_ft: 10_000,
-            ..corridor("ZDC", volume_id, tier)
-        });
-    }
-    state
-        .airspace_sectors
-        .store(Arc::new(SectorTable { volumes }));
+    let base = state.airspace_sectors.load().volumes.clone();
+    let below = |artcc: &str, volume_id: &str, tier: &str| SectorVolume {
+        top_alt_ft: 10_000,
+        ..corridor(artcc, volume_id, tier)
+    };
+    let with_tracon = SectorTable {
+        volumes: [
+            base.clone(),
+            vec![
+                below("ZNY", "08001", "approach"),
+                below("ZDC", "09001", "low"),
+            ],
+        ]
+        .concat(),
+    };
+    state.airspace_sectors.store(Arc::new(with_tracon));
     let cookie = user(&pool, &[]).await;
     let first_active = |body: &Value, table: &str, sector: &str| {
         row(body, table, sector)["bins"][0]["active"].clone()
@@ -566,10 +625,11 @@ async fn a_flight_counts_in_the_tracon_only_when_inside_it(pool: PgPool) {
         ..Default::default()
     };
     cycle(&state, data, Utc::now()).await;
-    let body = get(&state, "ZDC", &cookie).await;
-    assert_eq!(first_active(&body, "enroute", "010"), 3);
-    assert_eq!(first_active(&body, "tracon", "080"), 0);
-    assert_eq!(first_active(&body, "enroute", "090"), 0);
+    let zdc = get(&state, "ZDC", &cookie).await;
+    assert_eq!(first_active(&zdc, "enroute", "010"), 3);
+    assert_eq!(first_active(&zdc, "enroute", "090"), 0);
+    let zny = get(&state, "ZNY", &cookie).await;
+    assert_eq!(first_active(&zny, "tracon", "080"), 0);
 
     let low = Pilot {
         altitude: 5_000,
@@ -581,9 +641,24 @@ async fn a_flight_counts_in_the_tracon_only_when_inside_it(pool: PgPool) {
         ..Default::default()
     };
     cycle(&state, data, Utc::now()).await;
-    let body = get(&state, "ZDC", &cookie).await;
-    assert_eq!(first_active(&body, "tracon", "080"), 1);
-    assert_eq!(first_active(&body, "enroute", "090"), 0, "{body}");
+    let zdc = get(&state, "ZDC", &cookie).await;
+    assert_eq!(
+        first_active(&zdc, "enroute", "090"),
+        0,
+        "a neighbour's approach volume claims the fix: {zdc}"
+    );
+    let zny = get(&state, "ZNY", &cookie).await;
+    assert_eq!(first_active(&zny, "tracon", "080"), 1);
+
+    state.airspace_sectors.store(Arc::new(SectorTable {
+        volumes: [base, vec![below("ZDC", "09001", "low")]].concat(),
+    }));
+    let zdc = get(&state, "ZDC", &cookie).await;
+    assert_eq!(
+        first_active(&zdc, "enroute", "090"),
+        1,
+        "with no approach volume over it, the low counts the flight"
+    );
 }
 
 /// A write refreshes the page at once and only at the writer's facility. A ZDC TMU's limit and
