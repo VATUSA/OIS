@@ -411,7 +411,7 @@ mod tests {
             population: tracks[0].population,
             fixes,
         }];
-        let loads = sector_loads(&table, &borrowed, now());
+        let loads = sector_loads(&table, &Default::default(), &borrowed, now());
         let counted: BTreeSet<i64> = loads[0]
             .bins
             .iter()

@@ -11,11 +11,13 @@
 //! distinct-flight set's size*. They share the bin width ([`BIN_MIN`]) and nothing else.
 //!
 //! Re-landed from the removed Airspace Monitor's binner (#597, removed in #719) without its limit,
-//! consolidation and staffing coupling, which #722 and #723 rebuild on top of this.
+//! consolidation and staffing coupling, which #722 and #723 rebuild on top of this. Consolidation
+//! (#723) is applied here, before counting: see [`sector_loads`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use crate::feed::gdp::BIN_MIN;
+use crate::feed::sector_consolidations::{SectorConsolidations, row_of};
 use crate::feed::sectors::SectorTable;
 
 /// Every sector is computed for the full six hours, whatever a view draws.
@@ -59,34 +61,72 @@ pub struct BinPeak {
 }
 
 /// One sector's row: [`HORIZON_MIN`] / [`BIN_MIN`] bins, the first being the Zulu quarter-hour that
-/// contains `now`. A sector stored as several volumes is one row.
+/// contains `now`. A sector stored as several volumes is one row, and so is a target with the sectors
+/// worked at it (#723).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectorLoad {
     pub artcc: String,
     pub sector_id: String,
     /// The sector's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume.
     pub tier: String,
+    /// The sectors worked at this one (#723), sorted; non-empty marks a combined row.
+    pub consolidated: Vec<String>,
     pub bins: Vec<BinPeak>,
 }
 
-/// Peak occupancy for every sector in `table`, sorted by `(artcc, sector_id)`.
+/// Peak occupancy for every row, sorted by `(artcc, sector_id)`.
 ///
 /// Bins are absolute Zulu quarter-hours — at 1407Z the first starts at 1400 — so they never depend on
 /// when the process started. A flight counts in a sector in a minute when any of its fixes that minute
-/// is inside any of the sector's volumes, laterally **and** between the volume's floor and ceiling
-/// ([`SectorVolume::contains`](super::sectors::SectorVolume::contains)). Occupants are sets keyed by
-/// sector and minute, so a boundary skim or a crossing between a sector's pieces counts once.
-pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<SectorLoad> {
+/// is counted by one of the sector's volumes ([`SectorTable::counting`]): laterally inside **and** in the
+/// half-open band `floor <= alt < top` at the fix's predicted altitude, with TRACON precedence (#726) —
+/// when an approach volume contains the fix, only approach volumes count it, so an enroute Low from the
+/// surface over a TRACON does not double-count it. Occupants are sets keyed by sector and minute, so a
+/// boundary skim or a crossing between a sector's pieces counts once.
+///
+/// A row exists only for a sector with a volume: a quiet TRACON is a row of zeros, and a facility whose
+/// source has no TRACON volumes (ZSE, see [`super::sectors`]) has no approach row at all.
+///
+/// A sector in `consolidations` has no row of its own (#723): its volumes are filed under its target's
+/// row **before** counting, so the combined row counts distinct flights per minute across the union of
+/// the airspace. A flight crossing from a source into the target within one minute is one flight
+/// there; adding the rows' peaks would count it twice and add busiest minutes that fall at different
+/// times, so a combined row can correctly read lower than the sum of its parts. The row keeps the
+/// target's tier when the target has volumes of its own.
+pub fn sector_loads(
+    table: &SectorTable,
+    consolidations: &SectorConsolidations,
+    tracks: &[Track],
+    now_ms: i64,
+) -> Vec<SectorLoad> {
     let bin_ms = BIN_MIN * MINUTE_MS;
     let first_ms = now_ms - now_ms.rem_euclid(bin_ms);
     let end_ms = first_ms + HORIZON_MIN * MINUTE_MS;
 
-    // Each sector once, with its tier, and the row every volume counts under.
-    let mut sectors: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    // Each sector's own tier, from its first volume.
+    let mut tiers: HashMap<(&str, &str), &str> = HashMap::new();
     for v in &table.volumes {
-        sectors
+        tiers
             .entry((v.artcc.as_str(), v.sector_id.as_str()))
             .or_insert(v.tier.as_str());
+    }
+    // The row every volume counts under — its sector's target if consolidated, else its sector — and
+    // each row once, with its tier and the sources filed under it.
+    fn row_key<'a>(
+        consolidations: &'a SectorConsolidations,
+        artcc: &'a str,
+        sector_id: &'a str,
+    ) -> (&'a str, &'a str) {
+        (artcc, row_of(consolidations, artcc, sector_id))
+    }
+    let mut sectors: BTreeMap<(&str, &str), (&str, Vec<&str>)> = BTreeMap::new();
+    for v in &table.volumes {
+        let key = row_key(consolidations, &v.artcc, &v.sector_id);
+        let tier = tiers.get(&key).copied().unwrap_or(v.tier.as_str());
+        let (_, sources) = sectors.entry(key).or_insert((tier, Vec::new()));
+        if v.sector_id != key.1 && !sources.contains(&v.sector_id.as_str()) {
+            sources.push(v.sector_id.as_str());
+        }
     }
     let row: HashMap<(&str, &str), usize> = sectors
         .keys()
@@ -96,7 +136,7 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
     let row_of_volume: Vec<usize> = table
         .volumes
         .iter()
-        .map(|v| row[&(v.artcc.as_str(), v.sector_id.as_str())])
+        .map(|v| row[&row_key(consolidations, &v.artcc, &v.sector_id)])
         .collect();
 
     // Who is inside each sector in each minute, by population. Sparse: most sector-minutes are empty.
@@ -109,12 +149,7 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
             .filter(|f| (first_ms..end_ms).contains(&f.t_ms))
         {
             let minute = (fix.t_ms - first_ms) / MINUTE_MS;
-            let inside = table
-                .volumes
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.contains(fix.lat, fix.lon, fix.alt_ft));
-            for (i, _) in inside {
+            for i in table.counting(fix.lat, fix.lon, fix.alt_ft) {
                 let (active, proposed) = occupied.entry((row_of_volume[i], minute)).or_default();
                 match track.population {
                     Population::Active => active.insert(track.id),
@@ -127,30 +162,37 @@ pub fn sector_loads(table: &SectorTable, tracks: &[Track], now_ms: i64) -> Vec<S
     sectors
         .iter()
         .enumerate()
-        .map(|(sector, ((artcc, sector_id), tier))| SectorLoad {
-            artcc: artcc.to_string(),
-            sector_id: sector_id.to_string(),
-            tier: tier.to_string(),
-            bins: (0..HORIZON_MIN / BIN_MIN)
-                .map(|bin| {
-                    let mut peak = BinPeak {
-                        start_ms: first_ms + bin * bin_ms,
-                        active: 0,
-                        proposed: 0,
-                        combined: 0,
-                    };
-                    for minute in bin * BIN_MIN..(bin + 1) * BIN_MIN {
-                        if let Some((a, p)) = occupied.get(&(sector, minute)) {
-                            peak.active = peak.active.max(a.len());
-                            peak.proposed = peak.proposed.max(p.len());
-                            // Distinct, because a flight is in exactly one population.
-                            peak.combined = peak.combined.max(a.len() + p.len());
+        .map(
+            |(sector, ((artcc, sector_id), (tier, sources)))| SectorLoad {
+                artcc: artcc.to_string(),
+                sector_id: sector_id.to_string(),
+                tier: tier.to_string(),
+                consolidated: {
+                    let mut sources: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+                    sources.sort();
+                    sources
+                },
+                bins: (0..HORIZON_MIN / BIN_MIN)
+                    .map(|bin| {
+                        let mut peak = BinPeak {
+                            start_ms: first_ms + bin * bin_ms,
+                            active: 0,
+                            proposed: 0,
+                            combined: 0,
+                        };
+                        for minute in bin * BIN_MIN..(bin + 1) * BIN_MIN {
+                            if let Some((a, p)) = occupied.get(&(sector, minute)) {
+                                peak.active = peak.active.max(a.len());
+                                peak.proposed = peak.proposed.max(p.len());
+                                // Distinct, because a flight is in exactly one population.
+                                peak.combined = peak.combined.max(a.len() + p.len());
+                            }
                         }
-                    }
-                    peak
-                })
-                .collect(),
-        })
+                        peak
+                    })
+                    .collect(),
+            },
+        )
         .collect()
 }
 
@@ -209,7 +251,7 @@ mod tests {
 
     /// The first bin of the only sector.
     fn first_bin(table: &SectorTable, tracks: &[Track]) -> BinPeak {
-        sector_loads(table, tracks, now())[0].bins[0]
+        sector_loads(table, &Default::default(), tracks, now())[0].bins[0]
     }
 
     /// AC1: 40 flights transit the sector within one quarter-hour, each inside for one minute and never
@@ -270,14 +312,14 @@ mod tests {
         let high = [at_alt(at(14, 2, 0), 24_000.0)];
         let low = [at_alt(at(14, 9, 0), 8_000.0)];
 
-        let fl240 = sector_loads(&table, &[active("HIGH", &high)], now());
+        let fl240 = sector_loads(&table, &Default::default(), &[active("HIGH", &high)], now());
         let row = |loads: &[SectorLoad], id: &str| {
             loads.iter().find(|l| l.sector_id == id).unwrap().bins[0].active
         };
         assert_eq!(row(&fl240, "H24"), 1, "FL240 is in the enroute sector");
         assert_eq!(row(&fl240, "TRA"), 0, "and not in the TRACON beneath it");
 
-        let at_8000 = sector_loads(&table, &[active("LOW", &low)], now());
+        let at_8000 = sector_loads(&table, &Default::default(), &[active("LOW", &low)], now());
         assert_eq!(row(&at_8000, "TRA"), 1, "8,000 ft is in the TRACON");
         assert_eq!(
             row(&at_8000, "H24"),
@@ -295,7 +337,7 @@ mod tests {
             volumes: vec![volume("ZDC", "01001"), second],
         };
         let fixes = [inside(at(14, 2, 0))];
-        let loads = sector_loads(&table, &[active("A", &fixes)], now());
+        let loads = sector_loads(&table, &Default::default(), &[active("A", &fixes)], now());
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].bins[0].active, 1);
     }
@@ -310,7 +352,12 @@ mod tests {
             inside(at(14, 15, 0)),  // first minute of bin 1
             inside(at(20, 0, 0)),   // six hours after 1400: past the horizon
         ];
-        let row = &sector_loads(&one_sector(), &[active("A", &fixes)], now())[0];
+        let row = &sector_loads(
+            &one_sector(),
+            &Default::default(),
+            &[active("A", &fixes)],
+            now(),
+        )[0];
         assert_eq!(row.bins.len(), 24);
         assert_eq!(row.bins[0].start_ms, at(14, 0, 0));
         assert_eq!(row.bins[1].start_ms, at(14, 15, 0));
@@ -319,7 +366,7 @@ mod tests {
         assert_eq!(counts[2..].iter().sum::<usize>(), 0);
 
         let starts = |now_ms| -> Vec<i64> {
-            sector_loads(&one_sector(), &[], now_ms)[0]
+            sector_loads(&one_sector(), &Default::default(), &[], now_ms)[0]
                 .bins
                 .iter()
                 .map(|b| b.start_ms)
@@ -359,9 +406,13 @@ mod tests {
     /// A sector with no traffic still gets its row of zeros, with its tier.
     #[test]
     fn an_empty_sector_still_has_a_row() {
-        let loads = sector_loads(&one_sector(), &[], now());
+        let loads = sector_loads(&one_sector(), &Default::default(), &[], now());
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].tier, "low");
         assert!(loads[0].bins.iter().all(|b| b.combined == 0));
     }
 }
+
+#[cfg(test)]
+#[path = "sector_load_strata_tests.rs"]
+mod strata_tests;

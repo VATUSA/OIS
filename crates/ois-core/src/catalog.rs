@@ -154,6 +154,7 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
         "flow.sectors.read",        // view ATC sector volumes on the admin sector map
         "flow.sector_limits.update", // set a sector's occupancy limit (facility-scoped)
+        "flow.sector_consolidations.update", // work a sector at another's position (facility-scoped)
         // --- system: background-jobs viewer (read status; update = trigger a run) ---
         "system.jobs.read",
         "system.jobs.update",

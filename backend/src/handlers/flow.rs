@@ -279,12 +279,7 @@ async fn require_event_fca_planner(
     principal: &Principal,
     fca: &FcaBody,
 ) -> Result<(), ApiError> {
-    if fca.event_id.is_none()
-        || !principal
-            .permission_scope(state, "events.plan.update")
-            .await?
-            .is_empty()
-    {
+    if fca.event_id.is_none() || is_event_planner(state, principal).await? {
         return Ok(());
     }
     if fca.event_status.as_deref() == Some("published") {
@@ -292,6 +287,39 @@ async fn require_event_fca_planner(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// Whether the caller plans events: holds `events.plan.update` at any scope. The one planner test
+/// [`require_event_fca_planner`] (`PUT`/`DELETE`, #736) and [`require_visible_event_fca`] (the live
+/// operations, #746) share, so the two paths agree on who may act on an unpublished event FCA.
+async fn is_event_planner(state: &AppState, principal: &Principal) -> Result<bool, ApiError> {
+    Ok(!principal
+        .permission_scope(state, "events.plan.update")
+        .await?
+        .is_empty())
+}
+
+/// An unpublished event FCA (`planned` or `archived`) belongs to its event's planner, so the
+/// live-operation routes — reorder, mark/clear a release, swap — answer `404` for it to anyone who
+/// isn't an event planner (#746), the rule [`require_event_fca_planner`] applies to `PUT`/`DELETE`. A
+/// published one is an ordinary live FCA there: releasing and resequencing it is controllers' work, so
+/// unlike `PUT`/`DELETE` this does not refuse it.
+///
+/// Runs before the ARTCC scope check, so a non-planner elsewhere gets the `404` a missing id gets
+/// rather than a `403` that confirms the FCA exists. A planner passes on to the scope check, as on
+/// `PUT`/`DELETE`.
+async fn require_visible_event_fca(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    if fca.event_id.is_none()
+        || fca.event_status.as_deref() == Some("published")
+        || is_event_planner(state, principal).await?
+    {
+        return Ok(());
+    }
+    Err(ApiError::NotFound)
 }
 
 /// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
@@ -2499,7 +2527,7 @@ pub async fn list_idst(
         (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
         (status = 400), (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
-        (status = 404),
+        (status = 404, description = "No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent neither `If-Match` nor `If-None-Match`")
@@ -2517,6 +2545,7 @@ pub async fn mark_release(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_visible_event_fca(&state, &principal, &fca).await?;
     require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
     // Who may write it, and on what condition, before any metering work (#585).
@@ -2601,7 +2630,7 @@ pub async fn mark_release(
     responses(
         (status = 200, body = Vec<FcaFlight>), (status = 400), (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
-        (status = 404),
+        (status = 404, description = "No such FCA, or an unpublished event FCA (#746)"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not clear it"),
         (status = 412, description = "The precondition failed; `ETag` is the current version"),
         (status = 428, description = "A machine sent no `If-Match`")
@@ -2618,6 +2647,7 @@ pub async fn clear_release(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_visible_event_fca(&state, &principal, &fca).await?;
     require_fca_scope(&state, &principal, &fca).await?;
     let callsign = callsign.to_ascii_uppercase();
     // A machine may clear only its own release, and only the version it last saw (#585). "Clear if
@@ -2702,7 +2732,7 @@ pub async fn clear_release(
     responses(
         (status = 200), (status = 400), (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
-        (status = 404),
+        (status = 404, description = "No such FCA, an unpublished event FCA (#746), or a flight holds no release"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not trade it. \
             `departure_unknown` / `different_departure` / `runway_unassigned` / `different_runway`: the two \
             flights must share a departure airport and an assigned departure runway (#56)"),
@@ -2726,6 +2756,7 @@ pub async fn swap_releases(
     let fca = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_visible_event_fca(&state, &principal, &fca).await?;
     require_fca_scope(&state, &principal, &fca).await?;
     // A swap changes both releases, so a machine needs authority over both (#585). It takes no
     // precondition: it trades two current times rather than writing one the caller computed.
@@ -2804,7 +2835,7 @@ async fn same_departure_slot(
     security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
-    responses((status = 204), (status = 401), (status = 403), (status = 404))
+    responses((status = 204), (status = 401), (status = 403), (status = 404, description = "No such FCA, or an unpublished event FCA (#746)"))
 )]
 pub async fn reorder_fca(
     State(state): State<AppState>,
@@ -2818,6 +2849,7 @@ pub async fn reorder_fca(
     let existing = flow_repo::get_fca(pool, &id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    require_visible_event_fca(&state, &principal, &existing).await?;
     require_fca_write_scope(&state, &principal, "flow.fca.update", &[&existing.artcc]).await?;
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();

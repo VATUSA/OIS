@@ -159,12 +159,16 @@ ci-full:
     fi
     # client-drift job: regenerate the client from the compiled OpenAPI document and compare it to the
     # checked-in one. The worktree copy is restored afterwards; on drift, run the codegen yourself.
+    # The document goes to this worktree's target/, not CI's shared /tmp path, so concurrent
+    # worktrees each check against their own contract (#760).
     drift() {
         local schema=packages/api-client/src/generated/schema.d.ts saved
+        local doc="$PWD/target/ois-openapi.json"
         saved="$(mktemp)" || return 1
         cp "$schema" "$saved"
-        cargo test -p ois-backend --lib openapi::dump_openapi_json -- --exact --ignored --quiet &&
-            OIS_OPENAPI_URL=/tmp/ois-openapi.json pnpm --filter @ois/api-client codegen >/dev/null &&
+        mkdir -p "${doc%/*}" && rm -f "$doc" &&
+            OIS_OPENAPI_OUT="$doc" cargo test -p ois-backend --lib openapi::dump_openapi_json -- --exact --ignored --quiet &&
+            OIS_OPENAPI_URL="$doc" pnpm --filter @ois/api-client codegen >/dev/null &&
             cmp -s "$schema" "$saved"
         local status=$?
         if [[ $status -ne 0 ]] && ! cmp -s "$schema" "$saved"; then

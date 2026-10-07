@@ -24,9 +24,9 @@ PR="${PR:-<number from gh output>}"
 
 remind "ISSUE REMINDER, Moment 3 (work complete) for PR #$PR:
 1. Prove the push: \`git ls-remote origin refs/heads/<branch>\` must print \`git rev-parse HEAD\`.
-2. Post ONE comment on the issue, at most 1,200 characters of body text (footer excluded); assert the
-   length before posting. Real file paths only; a blast-radius line (trajectory/ETA model, the
+2. Post ONE comment on the issue, at most 1,200 characters; assert the length
+   before posting. Real file paths only; a blast-radius line (trajectory/ETA model, the
    permission/role three-in-sync, the OpenAPI->client contract, or none); and a deploy note (new
-   migration? client regen?). End with a blank line, then \"🤖 Drafted by Claude Code\".
+   migration? client regen?). No AI attribution: no footer, no Drafted by / Generated with line.
 3. Move the card: .claude/scripts/board-status.sh <n> \"Testing Queue\". Never Shippable or Done.
 See .claude/commands/ship.md § Step 7."

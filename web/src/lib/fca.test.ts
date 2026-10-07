@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, refreshToast} from "./fca";
+import {type DataStatus, fcaIsLive, refreshToast} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -48,5 +48,19 @@ describe("refreshToast", () => {
     const absent = refreshToast(status({ nav_cycle: "unknown", nav_cycles_behind: undefined }));
     expect(absent.variant).toBe("warning");
     expect(absent.title).toBe("NASR cycle unknown is unreadable");
+  });
+});
+
+// The live-operation routes (release, swap, reorder) 404 on an event FCA that isn't published, to
+// every caller (VATUSA/OIS#746), so only a published event FCA or an ordinary one is live.
+describe("fcaIsLive", () => {
+  it.each([
+    [null, null, true],
+    [7461, "published", true],
+    [7461, "planned", false],
+    [7461, "archived", false],
+    [7461, null, false],
+  ])("event %s / %s → %s", (eventId, eventStatus, live) => {
+    expect(fcaIsLive({event_id: eventId, event_status: eventStatus})).toBe(live);
   });
 });

@@ -7,12 +7,14 @@ import {CSS} from "@dnd-kit/utilities";
 import {GripVertical, PictureInPicture2, RotateCcw, Trash2, X} from "lucide-react";
 
 import {swatchCss} from "@/components/map/lib/colors";
-import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
+import {DELAY_THRESHOLD_SEC, type Fca, type FcaFlight, fcaIsLive, fmtDelaySec, useClearRelease, useMarkRelease, useReorderFca,} from "@/lib/fca";
 import {
   useExcludeFlight,
   useFlightExclusions,
   useRestoreFlight,
 } from "@/lib/flight-exclusions";
+import {useMe} from "@/lib/auth";
+import {hasPermission} from "@/lib/permissions";
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
 import {Ladder} from "@/pages/fca/ladder";
@@ -228,6 +230,11 @@ export function FcaDetail({
   // these endpoints are ARTCC-scoped (#342). Offering the control on a facility the caller's grant
   // doesn't cover would just earn a 403.
   const canRemove = canEdit && exclusions.data?.editable === true;
+  // Release, clear and reorder 404 on an event FCA that is planned or archived unless the caller is an
+  // event planner, who sequences it in the event builder (#746, as #736 gates edit/delete). Anyone
+  // else reaching one — a stale selection on the ops map — would be offered controls that can only fail.
+  const { data: me } = useMe();
+  const canOperate = canEdit && (fcaIsLive(fca) || hasPermission(me, "events.plan.update"));
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -262,16 +269,19 @@ export function FcaDetail({
         <StatusPill tone="neutral" className="font-mono">
           {fca.mode === "mit" ? `${fca.mit} MIT` : `${fca.rate}/hr`}
         </StatusPill>
-        {fca.manual_seq && (
-          <button
-            type="button"
-            title="Reset to automatic sequencing"
-            onClick={() => reorder.mutate([])}
-            className="ml-auto flex items-center gap-1 text-xs text-ink-3 hover:text-ink"
-          >
-            <RotateCcw className="size-3" /> manual
-          </button>
-        )}
+        {fca.manual_seq &&
+          (canOperate ? (
+            <button
+              type="button"
+              title="Reset to automatic sequencing"
+              onClick={() => reorder.mutate([])}
+              className="ml-auto flex items-center gap-1 text-xs text-ink-3 hover:text-ink"
+            >
+              <RotateCcw className="size-3" /> manual
+            </button>
+          ) : (
+            <span className="ml-auto text-xs text-ink-3">manual</span>
+          ))}
         {/* Extra right padding on mobile so the header clears the sheet's close X. */}
         <span className="w-6 shrink-0 md:hidden" />
       </div>
@@ -325,7 +335,7 @@ export function FcaDetail({
                   <Strip
                     key={f.callsign}
                     f={f}
-                    canEdit={canEdit}
+                    canEdit={canOperate}
                     onRelease={(callsign, ready) =>
                       markRelease.mutate({ callsign, ready })
                     }

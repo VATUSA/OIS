@@ -2108,6 +2108,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/flow/sector-consolidations/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `artcc`'s consolidations: which sectors are worked at which, with `editable` for the caller. */
+        get: operations["list_sector_consolidations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-consolidations/{artcc}/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Work a sector at another of this ARTCC's sectors. Both must be this ARTCC's (404 otherwise, which
+         *     is how a cross-ARTCC consolidation is refused). A sector can't be worked at itself (400), and a save
+         *     that would make a loop is refused (409); neither writes anything. The arrangement stays flat: a
+         *     target worked elsewhere resolves to where it is worked, and the sectors worked at this one move with
+         *     it. Answers with the ARTCC's consolidations after the save.
+         */
+        put: operations["consolidate_sector"];
+        post?: never;
+        /**
+         * Give a consolidated sector its own row back. A sector that isn't worked elsewhere is a no-op (200,
+         *     nothing written). Not checked against the dataset, so a consolidation left behind by a re-import
+         *     can still be released. Answers with the ARTCC's consolidations after the release.
+         */
+        delete: operations["release_sector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/flow/sector-limits/{artcc}": {
         parameters: {
             query?: never;
@@ -4292,6 +4337,10 @@ export interface components {
             top_aircraft: components["schemas"]["KeyCountBody"][];
             /** Format: int64 */
             unique_pilots: number;
+        };
+        /** @description Work a sector at another of the same ARTCC's sectors. */
+        ConsolidateSectorRequest: {
+            target_sector_id: string;
         };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
@@ -6595,6 +6644,23 @@ export interface components {
             artcc_id?: string | null;
             permissions: Record<string, never>;
             role_names?: string[] | null;
+        };
+        /** @description One sector worked at another sector's position (#723). Its airspace counts in the target's row. */
+        SectorConsolidationBody: {
+            sector_id: string;
+            /** @description Where `sector_id` is worked. Never itself worked elsewhere: the arrangement is kept flat. */
+            target_sector_id: string;
+        };
+        /** @description An ARTCC's consolidations (#723). A sector not listed is worked on its own. */
+        SectorConsolidationsBody: {
+            artcc: string;
+            /** @description Ordered by `sector_id`. */
+            consolidations: components["schemas"]["SectorConsolidationBody"][];
+            /**
+             * @description Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`,
+             *     nationally or for this ARTCC).
+             */
+            editable: boolean;
         };
         /** @description One sector and the occupancy limit its counts are judged against (#722). */
         SectorLimitBody: {
@@ -14189,6 +14255,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14257,6 +14324,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14339,6 +14407,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14418,6 +14487,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or a flight holds no release */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14992,6 +15062,183 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sector_consolidations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    consolidate_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                /** @description The sector to work elsewhere */
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsolidateSectorRequest"];
+            };
+        };
+        responses: {
+            /** @description The ARTCC's consolidations after the save, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description A sector can't be worked at itself; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Either sector is not one of this ARTCC's */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The target is worked at this sector, so the save would make a loop; nothing is written */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                /** @description The sector to work on its own again */
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ARTCC's consolidations after the release */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
