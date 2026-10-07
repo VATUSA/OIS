@@ -123,8 +123,8 @@ The first review almost never finds the sibling sites.
 Don't delete a failing test, weaken an assertion, add `#[allow(...)]` or `eslint-disable` without
 a stated reason, or skip a hook with `--no-verify`. Fix the error. There are two exceptions: a
 failure you have confirmed is pre-existing on `origin/next`, which you say so in the PR; and the QA
-reviewer's rework push, which `ois-agent-goals.txt` (REVIEW TICKETS) makes with `--no-verify`
-because the build agent re-gates that branch before it reaches a PR.
+reviewer's `.claude/` rules-branch push, which `.claude/agents/ticket-reviewer.md` (Phase C) makes
+with `--no-verify` because it skips only the pre-push clippy run and the branch carries no code.
 
 ## Review priority
 

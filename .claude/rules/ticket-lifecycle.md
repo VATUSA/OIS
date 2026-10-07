@@ -25,7 +25,7 @@ Sources: ported from the house ticket-lifecycle rule; OIS lessons from #411, #44
 
 `Shippable` and `Done` are a human's to set, and agents never merge. The one agent move past
 `Testing Queue` is the QA reviewer's: `In Test` when it claims a card, then `Code Review` on a pass
-the operator approved (`ois-agent-goals.txt`, REVIEW TICKETS).
+the operator approved (`.claude/agents/ticket-reviewer.md`).
 
 If work comes back as `Returned`, treat it as a fresh build: read why, fix, and run the whole ship
 sequence again.
