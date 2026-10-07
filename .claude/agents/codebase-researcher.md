@@ -32,11 +32,8 @@ Use this as a starting point for where to look, not as an answer.
 - **Feed**: `backend/src/feed/`. Compute functions read `AppState` caches behind `ArcSwap`
   (`backend/src/state.rs`) rather than the database. Caches are filled by `backend/src/jobs.rs`
   workers registered in `backend/src/job_registry.rs` and started from `backend/src/lib.rs`.
-- **Trajectory**: `backend/src/feed/trajectory.rs`, called by FCA metering
-  (`backend/src/handlers/flow.rs`), airport-flow demand (`backend/src/feed/flow.rs`), runway ETE
-  (`backend/src/feed/runway.rs`) and the sector occupancy engine
-  (`backend/src/feed/sector_tracks.rs`). `AGENTS.md` lists three; grep `trajectory::` before relying
-  on any list.
+- **Trajectory**: `backend/src/feed/trajectory.rs`, shared by every ETA surface. Its callers are
+  listed in `AGENTS.md` § The trajectory / ETA model; grep `trajectory::` before relying on any list.
 - **Realtime**: `AppState::publish(topic)` → `GET /api/v1/ws` (`backend/src/realtime.rs`) →
   React Query invalidation (`web/src/lib/realtime.ts`).
 - **Discord**: `enqueue_job` (`backend/src/repos/integration.rs`) → the bot leases through
