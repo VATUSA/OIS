@@ -533,6 +533,8 @@ async fn a_batch_sets_and_releases_in_one_write(pool: PgPool) {
     let state = state(pool.clone());
     let (id, zdc) = user(&pool, Some(Some("ZDC"))).await;
     seed(&state, "ZNY", "030", "010").await;
+    // The same sector id in another ARTCC: releasing ZDC's 041 must leave ZNY's alone.
+    seed(&state, "ZNY", "041", "010").await;
     seed(&state, "ZDC", "041", "020").await;
     let mut rx = state.events.subscribe();
 
@@ -550,12 +552,20 @@ async fn a_batch_sets_and_releases_in_one_write(pool: PgPool) {
     );
     assert_eq!(
         stored(&pool).await,
-        arrangement(&[("ZDC", "020", "010"), ("ZNY", "030", "010")]),
-        "ZNY's row is untouched"
+        arrangement(&[
+            ("ZDC", "020", "010"),
+            ("ZNY", "030", "010"),
+            ("ZNY", "041", "010")
+        ]),
+        "ZNY's rows are untouched"
     );
     assert_eq!(
         **state.sector_consolidations.load(),
-        arrangement(&[("ZDC", "020", "010"), ("ZNY", "030", "010")])
+        arrangement(&[
+            ("ZDC", "020", "010"),
+            ("ZNY", "030", "010"),
+            ("ZNY", "041", "010")
+        ])
     );
     assert_eq!(drain(&mut rx), 1, "one nudge for the whole batch");
     let by: Option<String> = sqlx::query_scalar(
