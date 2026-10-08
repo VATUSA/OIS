@@ -179,7 +179,8 @@ export function FacilityDemand({ artcc }: { artcc: string }) {
   };
 
   return (
-    <div style={{ background: C.beige, display: "flex", flexDirection: "column", gap: 8, padding: "8px 0", minWidth: 0 }}>
+    // `colorScheme: light`: the OIS root is dark, which would draw vTBFM's checkbox and select dark.
+    <div style={{ background: C.beige, colorScheme: "light", display: "flex", flexDirection: "column", gap: 8, padding: "8px 0", minWidth: 0 }}>
       <style>{RETRO_CSS}</style>
       {(mapError || consError) && (
         <div role="alert" style={{ display: "flex", gap: 12, padding: "0 8px", fontFamily: FONT, fontSize: 12, fontWeight: WEIGHT, color: C.error }}>
