@@ -1293,33 +1293,21 @@ async fn a_stale_poll_between_a_projection_and_a_limit_write_only_rejudges(pool:
     let tmu = user(&pool, &[("flow.sector_limits.update", "ZDC")]).await;
     airports_only(&state).await;
     let seen = &mut (None, 0);
+    // The shape the VATSIM feed publishes, seven fractional digits (as in `feed/stats/session.rs`):
+    // if it stopped parsing, the cache would quietly fall back to keying on the snapshot.
+    let publish = "2026-10-07T14:14:50.9210242Z";
+    let served = "2026-10-07T14:14:50.921024200Z";
 
-    assert!(
-        poll(
-            &state,
-            seen,
-            published("2026-10-07T14:14:50Z"),
-            "2026-10-07T14:15:05Z"
-        )
-        .await
-    );
+    assert!(poll(&state, seen, published(publish), "2026-10-07T14:15:05Z").await);
     let first = get(&state, "ZDC", &tmu).await;
     assert_eq!(runs(&state), (1, 1));
-    assert_eq!(first["cycle_at"], "2026-10-07T14:14:50Z");
+    assert_eq!(first["cycle_at"], served);
     assert_eq!(first["bin_starts_ms"][0], ms("2026-10-07T14:00:00Z"));
     assert_eq!(row(&first, "enroute", "010")["bins"][0]["active"], 3);
     let projected = state.feed.read().await.snapshot.clone().unwrap();
 
     // The stale poll: the same publish, fetched again, installed as a new snapshot.
-    assert!(
-        !poll(
-            &state,
-            seen,
-            published("2026-10-07T14:14:50Z"),
-            "2026-10-07T14:15:07Z"
-        )
-        .await
-    );
+    assert!(!poll(&state, seen, published(publish), "2026-10-07T14:15:07Z").await);
     let stale = state.feed.read().await.snapshot.clone().unwrap();
     assert!(
         !Arc::ptr_eq(&projected, &stale),
@@ -1333,10 +1321,7 @@ async fn a_stale_poll_between_a_projection_and_a_limit_write_only_rejudges(pool:
     assert_eq!(status, StatusCode::OK);
     let judged = get(&state, "ZDC", &tmu).await;
     assert_eq!(runs(&state), (1, 2), "re-judged, not re-projected");
-    assert_eq!(
-        judged["cycle_at"], "2026-10-07T14:14:50Z",
-        "the projection's clock"
-    );
+    assert_eq!(judged["cycle_at"], served, "the projection's clock");
     assert_eq!(judged["bin_starts_ms"], first["bin_starts_ms"]);
     assert_eq!(row(&judged, "enroute", "010")["limit"], 2);
     assert_eq!(row(&judged, "enroute", "010")["bins"][0]["level"], "over");

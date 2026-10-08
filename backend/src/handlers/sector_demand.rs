@@ -124,8 +124,9 @@ fn grounded_callsigns(data: &VatsimData, excluded: &HashSet<String>) -> Vec<Stri
 
 /// `artcc`'s predicted sector demand: an enroute and a TRACON table, each row a sector (or a target with
 /// the sectors worked at it) over 24 Zulu quarter-hours. An ARTCC with no sector data answers
-/// `no_sector_data` and one asked before the first feed cycle answers `pending`, both with no rows, so
-/// the page can say which rather than draw an empty grid.
+/// `no_sector_data`, and one asked before the server has loaded the sector dataset or received its
+/// first feed cycle answers `pending`, both with no rows, so the page can say which rather than draw an
+/// empty grid.
 #[utoipa::path(
     get, path = "/api/v1/flow/sector-demand/{artcc}", tag = "flow",
     params(("artcc" = String, Path, description = "ARTCC id, case-insensitive")),
@@ -185,8 +186,7 @@ pub async fn get_sector_demand(
             rows: Vec::new(),
         },
     };
-    // Until the table has been read, its emptiness says nothing about this ARTCC, so this is `pending`
-    // too, not `no_sector_data` for every ARTCC (#725 Q5).
+    // Until the table has been read, its emptiness says nothing about this ARTCC (#725 Q5).
     if !sectors_loaded {
         body.status = SectorDemandStatus::Pending;
         return Ok(Json(body));

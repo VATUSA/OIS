@@ -1600,7 +1600,8 @@ pub enum SectorDemandStatus {
     /// The sector dataset has no volume for this ARTCC at all (ZLA, ZAN and HCF today): name the
     /// facility and say so. Never drawn as an empty or all-green table, which reads as "quiet".
     NoSectorData,
-    /// The server has not yet received its first feed cycle, so nothing has been counted.
+    /// Nothing has been counted yet: the server has not loaded the sector dataset since it started,
+    /// or has not yet received its first feed cycle.
     Pending,
     /// Counted from the feed cycle at `cycle_at`.
     Ready,

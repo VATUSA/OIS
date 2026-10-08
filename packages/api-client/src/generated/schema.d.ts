@@ -2163,8 +2163,9 @@ export interface paths {
         /**
          * `artcc`'s predicted sector demand: an enroute and a TRACON table, each row a sector (or a target with
          *     the sectors worked at it) over 24 Zulu quarter-hours. An ARTCC with no sector data answers
-         *     `no_sector_data` and one asked before the first feed cycle answers `pending`, both with no rows, so
-         *     the page can say which rather than draw an empty grid.
+         *     `no_sector_data`, and one asked before the server has loaded the sector dataset or received its
+         *     first feed cycle answers `pending`, both with no rows, so the page can say which rather than draw an
+         *     empty grid.
          */
         get: operations["get_sector_demand"];
         put?: never;
