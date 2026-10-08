@@ -672,10 +672,18 @@ async fn a_batch_release_needs_no_dataset_entry(pool: PgPool) {
     let state = state(pool.clone());
     let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
     seed(&state, "ZDC", "077", "010").await;
+    seed(&state, "ZDC", "078", "010").await;
     seed(&state, "ZDC", "020", "010").await;
     let mut rx = state.events.subscribe();
 
-    let (status, body) = batch(&state, "ZDC", json!({ "077": null, "999": null }), &zdc).await;
+    // Two stored rows released in the one statement, one with nothing to release, 020 untouched.
+    let (status, body) = batch(
+        &state,
+        "ZDC",
+        json!({ "077": null, "078": null, "999": null }),
+        &zdc,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(stored(&pool).await, arrangement(&[("ZDC", "020", "010")]));
     assert_eq!(
@@ -691,6 +699,7 @@ async fn a_batch_is_capped_at_200_entries(pool: PgPool) {
     let state = state(pool.clone());
     let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
     seed(&state, "ZDC", "020", "010").await;
+    let mut rx = state.events.subscribe();
     let nulls = |n: usize| -> Value {
         let mut into: serde_json::Map<String, Value> =
             (0..n - 1).map(|i| (format!("X{i}"), Value::Null)).collect();
@@ -698,9 +707,13 @@ async fn a_batch_is_capped_at_200_entries(pool: PgPool) {
         Value::Object(into)
     };
 
-    let (status, _) = batch(&state, "ZDC", nulls(201), &zdc).await;
+    // One unknown sector among the 201: a 404 would mean the cap ran after the dataset lookup.
+    let mut over = nulls(201);
+    over["X0"] = json!("999");
+    let (status, _) = batch(&state, "ZDC", over, &zdc).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(stored(&pool).await, arrangement(&[("ZDC", "020", "010")]));
+    assert_eq!(drain(&mut rx), 0);
     let (status, body) = batch(&state, "ZDC", nulls(200), &zdc).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(stored(&pool).await.is_empty());

@@ -364,12 +364,13 @@ describe("the Sector Monitor page (#794)", () => {
   it("collapses neighbours, fetches one only when opened, and never offers them a MAP editor or menu", async () => {
     // A national TMU: the neighbour's own body says it is editable, and the page still says no.
     const zny = demand("ZNY", {limits_editable: true, consolidations_editable: true});
-    const {host, qc} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"], limits_editable: true, consolidations_editable: true}), zny]);
+    // ZNY is not in the cache, so any enabled query for it would fetch on mount.
+    localStorage.setItem("ois.sectorMonitor.ZNY.enroute.alertOnly", "false");
+    const {host, qc} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"], limits_editable: true, consolidations_editable: true})]);
     for (const t of ["ZNY", "ZNY TRACON"]) {
       expect(control(host, `Expand ${t}`).getAttribute("aria-expanded")).toBe("false");
       expect(section(host, t)!.querySelector("table, input")).toBeNull();
     }
-    qc.removeQueries({queryKey: sectorDemandKey("ZNY")});
     await settle();
     expect(demandRequests()).toHaveLength(0);
     await click(control(host, "Expand ZNY"));
@@ -504,6 +505,24 @@ describe("the Sector Monitor page (#794)", () => {
       expect(put.mock.calls[0][1].body).toEqual({limit: 7});
     });
 
+    it("rolls back the first of two overlapping edits on its own refusal", async () => {
+      let answerFirst: (v: unknown) => void = () => {};
+      put.mockImplementationOnce(() => new Promise((r) => (answerFirst = r))).mockResolvedValueOnce({data: {}, error: undefined, response: {status: 200}});
+      const {host} = await tmu();
+      const enroute = section(host, "ZDC");
+      for (const [sector, value] of [["05", "3"], ["06", "4"]]) {
+        await click(mapCell(enroute, sector));
+        await setValue(control(host, `MAP for ZDC${sector}`), value);
+        await key(control(host, `MAP for ZDC${sector}`), "Enter");
+      }
+      expect([mapCell(enroute, "05").textContent, mapCell(enroute, "06").textContent]).toEqual(["03/03", "04/04"]);
+      await act(async () => answerFirst(answers.refused(403)));
+      await settle();
+      // 05 is back on the stored value; 06's write, which succeeded, still shows until its refetch lands.
+      expect([mapCell(enroute, "05").textContent, mapCell(enroute, "06").textContent]).toEqual(["10/10", "04/04"]);
+      expect(host.querySelector('[role="alert"]')!.textContent).toBe("Could not save MAP for ZDC05 — check TMU access / connection.");
+    });
+
     it("rolls a refused write back and says so", async () => {
       put.mockResolvedValue(answers.refused(403));
       const {host} = await tmu();
@@ -516,6 +535,7 @@ describe("the Sector Monitor page (#794)", () => {
       expect(host.querySelector('[role="alert"]')!.textContent).toBe(
         "Could not save MAP for ZDC05 — check TMU access / connection.",
       );
+      expect(demandRequests()).toHaveLength(0);
     });
   });
 
@@ -616,10 +636,17 @@ describe("the Sector Monitor page (#794)", () => {
       body.enroute.rows[2] = {...body.enroute.rows[2], consolidated: []};
       body.tracon.rows[0] = {...body.tracon.rows[0], consolidated: []};
       const {host} = await mount(READER, [body]);
-      await menuOn(host, "06");
-      expect(item("Deconsolidate")!.getAttribute("aria-disabled")).toBe("true");
-      await run("Deconsolidate");
-      expect(item("Deconsolidate All in ZDC")).toBeUndefined();
+      vi.useFakeTimers();
+      try {
+        await menuOn(host, "06");
+        expect(item("Deconsolidate")!.getAttribute("aria-disabled")).toBe("true");
+        await run("Deconsolidate");
+        await act(async () => void item("Deconsolidate")!.dispatchEvent(new MouseEvent("mouseover", {bubbles: true})));
+        await act(async () => void vi.advanceTimersByTime(500));
+        expect(item("Deconsolidate All in ZDC")).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("leaves every sector in an arrangement alone for Except Consolidated", async () => {
@@ -654,6 +681,8 @@ describe("the Sector Monitor page (#794)", () => {
         await menuOn(host, "10");
         await run("Deconsolidate", ...command);
         expect(consolidationPuts().map((c) => c.body.into)).toEqual([into]);
+        // The checklist stays open; every other command closes the menu.
+        expect(menuRoot() !== null).toBe(command.length === 2);
         // Optimistic: 12 has its own row back, ahead of the refetch (12 has no row in this fixture's
         // data, so the + is what goes).
         expect(names(section(host, "ZDC"))).toEqual(["ZDC05", "ZDC06", "ZDC10"]);
