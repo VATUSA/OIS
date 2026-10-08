@@ -1015,18 +1015,25 @@ mod tests {
     /// A reset examines exactly the members `reset_member` would change, from every source VATUSA
     /// justifies a grant through: a role mapping, the roster's home ARTCC, a visiting ARTCC, and a
     /// division (`ZHQ`) role, which is national. A member in line through each source is left out, and
-    /// so is one whose only hand-made grant is the protected baseline.
+    /// so is one whose only hand-made grant is the protected baseline. A held grant that differs from
+    /// the justified one only in its scope, or only in its group, is still drift.
     #[sqlx::test]
     async fn a_reset_examines_exactly_the_members_it_would_change(pool: PgPool) {
         let w = world(pool).await;
         let home_missing = user(&w.pool, 1_795_030, "Home Missing").await;
         let home_ok = user(&w.pool, 1_795_031, "Home Ok").await;
+        // Each holds one `vatusa` row that matches what VATUSA justifies (CONTROLLER at ZDC) in all
+        // but one column: the scope for one, the group for the other.
+        let wrong_scope = user(&w.pool, 1_795_037, "Wrong Scope").await;
+        let wrong_group = user(&w.pool, 1_795_038, "Wrong Group").await;
         sqlx::query("update identity.users set home_facility = 'ZDC' where id = any($1)")
-            .bind([&home_missing, &home_ok])
+            .bind([&home_missing, &home_ok, &wrong_scope, &wrong_group])
             .execute(&w.pool)
             .await
             .unwrap();
         group(&w.pool, &home_ok, "CONTROLLER", Some("ZDC"), "vatusa").await;
+        group(&w.pool, &wrong_scope, "CONTROLLER", Some("ZJX"), "vatusa").await;
+        group(&w.pool, &wrong_group, "EC", Some("ZDC"), "vatusa").await;
         user(&w.pool, 1_795_032, "Visit Missing").await;
         let visit_ok = user(&w.pool, 1_795_033, "Visit Ok").await;
         for cid in [1_795_032_i64, 1_795_033] {
@@ -1053,7 +1060,9 @@ mod tests {
                 "Member",
                 "Home Missing",
                 "Visit Missing",
-                "Division Missing"
+                "Division Missing",
+                "Wrong Scope",
+                "Wrong Group"
             ]
         );
 
