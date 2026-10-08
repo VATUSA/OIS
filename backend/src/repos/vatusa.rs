@@ -608,7 +608,11 @@ pub struct ResetRun {
 /// into `identity.users` and reconciles every attached member, so most members are in none of these
 /// groups, and a reset opens a transaction only for the members it touches.
 ///
-/// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once.
+/// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once. The
+/// `vatusa` drift is one set-based diff (justified `FULL JOIN` held, keeping the rows with one side
+/// missing), not a per-member comparison: a correlated subquery over the CTE rescans it once per
+/// member, which took 31 s at 15,000 users. A full join needs a hashable condition, so a national
+/// (null) scope is compared through `coalesce(artcc_id, '')`, as the unique index does (0098).
 pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiError> {
     sqlx::query_scalar(
         r#"
@@ -625,6 +629,16 @@ pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiEr
             union
             select v.cid, $2, f.id
             from identity.vatusa_visits v join org.facilities f on f.id = v.facility
+        ),
+        drift(user_id) as (
+            select coalesce(j.user_id, h.user_id)
+            from (select u.id as user_id, g.role_name, g.artcc_id
+                  from justified g join identity.users u on u.cid = g.cid) j
+            full join (select r.user_id, r.role_name, r.artcc_id from access.user_roles r
+                       where r.source = 'vatusa') h
+              on h.user_id = j.user_id and h.role_name = j.role_name
+             and coalesce(h.artcc_id, '') = coalesce(j.artcc_id, '')
+            where j.user_id is null or h.user_id is null
         )
         select u.id from identity.users u
         where u.vatusa_roles_detached_at is not null
@@ -632,14 +646,7 @@ pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiEr
                       where r.user_id = u.id and r.source = 'manual' and r.role_name <> all($1))
            or exists (select 1 from access.user_permissions p
                       where p.user_id = u.id and p.source = 'manual')
-           or exists (select j.role_name, j.artcc_id from justified j where j.cid = u.cid
-                      except
-                      select r.role_name, r.artcc_id from access.user_roles r
-                      where r.user_id = u.id and r.source = 'vatusa')
-           or exists (select r.role_name, r.artcc_id from access.user_roles r
-                      where r.user_id = u.id and r.source = 'vatusa'
-                      except
-                      select j.role_name, j.artcc_id from justified j where j.cid = u.cid)
+           or u.id in (select user_id from drift)
         order by u.cid nulls last, u.id
         "#,
     )
