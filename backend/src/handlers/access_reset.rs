@@ -883,11 +883,12 @@ mod tests {
         assert_eq!(status, http::StatusCode::OK);
     }
 
-    /// The server admin's POST reaches the apply handler and the reason they sent: a blank reason is
-    /// refused with 400 before anything is pulled or reset. Bound to the dry-run handler, or given any
-    /// reason but the payload's, the same request would answer 200 or reach the (unconfigured) pull.
+    /// The server admin's POST reaches the apply handler, and the reason they sent reaches its check:
+    /// a blank reason is refused with 400 before anything is pulled or reset. Bound to the dry-run
+    /// handler, the same request would answer 200. That the handler passes the payload's reason
+    /// itself, not some other non-blank text, is pinned by `the_route_pulls_with_the_configured_key`.
     #[sqlx::test]
-    async fn the_admins_post_applies_with_the_reason_sent(pool: PgPool) {
+    async fn the_admins_post_refuses_a_blank_reason(pool: PgPool) {
         let w = world(pool).await;
         let before = everything(&w.pool).await;
         let status = send(
@@ -993,6 +994,10 @@ mod tests {
             "apply_vatusa_reset must pull with the configured VATUSA key"
         );
         assert!(handler.contains("reset_to_vatusa("));
+        assert!(
+            handler.contains("&payload.reason,"),
+            "apply_vatusa_reset must reset with the reason the admin sent"
+        );
     }
 
     /// A member already in line comes back from `reset_member` as unchanged, so a reset never audits
