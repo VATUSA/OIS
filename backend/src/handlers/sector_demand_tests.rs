@@ -6,7 +6,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 
 use axum::http::{Method, StatusCode};
@@ -18,8 +19,9 @@ use crate::{
     feed::{
         Snapshot,
         airports::{Airport, AirportDb},
+        apply_fetch,
         sectors::{SectorTable, SectorVolume, tests::volume},
-        vatsim::{FlightPlan, Pilot, Prefile, VatsimData},
+        vatsim::{FlightPlan, General, Pilot, Prefile, VatsimData},
     },
     handlers::sector_demand_cache::Inputs,
     scope_test_support::{grant, seed_user, send, send_json, session_cookie, test_state},
@@ -76,6 +78,7 @@ fn state(pool: PgPool) -> AppState {
             elsewhere("ZNY", "03001", "high"),
         ],
     }));
+    state.airspace_sectors_loaded.store(true, Ordering::Release);
     state
 }
 
@@ -106,7 +109,7 @@ fn airborne(callsign: &str) -> Pilot {
     }
 }
 
-/// Install a feed cycle at `fetched_at` holding `data`, with KJFK and KDCA known. The airport table is
+/// Install a feed cycle published and fetched at `fetched_at` holding `data`, with KJFK and KDCA known. The airport table is
 /// installed once and kept, as the feed keeps it between cycles, so a new cycle changes only the snapshot.
 async fn cycle(state: &AppState, data: VatsimData, fetched_at: DateTime<Utc>) {
     let mut feed = state.feed.write().await;
@@ -118,7 +121,7 @@ async fn cycle(state: &AppState, data: VatsimData, fetched_at: DateTime<Utc>) {
     }
     feed.snapshot = Some(Arc::new(Snapshot {
         fetched_at,
-        source_timestamp: String::new(),
+        source_timestamp: fetched_at.to_rfc3339(),
         data,
     }));
 }
@@ -332,6 +335,7 @@ fn departure_box(pool: PgPool) -> AppState {
             ..volume("ZDC", "05001")
         }],
     }));
+    state.airspace_sectors_loaded.store(true, Ordering::Release);
     state
 }
 
@@ -817,7 +821,7 @@ async fn writes_refresh_the_demand_and_a_neighbours_are_refused(pool: PgPool) {
     assert_eq!(zny["enroute"]["rows"].as_array().unwrap().len(), 2);
 }
 
-// ---- #725 QA: computed once per snapshot, not once per request ----
+// ---- #725 QA: computed once per publish, not once per request ----
 
 /// How many projections and renders `state`'s demand cache has run.
 fn runs(state: &AppState) -> (u64, u64) {
@@ -1069,7 +1073,7 @@ fn direct_fixture() -> (AppState, Arc<SectorTable>, Arc<AirportDb>) {
 fn direct_snapshot(at: &str) -> Arc<Snapshot> {
     Arc::new(Snapshot {
         fetched_at: at.parse().unwrap(),
-        source_timestamp: String::new(),
+        source_timestamp: at.into(),
         data: VatsimData::default(),
     })
 }
@@ -1229,4 +1233,287 @@ async fn each_reloaded_input_reprojects_once(pool: PgPool) {
         get(&state, "ZDC", &cookie).await;
         assert_eq!(runs(&state).0, 3 + n as u64, "a {what} reload");
     }
+}
+
+// ---- #725 QA round 3: keyed on the VATSIM publish, not the poll; pending until the table loads ----
+
+/// KJFK and KDCA known to the feed, with no snapshot installed (unlike [`cycle`]).
+async fn airports_only(state: &AppState) {
+    state.feed.write().await.airports = Arc::new(HashMap::from([
+        ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+        ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+    ]));
+}
+
+/// The three airborne flights of a publish stamped `published`, as the VATSIM feed sends it.
+fn published(published: &str) -> VatsimData {
+    VatsimData {
+        general: General {
+            update_timestamp: published.into(),
+            ..Default::default()
+        },
+        pilots: ["AAL1", "AAL2", "AAL3"].map(airborne).into(),
+        ..Default::default()
+    }
+}
+
+/// One successful poll through the feed's own writer, as the poller makes it; true when it was a new
+/// publish. `seen` is the poller's memory of the last publish and of its stale polls.
+async fn poll(
+    state: &AppState,
+    seen: &mut (Option<DateTime<Utc>>, u32),
+    data: VatsimData,
+    now: &str,
+) -> bool {
+    let (last_source, stale_polls) = (&mut seen.0, &mut seen.1);
+    let now = now.parse().unwrap();
+    apply_fetch(
+        &state.feed,
+        data,
+        now,
+        Duration::from_secs(2),
+        last_source,
+        stale_polls,
+    )
+    .await
+}
+
+fn ms(at: &str) -> i64 {
+    at.parse::<DateTime<Utc>>().unwrap().timestamp_millis()
+}
+
+/// QA round 2's return: the feed poller installs a new `Snapshot` on every 2 s poll, including a poll
+/// that repeats the publish already held, so a cache keyed on the snapshot re-projected about five times
+/// per publish and a limit write after a stale poll re-projected instead of re-judging. Driven through
+/// the real writer (`feed::apply_fetch`) and the real router. The publish (14:14:50) and its first fetch
+/// (14:15:05) sit either side of 1415Z, so the bins also show which clock the projection used.
+#[sqlx::test]
+async fn a_stale_poll_between_a_projection_and_a_limit_write_only_rejudges(pool: PgPool) {
+    let state = state(pool.clone());
+    let tmu = user(&pool, &[("flow.sector_limits.update", "ZDC")]).await;
+    airports_only(&state).await;
+    let seen = &mut (None, 0);
+
+    assert!(
+        poll(
+            &state,
+            seen,
+            published("2026-10-07T14:14:50Z"),
+            "2026-10-07T14:15:05Z"
+        )
+        .await
+    );
+    let first = get(&state, "ZDC", &tmu).await;
+    assert_eq!(runs(&state), (1, 1));
+    assert_eq!(first["cycle_at"], "2026-10-07T14:14:50Z");
+    assert_eq!(first["bin_starts_ms"][0], ms("2026-10-07T14:00:00Z"));
+    assert_eq!(row(&first, "enroute", "010")["bins"][0]["active"], 3);
+    let projected = state.feed.read().await.snapshot.clone().unwrap();
+
+    // The stale poll: the same publish, fetched again, installed as a new snapshot.
+    assert!(
+        !poll(
+            &state,
+            seen,
+            published("2026-10-07T14:14:50Z"),
+            "2026-10-07T14:15:07Z"
+        )
+        .await
+    );
+    let stale = state.feed.read().await.snapshot.clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&projected, &stale),
+        "the poll installed a new snapshot"
+    );
+    assert_eq!(get(&state, "ZDC", &tmu).await, first);
+    assert_eq!(runs(&state), (1, 1), "a repeated publish is a hit");
+
+    let uri = "/api/v1/flow/sector-limits/ZDC/010";
+    let status = send(&state, Method::PUT, uri, &tmu, Some(json!({ "limit": 2 }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let judged = get(&state, "ZDC", &tmu).await;
+    assert_eq!(runs(&state), (1, 2), "re-judged, not re-projected");
+    assert_eq!(
+        judged["cycle_at"], "2026-10-07T14:14:50Z",
+        "the projection's clock"
+    );
+    assert_eq!(judged["bin_starts_ms"], first["bin_starts_ms"]);
+    assert_eq!(row(&judged, "enroute", "010")["limit"], 2);
+    assert_eq!(row(&judged, "enroute", "010")["bins"][0]["level"], "over");
+
+    // Control: a new publish projects again, from its own time.
+    assert!(
+        poll(
+            &state,
+            seen,
+            published("2026-10-07T14:15:05Z"),
+            "2026-10-07T14:15:20Z"
+        )
+        .await
+    );
+    let next = get(&state, "ZDC", &tmu).await;
+    assert_eq!(runs(&state), (2, 3));
+    assert_eq!(next["cycle_at"], "2026-10-07T14:15:05Z");
+    assert_eq!(next["bin_starts_ms"][0], ms("2026-10-07T14:15:00Z"));
+}
+
+/// A snapshot whose timestamp doesn't parse (`Snapshot::of`, a malformed feed) has no publish to key
+/// on, so the cache falls back to the snapshot itself and the projection to its fetch time. The control,
+/// two snapshots of one parseable publish, is one projection.
+#[tokio::test]
+async fn an_unparseable_publish_falls_back_to_snapshot_identity() {
+    let (state, table, airports) = direct_fixture();
+    let inputs = |snapshot: &Arc<Snapshot>| direct_inputs(&state, snapshot, &airports, &table);
+    let cache = &state.sector_demand;
+    let stamped = |published: &str| {
+        Arc::new(Snapshot {
+            fetched_at: "2026-10-07T14:00:20Z".parse().unwrap(),
+            source_timestamp: published.into(),
+            data: VatsimData::default(),
+        })
+    };
+
+    let (a, b) = (
+        stamped("2026-10-07T14:00:00Z"),
+        stamped("2026-10-07T14:00:00Z"),
+    );
+    cache.demand("ZDC", inputs(&a)).await.unwrap();
+    cache.demand("ZDC", inputs(&b)).await.unwrap();
+    assert_eq!(cache.projections(), 1, "one publish, two snapshots");
+
+    let (c, d) = (stamped(""), stamped("not a time"));
+    cache.demand("ZDC", inputs(&c)).await.unwrap();
+    cache.demand("ZDC", inputs(&c)).await.unwrap();
+    assert_eq!(cache.projections(), 2);
+    let demand = cache.demand("ZDC", inputs(&d)).await.unwrap();
+    assert_eq!(
+        cache.projections(),
+        3,
+        "another unstamped snapshot is another key"
+    );
+    cache.demand("ZDC", inputs(&d)).await.unwrap();
+    assert_eq!(cache.projections(), 3);
+    assert_eq!(
+        demand.cycle_at, d.fetched_at,
+        "no publish time: the fetch's"
+    );
+}
+
+/// The single-flight guard orders entries by publish. Both snapshots were fetched at the same moment,
+/// so only their publish times can tell the older from the newer.
+#[tokio::test]
+async fn an_older_publish_never_replaces_a_newer_one() {
+    let (state, table, airports) = direct_fixture();
+    let inputs = |snapshot: &Arc<Snapshot>| direct_inputs(&state, snapshot, &airports, &table);
+    let cache = &state.sector_demand;
+    let stamped = |published: &str| {
+        Arc::new(Snapshot {
+            fetched_at: "2026-10-07T14:00:20Z".parse().unwrap(),
+            source_timestamp: published.into(),
+            data: VatsimData::default(),
+        })
+    };
+    let (older, newer) = (
+        stamped("2026-10-07T14:00:00Z"),
+        stamped("2026-10-07T14:00:15Z"),
+    );
+
+    cache.demand("ZDC", inputs(&newer)).await.unwrap();
+    let o = cache.demand("ZDC", inputs(&older)).await.unwrap();
+    assert_eq!(
+        o.cycle_at,
+        "2026-10-07T14:00:00Z".parse::<DateTime<Utc>>().unwrap()
+    );
+    assert_eq!(cache.projections(), 2);
+    cache.demand("ZDC", inputs(&newer)).await.unwrap();
+    assert_eq!(cache.projections(), 2, "the newer publish's entry was kept");
+}
+
+/// Q5: until the refresh job has read the sector table, its emptiness says nothing about any ARTCC, so
+/// every ARTCC is `pending`, not `no_sector_data`. A feed cycle is installed throughout, so `pending`
+/// can only come from the table. Once loaded, an empty table is `no_sector_data` for everyone.
+#[sqlx::test]
+async fn before_the_sector_table_loads_every_artcc_reads_pending(pool: PgPool) {
+    let volumes = state(pool.clone()).airspace_sectors.load_full();
+    let state = test_state(pool.clone(), HashMap::new());
+    let cookie = user(&pool, &[]).await;
+    cycle(&state, VatsimData::default(), Utc::now()).await;
+    let status = |artcc: &'static str| {
+        let (state, cookie) = (state.clone(), cookie.clone());
+        async move {
+            let body = get(&state, artcc, &cookie).await;
+            assert_eq!(body["artcc"], artcc);
+            body["status"].clone()
+        }
+    };
+
+    for artcc in ["ZDC", "ZLA"] {
+        let body = get(&state, artcc, &cookie).await;
+        assert_eq!(body["status"], "pending", "{artcc} before the table loads");
+        assert_eq!(body["cycle_at"], Value::Null);
+        assert_eq!(body["enroute"]["rows"], json!([]));
+        assert_eq!(body["tracon"]["rows"], json!([]));
+    }
+
+    // The job stores the table before it sets the flag.
+    state.airspace_sectors.store(volumes.clone());
+    assert_eq!(status("ZDC").await, "pending");
+
+    state.airspace_sectors.store(Arc::default());
+    state.airspace_sectors_loaded.store(true, Ordering::Release);
+    assert_eq!(status("ZDC").await, "no_sector_data", "loaded, and empty");
+    assert_eq!(status("ZLA").await, "no_sector_data");
+
+    state.airspace_sectors.store(volumes);
+    assert_eq!(status("ZDC").await, "ready");
+    assert_eq!(status("ZLA").await, "no_sector_data");
+}
+
+/// AC3 on the TRACON side: `state()`'s ZNY has enroute volumes only, so this adds a ZNY approach
+/// sector and shows a ZDC TMU refused at it through the real router. The controls show the sector is
+/// writable: by the ZDC TMU at its own approach sector, and by a ZNY TMU at this one.
+#[sqlx::test]
+async fn a_neighbours_tracon_limit_write_is_refused(pool: PgPool) {
+    let state = state(pool.clone());
+    let mut volumes = state.airspace_sectors.load().volumes.clone();
+    volumes.push(elsewhere("ZNY", "07501", "approach"));
+    state
+        .airspace_sectors
+        .store(Arc::new(SectorTable { volumes }));
+    let zdc_tmu = user(&pool, &[("flow.sector_limits.update", "ZDC")]).await;
+    let zny_tmu = user(&pool, &[("flow.sector_limits.update", "ZNY")]).await;
+    cycle(&state, VatsimData::default(), Utc::now()).await;
+    let put = |uri: &'static str, cookie: &String| {
+        let (state, cookie) = (state.clone(), cookie.clone());
+        async move {
+            send(
+                &state,
+                Method::PUT,
+                uri,
+                &cookie,
+                Some(json!({ "limit": 2 })),
+            )
+            .await
+        }
+    };
+    let mut rx = state.events.subscribe();
+
+    assert_eq!(
+        put("/api/v1/flow/sector-limits/ZNY/075", &zdc_tmu).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(rx.try_recv().is_err(), "a refused write publishes nothing");
+    let zny = get(&state, "ZNY", &zdc_tmu).await;
+    assert_eq!(row(&zny, "tracon", "075")["limit"], 10);
+
+    assert_eq!(
+        put("/api/v1/flow/sector-limits/ZDC/070", &zdc_tmu).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put("/api/v1/flow/sector-limits/ZNY/075", &zny_tmu).await,
+        StatusCode::OK
+    );
+    let zny = get(&state, "ZNY", &zdc_tmu).await;
+    assert_eq!(row(&zny, "tracon", "075")["limit"], 2);
 }

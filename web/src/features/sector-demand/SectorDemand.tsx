@@ -154,8 +154,9 @@ function DemandBody({ data, editing }: { data: SectorDemand; editing?: LimitEdit
   }
   if (data.status === "pending") {
     return (
-      <EmptyState icon={Hourglass} title="Waiting for the first feed cycle" className="rounded-md border border-line">
-        {artcc}&apos;s sector demand is counted from the live feed and appears once the server has received a cycle.
+      <EmptyState icon={Hourglass} title="Waiting for the first cycle" className="rounded-md border border-line">
+        {artcc}&apos;s sector demand is counted from the live feed against the sector data. It appears once the
+        server has loaded the sector data and received a feed cycle.
       </EmptyState>
     );
   }

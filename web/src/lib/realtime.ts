@@ -34,9 +34,9 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   { key: ["feed-status"], minGapMs: 30_000 },
   { key: ["idst"], minGapMs: 30_000 },
   { key: ["departures"], minGapMs: 60_000 },
-  // Six hours of projection per ARTCC, computed once per feed snapshot on the server and shared by
-  // every viewer (`AppState::sector_demand`): a miss costs one projection, 32–125 ms of CPU per ARTCC
-  // in release; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
+  // Six hours of projection per ARTCC, computed once per VATSIM publish on the server and shared by
+  // every viewer (`AppState::sector_demand`): a miss costs one projection, 179–540 ms of CPU per ARTCC
+  // in release on the live feed; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
   { key: ["sector-demand"], minGapMs: 60_000 },
 ];
 

@@ -190,15 +190,18 @@ describe("the Sector Monitor page (#725)", () => {
     await setValue(control(host, "Facility"), "ZLA");
     expect(host.textContent).toContain("No sector data for ZLA");
     expect(host.querySelector("table")).toBeNull();
-    expect(host.textContent).not.toContain("Waiting for the first feed cycle");
+    expect(host.textContent).not.toContain("Waiting for the first cycle");
   });
 
   it("says it is waiting for the first cycle rather than drawing an empty grid", async () => {
     const {host} = await mount(READER, [
       demand("ZDC", {status: "pending", cycle_at: null, bin_starts_ms: [], enroute: {has_sector_data: true, rows: []}, tracon: {has_sector_data: true, rows: []}}),
     ]);
-    expect(host.textContent).toContain("Waiting for the first feed cycle");
+    expect(host.textContent).toContain("Waiting for the first cycle");
     expect(host.textContent).toContain("ZDC's sector demand");
+    // #725 Q5: pending also means the sector data hasn't loaded yet, so the copy names both waits.
+    expect(host.textContent).toContain("loaded the sector data");
+    expect(host.textContent).toContain("received a feed cycle");
     expect(host.querySelector("table")).toBeNull();
     expect(host.textContent).not.toContain("No sector data");
   });
@@ -502,14 +505,14 @@ describe("the Sector Monitor page (#725)", () => {
     const noneAlerting = section(host, "ZNY Enroute sectors")!.textContent ?? "";
     expect(section(host, "ZNY Enroute sectors")!.querySelector("table")).toBeNull();
 
-    expect(pending).toContain("Waiting for the first feed cycle");
+    expect(pending).toContain("Waiting for the first cycle");
     expect(noData).toContain("No sector data for ZLA");
     expect(noneAlerting).toContain("No ZNY sectors alerting in the next 1.00 h");
     // Each says only its own thing.
     for (const [text, others] of [
       [pending, ["No sector data", "alerting in the next"]],
-      [noData, ["Waiting for the first feed cycle", "alerting in the next"]],
-      [noneAlerting, ["Waiting for the first feed cycle", "No sector data"]],
+      [noData, ["Waiting for the first cycle", "alerting in the next"]],
+      [noneAlerting, ["Waiting for the first cycle", "No sector data"]],
     ] as const) {
       for (const other of others) expect(text).not.toContain(other);
     }

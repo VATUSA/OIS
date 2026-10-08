@@ -1,23 +1,32 @@
-//! Sector demand computed once per feed snapshot (#725), not once per request.
+//! Sector demand computed once per VATSIM publish (#725), not once per request.
 //!
 //! An ARTCC's demand projects six hours of every flight near it (`sector_tracks::project_tracks`) and
-//! bins them against the whole sector table (`sector_loads`): 32–125 ms of CPU per ARTCC in a release
-//! build, measured against a captured 1,486-pilot feed. Every viewer of an ARTCC, as its own facility or as someone's neighbour, asks for the same numbers, and each
-//! open table refetches on every feed tick and on four flow topics. So the projection runs once per
-//! ARTCC per set of inputs and every other request reads it.
+//! bins them against the whole sector table (`sector_loads`): 179–540 ms of CPU per ARTCC in a release
+//! build, measured by QA against the live feed (546 pilots). Every viewer of an ARTCC, as its own
+//! facility or as someone's neighbour, asks for the same numbers, and each open table refetches on every
+//! feed tick and on four flow topics. So the projection runs once per ARTCC per set of inputs and every
+//! other request reads it.
 //!
 //! **Keyed on everything it reads.** An entry is reused only while each input is the one it was built
 //! from:
-//! - the feed snapshot, the airport, nav, aircraft-profile and wind tables and the sector table, by
-//!   identity: a new feed cycle or a refresh job's reload replaces the `Arc`, and only then. The entry holds
-//!   them as `Weak`, which keeps each address from being reused without keeping an old snapshot alive;
+//! - the feed, by the VATSIM publish it carries (`Snapshot::source_timestamp`), never by the `Snapshot`
+//!   itself: the poller installs a new `Snapshot` on every 2 s poll, including the polls that repeat a
+//!   publish (`feed::apply_fetch`), and only a new publish changes the flights. A snapshot whose
+//!   timestamp doesn't parse is keyed by identity instead;
+//! - the airport, nav, aircraft-profile and wind tables and the sector table, by identity: a refresh
+//!   job's reload replaces the `Arc`, and only then. The entry holds them as `Weak`, which keeps each
+//!   address from being reused without keeping an old table alive;
 //! - the consolidations, by value: their refresh job reloads every 30 s whether or not anything changed,
 //!   and a write force-reloads them (`handlers::sector_consolidations`), so a real change misses at once
 //!   and a no-op reload doesn't;
 //! - the excluded callsigns and the grounded flights' locked wheels-up (read from the database per
-//!   request), by value, so a release, CFR, GDP or FCA write shows on the next read in the same cycle;
+//!   request), by value, so a release, CFR, GDP or FCA write shows on the next read in the same publish;
 //! - the limits, by value, but they only colour the rows: a limit write (force-reloaded by
 //!   `handlers::sector_limits`) re-renders the rows from the cached projection and does not re-project.
+//!
+//! **The publish is the clock.** Positions are as of the publish, so the projection and its bins start
+//! from the publish time, not from when a poll fetched it. That keeps a stale poll from moving the
+//! clock, and a limit-only re-render keeps the clock its projection used.
 //!
 //! **Computed on demand, once.** Nothing is computed for an ARTCC nobody is looking at, and the feed
 //! tick stays as cheap as it was: the first request after a change computes, holding that ARTCC's slot,
@@ -79,7 +88,7 @@ pub(crate) struct Demand {
 
 /// The inputs a projection was built from (see the module docs for why each is compared as it is).
 struct Key {
-    snapshot: Weak<Snapshot>,
+    publish: Publish,
     airports: Weak<AirportDb>,
     nav: Weak<NavData>,
     profiles: Weak<ProfileTable>,
@@ -88,6 +97,42 @@ struct Key {
     consolidations: Arc<SectorConsolidations>,
     excluded: HashSet<String>,
     wheels_up: HashMap<String, i64>,
+}
+
+/// The VATSIM publish a feed snapshot carries: its `update_timestamp`, or the snapshot itself when that
+/// doesn't parse (an empty or malformed timestamp, or a `Snapshot::of` fallback).
+enum Publish {
+    At(DateTime<Utc>),
+    Unstamped(Weak<Snapshot>),
+}
+
+impl Publish {
+    fn of(snapshot: &Arc<Snapshot>) -> Self {
+        match published_at(snapshot) {
+            Some(at) => Self::At(at),
+            None => Self::Unstamped(Arc::downgrade(snapshot)),
+        }
+    }
+
+    fn matches(&self, snapshot: &Arc<Snapshot>) -> bool {
+        match self {
+            Self::At(at) => published_at(snapshot) == Some(*at),
+            Self::Unstamped(held) => same(held, snapshot),
+        }
+    }
+}
+
+/// When the snapshot's data was published upstream, if its timestamp parses.
+fn published_at(snapshot: &Snapshot) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&snapshot.source_timestamp)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// The projection's clock: the publish time, or the fetch time when the snapshot carries none. The same
+/// fallback as `feed::delays` and `feed::stats`.
+fn clock(snapshot: &Snapshot) -> DateTime<Utc> {
+    published_at(snapshot).unwrap_or(snapshot.fetched_at)
 }
 
 /// Whether `held` was taken from `current`. A `Weak` keeps its allocation, so no other value can be
@@ -104,7 +149,7 @@ fn equal<T: PartialEq>(held: &Arc<T>, current: &Arc<T>) -> bool {
 impl Key {
     fn of(inputs: &Inputs) -> Self {
         Self {
-            snapshot: Arc::downgrade(&inputs.snapshot),
+            publish: Publish::of(&inputs.snapshot),
             airports: Arc::downgrade(&inputs.airports),
             nav: Arc::downgrade(&inputs.nav),
             profiles: Arc::downgrade(&inputs.profiles),
@@ -117,7 +162,7 @@ impl Key {
     }
 
     fn matches(&self, inputs: &Inputs) -> bool {
-        same(&self.snapshot, &inputs.snapshot)
+        self.publish.matches(&inputs.snapshot)
             && same(&self.airports, &inputs.airports)
             && same(&self.nav, &inputs.nav)
             && same(&self.profiles, &inputs.profiles)
@@ -180,7 +225,9 @@ impl SectorDemandCache {
             && entry.key.matches(&inputs)
         {
             if !equal(&entry.limits, &inputs.limits) {
-                entry.demand = Arc::new(self.render(&entry.loads, &inputs, artcc));
+                // The projection's clock, not this request's snapshot: a stale poll since then carries a
+                // later fetch time for the same publish.
+                entry.demand = Arc::new(self.render(&entry.loads, entry.cycle_at, &inputs, artcc));
                 entry.limits = inputs.limits.clone();
             }
             return Ok(entry.demand.clone());
@@ -190,11 +237,11 @@ impl SectorDemandCache {
         // running, and the next request in line reads the entry instead of projecting again.
         let (cache, artcc) = (Arc::clone(self), artcc.to_string());
         tokio::spawn(async move {
-            let loads = Arc::new(cache.project(&artcc, &inputs).await?);
-            let demand = Arc::new(cache.render(&loads, &inputs, &artcc));
-            // A request that read the feed just before a new cycle landed must not replace that cycle's
-            // entry with its older one: it gets its own answer and the newer entry stays.
-            let cycle_at = inputs.snapshot.fetched_at;
+            let cycle_at = clock(&inputs.snapshot);
+            let loads = Arc::new(cache.project(&artcc, &inputs, cycle_at).await?);
+            let demand = Arc::new(cache.render(&loads, cycle_at, &inputs, &artcc));
+            // A request that read the feed just before a new publish landed must not replace that
+            // publish's entry with its older one: it gets its own answer and the newer entry stays.
             if held.as_ref().is_none_or(|e| e.cycle_at <= cycle_at) {
                 *held = Some(Entry {
                     key: Key::of(&inputs),
@@ -211,7 +258,12 @@ impl SectorDemandCache {
     }
 
     /// Project the flights near `artcc` and bin them against the whole table, keeping `artcc`'s rows.
-    async fn project(&self, artcc: &str, inputs: &Inputs) -> Result<Vec<SectorLoad>, ApiError> {
+    async fn project(
+        &self,
+        artcc: &str,
+        inputs: &Inputs,
+        cycle_at: DateTime<Utc>,
+    ) -> Result<Vec<SectorLoad>, ApiError> {
         self.projections.fetch_add(1, Ordering::Relaxed);
         let snapshot = inputs.snapshot.clone();
         let (airports, nav, profiles, winds, table, consolidations) = (
@@ -224,10 +276,9 @@ impl SectorDemandCache {
         );
         let (excluded, wheels_up) = (inputs.excluded.clone(), inputs.wheels_up.clone());
         let owner = artcc.to_string();
+        let now_ms = cycle_at.timestamp_millis();
         let started = std::time::Instant::now();
         let loads = tokio::task::spawn_blocking(move || {
-            // The cycle is the clock: positions are as of the snapshot, so the bins start from it too.
-            let now_ms = snapshot.fetched_at.timestamp_millis();
             let owned = project_tracks(
                 &snapshot.data,
                 &nav,
@@ -263,11 +314,17 @@ impl SectorDemandCache {
         Ok(loads)
     }
 
-    fn render(&self, loads: &[SectorLoad], inputs: &Inputs, artcc: &str) -> Demand {
+    fn render(
+        &self,
+        loads: &[SectorLoad],
+        cycle_at: DateTime<Utc>,
+        inputs: &Inputs,
+        artcc: &str,
+    ) -> Demand {
         self.renders.fetch_add(1, Ordering::Relaxed);
         let (enroute, tracon) = tables(loads, &inputs.table, artcc, &inputs.limits);
         Demand {
-            cycle_at: inputs.snapshot.fetched_at,
+            cycle_at,
             bin_starts_ms: loads
                 .first()
                 .map(|l| l.bins.iter().map(|b| b.start_ms).collect())

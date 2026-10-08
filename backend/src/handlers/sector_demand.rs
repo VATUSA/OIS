@@ -5,7 +5,7 @@
 //!
 //! Read-only and gated `flow.sectors.read`, like the limit and consolidation reads. Computed from the
 //! caches (the feed snapshot, the sector table, limits, consolidations and exclusions) once per ARTCC per
-//! change, not per request: see `handlers::sector_demand_cache`. The database is read for the caller's
+//! VATSIM publish or config change, not per request: see `handlers::sector_demand_cache`. The database is read for the caller's
 //! two edit scopes, the locked wheels-up of the grounded flights (`repos::flow::locked_wheels_up`) and the
 //! active facilities that filter the neighbour list.
 //!
@@ -13,7 +13,10 @@
 //! `flow.sector_consolidations` (rows recolour or merge), and on `flow.release`, `flow.cfr`, `tmu.gdp`
 //! and `flow.fca` (a wheels-up moved, so the proposed counts did). See `docs/features/monitor.md`.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::Ordering,
+};
 
 use axum::{
     Json,
@@ -159,6 +162,8 @@ pub async fn get_sector_demand(
     let mut neighbours = neighbors::tier1(&artcc, &known);
     neighbours.sort();
 
+    // Read before the table: the refresh job stores the table, then sets the flag.
+    let sectors_loaded = state.airspace_sectors_loaded.load(Ordering::Acquire);
     let table = state.airspace_sectors.load_full();
     let (has_enroute, has_tracon) = coverage(&table, &artcc);
     let mut body = SectorDemandBody {
@@ -180,6 +185,12 @@ pub async fn get_sector_demand(
             rows: Vec::new(),
         },
     };
+    // Until the table has been read, its emptiness says nothing about this ARTCC, so this is `pending`
+    // too, not `no_sector_data` for every ARTCC (#725 Q5).
+    if !sectors_loaded {
+        body.status = SectorDemandStatus::Pending;
+        return Ok(Json(body));
+    }
     if !has_enroute && !has_tracon {
         return Ok(Json(body));
     }

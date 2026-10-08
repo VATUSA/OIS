@@ -44,6 +44,7 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
         aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
         airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
+        airspace_sectors_loaded: Arc::new(AtomicBool::new(false)),
         sector_limits: Arc::new(ArcSwap::from_pointee(Default::default())),
         sector_consolidations: Arc::new(ArcSwap::from_pointee(Default::default())),
         sector_demand: Arc::default(),

@@ -44,6 +44,11 @@ pub struct AppState {
     /// import appears on the next tick (see `feed::sectors`). Behind `ArcSwap` for lock-free reads
     /// from the DB-less feed subsystem.
     pub airspace_sectors: Arc<ArcSwap<SectorTable>>,
+    /// Whether `airspace_sectors` has been loaded from the DB at least once. Until then the empty
+    /// table means "not read yet", not "no volumes", so `handlers::sector_demand` answers `pending`
+    /// rather than naming every ARTCC as having no sector data. Set by
+    /// `jobs::spawn_airspace_sectors_refresh` and never cleared: a later failed load keeps the table.
+    pub airspace_sectors_loaded: Arc<AtomicBool>,
     /// Sector occupancy limit overrides (#722). Starts empty (every sector at the default) and is
     /// reloaded by `jobs::spawn_sector_limits_refresh`, and force-reloaded by `handlers::sector_limits`
     /// after each write, so an edit recolours at once for every viewer of this replica.
@@ -52,7 +57,7 @@ pub struct AppState {
     /// `jobs::spawn_sector_consolidations_refresh`, and force-reloaded by
     /// `handlers::sector_consolidations` after each write, so a merge shows at once on this replica.
     pub sector_consolidations: Arc<ArcSwap<SectorConsolidations>>,
-    /// Each ARTCC's sector demand (#725), computed once per feed snapshot and the config it reads,
+    /// Each ARTCC's sector demand (#725), computed once per VATSIM publish and the config it reads,
     /// not once per request. Filled by `handlers::sector_demand` on the first read after a change; see
     /// `handlers::sector_demand_cache`.
     pub sector_demand: Arc<crate::handlers::sector_demand_cache::SectorDemandCache>,
@@ -119,6 +124,7 @@ impl AppState {
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+        let airspace_sectors_loaded = Arc::new(AtomicBool::new(false));
         let sector_limits = Arc::new(ArcSwap::from_pointee(SectorLimits::default()));
         let sector_consolidations =
             Arc::new(ArcSwap::from_pointee(SectorConsolidations::default()));
@@ -164,6 +170,7 @@ impl AppState {
                 winds,
                 aircraft_profiles,
                 airspace_sectors,
+                airspace_sectors_loaded: airspace_sectors_loaded.clone(),
                 sector_limits,
                 sector_consolidations,
                 sector_demand: Arc::default(),
@@ -193,6 +200,7 @@ impl AppState {
             winds,
             aircraft_profiles,
             airspace_sectors,
+            airspace_sectors_loaded,
             sector_limits,
             sector_consolidations,
             sector_demand: Arc::default(),
@@ -223,6 +231,7 @@ impl AppState {
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
+            airspace_sectors_loaded: Arc::new(AtomicBool::new(false)),
             sector_limits: Arc::new(ArcSwap::from_pointee(SectorLimits::default())),
             sector_consolidations: Arc::new(ArcSwap::from_pointee(SectorConsolidations::default())),
             sector_demand: Arc::default(),
