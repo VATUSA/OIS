@@ -89,6 +89,9 @@ struct RawProc {
     common: Vec<Leg>,
     #[serde(default)]
     transitions: HashMap<String, Vec<Leg>>,
+    /// The airports the procedure serves (CIFP terminal records' airport field).
+    #[serde(default)]
+    apt: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -111,6 +114,8 @@ pub struct NavData {
     preferred: HashMap<String, String>,
     /// Shortest procedure key for a bare letter prefix (e.g. `DOTSS` → `DOTSS2`).
     proc_by_prefix: HashMap<String, String>,
+    /// Airport ICAO → the STAR keys that serve it, sorted (VATUSA/OIS#791).
+    stars_by_apt: HashMap<String, Vec<String>>,
     /// Navaid id → magnetic variation (deg, East positive), for fix-radial-distance points.
     nav_magvar: HashMap<String, f64>,
     bbox: [f64; 4],
@@ -162,6 +167,7 @@ impl NavData {
             .map(|(k, v)| (k, Airway { w: v.w }))
             .collect();
 
+        let mut stars_by_apt: HashMap<String, Vec<String>> = HashMap::new();
         let procedures: HashMap<String, Procedure> = raw_procs
             .into_iter()
             .map(|(k, v)| {
@@ -170,6 +176,14 @@ impl NavData {
                 } else {
                     ProcType::Sid
                 };
+                if ptype == ProcType::Star {
+                    for apt in &v.apt {
+                        stars_by_apt
+                            .entry(apt.to_ascii_uppercase())
+                            .or_default()
+                            .push(k.clone());
+                    }
+                }
                 (
                     k,
                     Procedure {
@@ -197,6 +211,11 @@ impl NavData {
             }
         }
 
+        for stars in stars_by_apt.values_mut() {
+            stars.sort();
+            stars.dedup();
+        }
+
         Self {
             navaids,
             fixes,
@@ -204,6 +223,7 @@ impl NavData {
             procedures,
             preferred,
             proc_by_prefix,
+            stars_by_apt,
             nav_magvar,
             bbox: meta.bbox.unwrap_or([-90.0, -180.0, 90.0, 180.0]),
             cycle: meta.nasr_cycle_date.unwrap_or_default(),
@@ -243,6 +263,16 @@ impl NavData {
 
     pub fn procedure_count(&self) -> usize {
         self.procedures.len()
+    }
+
+    /// The STAR procedure keys (e.g. `CAPPS3`, plus any bare-prefix alias like `CAPPS`) that serve
+    /// `icao`, sorted; empty for an airport with none. Raw names: the web groups them into arrival
+    /// gates with the same `summaryGateName` it applies to `FlowFlight.gate`, so the two sources
+    /// share one normalizer (VATUSA/OIS#791).
+    pub fn stars_for(&self, icao: &str) -> &[String] {
+        self.stars_by_apt
+            .get(&icao.to_ascii_uppercase())
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Whether `token` names a known nav element (fix, navaid, airway, or procedure). Used to flag

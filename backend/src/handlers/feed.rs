@@ -166,6 +166,7 @@ pub(crate) async fn flow_for(
             demand_60min: 0,
             over_capacity: None,
             flights: Vec::new(),
+            stars: state.nav.load().stars_for(icao).to_vec(),
         }),
     }
 }
@@ -998,6 +999,17 @@ mod tests {
             send(&state, Method::GET, DEMAND, &cookie, None).await,
             StatusCode::OK
         );
+    }
+
+    /// #791: before the first feed snapshot lands, `flow_for` builds an empty flow by hand rather
+    /// than through `flow::compute`; it still carries the airport's STARs from the nav data.
+    #[sqlx::test]
+    async fn the_flow_lists_stars_before_the_first_snapshot(pool: PgPool) {
+        let state = state_for(pool.clone());
+        assert!(state.feed.read().await.snapshot.is_none());
+        let flow = flow_for(&state, &pool, "KIAD").await.unwrap();
+        assert!(flow.flights.is_empty());
+        assert!(flow.stars.iter().any(|s| s == "CAVLR6"), "{:?}", flow.stars);
     }
 }
 
