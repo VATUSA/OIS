@@ -12,7 +12,7 @@ check-constrained statuses, FK cascades), the migration-number contention and it
 and the `#[sqlx::test]` setup are in `AGENTS.md` § Conventions & gotchas and § Testing &
 verification. Read those first; this file adds what has gone wrong anyway.
 
-Sources: OIS lessons from #61, #436, #550, #569, #584, #585, #656, and #706.
+Sources: OIS lessons from #61, #436, #550, #569, #584, #585, #656, #706, and #795.
 
 ## Picking a migration number: scan branches, not PRs
 
@@ -93,6 +93,13 @@ mutant here means mass data loss, not a wrong number.
 - A repo `delete` or `update` keyed on several columns gets a neighbor row per key in its test.
   On #706 a two-predicate `delete … where artcc = $1 and sector_id = $2` was tested against one
   row, and dropping either predicate stayed green.
+- A query that scans every member (a bulk pass, a candidate list, a division-wide diff) gets an
+  `EXPLAIN ANALYZE` against a throwaway database seeded at division scale (10,000+ users) before it
+  ships. A unit fixture of a few rows can't show the plan. Watch for a correlated `EXISTS` or
+  `IN` over a CTE: a CTE referenced twice is materialized without an index, so each outer row
+  rescans it. On #795 the reset's candidate query ran 2 × 14,850 such scans, 31 s at 15,000
+  users and quadratic beyond. A set-based diff (`FULL JOIN … USING (…)`, keep the rows with one
+  side null) returned the same rows in 185 ms. Put the timing in the PR.
 - Feed-visible data is loaded into an `AppState` cache by a job, never queried from `feed/`
   (`AGENTS.md` § The live feed subsystem).
 
