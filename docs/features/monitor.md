@@ -114,7 +114,7 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
 - **Rules**: same ARTCC only, since both sectors are looked up in the path's ARTCC (another ARTCC's
   sector is a 404). A sector worked at itself is a 400. A loop (a at b, then b at a) is a 409. Neither
   refusal writes anything.
-- **Flat on every write** (`repos::sector_consolidations::consolidate`, one transaction, serialised per
+- **Flat on every write** (`repos::sector_consolidations::consolidate` and `apply_batch`, one transaction, serialised per
   ARTCC). A target that is itself worked elsewhere resolves to where it is worked. Sectors worked at the
   source move with it: 18 at 41, then 41 at 20, leaves 18 at 20.
 - **Read**: `GET /api/v1/flow/sector-consolidations/{artcc}` (`flow.sectors.read`), with `editable`.
@@ -122,6 +122,13 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
   `DELETE` on the same path to release. Both need `flow.sector_consolidations.update` for that ARTCC,
   which is separate from `flow.sector_limits.update` and granted to the same five groups. A release
   isn't checked against the dataset, so one left behind by a re-import can still be cleared.
+- **Batch write** (#794): `PUT /api/v1/flow/sector-consolidations/{artcc}` with `{ "into": { "<sector>":
+  "<target>" | null } }`, same permission and scope. All or nothing in one transaction
+  (`repos::sector_consolidations::apply_batch`): releases first, then saves in sector order, each flattened
+  as above, and the first refusal (400, 404 or 409, a loop between the batch's own entries included)
+  writes none of it. A null entry releases without a dataset check, like `DELETE`; two keys that trim to
+  one sector are a 400. One `flow.sector_consolidations` publish for the whole batch. The Sector
+  Monitor's menu sends every consolidation command through it.
 - **Cache**: `AppState::sector_consolidations`, refreshed every 30 s by `sector_consolidations_refresh`.
   Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a
   cache another replica's write has left behind. A write that changes anything also publishes

@@ -5,6 +5,8 @@
 //! regenerate the client in the same change, or CI's `client-drift` fails. See `AGENTS.md`
 //! § "The API contract → typed client".
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1590,6 +1592,14 @@ pub struct SectorConsolidationsBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ConsolidateSectorRequest {
     pub target_sector_id: String,
+}
+
+/// Change several of one ARTCC's consolidations at once (#794), all or nothing.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorsRequest {
+    /// Each sector to change, mapped to the sector to work it at, or to null to give it its own row
+    /// back.
+    pub into: BTreeMap<String, Option<String>>,
 }
 
 /// Whether an ARTCC's sector demand can be drawn (#725). Each state has its own message on the page;

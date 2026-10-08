@@ -2117,7 +2117,16 @@ export interface paths {
         };
         /** `artcc`'s consolidations: which sectors are worked at which, with `editable` for the caller. */
         get: operations["list_sector_consolidations"];
-        put?: never;
+        /**
+         * Change several of this ARTCC's consolidations at once, all or nothing: the Sector Monitor's "All"
+         *     commands and its checklists (#794, #792). `into` maps each sector to the sector to work it at, or to
+         *     null to give it its own row back. Every sector being worked somewhere, and every target, must be
+         *     this ARTCC's (404 otherwise); a release is not checked against the dataset, like the single release.
+         *     A self-reference (or two keys naming one sector) is a 400 and a loop, including one between the
+         *     batch's own entries, a 409, and neither writes anything. Answers with the ARTCC's consolidations after the save; a batch that
+         *     changed something tells every viewer once.
+         */
+        put: operations["consolidate_sectors"];
         post?: never;
         delete?: never;
         options?: never;
@@ -4364,6 +4373,16 @@ export interface components {
         /** @description Work a sector at another of the same ARTCC's sectors. */
         ConsolidateSectorRequest: {
             target_sector_id: string;
+        };
+        /** @description Change several of one ARTCC's consolidations at once (#794), all or nothing. */
+        ConsolidateSectorsRequest: {
+            /**
+             * @description Each sector to change, mapped to the sector to work it at, or to null to give it its own row
+             *     back.
+             */
+            into: {
+                [key: string]: string | null;
+            };
         };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
@@ -15239,6 +15258,83 @@ export interface operations {
             };
             /** @description Not signed in, or without `flow.sectors.read` */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    consolidate_sectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsolidateSectorsRequest"];
+            };
+        };
+        responses: {
+            /** @description The ARTCC's consolidations after the save, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description An entry works a sector at itself, or two entries name the same sector; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A sector being consolidated, or a target, is not one of this ARTCC's; nothing is written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The batch would make a loop; nothing is written */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
