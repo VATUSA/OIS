@@ -481,7 +481,26 @@ async fn ensure_user_login_access(
     cid: i64,
     first_sign_in: bool,
 ) -> Result<(), ApiError> {
-    if configured_server_admin_cids().contains(&cid) {
+    reconcile_login_access(
+        pool,
+        user_id,
+        cid,
+        first_sign_in,
+        &configured_server_admin_cids(),
+    )
+    .await
+}
+
+/// [`ensure_user_login_access`] against an explicit admin list, so a test can configure an admin
+/// without `set_var` racing the rest of the suite.
+pub(crate) async fn reconcile_login_access(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    cid: i64,
+    first_sign_in: bool,
+    server_admin_cids: &[i64],
+) -> Result<(), ApiError> {
+    if server_admin_cids.contains(&cid) {
         let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
         access_repo::assign_server_admin(&mut tx, user_id).await?;
         tx.commit().await.map_err(|_| ApiError::Internal)?;
@@ -816,6 +835,97 @@ mod tests {
             effective.contains_key("access.self.read"),
             "but keeps the baseline"
         );
+    }
+
+    const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
+
+    /// The user's group rows as `role:source`, sorted.
+    async fn role_rows(pool: &PgPool, user: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "select role_name || ':' || source from access.user_roles where user_id = $1 order by 1",
+        )
+        .bind(user)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Seeds the rows 0098's backfill left a pre-0098 holder with: SERVER_ADMIN and USER, both
+    /// `manual`.
+    async fn seed_backfilled_admin(pool: &PgPool, user: &str) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'manual'), ($1, 'USER', 'manual')",
+        )
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// #805 AC1: an admin configured before 0098 and since removed from `OIS_SERVER_ADMIN_CID` is
+    /// demoted at their next sign-in. The backfilled row was `manual`, which `revoke_server_admin`
+    /// never deletes; without 0130's re-tag they would stay server admin.
+    #[sqlx::test]
+    async fn a_backfilled_admin_no_longer_configured_is_demoted_at_sign_in(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        seed_backfilled_admin(&pool, &user).await;
+        grant(&pool, &user, "tmu.program.update", None).await;
+        sqlx::raw_sql(MIGRATION_0130).execute(&pool).await.unwrap();
+
+        super::reconcile_login_access(&pool, &user, 1_000_001, false, &[1_000_002])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            role_rows(&pool, &user).await,
+            ["USER:system"],
+            "SERVER_ADMIN is gone and only the baseline is left"
+        );
+        let direct: i64 =
+            sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+                .bind(&user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            direct, 0,
+            "the demotion wipes direct grants, as for any demotion"
+        );
+    }
+
+    /// #805 AC2, the sign-in half: a backfilled admin who is still configured keeps SERVER_ADMIN,
+    /// including one who signed in after 0098 and so holds a `system` twin beside the backfilled row.
+    #[sqlx::test]
+    async fn a_backfilled_admin_still_configured_keeps_server_admin_at_sign_in(pool: PgPool) {
+        let twin = seed_user(&pool).await;
+        seed_backfilled_admin(&pool, &twin).await;
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) \
+             values ($1, 'SERVER_ADMIN', 'system')",
+        )
+        .bind(&twin)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let backfill_only = seed_user(&pool).await;
+        seed_backfilled_admin(&pool, &backfill_only).await;
+        sqlx::raw_sql(MIGRATION_0130).execute(&pool).await.unwrap();
+
+        let admins = [1_000_001, 1_000_002];
+        super::reconcile_login_access(&pool, &twin, 1_000_001, false, &admins)
+            .await
+            .unwrap();
+        super::reconcile_login_access(&pool, &backfill_only, 1_000_002, false, &admins)
+            .await
+            .unwrap();
+
+        for user in [&twin, &backfill_only] {
+            assert_eq!(
+                role_rows(&pool, user).await,
+                ["SERVER_ADMIN:system", "USER:system"]
+            );
+        }
     }
 
     /// `/me` could contradict itself (VATUSA/OIS#543): `tmu_national` came from the scoped resolver,

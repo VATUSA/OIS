@@ -1480,7 +1480,8 @@ mod tests {
         .unwrap();
         assert_eq!(source, "system");
 
-        // A hand-made SERVER_ADMIN is a separate row, and the reconciliation's revoke leaves it.
+        // A SERVER_ADMIN of another source is a separate row, and the reconciliation's revoke leaves
+        // it. No editor can write one; 0098's `manual` backfill was the only source until 0130 (#805).
         sqlx::query(
             "insert into access.user_roles (user_id, role_name, source) \
              values ($1, 'SERVER_ADMIN', 'manual')",
@@ -1507,6 +1508,246 @@ mod tests {
             vec!["manual".to_string()],
             "the env reconciliation must revoke only its own grant"
         );
+    }
+
+    /// 0130 (#805) re-tags the `manual` USER and SERVER_ADMIN rows 0098 backfilled as `system`, and
+    /// deletes the `manual` row instead where a `system` twin exists. Each user below is the
+    /// surviving neighbor of one predicate: drop that predicate and that user's rows come out wrong.
+    #[sqlx::test]
+    async fn migration_0130_retags_the_backfilled_system_groups(pool: sqlx::PgPool) {
+        const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
+
+        /// A group row: role, scope (`None` = national), source.
+        type Row = (&'static str, Option<&'static str>, &'static str);
+        let fixture: &[(&str, &[Row])] = &[
+            // The twin: the backfilled row goes, the login's row stays.
+            (
+                "twin",
+                &[
+                    ("SERVER_ADMIN", None, "manual"),
+                    ("SERVER_ADMIN", None, "system"),
+                ],
+            ),
+            // Backfill only: updated. Its `system` neighbor is another user's (delete's user match).
+            ("backfill only", &[("SERVER_ADMIN", None, "manual")]),
+            ("other user", &[("SERVER_ADMIN", None, "system")]),
+            // A `system` row of another group is no twin (delete's role match).
+            (
+                "other group",
+                &[("USER", None, "manual"), ("SERVER_ADMIN", None, "system")],
+            ),
+            // A `system` row at another scope is no twin (delete's scope match); both re-tag.
+            (
+                "other scope",
+                &[("USER", Some("ZDC"), "manual"), ("USER", None, "system")],
+            ),
+            // A `vatusa` row is no twin (delete's `s.source`), and is never touched itself
+            // (delete's and update's `m.source`).
+            (
+                "vatusa",
+                &[
+                    ("SERVER_ADMIN", None, "manual"),
+                    ("SERVER_ADMIN", None, "vatusa"),
+                ],
+            ),
+            (
+                "vatusa beside system",
+                &[("USER", None, "vatusa"), ("USER", None, "system")],
+            ),
+            // Another group's rows are not 0130's (delete's and update's role filter).
+            (
+                "assignable",
+                &[("EC", None, "manual"), ("EC", None, "system")],
+            ),
+        ];
+        for (name, rows) in fixture {
+            let user: String = sqlx::query_scalar(
+                "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            for (role, artcc, source) in *rows {
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, $2, $3, $4)",
+                )
+                .bind(&user)
+                .bind(role)
+                .bind(artcc)
+                .bind(source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        async fn rows(pool: &sqlx::PgPool) -> Vec<String> {
+            sqlx::query_scalar(
+                "select u.display_name || ': ' || r.role_name || '@' \
+                        || coalesce(r.artcc_id, 'national') || ':' || r.source \
+                 from access.user_roles r join identity.users u on u.id = r.user_id \
+                 order by 1",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        sqlx::raw_sql(MIGRATION_0130).execute(&pool).await.unwrap();
+        let after = rows(&pool).await;
+        assert_eq!(
+            after,
+            [
+                "assignable: EC@national:manual",
+                "assignable: EC@national:system",
+                "backfill only: SERVER_ADMIN@national:system",
+                "other group: SERVER_ADMIN@national:system",
+                "other group: USER@national:system",
+                "other scope: USER@national:system",
+                "other scope: USER@ZDC:system",
+                "other user: SERVER_ADMIN@national:system",
+                "twin: SERVER_ADMIN@national:system",
+                "vatusa beside system: USER@national:system",
+                "vatusa beside system: USER@national:vatusa",
+                "vatusa: SERVER_ADMIN@national:system",
+                "vatusa: SERVER_ADMIN@national:vatusa",
+            ]
+        );
+
+        sqlx::raw_sql(MIGRATION_0130)
+            .execute(&pool)
+            .await
+            .expect("a second run doesn't fail");
+        assert_eq!(rows(&pool).await, after, "and changes nothing");
+    }
+
+    /// #805 AC4: the 0130 audit (`backend/audits/0130_retag_effect.sql`), run from its own SETUP and
+    /// REPORT blocks, lists every SERVER_ADMIN holder before and after, and singles out the former
+    /// admin 0130 demotes at sign-in from the configured ones it leaves alone.
+    #[sqlx::test]
+    async fn the_0130_audit_lists_every_server_admin_before_and_after(pool: sqlx::PgPool) {
+        const AUDIT: &str = include_str!("../../audits/0130_retag_effect.sql");
+        const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
+        fn block(name: &str) -> &'static str {
+            let begin = format!("-- BEGIN {name}\n");
+            let start = AUDIT.find(&begin).expect("the block opens") + begin.len();
+            let len = AUDIT[start..]
+                .find(&format!("-- END {name}"))
+                .expect("the block closes");
+            &AUDIT[start..start + len]
+        }
+
+        for (cid, name, sources) in [
+            (1_805_001_i64, "Configured Backfill", &["manual"][..]),
+            (1_805_002, "Configured Twin", &["manual", "system"][..]),
+            (1_805_003, "Former Backfill", &["manual"][..]),
+            (1_805_004, "Former Vatusa", &["vatusa"][..]),
+        ] {
+            let user: String = sqlx::query_scalar(
+                "insert into identity.users (cid, full_name, display_name) values ($1, $2, $2) \
+                 returning id",
+            )
+            .bind(cid)
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            for source in sources {
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, source) \
+                     values ($1, 'SERVER_ADMIN', $2)",
+                )
+                .bind(&user)
+                .bind(source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(block("SETUP"))
+            .execute(&mut *tx)
+            .await
+            .expect("the audit's setup runs");
+        // What the psql `admin_cids` variable feeds in.
+        sqlx::query("insert into audit_configured_cids values (1805001), (1805002)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::raw_sql(MIGRATION_0130)
+            .execute(&mut *tx)
+            .await
+            .expect("the migration runs");
+        let report: Vec<(i64, String, String, String, bool, bool, bool)> =
+            sqlx::query_as(block("REPORT"))
+                .fetch_all(&mut *tx)
+                .await
+                .expect("the audit's report runs");
+        tx.rollback().await.unwrap();
+
+        let row = |cid, name: &str, before: &str, after: &str, configured, today, with| {
+            (
+                cid,
+                name.to_string(),
+                before.to_string(),
+                after.to_string(),
+                configured,
+                today,
+                with,
+            )
+        };
+        assert_eq!(
+            report,
+            [
+                row(
+                    1_805_001,
+                    "Configured Backfill",
+                    "manual",
+                    "system",
+                    true,
+                    true,
+                    true
+                ),
+                row(
+                    1_805_002,
+                    "Configured Twin",
+                    "manual,system",
+                    "system",
+                    true,
+                    true,
+                    true
+                ),
+                row(
+                    1_805_003,
+                    "Former Backfill",
+                    "manual",
+                    "system",
+                    false,
+                    true,
+                    false
+                ),
+                row(
+                    1_805_004,
+                    "Former Vatusa",
+                    "vatusa",
+                    "vatusa",
+                    false,
+                    true,
+                    true
+                ),
+            ]
+        );
+        let manual: i64 = sqlx::query_scalar(
+            "select count(*) from access.user_roles where role_name = 'SERVER_ADMIN' \
+             and source = 'manual'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(manual, 3, "the audit rolled back");
     }
 
     #[test]

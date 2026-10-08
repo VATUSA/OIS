@@ -185,8 +185,9 @@ holding exactly their `system` grants plus what VATUSA justifies.
   `USER_ACCESS` audit entry naming every row removed and added. A user with no change gets no entry.
   Because the pull is fresh, the result can differ from the dry run if VATUSA changed since the last
   pull; the response lists what the reset actually did.
-- **`USER` and `SERVER_ADMIN` are never removed**, whatever their `source`. Migration 0098 backfilled
-  both as `manual` for everyone who held them then.
+- **`USER` and `SERVER_ADMIN` stay** because they are `system` rows. Migration 0098 backfilled both
+  as `manual`; 0130 re-tagged them `system` (#805). A `SERVER_ADMIN` row written by hand as `manual`
+  is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` is the only way to grant it.
 - **A failure part-way** stops the run with `500 reset_incomplete`. Users before it are reset and
   audited, the failing user is rolled back whole, and users after it are untouched. `users_reset`
   says how many were done; running it again finishes the rest.

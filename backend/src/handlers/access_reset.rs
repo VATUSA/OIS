@@ -128,11 +128,11 @@ pub async fn preview_vatusa_reset(
     security(("session" = []))
 )]
 /// Reset every member's access to VATUSA (#795): pull the division fresh (refused with 503 when
-/// VATUSA is not configured), then, one transaction per
-/// member, put them back on role sync, delete every hand-made grant except the baseline `USER` and
-/// `SERVER_ADMIN` groups, and reconcile their VATUSA grants. `system` grants are left alone. Each
-/// changed member gets one `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the
-/// result can differ from the dry run if VATUSA changed since the last pull. Server admin only.
+/// VATUSA is not configured), then, one transaction per member, put them back on role sync, delete
+/// every hand-made grant, and reconcile their VATUSA grants. `system` grants, the baseline `USER` and
+/// `SERVER_ADMIN` groups among them, are left alone. Each changed member gets one `USER_ACCESS` audit
+/// entry with the reason. Because the pull is fresh, the result can differ from the dry run if VATUSA
+/// changed since the last pull. Server admin only.
 pub async fn apply_vatusa_reset(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
@@ -247,6 +247,7 @@ mod tests {
     const ADMIN_CID: i64 = 1_795_000;
     const MEMBER_CID: i64 = 1_795_001;
     const STEADY_CID: i64 = 1_795_002;
+    const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
 
     /// `(kind, name, scope, source, granted)`, sorted, for one user.
     type Rows = Vec<(String, String, Option<String>, String, bool)>;
@@ -328,12 +329,14 @@ mod tests {
             .unwrap();
     }
 
-    /// The server admin holds `USER` and `SERVER_ADMIN` as `manual`, as migration 0098 backfilled them,
-    /// plus a hand-made EC. The member holds every kind of row: the baseline as `manual` and as
-    /// `system`; a `system` non-baseline group and a `system` permission (kept — the reset only takes
-    /// `manual` rows); a hand-made group, permission and deny (removed); VATUSA's EC at ZDC, which the
-    /// default EVENT_COORDINATOR mapping (0124) still justifies (kept); and VATUSA's AEC at ZDC, whose
-    /// role is gone (removed). They are detached, and VATUSA justifies an EC at ZJX they don't hold yet.
+    /// A database 0098 backfilled, after 0130 re-tagged it (#805). The server admin was seeded with
+    /// `USER` and `SERVER_ADMIN` as `manual`, as 0098 left them, which 0130 makes `system`, plus a
+    /// hand-made EC. The member holds every kind of row: the baseline as `system` (its backfilled
+    /// `manual` twin is seeded and 0130 deletes it); a `system` non-baseline group and a `system`
+    /// permission (kept — the reset only takes `manual` rows); a hand-made group, permission and deny
+    /// (removed); VATUSA's EC at ZDC, which the default EVENT_COORDINATOR mapping (0124) still
+    /// justifies (kept); and VATUSA's AEC at ZDC, whose role is gone (removed). They are detached, and
+    /// VATUSA justifies an EC at ZJX they don't hold yet.
     async fn world(pool: PgPool) -> World {
         let admin = user(&pool, ADMIN_CID, "Admin").await;
         group(&pool, &admin, "USER", None, "manual").await;
@@ -373,6 +376,8 @@ mod tests {
         vatusa_role(&pool, STEADY_CID, "ZDC", "EVENT_COORDINATOR").await;
         group(&pool, &steady, "USER", None, "system").await;
         group(&pool, &steady, "EC", Some("ZDC"), "vatusa").await;
+
+        sqlx::raw_sql(MIGRATION_0130).execute(&pool).await.unwrap();
 
         World {
             state: test_state(pool.clone(), Default::default()),
@@ -515,23 +520,22 @@ mod tests {
         reset_to_vatusa(&w.state, &admin_user(w), "back to VATUSA", None, pulled()).await
     }
 
-    /// What the member holds after a reset: their `system` rows, the baseline they held as `manual`,
-    /// and exactly the EC grants VATUSA justifies.
+    /// What the member holds after a reset: their `system` rows, the baseline among them, and exactly
+    /// the EC grants VATUSA justifies.
     fn member_after() -> Rows {
         rows_of(&[
             row("group", "CONTROLLER", Some("ZDC"), "system", true),
             row("group", "EC", Some("ZDC"), "vatusa", true),
             row("group", "EC", Some("ZJX"), "vatusa", true),
-            row("group", "USER", None, "manual", true),
             row("group", "USER", None, "system", true),
             row("permission", "access.catalog.read", None, "system", true),
         ])
     }
 
     /// AC3 + AC4: after a reset the member holds exactly their `system` grants plus what VATUSA
-    /// justifies; no hand-made row is left but the protected baseline; they are back on role sync. The
-    /// server admin keeps `USER` and `SERVER_ADMIN` though both are stored as `manual`, and loses the
-    /// hand-made EC. Service accounts are untouched.
+    /// justifies; no hand-made row is left; they are back on role sync. The server admin keeps `USER`
+    /// and `SERVER_ADMIN`, which 0098 backfilled as `manual` and 0130 re-tagged `system` (#805 AC2),
+    /// and loses the hand-made EC. Service accounts are untouched.
     #[sqlx::test]
     async fn a_reset_leaves_exactly_system_and_vatusa_grants(pool: PgPool) {
         let w = world(pool).await;
@@ -554,8 +558,8 @@ mod tests {
         assert_eq!(
             rows(&w.pool, &w.admin).await,
             rows_of(&[
-                row("group", "SERVER_ADMIN", None, "manual", true),
-                row("group", "USER", None, "manual", true),
+                row("group", "SERVER_ADMIN", None, "system", true),
+                row("group", "USER", None, "system", true),
             ])
         );
         assert_eq!(
@@ -573,7 +577,7 @@ mod tests {
         .fetch_all(&w.pool)
         .await
         .unwrap();
-        assert_eq!(manual_left, ["SERVER_ADMIN", "USER", "USER"]);
+        assert_eq!(manual_left, Vec::<String>::new());
         assert_eq!(everything(&w.pool).await.3, service_roles_before);
 
         assert!(!body.dry_run);
@@ -583,6 +587,37 @@ mod tests {
             body.users_reset, 2,
             "the admin and the member; not the steady one"
         );
+    }
+
+    /// #805 AC2: the server admin, backfilled as `manual` by 0098 and re-tagged by 0130, keeps
+    /// SERVER_ADMIN through a sign-in while configured and through the reset after it. A SERVER_ADMIN
+    /// written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way to hold it.
+    #[sqlx::test]
+    async fn a_configured_admin_keeps_server_admin_through_sign_in_and_reset(pool: PgPool) {
+        let w = world(pool).await;
+        let hand_made = user(&w.pool, 1_795_041, "Hand Made").await;
+        group(&w.pool, &hand_made, "SERVER_ADMIN", None, "manual").await;
+
+        crate::handlers::auth::reconcile_login_access(
+            &w.pool,
+            &w.admin,
+            ADMIN_CID,
+            false,
+            &[ADMIN_CID],
+        )
+        .await
+        .unwrap();
+        reset(&w).await.ok().unwrap();
+
+        let server_admins: Vec<String> = sqlx::query_scalar(
+            "select u.display_name || ':' || r.source from access.user_roles r \
+             join identity.users u on u.id = r.user_id \
+             where r.role_name = 'SERVER_ADMIN' order by 1",
+        )
+        .fetch_all(&w.pool)
+        .await
+        .unwrap();
+        assert_eq!(server_admins, ["Admin:system"]);
     }
 
     /// AC6: one audit entry per changed member, by the admin, with both snapshots and the reason
@@ -1039,8 +1074,9 @@ mod tests {
     /// A reset examines exactly the members `reset_member` would change, from every source VATUSA
     /// justifies a grant through: a role mapping, the roster's home ARTCC, a visiting ARTCC, and a
     /// division (`ZHQ`) role, which is national. A member in line through each source is left out, and
-    /// so is one whose only hand-made grant is the protected baseline, or whose only direct permission
-    /// is a `system` one. A held grant that differs from
+    /// so is one holding only the `system` baseline, or whose only direct permission is a `system`
+    /// one. A `SERVER_ADMIN` written by hand as `manual` is examined, like any hand-made group (#805).
+    /// A held grant that differs from
     /// the justified one only in its scope, or only in its group, is still drift.
     #[sqlx::test]
     async fn a_reset_examines_exactly_the_members_it_would_change(pool: PgPool) {
@@ -1076,7 +1112,9 @@ mod tests {
         }
         group(&w.pool, &division_ok, "VATUSA_STAFF", None, "vatusa").await;
         let baseline_only = user(&w.pool, 1_795_036, "Baseline Only").await;
-        group(&w.pool, &baseline_only, "USER", None, "manual").await;
+        group(&w.pool, &baseline_only, "USER", None, "system").await;
+        let manual_admin = user(&w.pool, 1_795_040, "Manual Admin").await;
+        group(&w.pool, &manual_admin, "SERVER_ADMIN", None, "manual").await;
         let system_permission = user(&w.pool, 1_795_039, "System Permission").await;
         permission(
             &w.pool,
@@ -1097,7 +1135,8 @@ mod tests {
                 "Visit Missing",
                 "Division Missing",
                 "Wrong Scope",
-                "Wrong Group"
+                "Wrong Group",
+                "Manual Admin"
             ]
         );
 
@@ -1118,8 +1157,7 @@ mod tests {
             assert_eq!(examined.contains(name), changes, "{name}");
         }
 
-        // The admin is examined only for the hand-made EC: their manual USER and SERVER_ADMIN don't
-        // count.
+        // The admin is examined only for the hand-made EC: their USER and SERVER_ADMIN are `system`.
         sqlx::query("delete from access.user_roles where user_id = $1 and role_name = 'EC'")
             .bind(&w.admin)
             .execute(&w.pool)
