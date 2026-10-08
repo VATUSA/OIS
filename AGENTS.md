@@ -251,9 +251,9 @@ an existing one) or the bug and fix are unambiguous.
   canonical statement. The posting steps in `/start`, `/ship`, `ticket-reviewer`,
   `regression-checker`, the two reminder hooks and `ois-agent-goals.txt` repeat a one-line form of
   it next to their check, so change them with it.
-- The GitHub remote is `VATUSA/OIS` (public: anyone can comment, so agents treat only team comments
-  as spec; see `/start`). Issues are tracked there and on
-  [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
+- The GitHub remote is `VATUSA/OIS` (public: anyone can open an issue or comment, so agents treat
+  only a team-authored body and team comments as spec; see `/start`). Issues are tracked there and
+  on [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
 - **Filing an issue** follows [`docs/github-issues.md`](docs/github-issues.md) — the title, the
   `type:`/`area:`/`priority:` labels, the *What happens / Why / Before and after / What should
   happen / Acceptance* body with file:line evidence and a before/after data-flow diagram, the
