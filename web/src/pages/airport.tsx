@@ -14,13 +14,15 @@ import {
   StatusPill,
   Tabs,
 } from "@ois/ui";
-import {Clock, Filter, Lock, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
+import {Clock, Filter, Lock, PictureInPicture2, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import type {LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
+import {can} from "@/lib/platform";
+import {openPopout, popoutSpecs} from "@/lib/popout";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
@@ -439,7 +441,19 @@ export function airportTguiColumns(
   return [...columns.filter((c) => c.id !== "OTHER"), ...columns.filter((c) => c.id === "OTHER")];
 }
 
-export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
+/**
+ * `popoutIcao` adds the pop-out control (#790). Only the airport page passes it: the pop-out window
+ * and the dashboard widget render this same ladder and must not offer to pop out themselves.
+ */
+export function LadderView({
+  flow,
+  filters,
+  popoutIcao,
+}: {
+  flow: Flow;
+  filters?: LadderFilters;
+  popoutIcao?: string;
+}) {
   const [win, setWin] = useState(60);
   const style = useSetting<string>("ladder.style", "classic");
   const now = Date.now();
@@ -487,6 +501,19 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
           >
             +30
           </Button>
+          {/* Float the whole ladder over CRC/vATIS/charts. Desktop only (#790, as #349). */}
+          {popoutIcao && can("miniWindows") && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8 text-ink-3 hover:text-ink"
+              title="Pop out into a floating window"
+              aria-label="Pop out into a floating window"
+              onClick={() => void openPopout(popoutSpecs.airportLadder(popoutIcao))}
+            >
+              <PictureInPicture2 className="size-3.5" />
+            </Button>
+          )}
         </div>
       </div>
       {/* Nothing until the style is known, rather than the classic ladder flashing first. */}
@@ -646,7 +673,7 @@ export function AirportPage() {
               <Tabs value={sub} onChange={setSub} items={tabs} />
               {sub === "summary" && <SummaryView flow={flow.data} />}
               {sub === "aircraft" && <AircraftView flow={flow.data} />}
-              {sub === "ladder" && <LadderView flow={flow.data} />}
+              {sub === "ladder" && <LadderView flow={flow.data} popoutIcao={icao} />}
               {sub === "demand" && <DemandView flow={flow.data} />}
               {sub === "departures" && <DeparturesView icao={icao} />}
               {sub === "taxi" && <TaxiView icao={icao} />}

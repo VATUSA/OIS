@@ -18,7 +18,7 @@ import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
 import {DownloadPage} from "@/pages/download";
-import {PopoutFcaLadderPage, PopoutWidgetPage} from "@/pages/popout";
+import {PopoutAirportLadderPage, PopoutFcaLadderPage, PopoutWidgetPage} from "@/pages/popout";
 import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {ApiKeysPage} from "@/pages/api-keys";
@@ -368,6 +368,13 @@ const popoutFcaRoute = createRoute({
   component: PopoutFcaLadderPage,
 });
 
+const popoutAirportRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "popout/airport/$icao",
+  staticData: { layout: "full", title: "Ladder" },
+  component: PopoutAirportLadderPage,
+});
+
 // Public legal/info pages (linked from the footer).
 const downloadRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -681,6 +688,7 @@ const routeTree = rootRoute.addChildren([
   apiKeysRoute,
   popoutWidgetRoute,
   popoutFcaRoute,
+  popoutAirportRoute,
   downloadRoute,
   privacyRoute,
   adminRoute.addChildren([
