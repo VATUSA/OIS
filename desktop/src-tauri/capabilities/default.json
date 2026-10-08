@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the OIS main window and the windows it opens: Tauri's core defaults, signed auto-update (#347), native notifications (#348), creating / placing / pinning pop-out panels (#349) and whole-route windows (#350), the menu-bar tray (#351), OS-level global shortcuts (#352), and \u2014 since the main window has no native title bar \u2014 our own minimize / maximize / close and the top bar's drag region (#402; `is-maximized` is already in `core:window:default` and is listed only to keep the set self-describing, and `close` came with #349/#350). A notification click raises the window from Rust (src/notify.rs), so the window controls here are for raising an already-open pop-out or route window, not for notification clicks. Tray and menu themselves are already covered by core:default. Pop-out panels get their own, narrower set \u2014 see popout.json.",
+  "description": "Permissions for the OIS main window and the windows it opens: Tauri's core defaults, signed auto-update (#347), native notifications (#348), creating / placing / pinning pop-out panels (#349) and whole-route windows (#350), the menu-bar tray (#351) and OS-level global shortcuts (#352). Every window keeps its native title bar (#796), so the OS's own minimize / maximize / close and title-bar drag need no grant here; `close` is for pop-outs and route windows (#349, #350). A notification click raises the window from Rust (src/notify.rs), so the window controls here are for raising an already-open pop-out or route window, not for notification clicks. Tray and menu themselves are already covered by core:default. Pop-out panels get their own, narrower set \u2014 see popout.json.",
   "windows": [
     "main",
     "window-*"
@@ -31,10 +31,6 @@
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-unregister-all",
-    "global-shortcut:allow-is-registered",
-    "core:window:allow-minimize",
-    "core:window:allow-toggle-maximize",
-    "core:window:allow-is-maximized",
-    "core:window:allow-start-dragging"
+    "global-shortcut:allow-is-registered"
   ]
 }

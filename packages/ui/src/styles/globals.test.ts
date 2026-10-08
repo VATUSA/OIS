@@ -12,9 +12,9 @@ import {contrastRatio} from "../lib/colour";
  * value — no build error, no console warning, no failing test.
  *
  * #419 shipped `border-radius: var(--pill)` against a `--pill` that existed only as prose in
- * DESIGN.md's token table. It computed to `0`, and the desktop app's traffic lights rendered as three
- * coloured squares on Windows and Linux. Nothing caught it, because jsdom has no CSS engine and the
- * only reviewer of a stylesheet is whoever reads it (#419 review).
+ * DESIGN.md's token table. It computed to `0`, and the round controls it was meant for rendered as
+ * squares. Nothing caught it, because jsdom has no CSS engine and the only reviewer of a stylesheet is
+ * whoever reads it (#419 review).
  */
 let css = "";
 beforeAll(async () => {
@@ -52,23 +52,6 @@ describe("the token stylesheet", () => {
     const {used} = tokens(".x { gap: var(--ghost, 4px) }");
 
     expect([...used]).toEqual([]);
-  });
-
-  /**
-   * The traffic lights are the reason this file exists, so pin the two things about them that a
-   * stylesheet-only change can silently break: the pill radius that makes them round, and the fact
-   * that they carry their own chrome hues rather than borrowing a semantic status token.
-   */
-  it("keeps the traffic lights round and on their own hues", () => {
-    expect(css).toMatch(/--pill:\s*999px/);
-    for (const token of ["--traffic-close", "--traffic-minimize", "--traffic-zoom", "--traffic-blurred"]) {
-      expect(css).toMatch(new RegExp(`${token}:\\s*#`));
-    }
-    expect(css).toMatch(/\.traffic-light\s*\{[^}]*border-radius:\s*var\(--pill\)/);
-    // A flex item with a definite width still shrinks when its row is too narrow, and it shrinks to
-    // the 8px glyph inside it — the dots became ellipses rather than overflowing where anyone would
-    // see them (#419 review). jsdom has no layout, so this is pinned in the source.
-    expect(css).toMatch(/\.traffic-light\s*\{[^}]*flex:\s*0 0 12px/);
   });
 });
 

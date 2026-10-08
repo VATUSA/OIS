@@ -7,7 +7,6 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({invoke: (...a: unknown[]) => invoke(...a)}));
 vi.mock("@tauri-apps/api/window", () => ({getCurrentWindow: () => ({label: "popout-fca-1"})}));
-vi.mock("@/components/shell/window-chrome-bar", () => ({WindowChromeBar: () => null}));
 
 import {SendDiagnosticsButton} from "./send-diagnostics";
 import {ErrorBoundary} from "./error-boundary";
