@@ -75,7 +75,8 @@ developer noise):
    priority, added to the board (`gh project item-add 7 --owner VATUSA --url <issue-url>`), set to
    `Triaging` (`.claude/scripts/board-status.sh <n> "Triaging"`), and the status read back. There is
    no triage agent here, so the triage goes in the body: what happens, what should happen, how to
-   reproduce, where you saw it, the Sentry issue link, and the blast-radius footer. No AI attribution
+   reproduce, where you saw it, the Sentry issue link, the before/after diagram, and the
+   blast-radius footer. No AI attribution
    (no `Drafted by` or `Generated with` line). Read the issue number from
    `gh issue create`'s output; never predict it.
 

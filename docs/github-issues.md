@@ -94,10 +94,10 @@ ideally **symptom → consequence**. Name the real thing, not the fix.
 ## Body structure
 
 Use these sections (drop ones that don't apply — e.g. a pure feature has no "Why the neighboring
-path is fine"). Ground every claim in evidence: real file:line references, real captured output, not
+path is fine" — except "Before and after", which every issue carries). Ground every claim in evidence: real file:line references, real captured output, not
 "it should."
 
-```markdown
+````markdown
 ## What happens
 The observable problem. Point at the exact code — `path/to/file.rs:123` — and show it. For a bug,
 prove it with real output/behavior, not a description of it.
@@ -108,6 +108,16 @@ The mechanism / root cause. Which line, why the guard doesn't fire, what the wro
 ## Why the neighboring path is fine   ← for bugs, when relevant
 Why the adjacent code that touches the same data does NOT show the problem. (Forces you past a
 premature "found it" and documents the blast radius.)
+
+## Before and after
+```
+now:
+  <where the data enters> ─▶ <each hop it passes through> ─▶ <where it lands, and what goes wrong>
+
+after:
+  <the same path with the fix in place, changed hops marked>
+```
+<the mode (live vs historical, web vs desktop) under the diagram when it matters>
 
 ## What should happen
 The fix direction and the trade-off it makes — not a full patch, but enough that the picker isn't
@@ -121,34 +131,53 @@ re-deciding the approach.
 <!-- footer -->
 Blast radius: <does this touch the trajectory/ETA model · permissions (3-in-sync) · the API
 contract (client regen)? name it, or "none">
-Data path: <source → feed module or handler → repo → API route → consumer (hook → page, or the
-bot), real files and routes only; the mode when it matters; or "none">
+Data path: see the "Before and after" diagram above.
 Pre-existing; found while <what you were doing>.   ← provenance, when it's incidental
 Relates to #N / Duplicate of #N.                    ← after a duplicate search
-```
+````
 
-Three OIS-specific habits in that footer:
+Three OIS-specific habits in that body:
 
 - **Blast radius.** OIS has a few changes that reach further than they look — the single
   trajectory/ETA model in `feed/trajectory.rs` (several callers; `AGENTS.md` lists them), the permission/role
   "three-places-in-sync" invariants, and the OpenAPI→client contract (needs a regen). If the issue
   touches one, say so; if it touches none, say "none." Blast radius says *how far* a change
-  reaches; Data path says *how the data gets there*.
-- **Data path.** Trace the chain the issue concerns, in the direction the data moves, so a reviewer
-  doesn't re-derive it and a check can be reproduced. Name only hops that exist — a file, a
-  `module::function`, a route as written in `backend/src/router.rs`, a hook, a page — and skip any
-  hop the path doesn't have. In these examples backend paths are relative to `backend/src/` and web
-  paths to `web/src/`; in an issue, either form is fine as long as it resolves. For example:
-  - Live arrival flow: `VATSIM datafeed (feed/vatsim.rs) → handlers/feed.rs::airport_flow →
-    feed/flow.rs::compute (program + CFRs from repos/tmu.rs) → GET /api/v1/tmu/flow/{icao} →
-    useAirportFlow (web/src/lib/feed.ts) → pages/airport.tsx`
-  - Its historical twin: `stats.flight + stats.position →
-    feed/stats/reconstruct.rs::reconstruct_at → handlers/stats.rs::hist_flow →
-    feed/flow.rs::compute → GET /api/v1/stats/hist/flow/{icao} → useAirportFlow inside
-    HistoricalProvider → features/dashboard/view-widgets.tsx → pages/stats/dashboard.tsx`
-  - A write: `pages/admin/access-control.tsx → useSaveUserAccess (web/src/lib/access.ts) →
-    POST /api/v1/admin/users/{cid}/access → handlers/access.rs::update_user_access →
-    repos/access.rs`
+  reaches; the diagram shows *how the data gets there*.
+- **Before and after.** Every issue carries a diagram, and the footer's `Data path:` line points
+  at it instead of spelling the chain out in text. Draw the path the issue concerns in a fenced
+  block, in the direction the data moves, twice: `now:` as it behaves today and `after:` as it
+  should, so a reviewer sees the broken path beside the fixed one and doesn't re-derive either.
+  Name only hops that exist — a file, a `module::function`, a route as written in
+  `backend/src/router.rs`, a hook, a page — and skip any hop the path doesn't have. In these
+  examples backend paths are relative to `backend/src/` and web paths to `web/src/`; in an issue,
+  either form is fine as long as it resolves. A shared hop is drawn once, with both paths joining
+  it:
+
+  ```
+  live arrival flow and its historical twin:
+
+    VATSIM datafeed (feed/vatsim.rs)            stats.flight + stats.position
+       ─▶ handlers/feed.rs::airport_flow           ─▶ feed/stats/reconstruct.rs::reconstruct_at
+                     │                             ─▶ handlers/stats.rs::hist_flow
+                     └──────────────┬──────────────────────┘
+                                    ▼
+             feed/flow.rs::compute (program + CFRs from repos/tmu.rs)   ← shared: both affected
+                     ┌──────────────┴──────────────────────┐
+       GET /api/v1/tmu/flow/{icao}                 GET /api/v1/stats/hist/flow/{icao}
+       ─▶ useAirportFlow (lib/feed.ts)             ─▶ useAirportFlow inside HistoricalProvider
+       ─▶ pages/airport.tsx                        ─▶ features/dashboard/view-widgets.tsx
+                                                   ─▶ pages/stats/dashboard.tsx
+  ```
+
+  ```
+  a write:
+
+    pages/admin/access-control.tsx
+       ─▶ useSaveUserAccess (lib/access.ts)
+       ─▶ POST /api/v1/admin/users/{cid}/access
+       ─▶ handlers/access.rs::update_user_access
+       ─▶ repos/access.rs
+  ```
 
   **Name the mode** when the change, or a check of it, behaves differently across modes; otherwise
   leave it out:
@@ -165,7 +194,8 @@ Three OIS-specific habits in that footer:
     signs in with a token (`POST /api/v1/auth/desktop/exchange` and `/refresh`) and has its own
     origins and CSP. Name it when the path crosses auth, CORS/origins, CSP, or a Tauri command.
 
-  Write `Data path: none` for docs, tooling, CI, and other changes that move no runtime data.
+  A docs, tooling or CI change that moves no runtime data still gets a diagram: draw what does
+  move, such as the files an agent reads, the hook a command passes through, or the CI job order.
 - **Provenance.** If you noticed the problem while doing something else, say so ("Pre-existing;
   found while QA-ing #42") and label it `technical-debt`.
 
@@ -182,6 +212,19 @@ Three OIS-specific habits in that footer:
 > `access.permissions`, but was never added to `default_roles()`/the catalog list in
 > `crates/ois-core/src/catalog.rs`, so the editor's catalog validation rejects it.
 >
+> **## Before and after**
+>
+> ```
+> now:
+>   pages/admin/access-control.tsx ─▶ useSaveUserAccess
+>      ─▶ POST /api/v1/admin/users/{cid}/access ─▶ handlers/access.rs::update_user_access
+>      ─▶ repos/access.rs::fetch_access_catalog_names ─▶ string missing ─▶ 400 bad_request
+>
+> after:
+>   catalog.rs lists the string ─▶ same path ─▶ catalog check passes ─▶ grant saved
+>   test: permission! markers ⇄ catalog.rs ⇄ access.permissions rows ─▶ fails on any gap
+> ```
+>
 > **## What should happen** — Add the string to `catalog.rs`. More broadly, a lint/test should fail
 > when a `permission!` marker or an `access.permissions` row has no catalog entry, so the three
 > stay in sync.
@@ -191,9 +234,7 @@ Three OIS-specific habits in that footer:
 > - [ ] A test enumerates markers + catalog and fails if they diverge.
 >
 > Blast radius: permissions (three-in-sync).
-> Data path: `pages/admin/access-control.tsx → useSaveUserAccess → POST
-> /api/v1/admin/users/{cid}/access → handlers/access.rs::update_user_access →
-> repos/access.rs::fetch_access_catalog_names`.
+> Data path: see the "Before and after" diagram above.
 > Pre-existing; found while adding a flow permission.
 
 ---
@@ -301,7 +342,7 @@ Every issue has three touchpoints.
    2. <step>
 
    Blast radius: <trajectory/ETA model · permissions/roles three-in-sync · API contract · none>
-   Data path: <the chain the diff touches, source → … → consumer, or "none">
+   Data path: see the diagram in PR #<n>
    Deploy: <migration NNNN applies on backend start · client regenerated · new env var · nothing>
    ```
 
@@ -310,13 +351,14 @@ Every issue has three touchpoints.
    `docs/`, tooling, or test-only, say so and why it needs no runtime verification. Don't fire
    Moment 3 while more work is coming.
 
-   **Data path** follows the footer's rule in [Body structure](#body-structure): the same chain
-   format and examples, and `none` for a change that moves no runtime data. Write the chain
-   the diff actually touches, so restate the issue's line only if it still holds.
+   **Data path** points at the PR's before/after diagram, which `.claude/rules/engineering-prose.md`
+   § PR descriptions requires. Don't redraw it here: a diagram can take a third of the budget below,
+   and the PR's version is the one drawn against the diff, so it is the one that holds.
 
-   **Name the mode on each step** whose result depends on it, using the footer's two axes (live vs
-   historical, web vs desktop). A step that reads the same everywhere carries no mode. For a change
-   in shared compute such as `feed/flow.rs::compute`, give a step per side:
+   **Name the mode on each step** whose result depends on it, using the two axes in
+   [Body structure](#body-structure) (live vs historical, web vs desktop). A step that reads the
+   same everywhere carries no mode. For a change in shared compute such as `feed/flow.rs::compute`,
+   give a step per side:
 
    ```
    1. (live, web) Open /ops/airport?icao=KATL and check the 60-minute demand against its flight
