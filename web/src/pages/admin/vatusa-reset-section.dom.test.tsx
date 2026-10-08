@@ -175,8 +175,8 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
   it("shows why a reset failed and how many users it reached", async () => {
     post.mockResolvedValue({
       data: undefined,
-      error: {error: "vatusa_pull_failed", message: "VATUSA division pull failed: 502", users_reset: 0},
-      response: {status: 502},
+      error: {error: "reset_incomplete", message: "the reset stopped part-way", users_reset: 3},
+      response: {status: 500},
     });
     const host = await mount(true);
     await openDialog(host);
@@ -185,7 +185,7 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
     const apply = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
     await act(async () => apply.click());
     await vi.waitFor(() =>
-      expect(document.body.textContent).toContain("VATUSA division pull failed: 502"),
+      expect(document.body.textContent).toContain("the reset stopped part-way (3 users reset)"),
     );
   });
 

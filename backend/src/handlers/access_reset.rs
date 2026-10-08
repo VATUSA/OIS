@@ -883,6 +883,25 @@ mod tests {
         assert_eq!(status, http::StatusCode::OK);
     }
 
+    /// The server admin's POST reaches the apply handler and the reason they sent: a blank reason is
+    /// refused with 400 before anything is pulled or reset. Bound to the dry-run handler, or given any
+    /// reason but the payload's, the same request would answer 200 or reach the (unconfigured) pull.
+    #[sqlx::test]
+    async fn the_admins_post_applies_with_the_reason_sent(pool: PgPool) {
+        let w = world(pool).await;
+        let before = everything(&w.pool).await;
+        let status = send(
+            &w.state,
+            http::Method::POST,
+            "/api/v1/admin/access/vatusa-reset",
+            &w.admin_cookie,
+            Some(json!({"reason": "  "})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::BAD_REQUEST);
+        assert_eq!(everything(&w.pool).await, before);
+    }
+
     /// Only members a reset can change are examined, and every kind of drift is found: an attached
     /// member with only a hand-made group, only a hand-made permission, only a stale `vatusa` grant, or
     /// only a VATUSA-justified grant they lack, and a member with no CID. A member already in line is
@@ -1015,7 +1034,8 @@ mod tests {
     /// A reset examines exactly the members `reset_member` would change, from every source VATUSA
     /// justifies a grant through: a role mapping, the roster's home ARTCC, a visiting ARTCC, and a
     /// division (`ZHQ`) role, which is national. A member in line through each source is left out, and
-    /// so is one whose only hand-made grant is the protected baseline. A held grant that differs from
+    /// so is one whose only hand-made grant is the protected baseline, or whose only direct permission
+    /// is a `system` one. A held grant that differs from
     /// the justified one only in its scope, or only in its group, is still drift.
     #[sqlx::test]
     async fn a_reset_examines_exactly_the_members_it_would_change(pool: PgPool) {
@@ -1052,6 +1072,16 @@ mod tests {
         group(&w.pool, &division_ok, "VATUSA_STAFF", None, "vatusa").await;
         let baseline_only = user(&w.pool, 1_795_036, "Baseline Only").await;
         group(&w.pool, &baseline_only, "USER", None, "manual").await;
+        let system_permission = user(&w.pool, 1_795_039, "System Permission").await;
+        permission(
+            &w.pool,
+            &system_permission,
+            "access.users.read",
+            None,
+            "system",
+            true,
+        )
+        .await;
 
         assert_eq!(
             candidates(&w.pool).await,
