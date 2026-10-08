@@ -2,8 +2,8 @@
 
 > **Status: rebuilt (#720).** The old Airspace Monitor (#593, #594–#602) was removed in #719 (migration
 > 0125). The sector **dataset**, its importer and the admin sector viewer stayed, and the rebuild reads
-> them: occupancy (#721), limits (#722), consolidation (#723), `SectorGrid` (#724), TRACON strata (#726)
-> and the Operations page (#725). Known coverage gaps: #727, #728.
+> them: occupancy (#721), limits (#722), consolidation (#723), TRACON strata (#726)
+> and the Operations page (#725), redrawn as vTBFM's monitor (#794). #724's `SectorGrid` was removed in #794. Known coverage gaps: #727, #728.
 
 ## Data model
 
@@ -147,7 +147,7 @@ always sends all 24 bins, and the 2–6 h slider and the alert filter slice them
 | --- | --- |
 | `status` | `no_sector_data`, `pending` or `ready` (below) |
 | `cycle_at` | the VATSIM publish the counts were projected from (its `update_timestamp`); null unless `ready` |
-| `bin_minutes`, `bin_starts_ms` | 15, and each bin's start as epoch ms on absolute Zulu quarter-hours, the first containing `cycle_at` (`SectorGrid`'s `binStarts`) |
+| `bin_minutes`, `bin_starts_ms` | 15, and each bin's start as epoch ms on absolute Zulu quarter-hours, the first containing `cycle_at` |
 | `default_limit` | what an unset limit reads |
 | `limits_editable`, `consolidations_editable` | the caller's `flow.sector_limits.update` / `flow.sector_consolidations.update` scope covers this ARTCC |
 | `neighbours` | the bordering OIS ARTCCs, sorted (`feed::neighbors::tier1` over the active `org.facilities`) |
@@ -216,24 +216,39 @@ through `CONTROLLER` (migration 0129); a grant at their facility reads every ART
 - **The set follows the facility selector and nothing else.** It opens on the viewer's VATUSA home
   facility and the pick is not remembered, so a controller who moves facilities does not keep the old
   one's tables. The set is keyed by facility, so a switch replaces every table, control and neighbour.
-- **Top to bottom:** the facility's enroute table, its TRACON table, then each neighbour, collapsed and
-  fetched only when opened. Neighbour grids get no limit editor whatever `limits_editable` says; the
-  facility's own grid edits limits only when it is `true` (the write's 403 is the real gate). Limits are
-  edited only here, inline in the grid; #722's standalone limit table was never placed and is gone, and
-  the web no longer calls `GET /flow/sector-limits/{artcc}`. Consolidations have no editor yet (#792).
-- **Controls, per table:** a 2–6 h range slider (default 4 h) and "only alerting in the next N h" (a
-  quarter-hour span up to 6 h, **on by default at 2 h**; switching it off is remembered like the rest). The span is judged over all six computed
-  hours, independent of the range, and both only slice what the server sent, never refetching.
-- **Remembered per browser:** each table's controls under `ois.sectorDemand.view.<ARTCC>.<table>`, and a
-  neighbour's open state under `ois.sectorDemand.open.<facility>.<neighbour>`, in `localStorage`. Every
+- **It looks like vTBFM's Sector Monitor** (#794), a named exception in `DESIGN.md`: a beige body, one
+  bevelled table per facility and stratum (`ZLA`, then `ZLA TRACON`), then each neighbour's two. Rows are
+  the sector (`ZLA25`, with a trailing `+` when others are worked at it) and its MAP (`10/10`), then one
+  cell per bin holding the combined peak, green/yellow/red from the server's `level`. Time labels are a
+  bottom footer (blank, `MAP`, then `HHMM`). A cell's tooltip reads `ZLA25 0415Z · peak 3 (airborne 2)
+  vs MAP 10 · red`. The OIS shell and the facility picker stay as they are. Every literal is in
+  `web/src/features/sector-demand/vtbfm-palette.ts`, the only file `colours.guard.test.ts` exempts.
+- **Toggle:** ▼/▶ on the facility's own table folds away only its controls; on a neighbour's it hides
+  controls and grid together. Neighbour tables start collapsed and are fetched only once one is opened.
+- **Controls, per table:** `Time Range:` 2–6 h in whole hours (default 4 h), and `Show if alerted in
+  next:` 1.00–6.00 h (**on by default at 2.00 h**, unlike vTBFM). The span is judged over all six
+  computed hours, independent of the range, and both only slice what the server sent, never refetching.
+- **Remembered per browser,** per ARTCC and table, in `localStorage` under
+  `ois.sectorMonitor.<ARTCC>.<enroute|tracon>.<open|range|alertOnly|alertSpan|collapsed|order>`. Every
   access is guarded; with storage blocked, the defaults apply.
-- **States:** `no_sector_data` reads "No sector data for ZLA"; `pending` reads "Waiting for the first
-  cycle" and says it needs both the sector data and a feed cycle; a table without volumes reads "No TRACON sector data for ZSE"; a filter that hides every
-  row reads "No ZDC sectors alerting in the next 2.00 h" ("No ZDC TRACON sectors…" for TRACON). None of
-  them is a grid.
-- **A combined row** lists the sectors it carries under its id (`SectorGrid`'s `carries`).
-- **Colour** is tokens only, pinned by `web/src/features/sector-demand/colours.guard.test.ts` over the
-  feature and the page, alongside the grid's own guard in `packages/ui`.
+- **MAP edit** (own facility, `limits_editable`): click the MAP cell for an inline input; Enter or blur
+  commits only a changed positive number, Escape cancels. Optimistic, rolled back with "Could not save
+  MAP for ZLA25 — check TMU access / connection." on a refusal. Limits are edited only here; the web
+  never calls `GET /flow/sector-limits/{artcc}`.
+- **Right-click menu, the consolidation editor (#792)** (own facility, `consolidations_editable`; absent
+  otherwise and on every neighbour): Move Row Up/Down (row order is per browser); Consolidate ▸ All into
+  T, All into T Except Consolidated, into T ▸ (a checklist that stays open); Deconsolidate ▸ All from T,
+  All in ZLA, from T ▸. Every write goes through the batch `PUT` above as one request, optimistic, rolled
+  back on a refusal with a line naming the sector: "ZLA25 can't be consolidated into itself." (400), "Can't
+  consolidate ZLA25 into ZLA30: ZLA30 is worked at ZLA25." (409), "ZLA99 is not one of ZLA's sectors."
+  (404), "You can't change ZLA's consolidations." (403), else "Could not save the consolidation — check
+  TMU access / connection." The row merges or splits without a reload: the success refetches, and
+  `flow.sector_consolidations` reaches every other viewer.
+- **States:** "Waiting for the first sector-monitor cycle…" before the first read and while `pending`;
+  "No sector data for ZLA" for `no_sector_data`, in one table; "No TRACON sector data for ZSE" for a
+  table without volumes; "No sectors for ZLA." / "No TRACON sectors for ZLA." for a table with no rows;
+  "No ZLA sectors alerting in the next 2.00 h." ("No ZLA TRACON sectors…") when the filter hides every
+  row. None of them is a grid.
 
 ## The sector dataset
 

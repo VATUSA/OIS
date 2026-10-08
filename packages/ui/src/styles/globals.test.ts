@@ -73,9 +73,10 @@ describe("the token stylesheet", () => {
 });
 
 /**
- * The load-level colours carry a sector grid cell's meaning (#724), so each must stand out from the
- * ground it is drawn on in both themes: 3:1, WCAG's floor for a non-text indicator. The figure in the
- * cell is ink, so this is about the colour signal, not text. `--level-*` alias success/warning/danger.
+ * The load-level colours carry a load's meaning wherever one is drawn (runway bins, GDP, delays; #724),
+ * so each must stand out from the ground it is drawn on in both themes: 3:1, WCAG's floor for a
+ * non-text indicator. This is about the colour signal, not text. `--level-*` alias
+ * success/warning/danger.
  */
 describe("load-level colours (#724)", () => {
   const block = (selector: string) => {

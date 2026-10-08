@@ -7,7 +7,7 @@ type SectorLimit = components["schemas"]["SectorLimitBody"];
 
 /**
  * Sets one sector's limit (#722). Setting the default clears the override; the server ignores a value
- * equal to what is stored. Callers decide what counts as a change before calling — `SectorGrid`'s limit
+ * equal to what is stored. Callers decide what counts as a change before calling — the Sector Monitor's MAP
  * input commits only a positive whole number that differs — and refetch what the limit judges.
  */
 export function useSetSectorLimit(artcc: string) {

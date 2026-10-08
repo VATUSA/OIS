@@ -67,7 +67,7 @@ Copy an existing one. "Untestable without a DOM" is not an excuse here: extract 
 A component test can't see a call site that drifts or a forbidden call that appears elsewhere.
 Use a source-scan `*.guard.test.ts` for both; the method is in `test-quality.md` § Test the wiring
 and § Absence needs a guard. The house examples are `web/src/components/*.guard.test.ts`,
-`web/src/lib/*.guard.test.ts`, and `packages/ui/src/components/sector-grid.guard.test.ts`.
+`web/src/lib/*.guard.test.ts`, and `web/src/features/sector-demand/colours.guard.test.ts`.
 
 Never persist a credential in `localStorage`, `sessionStorage`, or a cookie set from script. A
 token shown once (API keys, service-account tokens) is guarded that way (#531).

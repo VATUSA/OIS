@@ -1,4 +1,4 @@
-import {useQuery} from "@tanstack/react-query";
+import {useMutation, useQuery} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 
 import {ois} from "@/lib/api";
@@ -36,6 +36,31 @@ export function useSectorDemand(artcc: string, { enabled = true }: { enabled?: b
         params: { path: { artcc } },
       });
       if (error || !data) throw new Error("failed to load sector demand");
+      return data;
+    },
+  });
+}
+
+/** A refused write, carrying the HTTP status so the page can say why (#792). */
+export class WriteError extends Error {
+  constructor(readonly status: number | undefined) {
+    super(`write refused (${status ?? "no response"})`);
+  }
+}
+
+/**
+ * Changes several of one ARTCC's consolidations in one atomic write (#794): each sector to the target
+ * given, or back to its own row for `null`. The Sector Monitor's menu sends every command through it,
+ * the single toggles included, so there is one write path and one rollback.
+ */
+export function useConsolidateSectors(artcc: string) {
+  return useMutation({
+    mutationFn: async (into: Record<string, string | null>) => {
+      const { data, error, response } = await ois.PUT("/api/v1/flow/sector-consolidations/{artcc}", {
+        params: { path: { artcc } },
+        body: { into },
+      });
+      if (error !== undefined || !data) throw new WriteError(response?.status);
       return data;
     },
   });
