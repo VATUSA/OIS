@@ -45,7 +45,8 @@ const stripComments = (text: string) =>
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"));
 
 const offenders = (text: string) => stripComments(text).filter((l) => LITERAL_COLOUR.test(l) || PALETTE_CLASS.test(l));
-const importsPalette = (text: string) => stripComments(text).some((l) => /from\s+["'][^"']*vtbfm-palette["']/.test(l));
+const importsPalette = (text: string) =>
+  stripComments(text).some((l) => /(from\s+|import\s*\(\s*)["'][^"']*vtbfm-palette["']/.test(l));
 
 describe("sector monitor colours (#725, #794)", () => {
   it("are tokens, not literals, in every source of the page but the vTBFM palette", () => {
@@ -95,6 +96,7 @@ describe("sector monitor colours (#725, #794)", () => {
     expect(offenders("// vTBFM's beige was #EFDFCE")).toEqual([]);
     expect(offenders('const u = "https://x.test"; const c = "#EFDFCE";')).toHaveLength(1);
     expect(importsPalette('import {C} from "@/features/sector-demand/vtbfm-palette";')).toBe(true);
+    expect(importsPalette('const m = await import("./vtbfm-palette");')).toBe(true);
     expect(importsPalette("// from \"./vtbfm-palette\"")).toBe(false);
   });
 });

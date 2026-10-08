@@ -322,22 +322,32 @@ describe("the Sector Monitor page (#794)", () => {
   });
 
   it("remembers each table's controls per ARTCC and table, and works when storage throws", async () => {
-    const first = await mount(READER, [demand("ZDC")]);
+    put.mockResolvedValue({data: {}, error: undefined, response: {status: 200}});
+    const bodies = () => [{...TMU_BODY(), neighbours: ["ZNY"]}, demand("ZNY")];
+    const first = await mount(READER, bodies());
     await setValue(control(first.host, "ZDC time range (hours)"), "3");
+    await setValue(control(first.host, "ZDC alert span (hours)"), "12");
+    await rightClick(trOf(section(first.host, "ZDC"), "05"));
+    await click(item("Move Row Down")!);
+    await click(control(first.host, "Expand ZNY TRACON"));
     await click(control(first.host, "Collapse ZDC controls"));
     expect(localStorage.getItem("ois.sectorMonitor.ZDC.enroute.range")).toBe("3");
     expect(localStorage.getItem("ois.sectorMonitor.ZDC.enroute.collapsed")).toBe("true");
     expect(localStorage.getItem("ois.sectorMonitor.ZDC.tracon.range")).toBeNull();
     await first.unmount();
 
-    const again = await mount(READER, [demand("ZDC")]);
-    // Collapsed: the controls are folded away, the grid stays.
+    const again = await mount(READER, bodies());
+    // Collapsed: the controls are folded away, the grid stays, in this browser's order.
     expect(again.host.querySelector('[aria-label="ZDC time range (hours)"]')).toBeNull();
-    expect(names(section(again.host, "ZDC"))).toEqual(["ZDC5", "ZDC16"]);
+    expect(names(section(again.host, "ZDC"))).toEqual(["ZDC06", "ZDC05", "ZDC10+"]);
     await click(control(again.host, "Expand ZDC controls"));
     expect(control<HTMLInputElement>(again.host, "ZDC time range (hours)").value).toBe("3");
+    expect(control<HTMLSelectElement>(again.host, "ZDC alert span (hours)").value).toBe("12");
     expect(control<HTMLInputElement>(again.host, "ZDC TRACON time range (hours)").value).toBe("4");
-    expect(Object.keys(localStorage).every((k) => k.startsWith("ois.sectorMonitor.ZDC."))).toBe(true);
+    // The neighbour's TRACON table was left open, its enroute table closed.
+    expect(control(again.host, "Collapse ZNY TRACON").getAttribute("aria-expanded")).toBe("true");
+    expect(control(again.host, "Expand ZNY").getAttribute("aria-expanded")).toBe("false");
+    expect(Object.keys(localStorage).every((k) => /^ois\.sectorMonitor\.(ZDC|ZNY)\.(enroute|tracon)\./.test(k))).toBe(true);
     await again.unmount();
 
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
@@ -362,8 +372,13 @@ describe("the Sector Monitor page (#794)", () => {
     qc.removeQueries({queryKey: sectorDemandKey("ZNY")});
     await settle();
     expect(demandRequests()).toHaveLength(0);
-    qc.setQueryData(sectorDemandKey("ZNY"), zny);
     await click(control(host, "Expand ZNY"));
+    expect(demandRequests().map(([, init]) => init.params.path.artcc)).toEqual(["ZNY"]);
+    expect(section(host, "ZNY")!.textContent).toContain("Waiting for the first sector-monitor cycle…");
+    await act(async () => {
+      qc.setQueryData(sectorDemandKey("ZNY"), zny);
+      await new Promise((r) => setTimeout(r, 0));
+    });
     expect(localStorage.getItem("ois.sectorMonitor.ZNY.enroute.open")).toBe("true");
     const table = section(host, "ZNY");
     expect(names(table)).toEqual(["ZNY5", "ZNY16"]);
@@ -379,14 +394,39 @@ describe("the Sector Monitor page (#794)", () => {
     expect(menuRoot()).not.toBeNull();
   });
 
-  it("replaces every table on a facility switch", async () => {
+  it("replaces every table on a facility switch, each starting from its own state", async () => {
     const {host} = await mount(READER, [demand("ZDC", {neighbours: ["ZNY"]}), demand("ZOB", {neighbours: ["ZID"]}), demand("ZNY")]);
+    // Storage swallowed, so only live state could carry across.
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {});
+    await setValue(control(host, "ZDC time range (hours)"), "2");
+    await setValue(control(host, "ZDC alert span (hours)"), "12");
     await click(control(host, "Expand ZNY"));
     expect(section(host, "ZNY")).not.toBeNull();
     await setValue(control(host, "Facility"), "ZOB");
     expect(host.querySelector('section[aria-label^="ZDC"], section[aria-label^="ZNY"]')).toBeNull();
     expect(names(section(host, "ZOB"))).toEqual(["ZOB5", "ZOB16"]);
+    expect(control<HTMLInputElement>(host, "ZOB time range (hours)").value).toBe("4");
+    expect(control<HTMLSelectElement>(host, "ZOB alert span (hours)").value).toBe("8");
     expect(control(host, "Expand ZID").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("never remembers the facility pick: a reload opens on the viewer's home facility", async () => {
+    const bodies = [demand("ZDC"), demand("ZOB"), demand("ZLA")];
+    const first = await mount(READER, bodies);
+    await setValue(control(first.host, "Facility"), "ZOB");
+    expect(section(first.host, "ZOB")).not.toBeNull();
+    await first.unmount();
+
+    const again = await mount(READER, bodies);
+    expect(control<HTMLSelectElement>(again.host, "Facility").value).toBe("ZDC");
+    expect(again.host.querySelector('section[aria-label^="ZOB"]')).toBeNull();
+    await again.unmount();
+
+    // A controller who moved from ZDC to ZLA opens on ZLA, with no ZDC table left over.
+    const moved = await mount(user({flow: {sectors: ["read"]}}, "ZLA"), bodies);
+    expect(control<HTMLSelectElement>(moved.host, "Facility").value).toBe("ZLA");
+    expect(moved.host.querySelector('section[aria-label^="ZDC"]')).toBeNull();
+    expect(Object.keys(localStorage).filter((k) => !k.startsWith("ois.sectorMonitor."))).toEqual([]);
   });
 
   describe("MAP inline edit (#794, #722's PUT)", () => {
@@ -417,6 +457,26 @@ describe("the Sector Monitor page (#794)", () => {
       expect(mapCell(enroute, "05").textContent).toBe("12/12");
       await settle();
       expect(demandRequests().length).toBeGreaterThan(0);
+      // The far side of the boundary: 1 is a positive number, and commits.
+      await click(mapCell(enroute, "06"));
+      await setValue(control(host, "MAP for ZDC06"), "1");
+      await key(control(host, "MAP for ZDC06"), "Enter");
+      expect(put.mock.calls.map(([, init]) => init.body)).toEqual([{limit: 12}, {limit: 1}]);
+    });
+
+    it("hands the cell back to the server's answer once the refetch lands", async () => {
+      put.mockResolvedValue({data: {}, error: undefined, response: {status: 200}});
+      const {host} = await tmu();
+      const served = TMU_BODY();
+      served.enroute.rows[0] = {...served.enroute.rows[0], limit: 11};
+      get.mockResolvedValue({data: served, error: undefined});
+      const enroute = section(host, "ZDC");
+      await click(mapCell(enroute, "05"));
+      await setValue(control(host, "MAP for ZDC05"), "12");
+      await key(control(host, "MAP for ZDC05"), "Enter");
+      await settle();
+      await settle();
+      expect(mapCell(enroute, "05").textContent).toBe("11/11");
     });
 
     it("cancels on Escape, and on blur with nothing changed, zero or a negative", async () => {
@@ -524,6 +584,44 @@ describe("the Sector Monitor page (#794)", () => {
       expect(demandRequests().length).toBeGreaterThan(0);
     });
 
+    it("hands the board back to the server's answer once the refetch lands", async () => {
+      put.mockResolvedValue(answers.ok("ZDC"));
+      const {host} = await mount(READER, [TMU_BODY()]);
+      // Another TMU's change landed first: the server answers with 05 on its own row.
+      get.mockResolvedValue({data: TMU_BODY(), error: undefined});
+      await menuOn(host, "06");
+      await run("Consolidate", "Consolidate into 06", "05");
+      await settle();
+      await settle();
+      expect(names(section(host, "ZDC"))).toEqual(["ZDC05", "ZDC06", "ZDC10+"]);
+    });
+
+    it("rolls back the first of two overlapping writes on its own refusal", async () => {
+      let answerFirst: (v: unknown) => void = () => {};
+      put.mockImplementationOnce(() => new Promise((r) => (answerFirst = r))).mockResolvedValueOnce(answers.ok("ZDC"));
+      const {host} = await mount(READER, [TMU_BODY()]);
+      await menuOn(host, "06");
+      await run("Consolidate", "Consolidate into 06", "05", "10");
+      expect(consolidationPuts().map((c) => c.body.into)).toEqual([{"05": "06"}, {"10": "06"}]);
+      expect(names(section(host, "ZDC"))).toEqual(["ZDC06+"]);
+      await act(async () => answerFirst(answers.refused(409)));
+      await settle();
+      // 05 is back; 10's write, which succeeded, still shows until its refetch lands.
+      expect(names(section(host, "ZDC"))).toEqual(["ZDC05", "ZDC06+"]);
+      expect(host.querySelector('[role="alert"]')!.textContent).toBe("Can't consolidate ZDC05 into ZDC06: ZDC06 is worked at ZDC05.");
+    });
+
+    it("disables Deconsolidate when the ARTCC has nothing combined", async () => {
+      const body = TMU_BODY();
+      body.enroute.rows[2] = {...body.enroute.rows[2], consolidated: []};
+      body.tracon.rows[0] = {...body.tracon.rows[0], consolidated: []};
+      const {host} = await mount(READER, [body]);
+      await menuOn(host, "06");
+      expect(item("Deconsolidate")!.getAttribute("aria-disabled")).toBe("true");
+      await run("Deconsolidate");
+      expect(item("Deconsolidate All in ZDC")).toBeUndefined();
+    });
+
     it("leaves every sector in an arrangement alone for Except Consolidated", async () => {
       put.mockResolvedValue(answers.ok("ZDC"));
       const {host} = await mount(READER, [TMU_BODY()]);
@@ -599,7 +697,7 @@ describe("the Sector Monitor page (#794)", () => {
     });
 
     for (const [status, text] of [
-      [400, "Could not save the consolidation — check TMU access / connection."],
+      [400, "That change names a sector twice, or too many; nothing was saved."],
       [403, "You can't change ZDC's consolidations."],
       [404, "A sector in that change is no longer one of ZDC's sectors; nothing was saved."],
       [409, "Can't consolidate ZDC05 into ZDC06: ZDC06 is worked at ZDC05."],

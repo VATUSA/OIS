@@ -103,6 +103,7 @@ describe("the consolidation menu's arithmetic (#794, #792)", () => {
     const say = (status: number | undefined, patch: Record<string, string | null>) =>
       consolidationError(status, "ZLA", patch, cons, known);
     expect(say(400, {"25": "25"})).toBe("ZLA25 can't be consolidated into itself.");
+    expect(say(400, {"05": "06"})).toBe("That change names a sector twice, or too many; nothing was saved.");
     expect(say(409, {"10": "12"})).toBe("Can't consolidate ZLA10 into ZLA12: ZLA12 is worked at ZLA10.");
     expect(say(409, {"05": "06"})).toBe("Can't consolidate ZLA05 into ZLA06: ZLA06 is worked at ZLA05.");
     expect(say(409, {"05": "06", "10": "06"})).toBe("Those consolidations would make a loop; nothing was saved.");

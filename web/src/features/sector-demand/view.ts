@@ -157,6 +157,7 @@ export function consolidationError(
   if (status === 400) {
     const self = sets.find(([s, t]) => s === t);
     if (self) return `${name(self[0])} can't be consolidated into itself.`;
+    return "That change names a sector twice, or too many; nothing was saved.";
   }
   if (status === 409) {
     // The server refuses a save whose target is worked at its source. With one save in the patch that

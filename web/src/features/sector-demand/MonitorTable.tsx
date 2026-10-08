@@ -194,8 +194,9 @@ export function MonitorTable({
                 data-sector={row.sector_id}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  // Every command in the menu is a write the viewer may not make here; without the
-                  // right there is no menu at all, rather than one that can only fail.
+                  // The menu is the consolidation editor; its row moves ride along, as in vTBFM, where
+                  // the whole menu is TMU work. Without the right there is no menu at all, rather
+                  // than one whose commands can only fail.
                   if (!onConsolidate) return;
                   setMenu({ x: e.clientX, y: e.clientY, sector: row.sector_id });
                 }}

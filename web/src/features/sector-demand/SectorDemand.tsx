@@ -123,7 +123,8 @@ function without<T>(pending: Readonly<Record<string, T>>, patch: Readonly<Record
  * and open neighbour.
  *
  * MAP and consolidation writes are optimistic, as in vTBFM: the board shows the change at once and
- * keeps it until the refetched demand agrees, or rolls it back and says why if the write is refused.
+ * keeps it until the refetch after the write settles, when the server's answer takes over, or rolls
+ * it back and says why if the write is refused.
  */
 export function FacilityDemand({ artcc }: { artcc: string }) {
   const qc = useQueryClient();
@@ -144,14 +145,13 @@ export function FacilityDemand({ artcc }: { artcc: string }) {
     const patch = { [sector]: limit };
     setPendingMaps((p) => ({ ...p, ...patch }));
     setMapError(null);
-    setLimit.mutate(
-      { sectorId: sector, limit },
-      {
-        onSuccess: () => void refetch().finally(() => setPendingMaps((p) => without(p, patch))),
-        onError: () => {
-          setPendingMaps((p) => without(p, patch));
-          setMapError(`Could not save MAP for ${sectorLabel(artcc, sector)} — check TMU access / connection.`);
-        },
+    // `mutateAsync`, per call: a second `mutate` on the same mutation detaches the first call's
+    // callbacks, so a quick second edit would strand the first one's overlay or skip its rollback.
+    void setLimit.mutateAsync({ sectorId: sector, limit }).then(
+      () => refetch().finally(() => setPendingMaps((p) => without(p, patch))),
+      () => {
+        setPendingMaps((p) => without(p, patch));
+        setMapError(`Could not save MAP for ${sectorLabel(artcc, sector)} — check TMU access / connection.`);
       },
     );
   };
@@ -163,14 +163,15 @@ export function FacilityDemand({ artcc }: { artcc: string }) {
     const known = new Set(rows.flatMap((r) => [r.sector_id, ...r.consolidated]));
     setPending((p) => ({ ...p, ...patch }));
     setConsError(null);
-    consolidate.mutate(patch, {
-      onSuccess: () => void refetch().finally(() => setPending((p) => without(p, patch))),
-      onError: (e) => {
+    // Per call, like the MAP edit: the checklist sends several writes in quick succession.
+    void consolidate.mutateAsync(patch).then(
+      () => refetch().finally(() => setPending((p) => without(p, patch))),
+      (e: unknown) => {
         setPending((p) => without(p, patch));
         const status = e instanceof WriteError ? e.status : undefined;
         setConsError(consolidationError(status, artcc, patch, before, known));
       },
-    });
+    );
   };
 
   const editing: TableEditing = {

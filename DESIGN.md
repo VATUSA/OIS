@@ -216,14 +216,17 @@ does not follow this file's look, and only inside its body:
   `2px` black borders; vTBFM's monospace stack at weight 500; its slider; and its cream right-click
   menu with stacked inset bevels. Source: `zla-artcc/vTBFM` `b7328138`,
   `src/components/SectorMonitorPage.tsx` and `src/components/SectorContextMenu.tsx`.
-- **Where the values live:** every literal is in one file,
-  `web/src/features/sector-demand/vtbfm-palette.ts`. `colours.guard.test.ts` exempts that file and no
-  other source of the page, and refuses an import of it from anywhere outside
-  `web/src/features/sector-demand/`, so the exception can't spread.
+- **Where the values live:** every colour literal, the font stack, the bevels and the grid's column
+  and row sizes are in one file, `web/src/features/sector-demand/vtbfm-palette.ts`; the remaining
+  spacings are vTBFM's own, copied inline beside the markup they size. `colours.guard.test.ts`
+  exempts that file and no other source of the page, and refuses an import of it from anywhere
+  outside `web/src/features/sector-demand/`, so the exception can't spread.
 - **What stays OIS:** the shell (sidebar, breadcrumb, page header) and the facility picker above the
   body. No other page changes, and nothing here is precedent: a new screen does not get to copy it.
-- **What it waives:** non-negotiables 2, 3, 6 and 9 and the "legible in both themes" row, inside the
-  body only. The body is the same in light and dark, as vTBFM's is.
+- **What it waives:** inside the body only, non-negotiables 2 (the slider's two-tone track), 3 (the
+  menu's inset bevel bands), 4 (2px outset frames and the footer's 2px borders), 5 (square corners),
+  6 (weight 500), 7 (monospace for labels too) and 9 (vTBFM's literals and spacings), and the
+  "legible in both themes" row: the body is the same in light and dark, as vTBFM's is.
 
 ## Components (one each, tokens only)
 

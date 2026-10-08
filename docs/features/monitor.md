@@ -221,7 +221,7 @@ through `CONTROLLER` (migration 0129); a grant at their facility reads every ART
   the sector (`ZLA25`, with a trailing `+` when others are worked at it) and its MAP (`10/10`), then one
   cell per bin holding the combined peak, green/yellow/red from the server's `level`. Time labels are a
   bottom footer (blank, `MAP`, then `HHMM`). A cell's tooltip reads `ZLA25 0415Z · peak 3 (airborne 2)
-  vs MAP 10 · red`. The OIS shell and the facility picker stay as they are. Every literal is in
+  vs MAP 10 · red`. The OIS shell and the facility picker stay as they are. Every colour literal is in
   `web/src/features/sector-demand/vtbfm-palette.ts`, the only file `colours.guard.test.ts` exempts.
 - **Toggle:** ▼/▶ on the facility's own table folds away only its controls; on a neighbour's it hides
   controls and grid together. Neighbour tables start collapsed and are fetched only once one is opened.
