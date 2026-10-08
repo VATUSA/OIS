@@ -6,7 +6,7 @@ commands, the `#[sqlx::test]` setup, and the "never hit real external APIs" rule
 and `web-frontend.md`.
 
 Sources: ported from the house test-quality rule; OIS lessons from #419, #428, #433, #457, #472,
-#488, #509, #510, #531, #550, #577, #585, #656, #699, and #706.
+#488, #509, #510, #531, #550, #577, #585, #656, #699, #706, and #725.
 
 ## Read the summary line
 
@@ -114,6 +114,25 @@ stays green, the test does not defend the fix. Four shapes have precedent:
 - **A test on the `jobs.rs` pass itself** when a background job is the writer. The private
   `*_once` functions are the recurring blind spot; `mod ace_reminder_tests`
   (`backend/src/jobs.rs:1711`) is the precedent. Anchor times on `Utc::now()`, not a calendar date.
+
+## A cache keyed on a feed input meets the poller's real cadence
+
+A cache that reuses work "until the input changes" is only as good as how often the input really
+changes. On #725 the sector demand cache keyed on the feed `Snapshot` by `Arc` identity. Every test
+installed one snapshot per "cycle" by hand and passed, but `apply_fetch` (`backend/src/feed/mod.rs`)
+installs a new `Snapshot` on every 2 s poll, including stale polls that repeat the same VATSIM
+publish. Live, one viewer caused 19 projections a minute against about 4 publishes, and a
+limit-only write re-projected instead of re-judging. Every mutation of the key went red, because
+the tests pinned the key, not how often production changes it.
+
+- Before keying a cache on an `AppState` value, find every writer of it (the poller, each refresh
+  job, each force-reload) and how often each runs, not only the writer the change is about.
+- Test the sequence production produces: a projection, then a poll that repeats the same
+  publish, then the read or write that should hit. Install the repeat the way the writer does
+  (a fresh `Arc` with the same `source_timestamp` and a later `fetched_at`), not by reusing the
+  test's own `Arc`.
+- When a PR claims "once per publish" or similar, count the computations against a running
+  backend on the live feed over a minute and compare with the publish count.
 
 ## Absence needs a guard, not a grep
 
