@@ -2122,9 +2122,9 @@ export interface paths {
          *     commands and its checklists (#794, #792). `into` maps each sector to the sector to work it at, or to
          *     null to give it its own row back. Every sector being worked somewhere, and every target, must be
          *     this ARTCC's (404 otherwise); a release is not checked against the dataset, like the single release.
-         *     A self-reference (or two keys naming one sector) is a 400 and a loop, including one between the
-         *     batch's own entries, a 409, and neither writes anything. Answers with the ARTCC's consolidations after the save; a batch that
-         *     changed something tells every viewer once.
+         *     A self-reference, two keys naming one sector, or more than 200 entries is a 400, and a loop
+         *     (including one between the batch's own entries) a 409; neither writes anything. Answers with the
+         *     ARTCC's consolidations after the save; a batch that changed something tells every viewer once.
          */
         put: operations["consolidate_sectors"];
         post?: never;
@@ -6844,8 +6844,7 @@ export interface components {
             sectors: components["schemas"]["SectorLimitBody"][];
         };
         /**
-         * @description A bin's load against its sector's limit, drawn as `--level-ok` / `--level-watch` / `--level-over`
-         *     (`SectorGrid`'s `LoadLevel` in `@ois/ui`).
+         * @description A bin's load against its sector's limit: green, yellow and red on the Sector Monitor.
          * @enum {string}
          */
         SectorLoadLevel: "ok" | "watch" | "over";
@@ -15305,7 +15304,7 @@ export interface operations {
                     "application/json": components["schemas"]["SectorConsolidationsBody"];
                 };
             };
-            /** @description An entry works a sector at itself, or two entries name the same sector; nothing is written */
+            /** @description An entry works a sector at itself, two entries name the same sector, or there are more than 200 entries; nothing is written */
             400: {
                 headers: {
                     [name: string]: unknown;

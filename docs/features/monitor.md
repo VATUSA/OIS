@@ -127,7 +127,7 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
   (`repos::sector_consolidations::apply_batch`): releases first, then saves in sector order, each flattened
   as above, and the first refusal (400, 404 or 409, a loop between the batch's own entries included)
   writes none of it. A null entry releases without a dataset check, like `DELETE`; two keys that trim to
-  one sector are a 400. One `flow.sector_consolidations` publish for the whole batch. The Sector
+  one sector, or more than 200 entries, are a 400. One `flow.sector_consolidations` publish for the whole batch. The Sector
   Monitor's menu sends every consolidation command through it.
 - **Cache**: `AppState::sector_consolidations`, refreshed every 30 s by `sector_consolidations_refresh`.
   Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a

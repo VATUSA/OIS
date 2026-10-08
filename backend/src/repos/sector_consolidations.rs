@@ -85,9 +85,12 @@ pub async fn apply_batch(
     let mut tx = pool.begin().await.map_err(db)?;
     lock(&mut tx, artcc).await?;
     let mut changed = false;
-    for source in entries.iter().filter(|(_, t)| t.is_none()).map(|(s, _)| s) {
-        changed |= release_in(&mut tx, artcc, source).await?;
-    }
+    let releases: Vec<&str> = entries
+        .iter()
+        .filter(|(_, t)| t.is_none())
+        .map(|(s, _)| s.as_str())
+        .collect();
+    changed |= release_in(&mut tx, artcc, &releases).await?;
     for (source, target) in entries.iter().filter_map(|(s, t)| Some((s, t.as_ref()?))) {
         match consolidate_in(&mut tx, artcc, source, target, updated_by).await? {
             Ok(saved) => changed |= saved,
@@ -165,20 +168,25 @@ async fn consolidate_in(
     Ok(Ok(saved + moved > 0))
 }
 
-/// [`release`]'s delete, inside a caller's transaction.
+/// Gives each of `sources` its own row back, inside a caller's transaction, in one statement. Returns
+/// whether any was released.
 async fn release_in(
     tx: &mut Transaction<'_, Postgres>,
     artcc: &str,
-    source: &str,
+    sources: &[&str],
 ) -> Result<bool, ApiError> {
-    let deleted =
-        sqlx::query("delete from flow.sector_consolidation where artcc = $1 and sector_id = $2")
-            .bind(artcc)
-            .bind(source)
-            .execute(&mut **tx)
-            .await
-            .map_err(db)?
-            .rows_affected();
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let deleted = sqlx::query(
+        "delete from flow.sector_consolidation where artcc = $1 and sector_id = any($2)",
+    )
+    .bind(artcc)
+    .bind(sources)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?
+    .rows_affected();
     Ok(deleted > 0)
 }
 

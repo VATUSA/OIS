@@ -32,6 +32,9 @@ use crate::{
     state::AppState,
 };
 
+/// The most entries one batch may carry: well above any ARTCC's sector count.
+const MAX_BATCH: usize = 200;
+
 /// The permission a consolidation write is scoped against.
 pub const SECTOR_CONSOLIDATIONS_UPDATE: &str = "flow.sector_consolidations.update";
 
@@ -162,16 +165,16 @@ pub async fn consolidate_sector(
 /// commands and its checklists (#794, #792). `into` maps each sector to the sector to work it at, or to
 /// null to give it its own row back. Every sector being worked somewhere, and every target, must be
 /// this ARTCC's (404 otherwise); a release is not checked against the dataset, like the single release.
-/// A self-reference (or two keys naming one sector) is a 400 and a loop, including one between the
-/// batch's own entries, a 409, and neither writes anything. Answers with the ARTCC's consolidations after the save; a batch that
-/// changed something tells every viewer once.
+/// A self-reference, two keys naming one sector, or more than 200 entries is a 400, and a loop
+/// (including one between the batch's own entries) a 409; neither writes anything. Answers with the
+/// ARTCC's consolidations after the save; a batch that changed something tells every viewer once.
 #[utoipa::path(
     put, path = "/api/v1/flow/sector-consolidations/{artcc}", tag = "flow",
     params(("artcc" = String, Path, description = "ARTCC id, case-insensitive")),
     request_body = ConsolidateSectorsRequest,
     responses(
         (status = 200, body = SectorConsolidationsBody, description = "The ARTCC's consolidations after the save, written or not"),
-        (status = 400, description = "An entry works a sector at itself, or two entries name the same sector; nothing is written"),
+        (status = 400, description = "An entry works a sector at itself, two entries name the same sector, or there are more than 200 entries; nothing is written"),
         (status = 401, description = "Not signed in, or without `flow.sector_consolidations.update`"),
         (status = 403, description = "The caller's `flow.sector_consolidations.update` does not cover this ARTCC"),
         (status = 404, description = "A sector being consolidated, or a target, is not one of this ARTCC's; nothing is written"),
@@ -191,6 +194,11 @@ pub async fn consolidate_sectors(
     let artcc = artcc.trim().to_ascii_uppercase();
     if !may_edit(&state, &principal, &artcc).await? {
         return Err(ApiError::Forbidden);
+    }
+    // More entries than any ARTCC has sectors is not a monitor command, and each one is work done
+    // under the ARTCC's lock.
+    if payload.into.len() > MAX_BATCH {
+        return Err(ApiError::BadRequest);
     }
     // Trimmed like the single routes. Two keys that trim to one sector would silently drop one.
     let mut entries = BTreeMap::new();
