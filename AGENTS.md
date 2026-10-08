@@ -242,9 +242,12 @@ an existing one) or the bug and fix are unambiguous.
   comments carry no `Co-Authored-By` trailer, no "Generated with" or "Drafted by" line, no session
   link and no other agent credit, even when a session or tool suggests one. Every commit is authored
   solely as the user. `.githooks/commit-msg` and `.claude/hooks/attribution-gate.sh` block the
-  common forms (`.claude/hooks/lib/attribution.sh`; not a `Drafted by` line) on commits and
-  `gh pr create`/`edit`; nothing checks an issue or comment, so run
-  `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the
+  common forms, a `Drafted by` footer line included (`.claude/hooks/lib/attribution.sh`), on
+  commits, on PR and issue bodies and comments posted with `gh pr`/`gh issue` (`pr merge` too), and
+  on any `gh api` write. A form quoted in a code span (backticks) reads as prose and passes. The gate
+  blocks a body it cannot read (stdin without a heredoc, a `$(...)` other than `$(cat f)`, a body file
+  no redirect in the command writes) but cannot see one held in a shell variable (`--body "$BODY"`),
+  so still run `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the
   canonical statement. The posting steps in `/start`, `/ship`, `ticket-reviewer`,
   `regression-checker`, the two reminder hooks and `ois-agent-goals.txt` repeat a one-line form of
   it next to their check, so change them with it.
