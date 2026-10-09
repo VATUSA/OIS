@@ -273,15 +273,23 @@ async fn start_reset(
     }
     let Some(mut locks) = claimed else {
         // Still held and still no run: whatever holds it is not a reset this backend can name, such
-        // as one whose backend stopped between storing its result and letting go.
-        tracing::warn!("access reset refused: the reset lock is held, but no run is recorded");
+        // as one whose backend stopped between storing its result and letting go. Postgres frees
+        // that lock only once it notices the connection is gone, which can take a long time.
+        let holder = reset_runs::reset_lock_holder(pool).await.ok().flatten();
+        tracing::warn!(
+            holder_pid = holder,
+            "access reset refused: the reset lock is held, but no run is recorded; if it persists, \
+             end the holding backend with pg_terminate_backend"
+        );
         return Err(ResetError::Failed(
             StatusCode::SERVICE_UNAVAILABLE,
             AccessResetFailure {
                 error: "reset_lock_busy".to_string(),
-                message: "the reset lock is held, but no reset is running; nothing was started — \
-                          try again shortly"
-                    .to_string(),
+                message:
+                    "the reset lock is held, but no reset is running, so nothing was started. \
+                          Try again in a minute; if it persists, the backend logs name the session \
+                          holding the lock"
+                        .to_string(),
                 users_reset: 0,
             },
         ));
@@ -340,6 +348,9 @@ async fn start_reset(
         if let Err(e) = reset_runs::finish_run(&pool, &run_id, outcome.as_ref()).await {
             tracing::error!(error = %e, run_id, "access reset to VATUSA finished but its result was not stored");
         }
+        // Releasing here, rather than leaving it to the dropped connection, is what lets a start right
+        // after this run claim the lock at once. No test can tell the two apart reliably: Postgres
+        // usually notices a dropped connection within the same moment.
         locks.release().await;
     });
     Ok(run_id)
@@ -1815,6 +1826,12 @@ mod tests {
     /// and nothing starts.
     #[sqlx::test]
     async fn a_start_gives_up_on_a_reset_lock_held_with_no_run(pool: PgPool) {
+        // The wait is bounded from above too: a request held for long here is a hung dialog.
+        assert!(
+            CLAIM_RETRY * CLAIM_TRIES as u32 <= std::time::Duration::from_secs(3),
+            "a start would wait {:?}",
+            CLAIM_RETRY * CLAIM_TRIES as u32
+        );
         let w = world(pool).await;
         let held = hold_reset_lock(&w.pool).await;
         let before = everything(&w.pool).await;
@@ -1834,6 +1851,11 @@ mod tests {
         };
         assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(failure.error, "reset_lock_busy");
+        assert!(
+            failure.message.contains("nothing was started"),
+            "{}",
+            failure.message
+        );
         assert_eq!(failure.users_reset, 0);
         assert_eq!(run_count(&w.pool).await, 0);
         assert!(reset_job(&w).is_none());

@@ -62,17 +62,36 @@ pub async fn lock_division(pool: &PgPool) -> Result<AdvisoryLocks, sqlx::Error> 
     Ok(locks)
 }
 
-/// Claim the reset lock, or `None` when another reset, on any replica, holds it. The attempt uses an
-/// ordinary pooled connection, taken out of the pool only once it holds the lock, so a refused attempt
-/// costs no new connection.
+/// Claim the reset lock, or `None` when another reset, on any replica, holds it.
+///
+/// The connection leaves the pool before the attempt, not after it succeeds. The attempt runs in the
+/// request, which is dropped when the client goes away. Dropped after Postgres granted the lock but
+/// before the reply was read, a pooled connection would go back to the pool still holding the lock,
+/// and keep it for as long as the pool keeps the connection. A detached one is closed instead. That
+/// window is one round trip and no test can land in it reliably, so this order is the guard.
 pub async fn try_lock_reset(pool: &PgPool) -> Result<Option<AdvisoryLocks>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
+    let mut locks = AdvisoryLocks::connect(pool).await?;
     let claimed: bool = sqlx::query_scalar("select pg_try_advisory_lock($1, $2)")
         .bind(LOCK_CLASS)
         .bind(RESET_LOCK)
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut locks.0)
         .await?;
-    Ok(claimed.then(|| AdvisoryLocks(conn.detach())))
+    Ok(claimed.then_some(locks))
+}
+
+/// The Postgres backend pid holding the reset lock, if any, for the log when a start gives up: an
+/// operator can end a stuck holder with `pg_terminate_backend`.
+pub async fn reset_lock_holder(pool: &PgPool) -> Result<Option<i32>, ApiError> {
+    sqlx::query_scalar(
+        "select pid from pg_locks where locktype = 'advisory' and granted and objsubid = 2 \
+         and database = (select oid from pg_database where datname = current_database()) \
+         and classid = $1::int8::oid and objid = $2::int8::oid limit 1",
+    )
+    .bind(i64::from(LOCK_CLASS))
+    .bind(i64::from(RESET_LOCK))
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 // The two SQL fragments below are spliced into queries with `format!`. Both are constants of this
