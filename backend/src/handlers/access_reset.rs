@@ -589,11 +589,11 @@ mod tests {
         );
     }
 
-    /// #805 AC2: with RESET_KEEPS_GROUPS gone, a configured server admin still keeps SERVER_ADMIN
-    /// through a sign-in and the reset after it, because both leave `system` rows alone. A
-    /// SERVER_ADMIN written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way
-    /// to hold it. (0130's part in AC2 is pinned by `a_reset_leaves_exactly_system_and_vatusa_grants`,
-    /// whose admin holds only backfilled rows.)
+    /// #805 AC2: a configured server admin keeps SERVER_ADMIN through a sign-in and the reset after
+    /// it, because the reset removes only `manual` rows and holds no group back. A SERVER_ADMIN
+    /// written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way to hold it.
+    /// (0130's part in AC2 is pinned by `a_reset_leaves_exactly_system_and_vatusa_grants`, whose
+    /// admin holds only backfilled rows.)
     #[sqlx::test]
     async fn a_configured_admin_keeps_server_admin_through_sign_in_and_reset(pool: PgPool) {
         let w = world(pool).await;
@@ -623,9 +623,9 @@ mod tests {
     }
 
     /// #805: an admin removed from `OIS_SERVER_ADMIN_CID` loses admin on the session they already hold
-    /// once the startup pass runs, without signing in again. Access resolves per request, so the same
-    /// cookie is refused; a desktop session resolves through the same session lookup, and an API key
-    /// is capped by the owner's effective permissions, which drop to the baseline with it.
+    /// once the demotion pass runs, without signing in again: access resolves per request, so the
+    /// same cookie is refused, and their effective permissions, which cap their API keys, drop to the
+    /// baseline. (A desktop bearer resolves through the same session lookup as the cookie.)
     #[sqlx::test]
     async fn a_removed_admin_loses_admin_on_a_live_session_at_startup(pool: PgPool) {
         let w = world(pool).await;
@@ -648,10 +648,13 @@ mod tests {
         assert_eq!(dry_run(&w).await, http::StatusCode::OK);
         assert!(can_update_users(&w).await);
 
-        let demoted =
-            crate::handlers::auth::demote_unconfigured_server_admins(&w.pool, &[MEMBER_CID])
-                .await
-                .unwrap();
+        let demoted = crate::handlers::auth::demote_unconfigured_server_admins(
+            &w.pool,
+            &crate::config::parse_server_admin_cids(&MEMBER_CID.to_string()),
+        )
+        .await
+        .unwrap()
+        .demoted;
 
         assert_eq!(demoted, 1);
         assert_eq!(dry_run(&w).await, http::StatusCode::FORBIDDEN);

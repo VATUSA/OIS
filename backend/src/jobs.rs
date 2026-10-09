@@ -50,6 +50,13 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// and only adds load.
 const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// How often the server admin reconciliation re-runs after the one before serving (#805). It bounds
+/// how long a removed admin can hold the role after a replica still on the old
+/// `OIS_SERVER_ADMIN_CID` grants it back at their sign-in during a rolling restart, or after a row
+/// is written by hand. Five minutes, as the TMU cleanup above; each pass is one indexed query when
+/// there is nothing to do.
+const SERVER_ADMIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1100,6 +1107,42 @@ async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<S
     } else {
         format!("{sent} reminder(s) enqueued")
     })
+}
+
+/// Demote every server admin not in `OIS_SERVER_ADMIN_CID`, every
+/// [`SERVER_ADMIN_RECONCILE_INTERVAL`] (#805). `run()` also runs it once before serving.
+pub fn spawn_server_admin_reconcile(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "server_admin_reconcile",
+        "Demote server admins not in OIS_SERVER_ADMIN_CID",
+        SERVER_ADMIN_RECONCILE_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { server_admin_reconcile_once(&pool, &crate::config::server_admin_cids()).await }
+        },
+    ));
+}
+
+/// One reconciliation pass, reported for the job registry: a skipped pass (a part of the list is not
+/// a CID) or any holder it could not demote is a failure, so `/metrics` and Background Tasks show it.
+pub(crate) async fn server_admin_reconcile_once(
+    pool: &PgPool,
+    list: &crate::config::ServerAdminCids,
+) -> Result<String, String> {
+    let pass = crate::handlers::auth::demote_unconfigured_server_admins(pool, list)
+        .await
+        .map_err(|error| format!("could not list server admins: {error:?}"))?;
+    if pass.skipped {
+        return Err(format!(
+            "OIS_SERVER_ADMIN_CID has parts that are not CIDs ({}); demoted no one",
+            list.rejected.join(", ")
+        ));
+    }
+    if pass.failed > 0 {
+        return Err(format!("{} demoted, {} failed", pass.demoted, pass.failed));
+    }
+    Ok(format!("{} demoted", pass.demoted))
 }
 
 /// Periodically expire finished TMIs/ground stops, delete ones that ended over an hour ago, and

@@ -17,7 +17,9 @@ use crate::{
         require_permission::RequirePermission,
         vatsim::{VatsimOAuthConfig, exchange_code_for_token, fetch_profile},
     },
-    config::{configured_return_to_origins, configured_server_admin_cids, cookie_secure},
+    config::{
+        ServerAdminCids, configured_return_to_origins, configured_server_admin_cids, cookie_secure,
+    },
     errors::ApiError,
     models::{DesktopExchangeRequest, DesktopSessionBody, MeBody},
     repos::{
@@ -539,38 +541,100 @@ pub(crate) async fn reconcile_login_access(
     Ok(())
 }
 
-/// Demotes every server admin whose CID is not in `admin_cids`, each in its own transaction, as
-/// sign-in would (#805). Run at startup: `OIS_SERVER_ADMIN_CID` can change only across a restart, so
-/// this is the moment a removal takes effect, rather than the removed admin's next sign-in, which a
-/// live session or API key never needs. Access resolves per request, so their sessions and keys drop
-/// to the baseline with it. An empty list demotes everyone: no CID configured means no server admin.
-/// Returns how many were demoted.
+/// What a demotion pass does with the configured list (#805).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DemotionPlan<'a> {
+    /// Part of a set list is not a CID: demote no one. A typo would otherwise strip the admin it
+    /// meant to keep, or every admin when no part parses.
+    Skip(&'a [String]),
+    /// Demote every holder not in this list. Empty means no server admin, so everyone.
+    Run(&'a [i64]),
+}
+
+pub(crate) fn demotion_plan(list: &ServerAdminCids) -> DemotionPlan<'_> {
+    if list.rejected.is_empty() {
+        DemotionPlan::Run(&list.cids)
+    } else {
+        DemotionPlan::Skip(&list.rejected)
+    }
+}
+
+/// Whether a pass that ran is an alarm: an empty list that demoted someone, which is also how a lost
+/// variable shows. Logged at error level, where an ordinary demotion is a warning.
+pub(crate) fn demotion_alarm(admin_cids: &[i64], demoted: usize) -> bool {
+    admin_cids.is_empty() && demoted > 0
+}
+
+/// One demotion pass: how many holders it demoted and how many it failed on. `skipped` when the list
+/// had a part that is not a CID.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct DemotionPass {
+    pub demoted: usize,
+    pub failed: usize,
+    pub skipped: bool,
+}
+
+/// Demotes every server admin whose CID is not in `list`, each in its own transaction, as sign-in
+/// would (#805). Runs before the backend serves and then on a timer
+/// (`jobs::spawn_server_admin_reconcile`), so a removal takes effect at the restart that brings the
+/// new list, and a grant from a replica still on the old list is undone within one interval. Access resolves per request, so a
+/// demoted admin's sessions and keys drop to the baseline with them. A holder that fails is logged
+/// and counted, and the pass goes on to the next.
 pub(crate) async fn demote_unconfigured_server_admins(
     pool: &sqlx::PgPool,
-    admin_cids: &[i64],
-) -> Result<usize, ApiError> {
-    let holders = access_repo::server_admins_not_in(pool, admin_cids).await?;
-    let mut demoted = 0;
-    for (user_id, cid) in &holders {
-        let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-        if access_repo::demote_server_admin(&mut tx, user_id).await? {
-            demoted += 1;
-            tracing::warn!(
-                user_id,
-                cid,
-                "server admin not in OIS_SERVER_ADMIN_CID; demoted to baseline at startup"
-            );
+    list: &ServerAdminCids,
+) -> Result<DemotionPass, ApiError> {
+    let admin_cids = match demotion_plan(list) {
+        DemotionPlan::Skip(rejected) => {
+            for part in rejected {
+                tracing::error!(
+                    part = part.as_str(),
+                    "OIS_SERVER_ADMIN_CID has a part that is not a CID; no server admin demoted"
+                );
+            }
+            return Ok(DemotionPass {
+                skipped: true,
+                ..DemotionPass::default()
+            });
         }
-        tx.commit().await.map_err(|_| ApiError::Internal)?;
+        DemotionPlan::Run(admin_cids) => admin_cids,
+    };
+    let mut pass = DemotionPass::default();
+    for (user_id, cid) in access_repo::server_admins_not_in(pool, admin_cids).await? {
+        match demote_one(pool, &user_id).await {
+            Ok(true) => {
+                pass.demoted += 1;
+                tracing::warn!(
+                    user_id,
+                    cid,
+                    "server admin not in OIS_SERVER_ADMIN_CID; demoted to baseline"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                pass.failed += 1;
+                tracing::error!(
+                    user_id,
+                    cid,
+                    ?error,
+                    "could not demote a server admin not in OIS_SERVER_ADMIN_CID"
+                );
+            }
+        }
     }
-    if admin_cids.is_empty() && demoted > 0 {
+    if demotion_alarm(admin_cids, pass.demoted) {
         tracing::error!(
-            demoted,
-            "OIS_SERVER_ADMIN_CID is empty: every server admin was demoted at startup"
+            demoted = pass.demoted,
+            "OIS_SERVER_ADMIN_CID lists no CID: every server admin was demoted"
         );
-    } else if demoted > 0 {
-        tracing::info!(demoted, "startup server admin reconciliation done");
     }
+    Ok(pass)
+}
+
+async fn demote_one(pool: &sqlx::PgPool, user_id: &str) -> Result<bool, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let demoted = access_repo::demote_server_admin(&mut tx, user_id).await?;
+    tx.commit().await.map_err(|_| ApiError::Internal)?;
     Ok(demoted)
 }
 
@@ -890,8 +954,8 @@ mod tests {
     }
 
     /// #805 AC1: an admin configured before 0098 and since removed from `OIS_SERVER_ADMIN_CID` is
-    /// demoted at their next sign-in. The backfilled row was `manual`, which `revoke_server_admin` used
-    /// to skip; it now removes SERVER_ADMIN of any source, and 0130 has re-tagged the row besides.
+    /// demoted at their next sign-in, from the rows 0098 backfilled and 0130 re-tagged: SERVER_ADMIN
+    /// goes, and the baseline they keep is the `system` USER row.
     #[sqlx::test]
     async fn a_backfilled_admin_no_longer_configured_is_demoted_at_sign_in(pool: PgPool) {
         let user = seed_user(&pool).await;
@@ -986,13 +1050,24 @@ mod tests {
             .unwrap()
     }
 
-    /// #805: the startup pass demotes every server admin whose CID is not configured, whatever the
-    /// row's source and with no CID at all, exactly as sign-in would: baseline group, no direct
-    /// grants. The configured admin, and a user who never held SERVER_ADMIN, are left as they were.
+    /// A configured list of these CIDs, as `OIS_SERVER_ADMIN_CID` parses.
+    fn admins(cids: &[i64]) -> ServerAdminCids {
+        ServerAdminCids {
+            cids: cids.to_vec(),
+            rejected: Vec::new(),
+        }
+    }
+
+    /// #805: the pass demotes every server admin whose CID is not configured, whatever the row's
+    /// source and with no CID at all, exactly as sign-in would: baseline group, no direct grants. The
+    /// configured admins, whatever their row's source, and a user who never held SERVER_ADMIN, are
+    /// left as they were.
     #[sqlx::test]
-    async fn the_startup_pass_demotes_every_unconfigured_server_admin(pool: PgPool) {
+    async fn the_pass_demotes_every_unconfigured_server_admin(pool: PgPool) {
         let configured = user_with_cid(&pool, Some(1_000_001)).await;
         hold(&pool, &configured, "SERVER_ADMIN", "system").await;
+        let configured_vatusa = user_with_cid(&pool, Some(1_000_006)).await;
+        hold(&pool, &configured_vatusa, "SERVER_ADMIN", "vatusa").await;
         let mut former = Vec::new();
         for (cid, source) in [
             (Some(1_000_002), "system"),
@@ -1008,13 +1083,25 @@ mod tests {
         let bystander = user_with_cid(&pool, Some(1_000_005)).await;
         hold(&pool, &bystander, "EC", "manual").await;
         grant(&pool, &bystander, "tmu.program.update", None).await;
+        let list = admins(&[1_000_001, 1_000_006]);
 
-        let demoted = super::demote_unconfigured_server_admins(&pool, &[1_000_001])
+        let pass = super::demote_unconfigured_server_admins(&pool, &list)
             .await
             .unwrap();
 
-        assert_eq!(demoted, 4);
+        assert_eq!(
+            pass,
+            super::DemotionPass {
+                demoted: 4,
+                failed: 0,
+                skipped: false
+            }
+        );
         assert_eq!(role_rows(&pool, &configured).await, ["SERVER_ADMIN:system"]);
+        assert_eq!(
+            role_rows(&pool, &configured_vatusa).await,
+            ["SERVER_ADMIN:vatusa"]
+        );
         for user in &former {
             assert_eq!(role_rows(&pool, user).await, ["USER:system"]);
             assert_eq!(direct_count(&pool, user).await, 0);
@@ -1022,34 +1109,147 @@ mod tests {
         assert_eq!(role_rows(&pool, &bystander).await, ["EC:manual"]);
         assert_eq!(direct_count(&pool, &bystander).await, 1);
         assert_eq!(
-            super::demote_unconfigured_server_admins(&pool, &[1_000_001])
+            super::demote_unconfigured_server_admins(&pool, &list)
                 .await
-                .unwrap(),
+                .unwrap()
+                .demoted,
             0,
-            "a second start changes nothing"
+            "a second pass changes nothing"
         );
     }
 
     /// #805: no CID configured means no server admin, so an empty list demotes everyone.
     #[sqlx::test]
-    async fn an_empty_admin_list_demotes_every_server_admin_at_startup(pool: PgPool) {
+    async fn an_empty_admin_list_demotes_every_server_admin(pool: PgPool) {
         let admin = user_with_cid(&pool, Some(1_000_001)).await;
         hold(&pool, &admin, "SERVER_ADMIN", "system").await;
 
-        assert_eq!(
-            super::demote_unconfigured_server_admins(&pool, &[])
-                .await
-                .unwrap(),
-            1
-        );
+        let pass = super::demote_unconfigured_server_admins(&pool, &admins(&[]))
+            .await
+            .unwrap();
+
+        assert_eq!(pass.demoted, 1);
         assert_eq!(role_rows(&pool, &admin).await, ["USER:system"]);
+    }
+
+    /// #805: a set list with any part that is not a CID demotes no one, not even the holders the
+    /// parts that did parse leave out. "1000001;1000002" parses to nothing, and a pass on it would
+    /// otherwise strip both.
+    #[sqlx::test]
+    async fn a_list_with_a_part_that_is_not_a_cid_demotes_no_one(pool: PgPool) {
+        let configured = user_with_cid(&pool, Some(1_000_001)).await;
+        hold(&pool, &configured, "SERVER_ADMIN", "system").await;
+        let typo = user_with_cid(&pool, Some(1_000_002)).await;
+        hold(&pool, &typo, "SERVER_ADMIN", "system").await;
+
+        let list = crate::config::parse_server_admin_cids("1000001, 100000Z");
+        let pass = super::demote_unconfigured_server_admins(&pool, &list)
+            .await
+            .unwrap();
+
+        assert!(pass.skipped && pass.demoted == 0);
+        for user in [&configured, &typo] {
+            assert_eq!(role_rows(&pool, user).await, ["SERVER_ADMIN:system"]);
+        }
+        let report = crate::jobs::server_admin_reconcile_once(&pool, &list).await;
+        assert!(
+            report
+                .as_ref()
+                .is_err_and(|detail| detail.contains("100000Z")),
+            "the job registry shows the skip as a failure: {report:?}"
+        );
+    }
+
+    /// #805: a replica still on the old list re-grants a removed admin at their sign-in during a
+    /// rolling restart; the next timed pass on the new list takes it back.
+    #[sqlx::test]
+    async fn the_timed_pass_undoes_a_grant_from_a_replica_on_the_old_list(pool: PgPool) {
+        let removed = user_with_cid(&pool, Some(1_000_002)).await;
+        hold(&pool, &removed, "SERVER_ADMIN", "system").await;
+        let new_list = admins(&[1_000_001]);
+        super::demote_unconfigured_server_admins(&pool, &new_list)
+            .await
+            .unwrap();
+
+        super::reconcile_login_access(&pool, &removed, 1_000_002, false, &[1_000_002])
+            .await
+            .unwrap();
+        assert_eq!(
+            role_rows(&pool, &removed).await,
+            ["SERVER_ADMIN:system", "USER:system"]
+        );
+
+        assert_eq!(
+            crate::jobs::server_admin_reconcile_once(&pool, &new_list).await,
+            Ok("1 demoted".to_string())
+        );
+        assert_eq!(role_rows(&pool, &removed).await, ["USER:system"]);
+    }
+
+    /// The plan and the alarm a pass logs by, which are its only signal when a lost or mangled
+    /// variable strips every admin (#805).
+    #[test]
+    fn the_pass_skips_on_a_rejected_part_and_alarms_on_an_empty_list() {
+        let parsed = crate::config::parse_server_admin_cids;
+        assert_eq!(
+            super::demotion_plan(&parsed("1, 2")),
+            super::DemotionPlan::Run(&[1, 2])
+        );
+        assert_eq!(
+            super::demotion_plan(&parsed("")),
+            super::DemotionPlan::Run(&[])
+        );
+        assert_eq!(
+            super::demotion_plan(&parsed("1;2")),
+            super::DemotionPlan::Skip(&["1;2".to_string()])
+        );
+        assert!(super::demotion_alarm(&[], 1));
+        assert!(!super::demotion_alarm(&[], 0));
+        assert!(!super::demotion_alarm(&[1], 3));
+    }
+
+    /// A pass that demotes logs at error level when the list is empty, and a holder it fails on is
+    /// logged and counted while the pass goes on (#805). A source scan, with comments stripped: the
+    /// log line is the one signal a lost variable gives, and no test captures logs.
+    #[test]
+    fn the_pass_logs_its_alarm_and_each_failure() {
+        let code: String = include_str!("auth.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code
+            .find("pub(crate) async fn demote_unconfigured_server_admins")
+            .unwrap();
+        let pass = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        let at = |needle: &str| {
+            pass.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing"))
+        };
+        let skip =
+            &pass[at("DemotionPlan::Skip(rejected) => {")..at("DemotionPlan::Run(admin_cids) =>")];
+        assert!(
+            skip.contains("tracing::error!("),
+            "a skipped pass is logged"
+        );
+        let failure = &pass[at("Err(error) => {")..at("if demotion_alarm(")];
+        assert!(failure.contains("pass.failed += 1;") && failure.contains("tracing::error!("));
+        let alarm = &pass[at("if demotion_alarm(admin_cids, pass.demoted) {")..at("Ok(pass)")];
+        assert!(
+            alarm.contains("tracing::error!("),
+            "an emptied list is logged as an error"
+        );
     }
 
     /// Sign-in reconciles against the configured admin list. A source scan, because a test cannot set
     /// `OIS_SERVER_ADMIN_CID` without racing every other test.
     #[test]
     fn sign_in_reconciles_against_the_configured_admin_list() {
-        let source = include_str!("auth.rs");
+        let source: String = include_str!("auth.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let wrapper = &source[source.find("async fn ensure_user_login_access").unwrap()..];
         let wrapper = &wrapper[..wrapper.find("\n}\n").unwrap()];
         assert!(

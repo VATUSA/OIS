@@ -24,8 +24,8 @@
 --   * `configured` — the holder's CID is in `admin_cids`. Every holder with `false` is demoted when the
 --     release starts, whatever their sources; check each is a former admin.
 --
--- `repos::access::tests::the_0130_audit_lists_every_server_admin_before_and_after` runs the SETUP and
--- REPORT blocks below, verbatim, so this file cannot drift from what the test proves.
+-- `repos::access::tests::the_0130_audit_lists_every_server_admin_before_and_after` runs the SETUP, PARSE
+-- and REPORT blocks below, verbatim, so this file cannot drift from what the test proves.
 
 begin;
 
@@ -44,14 +44,23 @@ select * from audit_admin_rows;
 -- END SETUP
 ;
 
--- Parsed as configured_server_admin_cids parses it: a part that isn't a positive integer is skipped.
+-- Parsed as config::parse_server_admin_cids parses it: whitespace-trimmed parts, blank ones
+-- skipped. A part that is not a positive integer is listed first; while there is one, the backend
+-- demotes no one at all, so fix the value before reading the report.
+-- BEGIN PARSE
+create temp view audit_admin_cid_parts as
+select btrim(part, E' \t\r\n') as part,
+       case when btrim(part, E' \t\r\n') ~ '^\+?[0-9]{1,18}$'
+            then ltrim(btrim(part, E' \t\r\n'), '+')::bigint end as cid
+from unnest(string_to_array(:'admin_cids', ',')) as part
+where btrim(part, E' \t\r\n') <> '';
+
 insert into audit_configured_cids
-select distinct cid
-from (
-    select case when trim(part) ~ '^[0-9]{1,18}$' then trim(part)::bigint end as cid
-    from unnest(string_to_array(:'admin_cids', ',')) as part
-) parsed
-where cid > 0;
+select distinct cid from audit_admin_cid_parts where cid > 0;
+-- END PARSE
+;
+
+select part as not_a_cid from audit_admin_cid_parts where cid is null or cid <= 0;
 
 \i backend/migrations/0130_retag_system_groups.sql
 

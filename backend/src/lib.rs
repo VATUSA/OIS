@@ -75,6 +75,7 @@ pub async fn run() -> color_eyre::Result<()> {
             tracing::warn!(error = %e, "realtime: cross-replica listener did not start");
         }
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
+        jobs::spawn_server_admin_reconcile(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
@@ -198,17 +199,17 @@ async fn run_startup_migrations(
 }
 
 /// Demote every server admin no longer in `OIS_SERVER_ADMIN_CID` before serving (#805). After the
-/// migrations, so the rows 0130 re-tagged are in place. A failure is logged and boot goes on: sign-in
-/// still demotes, so failing leaves only the wait for the removed admin's next sign-in.
+/// migrations, so the rows 0130 re-tagged are in place. `jobs::spawn_server_admin_reconcile` repeats
+/// it on a timer. A failure is logged and boot goes on: the timer and sign-in still demote.
 async fn demote_removed_server_admins(state: &state::AppState) {
     let Some(pool) = state.db.as_ref() else {
         return;
     };
-    let admin_cids = config::configured_server_admin_cids();
-    if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &admin_cids).await {
+    let list = config::server_admin_cids();
+    if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &list).await {
         tracing::error!(
             ?error,
-            "could not demote server admins removed from OIS_SERVER_ADMIN_CID at startup"
+            "could not list the server admins to demote at startup"
         );
     }
 }
@@ -229,26 +230,42 @@ mod tests {
     async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
 
     /// Startup demotes the server admins removed from the configured list, after the migrations and
-    /// before serving (#805). A source scan, because a test cannot set `OIS_SERVER_ADMIN_CID` without
-    /// racing every other test, nor boot `run()`.
+    /// before serving, logs if it cannot, and starts the timer that repeats it (#805). A source scan,
+    /// with comments stripped, because a test cannot set `OIS_SERVER_ADMIN_CID` without racing every
+    /// other test, nor boot `run()`.
     #[test]
     fn startup_demotes_server_admins_removed_from_the_list() {
-        let source = include_str!("lib.rs");
-        let run = &source[source.find("pub async fn run()").unwrap()..];
-        let run = &run[..run.find("\n}\n").unwrap()];
+        let code: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = |signature: &str| {
+            let start = code.find(signature).unwrap();
+            let len = code[start..].find("\n}\n").unwrap();
+            code[start..start + len].to_string()
+        };
+
+        let run = body("pub async fn run()");
         let migrations = run.find("run_startup_migrations(&state).await?;").unwrap();
         let demote = run
             .find("demote_removed_server_admins(&state).await;")
             .expect("run() demotes removed server admins");
         let serve = run.find("axum::serve(").unwrap();
         assert!(migrations < demote && demote < serve);
+        assert!(
+            run.contains("jobs::spawn_server_admin_reconcile(state.jobs.clone(), pool.clone());")
+        );
 
-        let pass = &source[source
-            .find("async fn demote_removed_server_admins")
-            .unwrap()..];
-        let pass = &pass[..pass.find("\n}\n").unwrap()];
-        assert!(pass.contains("let admin_cids = config::configured_server_admin_cids();"));
-        assert!(pass.contains("demote_unconfigured_server_admins(pool, &admin_cids)"));
+        let pass = body("async fn demote_removed_server_admins");
+        assert!(pass.contains("let list = config::server_admin_cids();"));
+        let call = pass
+            .find("if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &list)")
+            .expect("the pass runs on the configured list, and its error is handled");
+        assert!(
+            pass[call..].contains("tracing::error!("),
+            "a failed pass is logged"
+        );
     }
 
     /// Every version claimed by more than one migration file, with the files that claim it.

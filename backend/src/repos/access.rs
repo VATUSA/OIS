@@ -806,8 +806,7 @@ pub async fn assign_server_admin(
 /// demotion).
 ///
 /// `OIS_SERVER_ADMIN_CID` is the only thing that decides who is server admin (#805): no editor can
-/// grant or remove it, so a row of any source held by a CID not in the list is one to remove. Until
-/// 0130 this matched `system` only, and the rows 0098 backfilled as `manual` outlived the list.
+/// grant or remove it, so a row of any source held by a CID not in the list is one to remove.
 pub async fn revoke_server_admin(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
@@ -1725,11 +1724,20 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("the audit's setup runs");
-        // What the psql `admin_cids` variable feeds in.
-        sqlx::query("insert into audit_configured_cids values (1805001), (1805002)")
+        // The psql `admin_cids` variable, substituted as psql would: a tab, a leading `+`, a blank
+        // part, and two parts that are not CIDs.
+        let parse = block("PARSE").replace(":'admin_cids'", "E' 1805001 ,\\t+1805002,, 0, x1'");
+        sqlx::raw_sql(&parse)
             .execute(&mut *tx)
             .await
-            .unwrap();
+            .expect("the audit parses the list");
+        let not_a_cid: Vec<String> = sqlx::query_scalar(
+            "select part from audit_admin_cid_parts where cid is null or cid <= 0 order by part",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(not_a_cid, ["0", "x1"]);
         sqlx::raw_sql(MIGRATION_0130)
             .execute(&mut *tx)
             .await
