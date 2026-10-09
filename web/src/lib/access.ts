@@ -217,29 +217,73 @@ export function useVatusaResetPreview(enabled: boolean) {
   });
 }
 
+/** How often a started reset is asked whether it has finished. */
+const RESET_POLL_MS = 1000;
+/** Failed polls in a row before the dialog stops waiting. The run itself carries on on the server. */
+const RESET_POLL_TRIES = 5;
+
+type ResetError = Error & { status?: number; usersReset?: number };
+
+function resetError(message: string, usersReset?: number, status?: number): ResetError {
+  const err = new Error(message) as ResetError;
+  err.status = status;
+  err.usersReset = usersReset;
+  return err;
+}
+
+/** Poll a reset run (#806) until it finishes: its result, or its failure thrown. */
+export async function waitForReset(id: string): Promise<AccessResetBody> {
+  for (let misses = 0; misses < RESET_POLL_TRIES; ) {
+    let run: components["schemas"]["AccessResetRun"] | undefined;
+    try {
+      ({ data: run } = await ois.GET("/api/v1/admin/access/vatusa-reset/runs/{id}", {
+        params: { path: { id } },
+      }));
+    } catch {
+      run = undefined;
+    }
+    if (!run) {
+      misses += 1;
+    } else if (run.status === "succeeded") {
+      if (run.result) return run.result;
+      throw resetError("the reset finished, but its result could not be read");
+    } else if (run.status === "failed") {
+      throw resetError(run.failure?.message ?? "reset failed", run.failure?.users_reset);
+    } else {
+      misses = 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, RESET_POLL_MS));
+  }
+  throw resetError("lost track of the reset; it carries on on the server (see Background Tasks)");
+}
+
 /**
- * Reset every user's access to VATUSA (#795). A failure carries the server's reason (a failed VATUSA
- * pull, or a run that stopped part-way) and how many users were already reset.
+ * Reset every user's access to VATUSA (#795): start the run, then wait for it to finish (#806). A
+ * failure carries the server's reason (a failed VATUSA pull, or a run that stopped part-way) and how
+ * many users were already reset.
  */
 export function useVatusaReset() {
   const queryClient = useQueryClient();
   const toast = useToast();
   return useMutation({
     mutationFn: async ({ reason }: { reason: string }) => {
+      // The server answers at once with the run (202), or with the run already in progress (409),
+      // and the reset carries on there whether or not anyone waits for it.
       const { data, error, response } = await ois.POST("/api/v1/admin/access/vatusa-reset", {
         body: { reason },
       });
-      if (error || !data) {
-        const failure = error as { message?: string; users_reset?: number } | undefined;
-        const err = new Error(failure?.message ?? "reset failed") as Error & {
-          status?: number;
-          usersReset?: number;
-        };
-        err.status = response?.status;
-        err.usersReset = failure?.users_reset;
-        throw err;
+      const running = (error as { run_id?: string } | undefined)?.run_id;
+      if (running) {
+        toast.info("A reset is already running", {
+          description: "Waiting for that reset instead. Yours was not started, and its reason was not used.",
+        });
       }
-      return data;
+      const runId = data?.run_id ?? running;
+      if (!runId) {
+        const failure = error as { message?: string; users_reset?: number } | undefined;
+        throw resetError(failure?.message ?? "reset failed", failure?.users_reset, response?.status);
+      }
+      return waitForReset(runId);
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["vatusa-reset-preview"] });

@@ -109,7 +109,7 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
   });
 
   it("shows the dry run and applies only with a reason and the confirmation word", async () => {
-    post.mockResolvedValue({data: {...preview, dry_run: false, pull_summary: "ok"}, error: undefined});
+    post.mockResolvedValue({data: {run_id: "run-1"}, error: undefined, response: {status: 202}});
     const host = await mount(true);
     const open = await vi.waitFor(() => {
       const b = resetButton(host);
@@ -138,8 +138,11 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
     expect(apply().disabled).toBe(false);
     expect(post).not.toHaveBeenCalled();
 
+    // The run finishes at once, so no poll outlives the test.
+    answerRun({...running, status: "succeeded", result: {...preview, dry_run: false, pull_summary: "ok"}});
     await act(async () => apply().click());
     expect(post).toHaveBeenCalledWith("/api/v1/admin/access/vatusa-reset", {body: {reason: "drift cleanup"}});
+    await vi.waitFor(() => expect(document.body.textContent).toContain("1 of 40 users changed"));
   });
 
   it("cannot apply without a dry run to show", async () => {
@@ -172,21 +175,90 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("users would change"));
   }
 
-  it("shows why a reset failed and how many users it reached", async () => {
-    post.mockResolvedValue({
-      data: undefined,
-      error: {error: "reset_incomplete", message: "the reset stopped part-way", users_reset: 3},
-      response: {status: 500},
+  /** Answer the reset run's polls in turn, the last answer repeating. */
+  function answerRun(...runs: object[]) {
+    const base = get.getMockImplementation()!;
+    const polls: string[] = [];
+    get.mockImplementation(async (path: string, init?: {params?: {path?: {id?: string}}}) => {
+      if (path !== "/api/v1/admin/access/vatusa-reset/runs/{id}") return base(path);
+      polls.push(init?.params?.path?.id ?? "");
+      return {data: runs[Math.min(polls.length, runs.length) - 1], error: undefined};
     });
-    const host = await mount(true);
+    return polls;
+  }
+
+  async function apply(host: HTMLElement) {
     await openDialog(host);
     type("Reason", "drift cleanup");
     type("Confirmation", "RESET");
-    const apply = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
-    await act(async () => apply.click());
+    const button = [...document.querySelectorAll("button")].find((b) => b.textContent === "Reset access")!;
+    await act(async () => button.click());
+  }
+
+  const running = {id: "run-1", status: "running", started_at: "2026-10-08T12:00:00Z", finished_at: null, result: null, failure: null};
+
+  it("waits for the run on the server and then shows its result (VATUSA/OIS#806)", async () => {
+    post.mockResolvedValue({data: {run_id: "run-1"}, error: undefined, response: {status: 202}});
+    const host = await mount(true);
+    const polls = answerRun(running, {
+      ...running,
+      status: "succeeded",
+      finished_at: "2026-10-08T12:03:00Z",
+      result: {...preview, dry_run: false, pull_summary: "ok", users_reset: 2},
+    });
+    await apply(host);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Resetting…"));
+    expect(document.body.textContent).toContain("finishes even if you close this dialog");
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("2 of 40 users changed"), {timeout: 4000});
+    expect(polls).toEqual(["run-1", "run-1"]);
+    expect(document.body.textContent).not.toContain("Resetting…");
+  });
+
+  it("shows why a run failed and how many users it reached", async () => {
+    post.mockResolvedValue({data: {run_id: "run-1"}, error: undefined, response: {status: 202}});
+    const host = await mount(true);
+    answerRun({
+      ...running,
+      status: "failed",
+      finished_at: "2026-10-08T12:01:00Z",
+      failure: {error: "reset_incomplete", message: "the reset stopped part-way", users_reset: 3},
+    });
+    await apply(host);
     await vi.waitFor(() =>
       expect(document.body.textContent).toContain("the reset stopped part-way (3 users reset)"),
     );
+  });
+
+  it("shows why the server would not start a reset", async () => {
+    post.mockResolvedValue({
+      data: undefined,
+      error: {error: "vatusa_not_configured", message: "VATUSA is not configured", users_reset: 0},
+      response: {status: 503},
+    });
+    const host = await mount(true);
+    const polls = answerRun(running);
+    await apply(host);
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("VATUSA is not configured (0 users reset)"),
+    );
+    expect(polls).toEqual([]);
+  });
+
+  it("waits for the reset already running when the server refuses a second one", async () => {
+    post.mockResolvedValue({data: undefined, error: {run_id: "run-0"}, response: {status: 409}});
+    const host = await mount(true);
+    const polls = answerRun({
+      ...running,
+      id: "run-0",
+      status: "succeeded",
+      finished_at: "2026-10-08T12:03:00Z",
+      result: {...preview, dry_run: false, pull_summary: "ok", users_reset: 5},
+    });
+    await apply(host);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("5 of 40 users changed"));
+    expect(document.body.textContent).toContain("A reset is already running");
+    expect(polls).toEqual(["run-0"]);
   });
 
   it("runs a fresh dry run each time the dialog opens", async () => {

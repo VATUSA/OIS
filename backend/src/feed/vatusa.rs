@@ -428,13 +428,16 @@ pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool, events: crate::r
     tokio::spawn(division_pull_job(reg, move || {
         let (pool, api_key, events) = (pool.clone(), api_key.clone(), events.clone());
         async move {
-            let summary = pull_division(&pool, &api_key, &events).await?;
-            // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
-            // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
-            match ensure_webhook(&pool, &api_key).await {
-                Ok(()) => Ok(summary),
-                Err(e) => Ok(format!("{summary}; webhook: {e}")),
-            }
+            with_division_lock(&pool, async {
+                let summary = pull_division(&pool, &api_key, &events).await?;
+                // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
+                // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
+                match ensure_webhook(&pool, &api_key).await {
+                    Ok(()) => Ok(summary),
+                    Err(e) => Ok(format!("{summary}; webhook: {e}")),
+                }
+            })
+            .await
         }
     }));
 }
@@ -454,6 +457,20 @@ where
         pull,
     )
     .await;
+}
+
+/// Run a division pull holding the division lock (#806). An access reset holds the same lock from before
+/// its own pull until its last member, so the scheduled, triggered or webhook-driven pull waits for it
+/// rather than rewriting VATUSA data under it. The lock is in Postgres, so it holds across replicas, and
+/// it also stops two replicas' pulls overlapping.
+pub async fn with_division_lock<T>(
+    pool: &PgPool,
+    pull: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let _lock = crate::repos::access_reset::lock_division(pool)
+        .await
+        .map_err(|e| format!("could not take the division lock: {e}"))?;
+    pull.await
 }
 
 // --- The division webhook (v3, #605) ---

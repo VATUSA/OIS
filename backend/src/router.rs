@@ -154,6 +154,10 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/admin/access/vatusa-reset",
             get(access_reset::preview_vatusa_reset).post(access_reset::apply_vatusa_reset),
         )
+        .route(
+            "/api/v1/admin/access/vatusa-reset/runs/{id}",
+            get(access_reset::get_vatusa_reset_run),
+        )
         // Group (role) management — #545
         .route(
             "/api/v1/admin/groups",

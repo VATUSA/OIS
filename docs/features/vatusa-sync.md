@@ -175,28 +175,69 @@ Resync (#549) puts one member back on role sync and only touches `vatusa` rows. 
 VATUSA** (Admin → Access) does it for everyone and also removes hand-made grants, so each user ends up
 holding exactly their `system` grants plus what VATUSA justifies.
 
-- **Server admin only.** Both routes check the caller holds `SERVER_ADMIN` and answer `403` to anyone
+- **Server admin only.** Every route checks the caller holds `SERVER_ADMIN` and answers `403` to anyone
   else, a national `access.users.update` holder included. There is no catalog permission for it.
 - **Dry run first.** `GET /api/v1/admin/access/vatusa-reset` lists every user who would change and the
   rows they would gain and lose (group or permission, scope, source, allow or deny). It runs each
   user's reset in a transaction it rolls back, against the VATUSA data the last pull stored, so it
   writes nothing.
-- **The reset.** `POST /api/v1/admin/access/vatusa-reset` with a reason. It runs the division pull
-  first; if the pull fails, or `VATUSA_API_KEY` is unset, nothing is reset and the error says why
-  (`502 vatusa_pull_failed`, `503 vatusa_not_configured`). Then, one transaction per user in CID
-  order: clear the detach, delete every `manual` row in `access.user_roles` and
-  `access.user_permissions` (denies included), reconcile the `vatusa` group grants, and write one
-  `USER_ACCESS` audit entry naming every row removed and added. A user with no change gets no entry.
-  Because the pull is fresh, the result can differ from the dry run if VATUSA changed since the last
-  pull; the response lists what the reset actually did.
+- **The reset.** `POST /api/v1/admin/access/vatusa-reset` with a reason. It answers at once with
+  `202 {run_id}` and runs in the background (#806). A blank reason is `400`, and an unset
+  `VATUSA_API_KEY` is `503 vatusa_not_configured`; neither starts a run. The run pulls the division
+  first; if the pull fails, nothing is reset and the run fails with `vatusa_pull_failed`. Then, one
+  transaction per user in CID order: clear the detach, delete every `manual` row in
+  `access.user_roles` and `access.user_permissions` (denies included), reconcile the `vatusa` group
+  grants, and write one `USER_ACCESS` audit entry naming every row removed and added. A user with no
+  change gets no entry. Because the pull is fresh, the result can differ from the dry run if VATUSA
+  changed since the last pull; the result lists what the reset actually did.
+- **Its result.** `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns the run: `running`, then
+  `succeeded` with the result or `failed` with the failure. Runs live in `access.vatusa_reset_runs`
+  (0131), so any replica answers. The dialog polls it each second and shows the result when it
+  finishes; closing the dialog doesn't stop the run.
 - **`USER` and `SERVER_ADMIN` stay** because they are `system` rows. Migration 0098 backfilled both
   as `manual`; 0130 re-tagged them `system` (#805). A `SERVER_ADMIN` row written by hand as `manual`
   is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` alone grants and removes it.
-- **A failure part-way** stops the run with `500 reset_incomplete`. Users before it are reset and
+- **A failure part-way** fails the run with `reset_incomplete`. Users before it are reset and
   audited, the failing user is rolled back whole, and users after it are untouched. `users_reset`
-  says how many were done; running it again finishes the rest.
+  says how many were done; running it again finishes the rest. A run whose backend stopped (a crash
+  or a redeploy) reads as `reset_interrupted`, with `users_reset` counted from its audit entries.
+- **One at a time, never beside the pull.** A run holds a Postgres advisory lock for its whole life,
+  so a second `POST` gets `409` with the running run's id (the dialog says so and waits for that run).
+  If the lock stays held for 2 s with no run recorded, the `POST` gets `503 reset_lock_busy`. A run
+  also holds the division lock from before its pull until its last member. The division pull job
+  takes the same lock, so a scheduled, admin-triggered or webhook-driven pull waits for a reset, and
+  a reset waits for a pull. The locks are in Postgres, so they hold across replicas; as a side effect,
+  two replicas' daily pulls no longer overlap either. A lock lives on a connection of its own, so it
+  is released when the run ends, panics or its process dies.
+- **In Background Tasks.** Each run appears as `vatusa_access_reset` in the job registry, and so in
+  `/metrics`: running while it runs, then its outcome and `N of M members reset`. The registry is per
+  process, so only the replica that ran it lists it. The entry appears with the first run after a
+  start.
 - Service accounts keep their grants (`access.service_account_roles` is not touched). API keys follow
   their owner's live access.
+
+### How long a reset takes, and the ingress timeout (#806)
+
+The reset used to run inside the request, so an ingress read timeout shorter than the run cut the
+admin off with a `504`. Dropping the request's future also stopped the run between members: with the
+run moved back inline, `a_dropped_client_does_not_stop_the_run` fails exactly so. Since #806 the
+request returns as soon as the run starts, so the reset no longer depends on that timeout.
+
+- **The ingress timeout for `/api/v1/admin/*` in production is not known from this repository.** The
+  ingress lives in the cluster's deployment config; `deploy/nginx.conf` serves only the web bundle. It
+  can be changed later without affecting the reset.
+- **Measured locally, not in production** (2026-10-09; a debug build on a shared, loaded dev host;
+  15,003 users; the division pull stubbed out). Time from start to stored result:
+
+  | Members whose access changes | Time |
+  | --- | --- |
+  | 2 (the roster already in line) | 0.9 s |
+  | 150 (1%) | 1.7 s |
+  | 15,000 (every member) | 144 s |
+
+  The per-member transactions dominate: about 10 ms each. The real division pull comes on top: its
+  fetch may take up to 120 s (`division_client`), then its chunked write. How many members drift in
+  production is not known, and the time scales with it.
 
 ## Freshness
 

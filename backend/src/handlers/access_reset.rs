@@ -1,4 +1,5 @@
-//! Reset every member's access to exactly what VATUSA justifies (#795): a dry run, and the reset itself.
+//! Reset every member's access to exactly what VATUSA justifies (#795): a dry run, and the reset itself,
+//! which runs in the background and is polled for its result (#806).
 //! Server admin only. The gate is the `SERVER_ADMIN` group, not a catalog permission, so no group can
 //! be given it.
 
@@ -6,7 +7,7 @@ use std::future::Future;
 
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -18,20 +19,23 @@ use crate::{
     },
     errors::ApiError,
     models::{
-        AccessResetBody, AccessResetFailure, AccessResetGrant, AccessResetRequest, AccessResetUser,
+        AccessResetBody, AccessResetFailure, AccessResetGrant, AccessResetRequest, AccessResetRun,
+        AccessResetStarted, AccessResetUser,
     },
     repos::{
-        audit as audit_repo,
+        access_reset as reset_runs, audit as audit_repo,
         vatusa::{self as vatusa_repo, GrantRow, ResetMode, ResetRun},
     },
     state::AppState,
 };
 
-/// Why the reset endpoint refused or stopped: an ordinary API error, or a failure the admin is shown
-/// with its cause and how many members were already reset.
+/// Why the reset endpoint refused or a run stopped: an ordinary API error, a failure the admin is shown
+/// with its cause and how many members were already reset, or another run in progress.
 pub enum ResetError {
     Api(ApiError),
     Failed(StatusCode, AccessResetFailure),
+    /// Another reset is running: 409 with its run id.
+    Running(String),
 }
 
 impl From<ApiError> for ResetError {
@@ -45,6 +49,9 @@ impl IntoResponse for ResetError {
         match self {
             Self::Api(e) => e.into_response(),
             Self::Failed(status, body) => (status, Json(body)).into_response(),
+            Self::Running(run_id) => {
+                (StatusCode::CONFLICT, Json(AccessResetStarted { run_id })).into_response()
+            }
         }
     }
 }
@@ -117,41 +124,73 @@ pub async fn preview_vatusa_reset(
     tag = "access",
     request_body = AccessResetRequest,
     responses(
-        (status = 200, body = AccessResetBody),
+        (status = 202, description = "The reset started; poll its run for the result", body = AccessResetStarted),
         (status = 400),
         (status = 401),
         (status = 403),
-        (status = 500, description = "Stopped part-way; `users_reset` members were reset", body = AccessResetFailure),
-        (status = 502, description = "The VATUSA division pull failed; nothing was reset", body = AccessResetFailure),
-        (status = 503, description = "VATUSA is not configured; nothing was reset", body = AccessResetFailure)
+        (status = 409, description = "A reset is already running; poll that run instead", body = AccessResetStarted),
+        (status = 503, description = "VATUSA is not configured, or the reset lock is held with no run recorded; nothing was started", body = AccessResetFailure)
     ),
     security(("session" = []))
 )]
-/// Reset every member's access to VATUSA (#795): pull the division fresh (refused with 503 when
-/// VATUSA is not configured), then, one transaction per member, put them back on role sync, delete
-/// every hand-made grant, and reconcile their VATUSA grants. `system` grants, the baseline `USER` and
-/// `SERVER_ADMIN` groups among them, are left alone. Each changed member gets one `USER_ACCESS` audit
-/// entry with the reason. Because the pull is fresh, the result can differ from the dry run if VATUSA
-/// changed since the last pull. Server admin only.
+/// Start a reset of every member's access to VATUSA (#795) and answer at once with its run id (#806).
+/// The run pulls the division fresh, then, one transaction per member, puts them back on role sync,
+/// deletes every hand-made grant, and reconciles their VATUSA grants. `system` grants, the baseline
+/// `USER` and `SERVER_ADMIN` groups among them, are left alone. Each changed member gets one
+/// `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the result can differ from the
+/// dry run if VATUSA changed since the last pull. It runs in the background, so it finishes whether or
+/// not the caller waits; `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns its result. One reset
+/// runs at a time, never alongside the division pull. Server admin only.
 pub async fn apply_vatusa_reset(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
     headers: HeaderMap,
     Json(payload): Json<AccessResetRequest>,
-) -> Result<Json<AccessResetBody>, ResetError> {
+) -> Result<(StatusCode, Json<AccessResetStarted>), ResetError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     require_server_admin(&state, user).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let pull = division_pull(pool, &state.events, crate::config::vatusa_api_key());
-    reset_to_vatusa(
+    // The reason is checked before the key, so a blank one is a 400 wherever VATUSA is configured.
+    if payload.reason.trim().is_empty() {
+        return Err(ApiError::BadRequest.into());
+    }
+    let Some(api_key) = crate::config::vatusa_api_key() else {
+        return Err(pull_failed(PullError::NotConfigured));
+    };
+    let pull = division_pull(pool.clone(), state.events.clone(), api_key);
+    let run_id = start_reset(
         &state,
         user,
         &payload.reason,
         audit_repo::client_ip(&headers),
         pull,
     )
-    .await
-    .map(Json)
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(AccessResetStarted { run_id })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/access/vatusa-reset/runs/{id}",
+    tag = "access",
+    params(("id" = String, Path, description = "The run id the reset's POST returned")),
+    responses((status = 200, body = AccessResetRun), (status = 401), (status = 403), (status = 404)),
+    security(("session" = []))
+)]
+/// One reset run (#806): `running` until it finishes, then its result or why it failed. A run whose
+/// backend stopped before it finished is reported as failed (`reset_interrupted`). Server admin only.
+pub async fn get_vatusa_reset_run(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(id): Path<String>,
+) -> Result<Json<AccessResetRun>, ApiError> {
+    let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
+    require_server_admin(&state, user).await?;
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    reset_runs::fetch_run(pool, &id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 /// Why the division pull that opens a reset did not run.
@@ -160,21 +199,164 @@ pub enum PullError {
     Failed(String),
 }
 
-/// The division pull a reset opens with. With no VATUSA API key there is nothing to reset to, so it is
-/// refused rather than run on whatever the last pull stored.
+/// The response for a pull that did not run: nothing was reset.
+fn pull_failed(e: PullError) -> ResetError {
+    let (status, error, message) = match e {
+        PullError::NotConfigured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "vatusa_not_configured",
+            "VATUSA is not configured (VATUSA_API_KEY is unset), so there is nothing to reset to"
+                .to_string(),
+        ),
+        PullError::Failed(message) => (StatusCode::BAD_GATEWAY, "vatusa_pull_failed", message),
+    };
+    ResetError::Failed(
+        status,
+        AccessResetFailure {
+            error: error.to_string(),
+            message,
+            users_reset: 0,
+        },
+    )
+}
+
+/// The division pull a reset opens with. It owns what it needs, since it runs after the request.
 async fn division_pull(
-    pool: &sqlx::PgPool,
-    events: &crate::realtime::Events,
-    api_key: Option<String>,
+    pool: sqlx::PgPool,
+    events: crate::realtime::Events,
+    api_key: String,
 ) -> Result<String, PullError> {
-    let api_key = api_key.ok_or(PullError::NotConfigured)?;
-    crate::feed::vatusa::pull_division(pool, &api_key, events)
+    crate::feed::vatusa::pull_division(&pool, &api_key, &events)
         .await
         .map_err(PullError::Failed)
 }
 
-/// The reset behind [`apply_vatusa_reset`], with the division pull passed in so a test can stand in
-/// for VATUSA. The pull runs first; if it fails, nothing is reset.
+/// The reset's entry in the job registry, so a run shows in Background Tasks and `/metrics`.
+pub const RESET_JOB: &str = "vatusa_access_reset";
+
+/// How long a start waits, at most, for a reset lock that is held with no run recorded (see
+/// [`start_reset`]) before answering 503 `reset_lock_busy`.
+const CLAIM_TRIES: usize = 20;
+const CLAIM_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Start a reset in a task of its own and return its run id at once (#806): the run belongs to no
+/// request, so a client or ingress that gives up cannot stop it part-way. The task holds the reset lock
+/// for the whole run and the division lock from before its pull until its last member, so no other
+/// reset, and no division pull, runs beside it on any replica. With the pull passed in so a test can
+/// stand in for VATUSA.
+async fn start_reset(
+    state: &AppState,
+    user: &CurrentUser,
+    reason: &str,
+    ip_address: Option<String>,
+    pull: impl Future<Output = Result<String, PullError>> + Send + 'static,
+) -> Result<String, ResetError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::BadRequest.into());
+    }
+    let mut claimed = None;
+    for _ in 0..CLAIM_TRIES {
+        claimed = reset_runs::try_lock_reset(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        if claimed.is_some() {
+            break;
+        }
+        if let Some(run_id) = reset_runs::running_run(pool).await? {
+            return Err(ResetError::Running(run_id));
+        }
+        // Held with no run recorded: another start is between taking the lock and recording its
+        // run, or a run is between storing its result and letting go. Either lasts a moment.
+        tokio::time::sleep(CLAIM_RETRY).await;
+    }
+    let Some(mut locks) = claimed else {
+        // Still held and still no run: whatever holds it is not a reset this backend can name, such
+        // as one whose backend stopped between storing its result and letting go. Postgres frees
+        // that lock only once it notices the connection is gone, which can take a long time.
+        let holder = reset_runs::reset_lock_holder(pool).await.ok().flatten();
+        tracing::warn!(
+            holder_pid = holder,
+            "access reset refused: the reset lock is held, but no run is recorded; if it persists, \
+             end the holding backend with pg_terminate_backend"
+        );
+        return Err(ResetError::Failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            AccessResetFailure {
+                error: "reset_lock_busy".to_string(),
+                message:
+                    "the reset lock is held, but no reset is running, so nothing was started. \
+                          Try again in a minute; if it persists, the backend logs name the session \
+                          holding the lock"
+                        .to_string(),
+                users_reset: 0,
+            },
+        ));
+    };
+    let run_id = reset_runs::start_run(pool, &user.id, reason).await?;
+    state.jobs.register(
+        RESET_JOB,
+        "Reset every member's access to VATUSA: pull the division, then reset each member (started by a server admin)",
+        None,
+        false,
+    );
+    state.jobs.begin(RESET_JOB);
+
+    let (state, pool, user, reason, task_run_id) = (
+        state.clone(),
+        pool.clone(),
+        user.clone(),
+        reason.to_string(),
+        run_id.clone(),
+    );
+    tokio::spawn(async move {
+        let outcome = match locks.lock_division().await {
+            Ok(()) => reset_to_vatusa(&state, &user, &reason, ip_address, pull).await,
+            Err(e) => {
+                tracing::error!(error = %e, "access reset to VATUSA could not take the division lock");
+                Err(ApiError::Internal.into())
+            }
+        };
+        let outcome = outcome.map_err(|e| match e {
+            ResetError::Failed(_, failure) => failure,
+            other => AccessResetFailure {
+                error: "reset_failed".to_string(),
+                message: match other {
+                    ResetError::Api(e) => {
+                        format!("the reset could not run ({e}); nothing was reset")
+                    }
+                    _ => "the reset could not run; nothing was reset".to_string(),
+                },
+                users_reset: 0,
+            },
+        });
+        match &outcome {
+            Ok(body) => state.jobs.finish(
+                RESET_JOB,
+                true,
+                format!(
+                    "{} of {} members reset",
+                    body.users_reset, body.users_checked
+                ),
+            ),
+            Err(failure) => state.jobs.finish(RESET_JOB, false, failure.message.clone()),
+        }
+        // Stored while the locks are still held: a `running` row with no lock holder reads as
+        // interrupted.
+        let run_id = task_run_id;
+        if let Err(e) = reset_runs::finish_run(&pool, &run_id, outcome.as_ref()).await {
+            tracing::error!(error = %e, run_id, "access reset to VATUSA finished but its result was not stored");
+        }
+        // Releasing here, rather than leaving it to the dropped connection, is what lets a start right
+        // after this run claim the lock at once. No test can tell the two apart reliably: Postgres
+        // usually notices a dropped connection within the same moment.
+        locks.release().await;
+    });
+    Ok(run_id)
+}
+
+/// The reset itself, run by [`start_reset`]'s task. The pull runs first; if it fails, nothing is reset.
 async fn reset_to_vatusa(
     state: &AppState,
     user: &CurrentUser,
@@ -187,25 +369,7 @@ async fn reset_to_vatusa(
     if reason.is_empty() {
         return Err(ApiError::BadRequest.into());
     }
-    let pull_summary = pull.await.map_err(|e| {
-        let (status, error, message) = match e {
-            PullError::NotConfigured => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "vatusa_not_configured",
-                "VATUSA is not configured (VATUSA_API_KEY is unset), so there is nothing to reset to"
-                    .to_string(),
-            ),
-            PullError::Failed(message) => (StatusCode::BAD_GATEWAY, "vatusa_pull_failed", message),
-        };
-        ResetError::Failed(
-            status,
-            AccessResetFailure {
-                error: error.to_string(),
-                message,
-                users_reset: 0,
-            },
-        )
-    })?;
+    let pull_summary = pull.await.map_err(pull_failed)?;
 
     let mut run = vatusa_repo::reset_all(
         pool,
@@ -240,6 +404,7 @@ async fn reset_to_vatusa(
 mod tests {
     use serde_json::json;
     use sqlx::PgPool;
+    use uuid::Uuid;
 
     use super::*;
     use crate::scope_test_support::{grant, send, send_json, session_cookie, test_state};
@@ -592,6 +757,7 @@ mod tests {
     /// #805 AC2: a configured server admin keeps SERVER_ADMIN through a sign-in and the reset after
     /// it, because the reset removes only `manual` rows and holds no group back. A SERVER_ADMIN
     /// written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way to hold it.
+    /// The reset runs as the POST starts it, in the background, and the test reads its stored result.
     /// (0130's part in AC2 is pinned by `a_reset_leaves_exactly_system_and_vatusa_grants`, whose
     /// admin holds only backfilled rows.)
     #[sqlx::test]
@@ -609,7 +775,8 @@ mod tests {
         )
         .await
         .unwrap();
-        reset(&w).await.ok().unwrap();
+        let run = finished(&w.pool, &start(&w, pulled()).await).await;
+        assert_eq!(run.status, "succeeded", "{:?}", run.failure);
 
         let server_admins: Vec<String> = sqlx::query_scalar(
             "select u.display_name || ':' || r.source from access.user_roles r \
@@ -815,20 +982,6 @@ mod tests {
         assert_eq!(body.error, "vatusa_pull_failed");
         assert_eq!(body.message, "VATUSA division pull failed: 502 Bad Gateway");
         assert_eq!(body.users_reset, 0);
-
-        // With `VATUSA_API_KEY` unset the real pull refuses before reaching VATUSA.
-        let unconfigured = reset_to_vatusa(
-            &w.state,
-            &admin_user(&w),
-            "back to VATUSA",
-            None,
-            division_pull(&w.pool, &w.state.events, None),
-        )
-        .await;
-        assert!(matches!(
-            unconfigured,
-            Err(ResetError::Failed(http::StatusCode::SERVICE_UNAVAILABLE, _))
-        ));
         assert_eq!(everything(&w.pool).await, before);
     }
 
@@ -1058,18 +1211,27 @@ mod tests {
         );
     }
 
-    /// The route's own pull reads the configured key. A source scan, because a test cannot set
-    /// `VATUSA_API_KEY` without racing every other test, and a configured key would reach VATUSA.
+    /// The route's own pull reads the configured key, and the route starts the run with the reason the
+    /// admin sent. A source scan, because a test cannot set `VATUSA_API_KEY` without racing every other
+    /// test, and a configured key would reach VATUSA.
     #[test]
     fn the_route_pulls_with_the_configured_key() {
         let source = include_str!("access_reset.rs");
         let handler = &source[source.find("pub async fn apply_vatusa_reset").unwrap()..];
         let handler = &handler[..handler.find("\n}\n").unwrap()];
         assert!(
-            handler.contains("division_pull(pool, &state.events, crate::config::vatusa_api_key())"),
+            handler.contains("let Some(api_key) = crate::config::vatusa_api_key() else"),
+            "apply_vatusa_reset must refuse when VATUSA is not configured"
+        );
+        assert!(
+            handler.contains("division_pull(pool.clone(), state.events.clone(), api_key)"),
             "apply_vatusa_reset must pull with the configured VATUSA key"
         );
-        assert!(handler.contains("reset_to_vatusa("));
+        assert!(handler.contains("start_reset("));
+        assert!(
+            handler.contains("Ok((StatusCode::ACCEPTED, Json(AccessResetStarted { run_id })))"),
+            "apply_vatusa_reset must answer 202 with the run id"
+        );
         assert!(
             handler.contains("&payload.reason,"),
             "apply_vatusa_reset must reset with the reason the admin sent"
@@ -1205,5 +1367,580 @@ mod tests {
             .await
             .unwrap();
         assert!(!candidates(&w.pool).await.contains(&"Admin".to_string()));
+    }
+
+    // --- The run off the request (#806) ---
+
+    /// A pull that says when the run reached it, then waits until the test lets it through.
+    fn gated_pull() -> (
+        impl Future<Output = Result<String, PullError>> + Send + 'static,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let (reached, reached_rx) = tokio::sync::oneshot::channel();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let pull = async move {
+            let _ = reached.send(());
+            gate.notified().await;
+            Ok("pulled".to_string())
+        };
+        (pull, reached_rx, release)
+    }
+
+    /// `fut`, or a panic naming `what` if it takes more than 10 s.
+    async fn within<T>(what: &str, fut: impl Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .unwrap_or_else(|_| panic!("{what} took more than 10 s"))
+    }
+
+    async fn start(
+        w: &World,
+        pull: impl Future<Output = Result<String, PullError>> + Send + 'static,
+    ) -> String {
+        // Starting returns at once, whatever the run is waiting on.
+        within(
+            "start_reset",
+            start_reset(&w.state, &admin_user(w), "back to VATUSA", None, pull),
+        )
+        .await
+        .ok()
+        .expect("the reset starts")
+    }
+
+    async fn latest_run(pool: &PgPool) -> String {
+        sqlx::query_scalar(
+            "select id from access.vatusa_reset_runs order by started_at desc limit 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The run once it has finished.
+    async fn finished(pool: &PgPool, id: &str) -> AccessResetRun {
+        for _ in 0..600 {
+            let run = reset_runs::fetch_run(pool, id).await.unwrap().unwrap();
+            if run.status != "running" {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the run did not finish within 30 s");
+    }
+
+    async fn status_of(pool: &PgPool, id: &str) -> String {
+        reset_runs::fetch_run(pool, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    fn reset_job(w: &World) -> Option<crate::job_registry::JobStatus> {
+        w.state
+            .jobs
+            .snapshot()
+            .into_iter()
+            .find(|j| j.name == RESET_JOB)
+    }
+
+    /// Wait until some session is queued on the division lock: advisory key (0x004F4953, 1), written
+    /// out here so a change to the key fails this rather than moving with it.
+    async fn someone_waits_for_the_division_lock(pool: &PgPool) {
+        within("waiting for a session to queue on the division lock", async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "select exists (select 1 from pg_locks where locktype = 'advisory' \
+                     and not granted and classid = 5196115 and objid = 1 and objsubid = 2 \
+                     and database = (select oid from pg_database where datname = current_database()))",
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
+
+    /// #806 AC: the client goes away mid-run and the run still completes, resets every member with the
+    /// admin's reason and publishes `ACCESS_GRANTED`. The request's future is aborted while the run
+    /// waits in its pull, as hyper drops a handler's future when its connection closes; run inline in
+    /// the request, the reset would stop there.
+    #[sqlx::test]
+    async fn a_dropped_client_does_not_stop_the_run(pool: PgPool) {
+        let w = world(pool).await;
+        let mut nudges = w.state.events.subscribe();
+        let (pull, reached, release) = gated_pull();
+        let (state, admin) = (w.state.clone(), admin_user(&w));
+        let request = tokio::spawn(async move {
+            let _ = start_reset(&state, &admin, "back to VATUSA", None, pull).await;
+            std::future::pending::<()>().await;
+        });
+        within("the run reaching its pull", reached)
+            .await
+            .expect("the run reaches its pull");
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release.notify_one();
+
+        let run = finished(&w.pool, &latest_run(&w.pool).await).await;
+        assert_eq!(
+            run.status,
+            "succeeded",
+            "{:?}",
+            run.failure.map(|f| f.message)
+        );
+        let result = run.result.expect("a finished run stores its result");
+        assert_eq!(result.users_reset, 2);
+        assert_eq!(result.users_checked, 3);
+        assert_eq!(result.pull_summary.as_deref(), Some("pulled"));
+        assert_eq!(rows(&w.pool, &w.member).await, member_after());
+        let (_, reason, _) = &audits(&w.pool, &w.member).await[0];
+        assert!(
+            reason.starts_with("Reset to VATUSA: back to VATUSA ("),
+            "{reason}"
+        );
+        let nudge = nudges.try_recv().expect("the run tells signed-in browsers");
+        assert_eq!(nudge.topic, crate::realtime::topic::ACCESS_GRANTED);
+    }
+
+    /// #806 AC: the run is in the job registry: running while it runs, then finished with its count.
+    #[sqlx::test]
+    async fn a_run_is_listed_in_the_job_registry(pool: PgPool) {
+        let w = world(pool).await;
+        assert!(reset_job(&w).is_none(), "registered before any run");
+        let (pull, reached, release) = gated_pull();
+        let id = start(&w, pull).await;
+        within("the run reaching its pull", reached).await.unwrap();
+        let running = reset_job(&w).expect("a started run is listed");
+        assert!(running.running);
+        assert!(!running.triggerable && running.interval_secs.is_none());
+        release.notify_one();
+        finished(&w.pool, &id).await;
+
+        let done = reset_job(&w).unwrap();
+        assert!(!done.running);
+        assert_eq!(done.runs, 1);
+        assert_eq!(done.last_ok, Some(true));
+        assert_eq!(done.last_detail.as_deref(), Some("2 of 3 members reset"));
+    }
+
+    /// A pull that fails is the run's failure, stored for the dialog and recorded in the registry, and
+    /// nothing is reset.
+    #[sqlx::test]
+    async fn a_failed_pull_fails_the_run(pool: PgPool) {
+        let w = world(pool).await;
+        let before = everything(&w.pool).await;
+        let id = start(&w, async {
+            Err(PullError::Failed(
+                "VATUSA division pull failed: 502 Bad Gateway".to_string(),
+            ))
+        })
+        .await;
+        let run = finished(&w.pool, &id).await;
+        assert_eq!(run.status, "failed");
+        assert!(run.result.is_none());
+        let failure = run.failure.unwrap();
+        assert_eq!(failure.error, "vatusa_pull_failed");
+        assert_eq!(
+            failure.message,
+            "VATUSA division pull failed: 502 Bad Gateway"
+        );
+        assert_eq!(failure.users_reset, 0);
+        let job = reset_job(&w).unwrap();
+        assert_eq!(job.last_ok, Some(false));
+        assert_eq!(
+            job.last_detail.as_deref(),
+            Some("VATUSA division pull failed: 502 Bad Gateway")
+        );
+        assert_eq!(everything(&w.pool).await, before);
+    }
+
+    /// #806 AC: a reset started while the division pull job is mid-pull does not pull until that pull
+    /// has finished. The stand-in pull runs through `with_division_lock`, as the job's body does.
+    #[sqlx::test]
+    async fn a_reset_waits_for_the_division_pull(pool: PgPool) {
+        let w = world(pool).await;
+        let (job_reached, job_reached_rx) = tokio::sync::oneshot::channel();
+        let job_release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let division_pull = tokio::spawn({
+            let (pool, gate) = (w.pool.clone(), job_release.clone());
+            async move {
+                crate::feed::vatusa::with_division_lock(&pool, async move {
+                    let _ = job_reached.send(());
+                    gate.notified().await;
+                    Ok(())
+                })
+                .await
+            }
+        });
+        within("the division pull starting", job_reached_rx)
+            .await
+            .unwrap();
+
+        let (pull, mut reached, release) = gated_pull();
+        let id = start(&w, pull).await;
+        someone_waits_for_the_division_lock(&w.pool).await;
+        assert!(
+            reached.try_recv().is_err(),
+            "the reset pulled while the division pull ran"
+        );
+        assert_eq!(status_of(&w.pool, &id).await, "running");
+
+        job_release.notify_one();
+        within("the division pull finishing", division_pull)
+            .await
+            .unwrap()
+            .unwrap();
+        within("the reset reaching its pull", reached)
+            .await
+            .expect("the reset pulls once the division pull is done");
+        release.notify_one();
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
+    }
+
+    /// #806 AC: the division pull, through the lock its job takes, waits for a running reset and runs
+    /// once the reset has finished.
+    #[sqlx::test]
+    async fn the_division_pull_waits_for_a_reset(pool: PgPool) {
+        let w = world(pool).await;
+        let (pull, reached, release) = gated_pull();
+        let id = start(&w, pull).await;
+        within("the run reaching its pull", reached).await.unwrap();
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let division_pull = tokio::spawn({
+            let (pool, ran) = (w.pool.clone(), ran.clone());
+            async move {
+                crate::feed::vatusa::with_division_lock(&pool, async {
+                    ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            }
+        });
+        someone_waits_for_the_division_lock(&w.pool).await;
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the division pull ran during a reset"
+        );
+
+        release.notify_one();
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
+        within("the division pull", division_pull)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The division pull job's body runs under the division lock. A source scan, because the job's pull
+    /// reaches VATUSA; `the_division_pull_waits_for_a_reset` proves the lock itself.
+    #[test]
+    fn the_division_pull_job_takes_the_division_lock() {
+        let source = include_str!("../feed/vatusa.rs");
+        let job = &source[source.find("pub fn spawn_division_pull").unwrap()..];
+        let job = &job[..job.find("\n}\n").unwrap()];
+        let locked = job
+            .find("with_division_lock(&pool, async {")
+            .expect("spawn_division_pull must pull under the division lock");
+        let pulled = job.find("pull_division(&pool").unwrap();
+        assert!(locked < pulled, "the pull must run inside the locked block");
+    }
+
+    /// One reset at a time: a second start while one runs is refused with 409 and the running run's id,
+    /// and a start right after it finished goes ahead and leaves the earlier run's result alone.
+    #[sqlx::test]
+    async fn a_second_reset_is_refused_while_one_runs(pool: PgPool) {
+        let w = world(pool).await;
+        let (pull, reached, release) = gated_pull();
+        let first = start(&w, pull).await;
+        within("the run reaching its pull", reached).await.unwrap();
+
+        let second = start_reset(&w.state, &admin_user(&w), "again", None, pulled()).await;
+        let Err(refused) = second else {
+            panic!("a second reset must be refused while one runs");
+        };
+        let response = refused.into_response();
+        assert_eq!(response.status(), http::StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, json!({"run_id": first}));
+        let count: i64 = sqlx::query_scalar("select count(*) from access.vatusa_reset_runs")
+            .fetch_one(&w.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the refused start recorded a run");
+
+        release.notify_one();
+        assert_eq!(finished(&w.pool, &first).await.status, "succeeded");
+        let third = start(&w, pulled()).await;
+        assert_eq!(finished(&w.pool, &third).await.status, "succeeded");
+        let earlier = reset_runs::fetch_run(&w.pool, &first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(earlier.status, "succeeded", "a later start rewrote it");
+        assert_eq!(earlier.result.unwrap().users_reset, 2);
+    }
+
+    /// The run's route answers the server admin with the run, and refuses everyone else.
+    #[sqlx::test]
+    async fn the_run_is_read_through_its_route(pool: PgPool) {
+        let w = world(pool).await;
+        let id = start(&w, pulled()).await;
+        finished(&w.pool, &id).await;
+        let uri = format!("/api/v1/admin/access/vatusa-reset/runs/{id}");
+
+        let (status, run) = send_json(&w.state, http::Method::GET, &uri, &w.admin_cookie).await;
+        assert_eq!(status, http::StatusCode::OK, "{run}");
+        assert_eq!(run["id"], id);
+        assert_eq!(run["status"], "succeeded");
+        assert_eq!(run["result"]["users_reset"], 2);
+        assert_eq!(run["failure"], serde_json::Value::Null);
+
+        let editor = user(&w.pool, 1_795_010, "Editor").await;
+        grant(&w.pool, &editor, "access.users.update", None).await;
+        let editor_cookie = session_cookie(&w.pool, &editor).await;
+        assert_eq!(
+            send(&w.state, http::Method::GET, &uri, &editor_cookie, None).await,
+            http::StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(&w.state, http::Method::GET, &uri, "", None).await,
+            http::StatusCode::UNAUTHORIZED
+        );
+        for missing in [Uuid::new_v4().to_string(), "not-a-run".to_string()] {
+            let (status, _) = send_json(
+                &w.state,
+                http::Method::GET,
+                &format!("/api/v1/admin/access/vatusa-reset/runs/{missing}"),
+                &w.admin_cookie,
+            )
+            .await;
+            assert_eq!(status, http::StatusCode::NOT_FOUND, "{missing}");
+        }
+    }
+
+    /// With `VATUSA_API_KEY` unset, the admin's POST is refused with 503 and starts no run.
+    #[sqlx::test]
+    async fn an_unconfigured_vatusa_starts_nothing(pool: PgPool) {
+        assert!(
+            crate::config::vatusa_api_key().is_none(),
+            "VATUSA_API_KEY is set: this test would start a real reset that calls VATUSA"
+        );
+        let w = world(pool).await;
+        let before = everything(&w.pool).await;
+        let status = send(
+            &w.state,
+            http::Method::POST,
+            "/api/v1/admin/access/vatusa-reset",
+            &w.admin_cookie,
+            Some(json!({"reason": "back to VATUSA"})),
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE);
+        let runs: i64 = sqlx::query_scalar("select count(*) from access.vatusa_reset_runs")
+            .fetch_one(&w.pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 0);
+        assert!(reset_job(&w).is_none());
+        assert_eq!(everything(&w.pool).await, before);
+    }
+
+    async fn audit_entry(pool: &PgPool, resource_type: &str, reason: &str, age: &str) {
+        sqlx::query(
+            "insert into access.audit_logs (action, resource_type, resource_id, reason, created_at) \
+             values ('UPDATE', $1, 'someone', $2, now() - $3::interval)",
+        )
+        .bind(resource_type)
+        .bind(reason)
+        .bind(age)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A run left `running` by a backend that died holds no lock: it reads as interrupted, with the
+    /// members its audit entries show it reset, and the next reset closes it. Neither a reset entry
+    /// from before it started, another kind of access entry, nor a reset-worded entry on another
+    /// resource counts, and no other lock makes it live. A live run, whose task holds the lock, still
+    /// reads as running.
+    #[sqlx::test]
+    async fn a_run_left_by_a_dead_backend_reads_as_interrupted(pool: PgPool) {
+        let w = world(pool).await;
+        audit_entry(
+            &w.pool,
+            "USER_ACCESS",
+            "Reset to VATUSA: an earlier run (removed group ACE)",
+            "1 hour",
+        )
+        .await;
+        let dead: String = sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (started_by, reason, started_at) \
+             values ($1, 'back to VATUSA', now() - interval '1 minute') returning id",
+        )
+        .bind(&w.admin)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        audit_entry(&w.pool, "USER_ACCESS", "Granted EC at ZDC", "1 second").await;
+        audit_entry(
+            &w.pool,
+            "USER",
+            "Reset to VATUSA: not an access entry",
+            "1 second",
+        )
+        .await;
+        // The dead run got as far as the admin and the member.
+        reset(&w).await.ok().unwrap();
+
+        // Locks that are not the reset lock don't make it live: the division lock, and the reset
+        // lock's number under another class.
+        let division_pull = reset_runs::lock_division(&w.pool).await.unwrap();
+        let mut other_class = w.pool.acquire().await.unwrap().detach();
+        sqlx::query("select pg_advisory_lock(1, 2)")
+            .execute(&mut other_class)
+            .await
+            .unwrap();
+        let run = reset_runs::fetch_run(&w.pool, &dead)
+            .await
+            .unwrap()
+            .unwrap();
+        division_pull.release().await;
+        sqlx::Connection::close(other_class).await.unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.finished_at.is_none());
+        let failure = run.failure.unwrap();
+        assert_eq!(failure.error, "reset_interrupted");
+        assert_eq!(failure.users_reset, 2);
+
+        let (pull, reached, release) = gated_pull();
+        let live = start(&w, pull).await;
+        within("the run reaching its pull", reached).await.unwrap();
+        assert_eq!(status_of(&w.pool, &live).await, "running");
+        let stored: (String, bool) = sqlx::query_as(
+            "select status, finished_at is not null from access.vatusa_reset_runs where id = $1",
+        )
+        .bind(&dead)
+        .fetch_one(&w.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            ("failed".to_string(), true),
+            "the next reset closes it"
+        );
+        assert_eq!(
+            reset_runs::fetch_run(&w.pool, &dead)
+                .await
+                .unwrap()
+                .unwrap()
+                .failure
+                .unwrap()
+                .users_reset,
+            2
+        );
+
+        release.notify_one();
+        assert_eq!(finished(&w.pool, &live).await.status, "succeeded");
+    }
+
+    /// Hold the reset lock by raw SQL on a connection of its own, with no run recorded: another
+    /// replica's start between taking the lock and recording its run, or a run between storing its
+    /// result and letting go.
+    async fn hold_reset_lock(pool: &PgPool) -> sqlx::PgConnection {
+        let mut conn = pool.acquire().await.unwrap().detach();
+        sqlx::query("select pg_advisory_lock(5196115, 2)")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn
+    }
+
+    async fn run_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from access.vatusa_reset_runs")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A start that finds the reset lock held with no run recorded waits for it rather than refusing,
+    /// and goes ahead once it is let go.
+    #[sqlx::test]
+    async fn a_start_waits_briefly_for_a_reset_lock_with_no_run(pool: PgPool) {
+        let w = world(pool).await;
+        let mut held = hold_reset_lock(&w.pool).await;
+        let starting = tokio::spawn({
+            let (state, admin) = (w.state.clone(), admin_user(&w));
+            async move {
+                start_reset(&state, &admin, "back to VATUSA", None, pulled())
+                    .await
+                    .ok()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!starting.is_finished(), "the start gave up at once");
+        sqlx::query("select pg_advisory_unlock(5196115, 2)")
+            .execute(&mut held)
+            .await
+            .unwrap();
+
+        let id = within("the start", starting)
+            .await
+            .unwrap()
+            .expect("the start goes ahead once the lock is let go");
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
+        assert_eq!(run_count(&w.pool).await, 1);
+    }
+
+    /// A reset lock that stays held with no run recorded gets a 503 `reset_lock_busy` after about 2 s,
+    /// and nothing starts.
+    #[sqlx::test]
+    async fn a_start_gives_up_on_a_reset_lock_held_with_no_run(pool: PgPool) {
+        // The wait is bounded from above too: a request held for long here is a hung dialog.
+        assert!(
+            CLAIM_RETRY * CLAIM_TRIES as u32 <= std::time::Duration::from_secs(3),
+            "a start would wait {:?}",
+            CLAIM_RETRY * CLAIM_TRIES as u32
+        );
+        let w = world(pool).await;
+        let held = hold_reset_lock(&w.pool).await;
+        let before = everything(&w.pool).await;
+        let began = std::time::Instant::now();
+        let refused = within(
+            "the start",
+            start_reset(&w.state, &admin_user(&w), "back to VATUSA", None, pulled()),
+        )
+        .await;
+        assert!(
+            began.elapsed() >= std::time::Duration::from_millis(1_800),
+            "gave up after {:?}",
+            began.elapsed()
+        );
+        let Err(ResetError::Failed(status, failure)) = refused else {
+            panic!("a start must give up on a lock held with no run");
+        };
+        assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(failure.error, "reset_lock_busy");
+        assert!(
+            failure.message.contains("nothing was started"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.users_reset, 0);
+        assert_eq!(run_count(&w.pool).await, 0);
+        assert!(reset_job(&w).is_none());
+        assert_eq!(everything(&w.pool).await, before);
+        sqlx::Connection::close(held).await.unwrap();
     }
 }

@@ -24,6 +24,7 @@ always matches the running API.
 | `/api/v1/access/self` | GET | `access.self.read` |
 | `/api/v1/admin/access/vatusa-reset` | GET | — (no permission marker) |
 | `/api/v1/admin/access/vatusa-reset` | POST | — (no permission marker) |
+| `/api/v1/admin/access/vatusa-reset/runs/{id}` | GET | — (no permission marker) |
 | `/api/v1/admin/api-keys` | GET | `api_keys.key.read` |
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
