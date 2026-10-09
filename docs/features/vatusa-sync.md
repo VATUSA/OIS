@@ -187,7 +187,7 @@ holding exactly their `system` grants plus what VATUSA justifies.
   pull; the response lists what the reset actually did.
 - **`USER` and `SERVER_ADMIN` stay** because they are `system` rows. Migration 0098 backfilled both
   as `manual`; 0130 re-tagged them `system` (#805). A `SERVER_ADMIN` row written by hand as `manual`
-  is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` is the only way to grant it.
+  is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` alone grants and removes it.
 - **A failure part-way** stops the run with `500 reset_incomplete`. Users before it are reset and
   audited, the failing user is rolled back whole, and users after it are untouched. `users_reset`
   says how many were done; running it again finishes the rest.

@@ -44,6 +44,7 @@ pub async fn run() -> color_eyre::Result<()> {
 
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
+    demote_removed_server_admins(&state).await;
 
     // Drains the Prometheus recorder on a timer (#382). Required even when nothing scrapes:
     // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
@@ -196,6 +197,22 @@ async fn run_startup_migrations(
     sqlx::migrate!("./migrations").run(pool).await
 }
 
+/// Demote every server admin no longer in `OIS_SERVER_ADMIN_CID` before serving (#805). After the
+/// migrations, so the rows 0130 re-tagged are in place. A failure is logged and boot goes on: sign-in
+/// still demotes, so failing leaves only the wait for the removed admin's next sign-in.
+async fn demote_removed_server_admins(state: &state::AppState) {
+    let Some(pool) = state.db.as_ref() else {
+        return;
+    };
+    let admin_cids = config::configured_server_admin_cids();
+    if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &admin_cids).await {
+        tracing::error!(
+            ?error,
+            "could not demote server admins removed from OIS_SERVER_ADMIN_CID at startup"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -210,6 +227,28 @@ mod tests {
     /// though, so `migration_versions_are_unique` below exists to say the same thing readably (#569).
     #[sqlx::test]
     async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
+
+    /// Startup demotes the server admins removed from the configured list, after the migrations and
+    /// before serving (#805). A source scan, because a test cannot set `OIS_SERVER_ADMIN_CID` without
+    /// racing every other test, nor boot `run()`.
+    #[test]
+    fn startup_demotes_server_admins_removed_from_the_list() {
+        let source = include_str!("lib.rs");
+        let run = &source[source.find("pub async fn run()").unwrap()..];
+        let run = &run[..run.find("\n}\n").unwrap()];
+        let migrations = run.find("run_startup_migrations(&state).await?;").unwrap();
+        let demote = run
+            .find("demote_removed_server_admins(&state).await;")
+            .expect("run() demotes removed server admins");
+        let serve = run.find("axum::serve(").unwrap();
+        assert!(migrations < demote && demote < serve);
+
+        let pass = &source[source
+            .find("async fn demote_removed_server_admins")
+            .unwrap()..];
+        assert!(pass.contains("let admin_cids = config::configured_server_admin_cids();"));
+        assert!(pass.contains("demote_unconfigured_server_admins(pool, &admin_cids)"));
+    }
 
     /// Every version claimed by more than one migration file, with the files that claim it.
     ///

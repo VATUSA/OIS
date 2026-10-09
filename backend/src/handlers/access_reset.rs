@@ -589,9 +589,11 @@ mod tests {
         );
     }
 
-    /// #805 AC2: the server admin, backfilled as `manual` by 0098 and re-tagged by 0130, keeps
-    /// SERVER_ADMIN through a sign-in while configured and through the reset after it. A SERVER_ADMIN
-    /// written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way to hold it.
+    /// #805 AC2: with RESET_KEEPS_GROUPS gone, a configured server admin still keeps SERVER_ADMIN
+    /// through a sign-in and the reset after it, because both leave `system` rows alone. A
+    /// SERVER_ADMIN written by hand as `manual` is reset away: `OIS_SERVER_ADMIN_CID` is the only way
+    /// to hold it. (0130's part in AC2 is pinned by `a_reset_leaves_exactly_system_and_vatusa_grants`,
+    /// whose admin holds only backfilled rows.)
     #[sqlx::test]
     async fn a_configured_admin_keeps_server_admin_through_sign_in_and_reset(pool: PgPool) {
         let w = world(pool).await;
@@ -618,6 +620,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(server_admins, ["Admin:system"]);
+    }
+
+    /// #805: an admin removed from `OIS_SERVER_ADMIN_CID` loses admin on the session they already hold
+    /// once the startup pass runs, without signing in again. Access resolves per request, so the same
+    /// cookie is refused; a desktop session resolves through the same session lookup, and an API key
+    /// is capped by the owner's effective permissions, which drop to the baseline with it.
+    #[sqlx::test]
+    async fn a_removed_admin_loses_admin_on_a_live_session_at_startup(pool: PgPool) {
+        let w = world(pool).await;
+        async fn dry_run(w: &World) -> http::StatusCode {
+            send(
+                &w.state,
+                http::Method::GET,
+                "/api/v1/admin/access/vatusa-reset",
+                &w.admin_cookie,
+                None,
+            )
+            .await
+        }
+        async fn can_update_users(w: &World) -> bool {
+            crate::repos::access::fetch_effective_permissions(&w.pool, &w.admin)
+                .await
+                .unwrap()
+                .contains_key("access.users.update")
+        }
+        assert_eq!(dry_run(&w).await, http::StatusCode::OK);
+        assert!(can_update_users(&w).await);
+
+        let demoted =
+            crate::handlers::auth::demote_unconfigured_server_admins(&w.pool, &[MEMBER_CID])
+                .await
+                .unwrap();
+
+        assert_eq!(demoted, 1);
+        assert_eq!(dry_run(&w).await, http::StatusCode::FORBIDDEN);
+        assert!(!can_update_users(&w).await);
     }
 
     /// AC6: one audit entry per changed member, by the admin, with both snapshots and the reason

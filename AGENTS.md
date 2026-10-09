@@ -433,7 +433,8 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **VATSIM OAuth** (required to sign in): `VATSIM_CLIENT_ID`, `VATSIM_CLIENT_SECRET`,
   `VATSIM_REDIRECT_URI`, `VATSIM_DEV_MODE`.
 - **Server admin bootstrap**: `OIS_SERVER_ADMIN_CID` (comma-separated CIDs) — the only way to grant
-  `SERVER_ADMIN`.
+  or remove `SERVER_ADMIN`. Each start demotes every holder not listed (#805), so an empty list means
+  no server admin.
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`, and
   `OIS_SECRET_KEY` (32 base64 bytes; encrypts the webhook secret — without it there is no webhook, the
   daily division pull still runs). See `docs/features/vatusa-sync.md`.

@@ -508,20 +508,12 @@ pub(crate) async fn reconcile_login_access(
         return Ok(());
     }
 
-    // Demotion + baseline seed share one transaction so they commit or roll back
-    // together — a former admin holds no other access, so a crash between a bare
-    // revoke and the seed could lock the account out.
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let demoted = access_repo::revoke_server_admin(&mut tx, user_id).await?;
-
-    if first_sign_in || demoted {
-        // The baseline now arrives through the `USER` group, not as five direct rows (#544). The
-        // wipe is for demotion only: a former admin must hold no national grants of their own. A
-        // first sign-in is not a blank slate any more — an admin may have granted (or denied) a user
-        // seeded by the VATUSA pull before they ever signed in (#605), and that must survive it.
-        if demoted {
-            access_repo::replace_user_permissions(&mut tx, user_id, &[]).await?;
-        }
+    let demoted = access_repo::demote_server_admin(&mut tx, user_id).await?;
+    if first_sign_in && !demoted {
+        // The baseline now arrives through the `USER` group, not as five direct rows (#544). A first
+        // sign-in is not a blank slate any more — an admin may have granted (or denied) a user seeded
+        // by the VATUSA pull before they ever signed in (#605), and that must survive it.
         // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
         access_repo::set_user_role(
             &mut tx,
@@ -532,7 +524,6 @@ pub(crate) async fn reconcile_login_access(
         )
         .await?;
     }
-
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
     if demoted {
@@ -546,6 +537,41 @@ pub(crate) async fn reconcile_login_access(
     }
 
     Ok(())
+}
+
+/// Demotes every server admin whose CID is not in `admin_cids`, each in its own transaction, as
+/// sign-in would (#805). Run at startup: `OIS_SERVER_ADMIN_CID` can change only across a restart, so
+/// this is the moment a removal takes effect, rather than the removed admin's next sign-in, which a
+/// live session or API key never needs. Access resolves per request, so their sessions and keys drop
+/// to the baseline with it. An empty list demotes everyone: no CID configured means no server admin.
+/// Returns how many were demoted.
+pub(crate) async fn demote_unconfigured_server_admins(
+    pool: &sqlx::PgPool,
+    admin_cids: &[i64],
+) -> Result<usize, ApiError> {
+    let holders = access_repo::server_admins_not_in(pool, admin_cids).await?;
+    let mut demoted = 0;
+    for (user_id, cid) in &holders {
+        let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+        if access_repo::demote_server_admin(&mut tx, user_id).await? {
+            demoted += 1;
+            tracing::warn!(
+                user_id,
+                cid,
+                "server admin not in OIS_SERVER_ADMIN_CID; demoted to baseline at startup"
+            );
+        }
+        tx.commit().await.map_err(|_| ApiError::Internal)?;
+    }
+    if admin_cids.is_empty() && demoted > 0 {
+        tracing::error!(
+            demoted,
+            "OIS_SERVER_ADMIN_CID is empty: every server admin was demoted at startup"
+        );
+    } else if demoted > 0 {
+        tracing::info!(demoted, "startup server admin reconciliation done");
+    }
+    Ok(demoted)
 }
 
 /// Validates a `return_to` target: absolute http(s) whose origin is allowlisted for redirects
@@ -864,8 +890,8 @@ mod tests {
     }
 
     /// #805 AC1: an admin configured before 0098 and since removed from `OIS_SERVER_ADMIN_CID` is
-    /// demoted at their next sign-in. The backfilled row was `manual`, which `revoke_server_admin`
-    /// never deletes; without 0130's re-tag they would stay server admin.
+    /// demoted at their next sign-in. The backfilled row was `manual`, which `revoke_server_admin` used
+    /// to skip; it now removes SERVER_ADMIN of any source, and 0130 has re-tagged the row besides.
     #[sqlx::test]
     async fn a_backfilled_admin_no_longer_configured_is_demoted_at_sign_in(pool: PgPool) {
         let user = seed_user(&pool).await;
@@ -926,6 +952,110 @@ mod tests {
                 ["SERVER_ADMIN:system", "USER:system"]
             );
         }
+    }
+
+    /// A user with a CID, as a real account has.
+    async fn user_with_cid(pool: &PgPool, cid: Option<i64>) -> String {
+        sqlx::query_scalar(
+            "insert into identity.users (cid, full_name, display_name) values ($1, 'U', 'U') \
+             returning id",
+        )
+        .bind(cid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn hold(pool: &PgPool, user: &str, role: &str, source: &str) {
+        sqlx::query(
+            "insert into access.user_roles (user_id, role_name, source) values ($1, $2, $3)",
+        )
+        .bind(user)
+        .bind(role)
+        .bind(source)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn direct_count(pool: &PgPool, user: &str) -> i64 {
+        sqlx::query_scalar("select count(*) from access.user_permissions where user_id = $1")
+            .bind(user)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// #805: the startup pass demotes every server admin whose CID is not configured, whatever the
+    /// row's source and with no CID at all, exactly as sign-in would: baseline group, no direct
+    /// grants. The configured admin, and a user who never held SERVER_ADMIN, are left as they were.
+    #[sqlx::test]
+    async fn the_startup_pass_demotes_every_unconfigured_server_admin(pool: PgPool) {
+        let configured = user_with_cid(&pool, Some(1_000_001)).await;
+        hold(&pool, &configured, "SERVER_ADMIN", "system").await;
+        let mut former = Vec::new();
+        for (cid, source) in [
+            (Some(1_000_002), "system"),
+            (Some(1_000_003), "manual"),
+            (Some(1_000_004), "vatusa"),
+            (None, "system"),
+        ] {
+            let user = user_with_cid(&pool, cid).await;
+            hold(&pool, &user, "SERVER_ADMIN", source).await;
+            grant(&pool, &user, "tmu.program.update", None).await;
+            former.push(user);
+        }
+        let bystander = user_with_cid(&pool, Some(1_000_005)).await;
+        hold(&pool, &bystander, "EC", "manual").await;
+        grant(&pool, &bystander, "tmu.program.update", None).await;
+
+        let demoted = super::demote_unconfigured_server_admins(&pool, &[1_000_001])
+            .await
+            .unwrap();
+
+        assert_eq!(demoted, 4);
+        assert_eq!(role_rows(&pool, &configured).await, ["SERVER_ADMIN:system"]);
+        for user in &former {
+            assert_eq!(role_rows(&pool, user).await, ["USER:system"]);
+            assert_eq!(direct_count(&pool, user).await, 0);
+        }
+        assert_eq!(role_rows(&pool, &bystander).await, ["EC:manual"]);
+        assert_eq!(direct_count(&pool, &bystander).await, 1);
+        assert_eq!(
+            super::demote_unconfigured_server_admins(&pool, &[1_000_001])
+                .await
+                .unwrap(),
+            0,
+            "a second start changes nothing"
+        );
+    }
+
+    /// #805: no CID configured means no server admin, so an empty list demotes everyone.
+    #[sqlx::test]
+    async fn an_empty_admin_list_demotes_every_server_admin_at_startup(pool: PgPool) {
+        let admin = user_with_cid(&pool, Some(1_000_001)).await;
+        hold(&pool, &admin, "SERVER_ADMIN", "system").await;
+
+        assert_eq!(
+            super::demote_unconfigured_server_admins(&pool, &[])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(role_rows(&pool, &admin).await, ["USER:system"]);
+    }
+
+    /// Sign-in reconciles against the configured admin list. A source scan, because a test cannot set
+    /// `OIS_SERVER_ADMIN_CID` without racing every other test.
+    #[test]
+    fn sign_in_reconciles_against_the_configured_admin_list() {
+        let source = include_str!("auth.rs");
+        let wrapper = &source[source.find("async fn ensure_user_login_access").unwrap()..];
+        let wrapper = &wrapper[..wrapper.find("\n}\n").unwrap()];
+        assert!(
+            wrapper.contains("&configured_server_admin_cids()"),
+            "ensure_user_login_access must pass the configured list"
+        );
     }
 
     /// `/me` could contradict itself (VATUSA/OIS#543): `tmu_national` came from the scoped resolver,

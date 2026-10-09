@@ -5,11 +5,12 @@
 -- reconciliation wrote and the baseline USER rows. Since then only OIS writes these two groups, always
 -- as `system`: the login path (handlers::auth::ensure_user_login_access), while the access editor, the
 -- group-member editor and VATUSA mappings all refuse a system group. So a `manual` row of either group
--- is a backfill, and leaving it `manual` hid it from its owner: revoke_server_admin deletes only
--- `system` rows, so a CID removed from OIS_SERVER_ADMIN_CID kept SERVER_ADMIN for good.
+-- is a backfill. Left `manual`, it hid from the env reconciliation, which deleted only `system` rows,
+-- so a CID removed from OIS_SERVER_ADMIN_CID kept SERVER_ADMIN for good; and the access reset, which
+-- removes every `manual` row, would take a configured admin's role and older members' baseline.
 --
 -- No one's access changes here: resolution ignores `source` (0098). A server admin no longer
--- configured loses the role at their next sign-in.
+-- configured is demoted when the backend starts (handlers::auth::demote_unconfigured_server_admins).
 --
 -- The unique index includes `source` (0098), so a user who signed in after 0098 holds a `system` twin
 -- beside the backfilled row. Updating that row would collide with the twin, so it is deleted instead.
