@@ -206,7 +206,7 @@ fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
 /// published new data, for [`apply_and_tick`] to announce (#648). It holds no realtime sender, so it
 /// can't tell clients anything before the snapshot it installs is in place. Split out of [`poller`]
 /// so the tick is tested where it is wired, not just as a rule.
-async fn apply_fetch(
+pub(crate) async fn apply_fetch(
     state: &FeedState,
     data: VatsimData,
     now: DateTime<Utc>,

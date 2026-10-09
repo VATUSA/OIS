@@ -29,24 +29,6 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/**
- * Whether this is macOS — the one place the app asks *which* desktop OS it runs on (#419).
- *
- * macOS keeps its own decorations, so the OS draws the traffic lights and rounds the window and the
- * app must draw neither; Windows and Linux run undecorated and get our replica. That is a question
- * about the host rather than about an ability, so it is not a {@link Capability} — and it stays a
- * user-agent check rather than `@tauri-apps/plugin-os` to keep rule 1 above: asking costs the web
- * build nothing, with no dependency and no capability grant for one boolean.
- *
- * Every Tauri webview on macOS is WKWebView, whose user agent carries `Macintosh`; Windows' WebView2
- * carries `Windows NT`. Answers `false` off-desktop, where the question is meaningless.
- */
-export function isMacOS(): boolean {
-  return (
-    isTauri() && typeof navigator !== "undefined" && /Mac(intosh| OS X)/.test(navigator.userAgent)
-  );
-}
-
 export type Platform = "desktop" | "web";
 
 /** Which build we're running as. Prefer {@link can} when gating on a specific ability. */
@@ -67,7 +49,6 @@ export type Capability =
   | "tray"
   | "globalHotkeys"
   | "audioAlerts"
-  | "windowControls"
   | "fileDialogs"
   | "diagnostics";
 

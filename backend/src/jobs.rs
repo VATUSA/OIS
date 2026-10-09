@@ -1,7 +1,7 @@
 //! Background maintenance jobs.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -504,11 +504,13 @@ pub fn spawn_credential_usage_flush(
 
 /// Keep the ATC sector volume cache current for the DB-less feed (#594): load at startup, then
 /// reload periodically so an offline import goes live. Fails safe — a failed load keeps the
-/// current table (initially empty).
+/// current table (initially empty). `loaded` is set on the first successful load, so a reader can
+/// tell an empty table that hasn't been read yet from one the DB holds no volumes for.
 pub fn spawn_airspace_sectors_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
     sectors: Arc<ArcSwap<SectorTable>>,
+    loaded: Arc<AtomicBool>,
 ) {
     tokio::spawn(run_interval(
         reg,
@@ -516,12 +518,13 @@ pub fn spawn_airspace_sectors_refresh(
         "Reload ATC sector volumes from the DB",
         AIRSPACE_SECTORS_INTERVAL,
         move || {
-            let (pool, sectors) = (pool.clone(), sectors.clone());
+            let (pool, sectors, loaded) = (pool.clone(), sectors.clone(), loaded.clone());
             async move {
                 match airspace_sectors_repo::load_all(&pool).await {
                     Ok(table) => {
                         let n = table.volumes.len();
                         sectors.store(Arc::new(table));
+                        loaded.store(true, Ordering::Release);
                         Ok(format!("{n} volumes"))
                     }
                     Err(e) => Err(format!("{e:?}")),
@@ -2128,7 +2131,10 @@ mod outbound_job_reaper_tests {
 
 #[cfg(test)]
 mod airspace_sectors_refresh_tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use arc_swap::ArcSwap;
     use sqlx::PgPool;
@@ -2140,25 +2146,60 @@ mod airspace_sectors_refresh_tests {
         repos::airspace_sectors,
     };
 
+    /// Start the job on `pool` and wait for its first run to finish. Waits on the registry, so "the job
+    /// hasn't run yet" can't read as "the job ran and left the flag false". Returns the cache, the
+    /// flag and whether the run succeeded.
+    async fn first_run(pool: PgPool) -> (Arc<ArcSwap<SectorTable>>, Arc<AtomicBool>, bool) {
+        let reg = Arc::new(JobRegistry::new());
+        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_airspace_sectors_refresh(reg.clone(), pool, cache.clone(), loaded.clone());
+        for _ in 0..200 {
+            let status = reg
+                .snapshot()
+                .into_iter()
+                .find(|j| j.name == "airspace_sectors_refresh");
+            if let Some(ok) = status.filter(|j| j.runs >= 1).and_then(|j| j.last_ok) {
+                return (cache, loaded, ok);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the job never finished its first run");
+    }
+
     /// The importer writes from another process, so this job is the only way an import reaches the
-    /// feed's cache: its first tick must load what is in the table.
+    /// feed's cache: its first tick must load what is in the table, and mark it loaded (#725 Q5).
     #[sqlx::test]
     async fn the_job_loads_imported_volumes_into_the_cache(pool: PgPool) {
         let vols = [volume("ZDC", "01001")];
         airspace_sectors::replace_artcc(&pool, "ZDC", &vols, "s", "1")
             .await
             .unwrap();
-        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
 
-        spawn_airspace_sectors_refresh(Arc::new(JobRegistry::new()), pool, cache.clone());
-
-        for _ in 0..100 {
-            if !cache.load().volumes.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(ok);
         assert_eq!(cache.load().volumes, vols);
+        assert!(loaded.load(Ordering::Acquire));
+    }
+
+    /// A table with no volumes at all is loaded too: it is what lets the handler say `no_sector_data`
+    /// for every ARTCC instead of `pending` forever.
+    #[sqlx::test]
+    async fn an_empty_successful_load_still_marks_the_table_loaded(pool: PgPool) {
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(ok);
+        assert!(cache.load().volumes.is_empty());
+        assert!(loaded.load(Ordering::Acquire));
+    }
+
+    /// A failed load says nothing about the table, so it stays unloaded and every ARTCC `pending`.
+    #[sqlx::test]
+    async fn a_failed_load_leaves_the_table_unloaded(pool: PgPool) {
+        pool.close().await;
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(!ok, "the closed pool must fail the load");
+        assert!(cache.load().volumes.is_empty());
+        assert!(!loaded.load(Ordering::Acquire));
     }
 }
 
@@ -2224,6 +2265,35 @@ mod registration_tests {
         assert!(
             missing.is_empty(),
             "defined in jobs.rs but never started in lib.rs, so they silently never run: {missing:?}"
+        );
+    }
+
+    /// The arguments `lib.rs` passes to `jobs::{name}(`, comments stripped.
+    fn call_args(lib: &str, name: &str) -> Option<String> {
+        let lib = without_line_comments(lib);
+        let start = lib.find(&format!("jobs::{name}("))?;
+        let rest = &lib[start..];
+        Some(rest[..rest.find(");")?].to_string())
+    }
+
+    /// #725 Q5: the sector-demand handler reads `AppState::airspace_sectors_loaded`, so the refresh job
+    /// must be handed that flag and not one of its own. Every job test passes its own flag, so only
+    /// this sees `lib.rs` get it wrong.
+    #[test]
+    fn the_sector_refresh_sets_the_states_own_loaded_flag() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_airspace_sectors_refresh")
+                .is_some_and(|args| args.contains("state.airspace_sectors_loaded.clone()"))
+        };
+        assert!(
+            wired(LIB_RS),
+            "lib.rs must pass state.airspace_sectors_loaded"
+        );
+        let detached = "jobs::spawn_airspace_sectors_refresh(reg, pool, state.airspace_sectors.clone(), \
+                        Arc::new(AtomicBool::new(false)));";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a flag of the job's own"
         );
     }
 }

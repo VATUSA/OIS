@@ -6,7 +6,7 @@ const token = vi.hoisted(() => ({value: undefined as string | undefined}));
 vi.mock("./desktop-token", () => ({getDesktopToken: async () => token.value}));
 vi.mock("./api", () => ({API_BASE: "https://ois.example"}));
 
-import {TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
+import {COALESCE_MS, TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
 
 /** Records how each socket was opened, and lets a test push frames through it. */
 class FakeSocket {
@@ -132,6 +132,194 @@ describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {
   });
 });
 
+describe("sector demand topics (VATUSA/OIS#725)", () => {
+  /** Connects, opens and subscribes to the tick, and drops the reconnect catch-up. */
+  async function connected() {
+    const dispose = connectRealtime(qc);
+    await flush();
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    invalidated.length = 0;
+    const send = (topic: string) => socket.onmessage?.({ data: JSON.stringify({ topic }) });
+    return { dispose, send };
+  }
+  const demandCalls = () =>
+    invalidated.filter((q) => (q as { queryKey: string[] }).queryKey[0] === "sector-demand") as {
+      queryKey: string[];
+      predicate?: (q: { state: { dataUpdatedAt: number } }) => boolean;
+    }[];
+
+  // #723 left the consolidation topic to this page: a merge or split must redraw the rows at once,
+  // and a limit must recolour them. Both are a deliberate edit someone is waiting to see.
+  it.each(["flow.sector_consolidations", "flow.sector_limits"])("%s refreshes every ARTCC's sector demand at once", async (topic) => {
+    const { dispose, send } = await connected();
+    send(topic);
+    expect(invalidated).toEqual([{ queryKey: ["sector-demand"] }]);
+    dispose();
+  });
+
+  // A moved wheels-up (release, CFR, GDP slot, an FCA switched off) moves the proposed counts, but the
+  // refetch waits for the next tick, so a burst costs the server one projection per ARTCC, not one per
+  // nudge per client. The topic's other keys still refetch at once.
+  it.each([
+    ["flow.release", [["idst"], ["fca-traffic"], ["departures"]]],
+    ["flow.cfr", [["departures"], ["flow"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"]]],
+    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]]],
+  ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {
+    const { dispose, send } = await connected();
+    send(topic);
+    expect(invalidated).toEqual(others.map((queryKey) => ({ queryKey })));
+
+    invalidated.length = 0;
+    send("feed.tick");
+    const [call, ...more] = demandCalls();
+    expect(more).toEqual([]);
+    // Fresh data (a second old) refetches on this tick, where the one-minute gap would skip it.
+    expect(call.predicate!({ state: { dataUpdatedAt: Date.now() - 1_000 } })).toBe(true);
+
+    // Held once: the tick after keeps the one-minute gap again.
+    invalidated.length = 0;
+    send("feed.tick");
+    expect(demandCalls()[0].predicate!({ state: { dataUpdatedAt: Date.now() - 1_000 } })).toBe(false);
+    dispose();
+  });
+
+  it("an unrelated topic leaves it alone, and the next tick keeps its gap", async () => {
+    const { dispose, send } = await connected();
+    send("tmu.advisory");
+    expect(invalidated).toEqual([{ queryKey: ["advisories"] }]);
+    invalidated.length = 0;
+    send("feed.tick");
+    expect(demandCalls()[0].predicate!({ state: { dataUpdatedAt: Date.now() - 1_000 } })).toBe(false);
+    dispose();
+  });
+
+  describe("without a tick", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    });
+    afterEach(() => vi.useRealTimers());
+
+    async function connectedFake() {
+      const dispose = connectRealtime(qc);
+      await vi.advanceTimersByTimeAsync(0);
+      const socket = FakeSocket.opened.at(-1)!;
+      socket.onopen?.();
+      invalidated.length = 0;
+      const send = (topic: string) => socket.onmessage?.({ data: JSON.stringify({ topic }) });
+      return { dispose, send, socket };
+    }
+
+    // Absolute times, not COALESCE_MS, so a changed window fails here instead of passing against itself:
+    // past one feed publish (15 s), so a due tick gets there first, and within 20 s of the first nudge.
+    it("refetches once, 20 s after the first nudge of a burst, and not before a tick was due", async () => {
+      const { dispose, send } = await connectedFake();
+      send("flow.release");
+      await vi.advanceTimersByTimeAsync(5_000);
+      send("flow.fca");
+      send("tmu.gdp");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(demandCalls(), "a tick due at 15 s gets there first").toEqual([]);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(demandCalls()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(demandCalls()).toEqual([{ queryKey: ["sector-demand"] }]);
+      // Nothing else is held: no second refetch follows.
+      await vi.advanceTimersByTimeAsync(COALESCE_MS * 3);
+      expect(demandCalls()).toHaveLength(1);
+      dispose();
+    });
+
+    it("a tick that comes first takes the refetch, and the timer adds none", async () => {
+      const { dispose, send } = await connectedFake();
+      send("flow.cfr");
+      await vi.advanceTimersByTimeAsync(3_000);
+      send("feed.tick");
+      expect(demandCalls()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(COALESCE_MS * 2);
+      expect(demandCalls()).toHaveLength(1);
+      dispose();
+    });
+
+    it("drops what it held on a disconnect and on sign-out: the reconnect's catch-up covers it", async () => {
+      const { send, socket } = await connectedFake();
+      send("flow.release");
+      socket.onclose?.();
+      invalidated.length = 0;
+      await vi.advanceTimersByTimeAsync(COALESCE_MS);
+      expect(demandCalls()).toEqual([]);
+
+      const again = await connectedFake();
+      again.send("flow.release");
+      again.dispose();
+      await vi.advanceTimersByTimeAsync(COALESCE_MS * 2);
+      expect(demandCalls()).toEqual([]);
+    });
+  });
+});
+
+describe("sector demand under a release burst (VATUSA/OIS#725)", () => {
+  beforeEach(() => {
+    vi.mocked(qc.invalidateQueries).mockRestore(); // the real thing, so a nudge really refetches
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval", "Date"] });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  // An hour of a busy program: a release every 4 s and an FCA, GDP or CFR change every 20 s, over a
+  // feed publishing every 15 s. One open ARTCC table, fetched each time its key refetches.
+  it("refetches at most once per feed publish, and shows each change within one publish", async () => {
+    const HOUR = 3_600_000;
+    const dispose = connectRealtime(qc);
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+    const send = (topic: string) => socket.onmessage?.({ data: JSON.stringify({ topic }) });
+
+    const fetches: number[] = [];
+    const observer = new QueryObserver(qc, {
+      queryKey: ["sector-demand", "ZDC"],
+      queryFn: async () => {
+        fetches.push(Date.now());
+        return null;
+      },
+      refetchInterval: pollUnlessLive(60_000, isRealtimeLive()),
+      staleTime: 0,
+    });
+    const unmount = observer.subscribe(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const start = Date.now();
+    const nudges: number[] = [];
+    const topics = ["flow.fca", "tmu.gdp", "flow.cfr"];
+    for (let t = 1_000; t <= HOUR; t += 1_000) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      if (t % 4_000 === 0) {
+        send("flow.release");
+        nudges.push(t);
+      }
+      if (t % 20_000 === 0) {
+        send(topics[(t / 20_000) % 3]);
+        nudges.push(t);
+      }
+      if (t % 15_000 === 7_000) send("feed.tick");
+    }
+    unmount();
+    dispose();
+
+    const after = fetches.map((f) => f - start).filter((f) => f > 0);
+    // One per publish at most: 240 publishes an hour. Refetched at once, it would be one per nudge (1,080).
+    expect(nudges.length).toBe(1_080);
+    expect(after.length).toBeLessThanOrEqual(HOUR / 15_000);
+    // Every nudge before the hour's last publish is followed by a fetch within one publish.
+    const lastPublish = HOUR - ((HOUR - 7_000) % 15_000);
+    const lag = nudges.filter((n) => n <= lastPublish).map((n) => after.find((f) => f >= n)! - n);
+    expect(lag.length).toBeGreaterThan(1_000);
+    expect(Math.max(...lag)).toBeLessThanOrEqual(15_000);
+  });
+});
+
 // ==== VATUSA/OIS#648: the feed tick ==================================================================
 
 const FEED = [
@@ -145,6 +333,7 @@ const FEED = [
   ["feed-status"],
   ["idst"],
   ["departures"],
+  ["sector-demand"],
 ];
 
 /** Open the socket the client created and return it. */
@@ -190,6 +379,8 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     ["feed-status", 30_000],
     ["idst", 30_000],
     ["departures", 60_000],
+    // New with #725, not a pre-#648 poll: its hook's fallback poll is the same minute.
+    ["sector-demand", 60_000],
   ] as const)("a tick refetches %s no more often than its old %ims poll", async (prefix, polledMs) => {
     const dispose = connectRealtime(qc);
     const socket = await opened();

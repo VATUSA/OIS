@@ -2,7 +2,6 @@ import * as React from "react";
 import {Button} from "@ois/ui";
 
 import {SendDiagnosticsButton} from "@/components/send-diagnostics";
-import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
 import {describe, log} from "@/lib/logger";
 
 /** Logs a render crash, so it leaves a line in the log rather than only a white screen (#629). */
@@ -12,12 +11,11 @@ export function logRenderCrash(error: unknown, componentStack?: string | null) {
 
 /**
  * What a crashed window shows instead of a white screen: a way back, and — on the desktop — a way to
- * report it. Outside `AppShell`, so it carries the frameless window's controls itself (#423).
+ * report it.
  */
 export function CrashScreen() {
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
-      <WindowChromeBar />
       <p className="text-xl font-bold">Something went wrong</p>
       <p className="max-w-md text-sm text-ink-2">
         This window hit an error it couldn’t recover from. Reloading usually fixes it.

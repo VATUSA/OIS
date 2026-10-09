@@ -101,6 +101,7 @@ pub async fn run() -> color_eyre::Result<()> {
             state.jobs.clone(),
             pool.clone(),
             state.airspace_sectors.clone(),
+            state.airspace_sectors_loaded.clone(),
         );
         // Sector occupancy limit overrides (#722); the handler also force-reloads on write.
         jobs::spawn_sector_limits_refresh(

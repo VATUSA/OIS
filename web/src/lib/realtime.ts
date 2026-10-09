@@ -34,11 +34,17 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   { key: ["feed-status"], minGapMs: 30_000 },
   { key: ["idst"], minGapMs: 30_000 },
   { key: ["departures"], minGapMs: 60_000 },
+  // Six hours of projection per ARTCC, computed once per VATSIM publish on the server and shared by
+  // every viewer (`AppState::sector_demand`): a miss costs one projection, 179–540 ms of CPU per ARTCC
+  // in release on the live feed; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
+  { key: ["sector-demand"], minGapMs: 60_000 },
 ];
 
 export const TOPIC_KEYS: Record<string, string[][]> = {
   [FEED_TICK]: FEED_KEYS.map(({ key }) => key),
+  // A release, CFR or GDP slot also moves the sector demand's proposed counts: see COALESCED_KEYS.
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
+  // Enabling, disabling or deleting an FCA changes which releases hold a wheels-up (#721).
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
   "tmu.tmi": [["tmis"]],
@@ -53,8 +59,40 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "events.reminder": [["my-ace-claims"]],
   "events.ace": [["event-ace"], ["my-ace-claims"]],
   "flow.runway": [["runway"], ["runway-configs"]],
-  "flow.sector_limits": [["sector-limits"]],
+  // A limit recolours the demand cells; a consolidation merges or splits its rows (#725). Both are a
+  // deliberate edit someone is waiting to see, and rare, so they refetch at once. A limit-only change
+  // re-judges the server's cached rows without re-projecting.
+  "flow.sector_limits": [["sector-demand"]],
+  "flow.sector_consolidations": [["sector-demand"]],
 };
+
+/**
+ * Keys a topic refetches on the next {@link FEED_TICK} rather than at once (#725). A release, an FCA
+ * switched on or off, a CFR or a GDP slot moves a wheels-up, so the sector demand's proposed counts
+ * move, but these topics can arrive several times a minute while a program is running, and every
+ * open client hears each one. Refetched at once, each would be a fresh projection on the server per
+ * open ARTCC (its cache is keyed on the wheels-up too), multiplied by every burst.
+ *
+ * Held until the next tick instead, a burst collapses into one refetch, and every client makes it
+ * together against the new snapshot, which the server projects once per ARTCC for all of them. So
+ * these topics normally cost one projection per open ARTCC per feed publish, however many arrive and
+ * however many clients hear them (a wheels-up the server commits between two clients' refetches on
+ * the same tick costs a second, since it reads wheels-up per request), and the change shows within one publish (about 15 s) instead of at
+ * the key's next one-minute tick refetch. If no tick comes, {@link COALESCE_MS} refetches it anyway.
+ */
+export const COALESCED_KEYS: Record<string, string[][]> = {
+  "flow.release": [["sector-demand"]],
+  "flow.fca": [["sector-demand"]],
+  "tmu.gdp": [["sector-demand"]],
+  "flow.cfr": [["sector-demand"]],
+};
+
+/**
+ * The longest a coalesced refetch waits for a tick: a little over one feed publish (~15 s), so a
+ * tick normally gets there first, and at most one refetch per key per window when ticks are not
+ * arriving.
+ */
+export const COALESCE_MS = 20_000;
 
 /**
  * How often a query the socket nudges polls anyway (#649). The socket is the fast path; this is what
@@ -72,7 +110,7 @@ const WS_BEARER_PREFIX = "ois.bearer.";
  *  changed while the socket was down. */
 const ALL_KEYS: string[][] = [
   ...new Set(
-    Object.values(TOPIC_KEYS)
+    [...Object.values(TOPIC_KEYS), ...Object.values(COALESCED_KEYS)]
       .flat()
       .map((k) => JSON.stringify(k)),
   ),
@@ -163,6 +201,29 @@ export function connectRealtime(qc: QueryClient): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
 
+  // Coalesced refetches waiting for the next tick (#725), by key, and the timer that runs them if
+  // no tick comes first.
+  const pending = new Map<string, string[]>();
+  let coalesce: ReturnType<typeof setTimeout> | null = null;
+  const dropPending = () => {
+    pending.clear();
+    if (coalesce) clearTimeout(coalesce);
+    coalesce = null;
+  };
+  /** Takes every pending key, clearing the fallback timer. */
+  const takePending = () => {
+    const keys = new Map(pending);
+    dropPending();
+    return keys;
+  };
+  const hold = (keys: string[][]) => {
+    keys.forEach((key) => pending.set(JSON.stringify(key), key));
+    coalesce ??= setTimeout(() => {
+      coalesce = null;
+      takePending().forEach((queryKey) => qc.invalidateQueries({ queryKey }));
+    }, COALESCE_MS);
+  };
+
   // Tick-silence watchdog (#648 review): live only while ticks keep arriving, not merely while the
   // socket claims to be open.
   let tickSubscribed = false;
@@ -247,7 +308,8 @@ export function connectRealtime(qc: QueryClient): () => void {
       sentFeed = null;
       sendSubscription();
       record("open", retry);
-      // Catch up on anything that changed while we were (re)connecting.
+      // Catch up on anything that changed while we were (re)connecting; that covers anything held.
+      dropPending();
       ALL_KEYS.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
     };
     ws.onmessage = (e) => {
@@ -271,17 +333,22 @@ export function connectRealtime(qc: QueryClient): () => void {
         if (frame.topic === FEED_TICK) {
           if (tickSubscribed) heard();
           const now = Date.now();
-          FEED_KEYS.forEach(({ key, minGapMs }) =>
+          // A held key refetches on this tick whatever its age; its gap holds only without one.
+          const held = takePending();
+          FEED_KEYS.forEach(({ key, minGapMs }) => {
+            const forced = held.delete(JSON.stringify(key));
             qc.invalidateQueries({
               queryKey: key,
-              predicate: (q) => now - q.state.dataUpdatedAt >= minGapMs,
-            }),
-          );
+              predicate: (q) => forced || now - q.state.dataUpdatedAt >= minGapMs,
+            });
+          });
+          held.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
           return;
         }
-        (frame.topic ? TOPIC_KEYS[frame.topic] : undefined)?.forEach((queryKey) =>
-          qc.invalidateQueries({ queryKey }),
-        );
+        if (!frame.topic) return;
+        TOPIC_KEYS[frame.topic]?.forEach((queryKey) => qc.invalidateQueries({ queryKey }));
+        const held = COALESCED_KEYS[frame.topic];
+        if (held) hold(held);
       } catch {
         /* ignore malformed frames */
       }
@@ -290,6 +357,8 @@ export function connectRealtime(qc: QueryClient): () => void {
       record("close", retry);
       ws = null;
       notLive();
+      // The reconnect's catch-up refetches everything, so nothing held needs its own timer.
+      dropPending();
       sentFeed = null;
       schedule();
     };
@@ -304,6 +373,7 @@ export function connectRealtime(qc: QueryClient): () => void {
     closed = true;
     stopWatchingCache();
     notLive();
+    dropPending();
     if (timer) clearTimeout(timer);
     ws?.close();
   };

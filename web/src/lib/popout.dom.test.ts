@@ -396,11 +396,13 @@ describe("popoutSpecs", () => {
   it("encodes every id into its route segment", () => {
     expect(popoutSpecs.widget("board/1", "w?2", "Rates").route).toBe("/popout/widget/board%2F1/w%3F2");
     expect(popoutSpecs.fcaLadder("ZDC#1", "ZDC FCA").route).toBe("/popout/fca/ZDC%231");
+    expect(popoutSpecs.airportLadder("K/IAD").route).toBe("/popout/airport/K%2FIAD");
   });
 
   it("keys the window on the panel, so reopening it raises the same one", () => {
     expect(popoutSpecs.widget("b1", "w1", "Rates").id).toBe("widget-w1");
     expect(popoutSpecs.fcaLadder("f1", "ZDC FCA")).toMatchObject({id: "fca-f1", title: "ZDC FCA · metering"});
+    expect(popoutSpecs.airportLadder("KIAD")).toMatchObject({id: "airport-KIAD", title: "KIAD · ladder"});
   });
 });
 
