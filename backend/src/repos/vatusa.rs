@@ -397,11 +397,6 @@ pub async fn resync(
 
 // --- Reset everyone's access to VATUSA (#795) ---
 
-/// Groups a reset never removes, whatever their `source`. Migration 0098 backfilled every grant that
-/// existed then as `manual`, the baseline group and `SERVER_ADMIN` included, so matching on `source`
-/// alone would strip older members' baseline and the server admin's own role.
-pub const RESET_KEEPS_GROUPS: [&str; 2] = [access_repo::BASELINE_ROLE, acl::SERVER_ADMIN_ROLE];
-
 /// One stored grant row: a group membership or a direct permission, at a scope (`None` = national),
 /// with whose row it is. `granted` is `false` for a direct deny and always `true` for a group.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -488,8 +483,9 @@ async fn grant_rows(
 
 /// Reset one member to exactly their `system` grants plus what VATUSA justifies, in the caller's
 /// transaction: put them back on role sync, delete every `manual` group and direct-permission row
-/// (allow or deny) except [`RESET_KEEPS_GROUPS`], and reconcile their `vatusa` grants against their
-/// stored VATUSA roles. Writes no audit; the caller audits, or rolls back for a dry run.
+/// (allow or deny), and reconcile their `vatusa` grants against their stored VATUSA roles. `USER`
+/// and `SERVER_ADMIN` are `system` rows (0130), so they stay. Writes no audit; the caller audits, or
+/// rolls back for a dry run.
 ///
 /// Returns `None` when nothing changed. Takes the member's `identity.users` row lock, the lock a sync
 /// holds, so a concurrent sync for the same member waits.
@@ -523,10 +519,9 @@ pub async fn reset_member(
     }
     sqlx::query(
         "delete from access.user_roles \
-         where user_id = $1 and source = 'manual' and role_name <> all($2)",
+         where user_id = $1 and source = 'manual'",
     )
     .bind(user_id)
-    .bind(RESET_KEEPS_GROUPS)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -601,12 +596,12 @@ pub struct ResetRun {
     pub failure: Option<ApiError>,
 }
 
-/// The members a reset can change, in CID order: detached, holding a `manual` row other than a
-/// [`RESET_KEEPS_GROUPS`] group, or holding `vatusa` group grants that differ from what their stored
-/// VATUSA roles justify. Everyone else already holds exactly their `system` grants plus VATUSA's, so
-/// [`reset_member`] would change nothing for them. The division pull seeds every rostered controller
-/// into `identity.users` and reconciles every attached member, so most members are in none of these
-/// groups, and a reset opens a transaction only for the members it touches.
+/// The members a reset can change, in CID order: detached, holding a `manual` row, or holding
+/// `vatusa` group grants that differ from what their stored VATUSA roles justify. Everyone else
+/// already holds exactly their `system` grants plus VATUSA's, so [`reset_member`] would change
+/// nothing for them. The division pull seeds every rostered controller into `identity.users` and
+/// reconciles every attached member, so most members are in none of these groups, and a reset opens a
+/// transaction only for the members it touches.
 ///
 /// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once. The
 /// `vatusa` drift is one set-based diff (justified `FULL JOIN` held, keeping the rows with one side
@@ -624,10 +619,10 @@ pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiEr
             left join org.facilities f on f.id = vr.facility
             where vr.facility = 'ZHQ' or f.id is not null
             union
-            select u.cid, $2, f.id
+            select u.cid, $1, f.id
             from identity.users u join org.facilities f on f.id = u.home_facility
             union
-            select v.cid, $2, f.id
+            select v.cid, $1, f.id
             from identity.vatusa_visits v join org.facilities f on f.id = v.facility
         ),
         drift(user_id) as (
@@ -643,14 +638,13 @@ pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiEr
         select u.id from identity.users u
         where u.vatusa_roles_detached_at is not null
            or exists (select 1 from access.user_roles r
-                      where r.user_id = u.id and r.source = 'manual' and r.role_name <> all($1))
+                      where r.user_id = u.id and r.source = 'manual')
            or exists (select 1 from access.user_permissions p
                       where p.user_id = u.id and p.source = 'manual')
            or u.id in (select user_id from drift)
         order by u.cid nulls last, u.id
         "#,
     )
-    .bind(RESET_KEEPS_GROUPS)
     .bind(ROSTER_GROUP)
     .fetch_all(pool)
     .await

@@ -26,4 +26,6 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   only. The `POST` takes `AccessResetRequest` (`reason`) and returns `AccessResetBody`; a failed VATUSA
   pull (`502`), an unconfigured VATUSA (`503`) or a run that stopped part-way (`500`) returns
   `AccessResetFailure` with `error`, `message` and `users_reset`. The dry run reads the VATUSA data the last pull stored and the reset pulls fresh, so the two
-  can differ if VATUSA changed in between. Additive; no existing caller changes.
+  can differ if VATUSA changed in between. The reset keeps `system` grants, so the baseline `USER` and
+  `SERVER_ADMIN` stay; a row of either written by hand as `manual` is removed like any other (#805).
+  Additive; no existing caller changes.

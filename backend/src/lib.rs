@@ -44,6 +44,7 @@ pub async fn run() -> color_eyre::Result<()> {
 
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
+    demote_removed_server_admins(&state).await;
 
     // Drains the Prometheus recorder on a timer (#382). Required even when nothing scrapes:
     // the observability stack is opt-in, and an unscraped recorder retains every latency sample.
@@ -74,6 +75,7 @@ pub async fn run() -> color_eyre::Result<()> {
             tracing::warn!(error = %e, "realtime: cross-replica listener did not start");
         }
         jobs::spawn_cleanup(state.jobs.clone(), pool.clone());
+        jobs::spawn_server_admin_reconcile(state.jobs.clone(), pool.clone());
         // One-time desktop sign-in codes expire in 60s; this removes the dead rows (#346).
         jobs::spawn_desktop_auth_code_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
@@ -197,6 +199,22 @@ async fn run_startup_migrations(
     sqlx::migrate!("./migrations").run(pool).await
 }
 
+/// Demote every server admin no longer in `OIS_SERVER_ADMIN_CID` before serving (#805). After the
+/// migrations, so the rows 0130 re-tagged are in place. `jobs::spawn_server_admin_reconcile` repeats
+/// it on a timer. A failure is logged and boot goes on: the timer and sign-in still demote.
+async fn demote_removed_server_admins(state: &state::AppState) {
+    let Some(pool) = state.db.as_ref() else {
+        return;
+    };
+    let list = config::server_admin_cids();
+    if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &list).await {
+        tracing::error!(
+            ?error,
+            "could not list the server admins to demote at startup"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -211,6 +229,45 @@ mod tests {
     /// though, so `migration_versions_are_unique` below exists to say the same thing readably (#569).
     #[sqlx::test]
     async fn migrations_apply_cleanly(_pool: sqlx::PgPool) {}
+
+    /// Startup demotes the server admins removed from the configured list, after the migrations and
+    /// before serving, logs if it cannot, and starts the timer that repeats it (#805). A source scan,
+    /// with comments stripped, because a test cannot set `OIS_SERVER_ADMIN_CID` without racing every
+    /// other test, nor boot `run()`.
+    #[test]
+    fn startup_demotes_server_admins_removed_from_the_list() {
+        let code: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = |signature: &str| {
+            let start = code.find(signature).unwrap();
+            let len = code[start..].find("\n}\n").unwrap();
+            code[start..start + len].to_string()
+        };
+
+        let run = body("pub async fn run()");
+        let migrations = run.find("run_startup_migrations(&state).await?;").unwrap();
+        let demote = run
+            .find("demote_removed_server_admins(&state).await;")
+            .expect("run() demotes removed server admins");
+        let serve = run.find("axum::serve(").unwrap();
+        assert!(migrations < demote && demote < serve);
+        assert!(
+            run.contains("jobs::spawn_server_admin_reconcile(state.jobs.clone(), pool.clone());")
+        );
+
+        let pass = body("async fn demote_removed_server_admins");
+        assert!(pass.contains("let list = config::server_admin_cids();"));
+        let call = pass
+            .find("if let Err(error) = handlers::auth::demote_unconfigured_server_admins(pool, &list)")
+            .expect("the pass runs on the configured list, and its error is handled");
+        assert!(
+            pass[call..].contains("tracing::error!("),
+            "a failed pass is logged"
+        );
+    }
 
     /// Every version claimed by more than one migration file, with the files that claim it.
     ///
