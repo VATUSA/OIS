@@ -187,6 +187,7 @@ always matches the running API.
 | `/api/v1/flow/runway/{icao}/configs/{name}` | DELETE | `flow.runway.update` |
 | `/api/v1/flow/runway/{icao}/configs/{name}` | PUT | `flow.runway.update` |
 | `/api/v1/flow/sector-consolidations/{artcc}` | GET | `flow.sectors.read` |
+| `/api/v1/flow/sector-consolidations/{artcc}` | PUT | `flow.sector_consolidations.update` |
 | `/api/v1/flow/sector-consolidations/{artcc}/{sector_id}` | DELETE | `flow.sector_consolidations.update` |
 | `/api/v1/flow/sector-consolidations/{artcc}/{sector_id}` | PUT | `flow.sector_consolidations.update` |
 | `/api/v1/flow/sector-demand/{artcc}` | GET | `flow.sectors.read` |

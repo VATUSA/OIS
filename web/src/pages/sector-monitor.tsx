@@ -60,7 +60,8 @@ function SectorMonitor({ me }: { me: Me | null | undefined }) {
 /**
  * The Operations page for sector demand (#725): the selected facility's enroute and TRACON tables,
  * then its neighbours, collapsed and view-only. The set follows the facility selector and nothing
- * else.
+ * else. The body below the selector is drawn as vTBFM's Sector Monitor (#794, a named DESIGN.md
+ * exception); the selector and the shell around it stay OIS.
  */
 export function SectorMonitorPage() {
   const { data: me } = useMe();

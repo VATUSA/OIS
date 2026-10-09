@@ -1,99 +1,117 @@
 import {describe, expect, it} from "vitest";
 
-import type {SectorDemandBin, SectorDemandRow} from "./sector-demand";
-import {DEFAULT_VIEW, SPAN_CHOICES_H, formatHours, isAlerting, loadView, visibleGrid} from "./view";
+import type {SectorDemandRow} from "./sector-demand";
+import {
+  colourOf,
+  cmpSector,
+  consolidateAllPatch,
+  consolidationError,
+  consolidationOf,
+  deconsolidateAllPatch,
+  isAlerting,
+  mapText,
+  menuLists,
+  moveInOrder,
+  orderRows,
+  storageKey,
+  withPending,
+  zHHMM,
+} from "./view";
 
-const START = Date.UTC(2026, 9, 7, 14, 0);
-const BINS = Array.from({ length: 24 }, (_, i) => START + i * 15 * 60_000);
+const row = (sector_id: string, consolidated: string[] = [], levels: ("ok" | "watch" | "over")[] = []): SectorDemandRow => ({
+  sector_id,
+  name: null,
+  tier: "high",
+  limit: 10,
+  limit_overridden: false,
+  consolidated,
+  bins: levels.map((level) => ({active: 0, proposed: 0, combined: 0, level})),
+});
 
-const ok: SectorDemandBin = { active: 1, proposed: 0, combined: 1, level: "ok" };
-
-/** A row green everywhere except `level` at bin `at`. */
-function row(id: string, at?: number, level: SectorDemandBin["level"] = "watch"): SectorDemandRow {
-  return {
-    sector_id: id,
-    tier: "high",
-    limit: 10,
-    limit_overridden: false,
-    consolidated: [],
-    bins: BINS.map((_, i) => (i === at ? { active: 9, proposed: 3, combined: 12, level } : ok)),
-  };
-}
-
-describe("isAlerting", () => {
-  it("looks only at the span's bins: an alert at 1h45 is inside 2 h and outside 1.5 h", () => {
-    const r = row("05", 7);
-    expect(isAlerting(r, 2)).toBe(true);
-    expect(isAlerting(r, 1.5)).toBe(false);
-    // The last bin of a span counts; the first bin past it does not.
-    expect(isAlerting(row("05", 6), 1.75)).toBe(true);
-    expect(isAlerting(row("05", 7), 1.75)).toBe(false);
+describe("the vTBFM board's formatting (#794)", () => {
+  it("names a level's colour without judging it", () => {
+    expect(["ok", "watch", "over"].map((l) => colourOf(l as "ok"))).toEqual(["green", "yellow", "red"]);
   });
 
-  it("treats red and yellow alike, and an all-green row as quiet", () => {
-    expect(isAlerting(row("05", 0, "over"), 0.25)).toBe(true);
-    expect(isAlerting(row("05", 0, "watch"), 0.25)).toBe(true);
-    expect(isAlerting(row("05"), 6)).toBe(false);
+  it("formats MAP and bin labels like vTBFM", () => {
+    expect([mapText(10), mapText(2), mapText(123)]).toEqual(["10/10", "02/02", "123/123"]);
+    expect(zHHMM(Date.UTC(2026, 9, 7, 4, 15))).toBe("0415");
+    expect(zHHMM(Date.UTC(2026, 9, 7, 0, 0))).toBe("0000");
+  });
+
+  it("orders sectors numerically when both are numbers, else lexically", () => {
+    expect(["100", "16", "9", "A80", "025"].sort(cmpSector)).toEqual(["9", "16", "025", "100", "A80"]);
+  });
+
+  it("puts this browser's order first, then the rest canonically", () => {
+    const rows = ["10", "2", "30", "4"].map((s) => row(s));
+    expect(orderRows(rows, ["30", "4"]).map((r) => r.sector_id)).toEqual(["30", "4", "2", "10"]);
+  });
+
+  it("moves a row past its visible neighbour and keeps hidden rows in place", () => {
+    // 20 is hidden by the filter: moving 30 up lands it above 10, its visible neighbour.
+    expect(moveInOrder([], ["10", "20", "30"], ["10", "30"], "30", -1)).toEqual(["30", "10", "20"]);
+    expect(moveInOrder([], ["10", "20", "30"], ["10", "30"], "10", 1)).toEqual(["20", "30", "10"]);
+    expect(moveInOrder([], ["10", "20"], ["10", "20"], "10", -1)).toBeNull();
+    expect(moveInOrder([], ["10", "20"], ["10", "20"], "20", 1)).toBeNull();
+  });
+
+  it("judges the alert filter on its own span, not the drawn range", () => {
+    const late = row("10", [], ["ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "watch"]);
+    expect(isAlerting(late, 8)).toBe(false);
+    expect(isAlerting(late, 9)).toBe(true);
+  });
+
+  it("keys each setting per ARTCC and table", () => {
+    expect(storageKey("ZLA", "tracon", "alertSpan")).toBe("ois.sectorMonitor.ZLA.tracon.alertSpan");
   });
 });
 
-describe("visibleGrid", () => {
-  it("cuts every row and the time axis to the drawn range", () => {
-    const all = { ...DEFAULT_VIEW, alertOnly: false };
-    const g = visibleGrid([row("05")], BINS, { ...all, rangeH: 2 });
-    expect(g.binStarts).toEqual(BINS.slice(0, 8));
-    expect(g.rows[0].cells).toHaveLength(8);
-    expect(visibleGrid([row("05")], BINS, { ...all, rangeH: 6 }).rows[0].cells).toHaveLength(24);
+describe("the consolidation menu's arithmetic (#794, #792)", () => {
+  // 12 is worked at 10; 05, 06 and 10 have rows.
+  const cons = consolidationOf([row("05"), row("06"), row("10", ["12"])]);
+
+  it("reads the arrangement off the rows and lays pending writes over it", () => {
+    expect(cons).toEqual({"12": "10"});
+    expect(withPending(cons, {"12": null, "05": "06"})).toEqual({"05": "06"});
   });
 
-  it("filters on its own span, independent of the range", () => {
-    // Alerting at 5h00: past a 4-hour range, inside a 6-hour span.
-    const late = row("LATE", 20);
-    const quiet = row("QUIET");
-    const view = { rangeH: 4, alertOnly: true, alertSpanH: 6 };
-    expect(visibleGrid([late, quiet], BINS, view).rows.map((r) => r.id)).toEqual(["LATE"]);
-    // Alerting at 0h30: inside a 1.5 h span on a 6-hour table, and hidden by a 0.25 h span.
-    const soon = row("SOON", 2);
-    expect(visibleGrid([soon, quiet], BINS, { rangeH: 6, alertOnly: true, alertSpanH: 1.5 }).rows.map((r) => r.id)).toEqual([
-      "SOON",
+  it("offers every other sector not worked elsewhere, and lists what is worked here", () => {
+    const universe = ["05", "06", "10", "12"];
+    const on06 = menuLists(universe, cons, "06");
+    expect(on06.offered).toEqual([
+      {sector: "05", checked: false},
+      {sector: "10", checked: false},
     ]);
-    expect(visibleGrid([soon], BINS, { rangeH: 6, alertOnly: true, alertSpanH: 0.25 }).rows).toEqual([]);
+    expect(on06.consolidatedHere).toEqual([]);
+    const on10 = menuLists(universe, cons, "10");
+    expect(on10.offered.map((s) => s.sector)).toEqual(["05", "06", "12"]);
+    expect(on10.consolidatedHere).toEqual([{sector: "12", checked: true}]);
   });
 
-  it("hides nothing while the filter is off", () => {
-    expect(visibleGrid([row("A"), row("B", 3)], BINS, { ...DEFAULT_VIEW, alertOnly: false }).rows).toHaveLength(2);
+  it("builds the All commands as one patch each", () => {
+    const {items} = menuLists(["05", "06", "10", "12"], cons, "06");
+    expect(consolidateAllPatch(items, cons, "06", false)).toEqual({"05": "06", "10": "06", "12": "06"});
+    expect(consolidateAllPatch(items, cons, "06", true)).toEqual({"05": "06"});
+    const two = {...cons, "81": "80"};
+    expect(deconsolidateAllPatch(two, "10", "target")).toEqual({"12": null});
+    expect(deconsolidateAllPatch(two, "10", "center")).toEqual({"12": null, "81": null});
   });
 
-  it("shows only what alerts in the next 2 h by default", () => {
-    // B alerts at 0h45, C at 1h45 (the span's last bin), D at 2h00 (the first bin past it).
-    const rows = [row("A"), row("B", 3), row("C", 7), row("D", 8)];
-    expect(visibleGrid(rows, BINS, DEFAULT_VIEW).rows.map((r) => r.id)).toEqual(["B", "C"]);
-  });
-
-  it("carries a combined row's sources and the server's levels through untouched", () => {
-    const combined = { ...row("05", 1, "over"), consolidated: ["06", "07"], name: "SHENANDOAH" };
-    const [r] = visibleGrid([combined], BINS, DEFAULT_VIEW).rows;
-    expect(r.carries).toEqual(["06", "07"]);
-    expect(r.name).toBe("SHENANDOAH");
-    expect(r.cells[1]).toEqual({ combined: 12, active: 9, level: "over" });
-  });
-});
-
-describe("controls", () => {
-  it("formats hours the way the empty-filter message reads", () => {
-    expect(formatHours(2)).toBe("2.00 h");
-    expect(formatHours(1.5)).toBe("1.50 h");
-  });
-
-  it("offers every quarter-hour span from 0.25 h to 6 h", () => {
-    expect(SPAN_CHOICES_H[0]).toBe(0.25);
-    expect(SPAN_CHOICES_H.at(-1)).toBe(6);
-    expect(SPAN_CHOICES_H).toHaveLength(24);
-  });
-
-  it("defaults to a 4-hour range, filtered to sectors alerting in the next 2 hours", () => {
-    expect(DEFAULT_VIEW).toEqual({ rangeH: 4, alertOnly: true, alertSpanH: 2 });
-    // No browser storage here at all: the defaults, not a throw.
-    expect(loadView("ZDC", "enroute")).toEqual(DEFAULT_VIEW);
+  it("names the sector in each refusal", () => {
+    const known = new Set(["05", "06", "10", "12"]);
+    const say = (status: number | undefined, patch: Record<string, string | null>) =>
+      consolidationError(status, "ZLA", patch, cons, known);
+    expect(say(400, {"25": "25"})).toBe("ZLA25 can't be consolidated into itself.");
+    expect(say(400, {"05": "06"})).toBe("That change names a sector twice, or too many; nothing was saved.");
+    expect(say(409, {"10": "12"})).toBe("Can't consolidate ZLA10 into ZLA12: ZLA12 is worked at ZLA10.");
+    expect(say(409, {"05": "06"})).toBe("Can't consolidate ZLA05 into ZLA06: ZLA06 is worked at ZLA05.");
+    expect(say(409, {"05": "06", "10": "06"})).toBe("Those consolidations would make a loop; nothing was saved.");
+    expect(say(404, {"99": "06"})).toBe("ZLA99 is not one of ZLA's sectors.");
+    expect(say(404, {"05": "06"})).toBe("A sector in that change is no longer one of ZLA's sectors; nothing was saved.");
+    expect(say(403, {"05": "06"})).toBe("You can't change ZLA's consolidations.");
+    for (const status of [500, undefined]) {
+      expect(say(status, {"05": "06"})).toBe("Could not save the consolidation — check TMU access / connection.");
+    }
   });
 });

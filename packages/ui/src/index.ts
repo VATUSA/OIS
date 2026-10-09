@@ -59,12 +59,6 @@ export {
   normalizeHex,
 } from "./lib/colour";
 export { ColorSwatches, type Swatch } from "./components/color-swatches";
-export {
-  SectorGrid,
-  type LoadLevel,
-  type SectorGridCell,
-  type SectorGridRow,
-} from "./components/sector-grid";
 export { Modal, type ModalProps } from "./components/modal";
 export { Sheet } from "./components/sheet";
 export { SegmentedControl, type SegmentOption } from "./components/segmented-control";

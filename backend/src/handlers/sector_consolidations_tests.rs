@@ -511,3 +511,246 @@ async fn a_path_sector_is_trimmed_like_the_body(pool: PgPool) {
     );
     assert!(stored(&pool).await.is_empty());
 }
+
+/// PUT `{artcc}` with the batch `into`.
+async fn batch(state: &AppState, artcc: &str, into: Value, cookie: &str) -> (StatusCode, Value) {
+    let uri = format!("/api/v1/flow/sector-consolidations/{artcc}");
+    request(
+        state,
+        Method::PUT,
+        &uri,
+        cookie,
+        Some(json!({ "into": into })),
+    )
+    .await
+}
+
+/// #794: the monitor's "All" commands are one write. Two sectors go to one target and a third is
+/// released in the same request; the answer is the arrangement after it, stamped with the caller,
+/// and every viewer hears about it exactly once.
+#[sqlx::test]
+async fn a_batch_sets_and_releases_in_one_write(pool: PgPool) {
+    let state = state(pool.clone());
+    let (id, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZNY", "030", "010").await;
+    // The same sector id in another ARTCC: releasing ZDC's 041 must leave ZNY's alone.
+    seed(&state, "ZNY", "041", "010").await;
+    seed(&state, "ZDC", "041", "020").await;
+    let mut rx = state.events.subscribe();
+
+    let (status, body) = batch(
+        &state,
+        "zdc",
+        json!({ " 020 ": " 010 ", "041": null }),
+        &zdc,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({ "artcc": "ZDC", "editable": true, "consolidations": pairs(&[("020", "010")]) })
+    );
+    assert_eq!(
+        stored(&pool).await,
+        arrangement(&[
+            ("ZDC", "020", "010"),
+            ("ZNY", "030", "010"),
+            ("ZNY", "041", "010")
+        ]),
+        "ZNY's rows are untouched"
+    );
+    assert_eq!(
+        **state.sector_consolidations.load(),
+        arrangement(&[
+            ("ZDC", "020", "010"),
+            ("ZNY", "030", "010"),
+            ("ZNY", "041", "010")
+        ])
+    );
+    assert_eq!(drain(&mut rx), 1, "one nudge for the whole batch");
+    let by: Option<String> = sqlx::query_scalar(
+        "select updated_by from flow.sector_consolidation where artcc = 'ZDC' and sector_id = '020'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(by, Some(id));
+
+    let (status, _) = batch(&state, "ZDC", json!({ "020": "010", "041": null }), &zdc).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        drain(&mut rx),
+        0,
+        "a batch that changes nothing tells nobody"
+    );
+    let (status, body) = batch(&state, "ZDC", json!({}), &zdc).await;
+    assert_eq!(
+        (status, &body["consolidations"]),
+        (StatusCode::OK, &pairs(&[("020", "010")]))
+    );
+    assert_eq!(drain(&mut rx), 0);
+}
+
+/// Consolidating a target moves its sources with it (041 at 020, then 020 at 010, leaves both at 010,
+/// never 041 at 020 at 010), and a batch that releases and re-targets in one go also ends flat.
+#[sqlx::test]
+async fn a_batch_keeps_the_arrangement_flat(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZDC", "041", "020").await;
+    let mut rx = state.events.subscribe();
+
+    let (status, body) = batch(&state, "ZDC", json!({ "020": "010" }), &zdc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["consolidations"],
+        pairs(&[("020", "010"), ("041", "010")]),
+        "the sources worked at 020 move with it"
+    );
+
+    assert_eq!(drain(&mut rx), 1);
+
+    // Releases land before saves: 041 gets its own row back, then 010 moves onto it and takes 020
+    // with it, so 020's own entry, the last to run, changes nothing. The batch still changed, and
+    // says so once.
+    let (status, body) = batch(
+        &state,
+        "ZDC",
+        json!({ "020": "041", "010": "041", "041": null }),
+        &zdc,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        stored(&pool).await,
+        arrangement(&[("ZDC", "010", "041"), ("ZDC", "020", "041")])
+    );
+    assert_eq!(drain(&mut rx), 1);
+}
+
+/// All or nothing: a refused entry anywhere in the batch writes none of it. The earlier entries (which
+/// alone would save) are absent afterwards, the cache stands, and nobody is told.
+#[sqlx::test]
+async fn a_refused_batch_writes_nothing(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZDC", "041", "010").await;
+    let before = arrangement(&[("ZDC", "041", "010")]);
+    let mut rx = state.events.subscribe();
+
+    for (into, expected) in [
+        (json!({ "010": "010" }), StatusCode::BAD_REQUEST),
+        (
+            json!({ "020": "041", "041": "041" }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({ "020": "041", " 020": null }),
+            StatusCode::BAD_REQUEST,
+        ),
+        // 010 at 041 resolves to 010 itself, since 041 is worked at 010: a loop.
+        (json!({ "010": "041" }), StatusCode::CONFLICT),
+        // A loop the batch builds between its own entries, after a save (010 at 020) that would have
+        // landed on its own.
+        (json!({ "010": "020", "020": "010" }), StatusCode::CONFLICT),
+        (json!({ "020": "999" }), StatusCode::NOT_FOUND),
+        (json!({ "020": "010", "030": "010" }), StatusCode::NOT_FOUND),
+        (json!({ "020": "010", "010": "030" }), StatusCode::NOT_FOUND),
+    ] {
+        let (status, body) = batch(&state, "ZDC", into.clone(), &zdc).await;
+        assert_eq!(status, expected, "{into}: {body}");
+        assert_eq!(stored(&pool).await, before, "{into}");
+    }
+    assert_eq!(**state.sector_consolidations.load(), before);
+    assert_eq!(drain(&mut rx), 0);
+}
+
+/// A release isn't checked against the dataset, so a batch can clear a consolidation a re-import
+/// orphaned (077 is no longer one of ZDC's sectors), like the single release.
+#[sqlx::test]
+async fn a_batch_release_needs_no_dataset_entry(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZDC", "077", "010").await;
+    seed(&state, "ZDC", "078", "010").await;
+    seed(&state, "ZDC", "020", "010").await;
+    let mut rx = state.events.subscribe();
+
+    // Two stored rows released in the one statement, one with nothing to release, 020 untouched.
+    let (status, body) = batch(
+        &state,
+        "ZDC",
+        json!({ "077": null, "078": null, "999": null }),
+        &zdc,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stored(&pool).await, arrangement(&[("ZDC", "020", "010")]));
+    assert_eq!(
+        drain(&mut rx),
+        1,
+        "077 was released, though 999 had nothing to release"
+    );
+}
+
+/// A batch is capped at 200 entries, a 400 before anything is looked up or written; 200 is allowed.
+#[sqlx::test]
+async fn a_batch_is_capped_at_200_entries(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    seed(&state, "ZDC", "020", "010").await;
+    let mut rx = state.events.subscribe();
+    let nulls = |n: usize| -> Value {
+        let mut into: serde_json::Map<String, Value> =
+            (0..n - 1).map(|i| (format!("X{i}"), Value::Null)).collect();
+        into.insert("020".into(), Value::Null);
+        Value::Object(into)
+    };
+
+    // One unknown sector among the 201: a 404 would mean the cap ran after the dataset lookup.
+    let mut over = nulls(201);
+    over["X0"] = json!("999");
+    let (status, _) = batch(&state, "ZDC", over, &zdc).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(stored(&pool).await, arrangement(&[("ZDC", "020", "010")]));
+    assert_eq!(drain(&mut rx), 0);
+    let (status, body) = batch(&state, "ZDC", nulls(200), &zdc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stored(&pool).await.is_empty());
+}
+
+/// The batch is gated like the single write: the update permission, scoped to the path's ARTCC. A
+/// reader, a limits-only TMU and an anonymous caller get a 401, a ZDC TMU a 403 on ZNY in either
+/// case, and a national grant may write anywhere. ZNY's arrangement survives every refused attempt.
+#[sqlx::test]
+async fn a_batch_is_scoped_to_the_callers_facility(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, reader) = user(&pool, None).await;
+    let (_, zdc) = user(&pool, Some(Some("ZDC"))).await;
+    let (_, national) = user(&pool, Some(None)).await;
+    let limits_only = seed_user(&pool).await;
+    grant(&pool, &limits_only, READ, None).await;
+    grant(&pool, &limits_only, "flow.sector_limits.update", None).await;
+    let limits_only = session_cookie(&pool, &limits_only).await;
+    seed(&state, "ZNY", "030", "010").await;
+    let before = arrangement(&[("ZNY", "030", "010")]);
+    let mut rx = state.events.subscribe();
+
+    for cookie in [reader.as_str(), limits_only.as_str(), ""] {
+        let (status, _) = batch(&state, "ZDC", json!({ "020": "010" }), cookie).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    for artcc in ["ZNY", "zny"] {
+        for into in [json!({ "010": "030" }), json!({ "030": null })] {
+            let (status, _) = batch(&state, artcc, into.clone(), &zdc).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{artcc} {into}");
+        }
+    }
+    assert_eq!(stored(&pool).await, before);
+    assert_eq!(drain(&mut rx), 0);
+
+    let (status, body) = batch(&state, "ZNY", json!({ "030": null }), &national).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stored(&pool).await.is_empty());
+    assert_eq!(drain(&mut rx), 1);
+}

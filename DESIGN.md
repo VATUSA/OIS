@@ -48,8 +48,9 @@ headers. It should feel calm, precise, and obviously the same product on every s
 9. **Tokens only — never inline a value.** Every colour, radius, space, and font size comes from a
    token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The
    exceptions are a page that physically cannot load the stylesheet — see § "Standalone pages outside
-   the app", which lists every one and the conditions they must meet — and a colour a **user** chose
-   and saved, which is data rather than chrome (§ "User-chosen domain colour").
+   the app", which lists every one and the conditions they must meet — a colour a **user** chose
+   and saved, which is data rather than chrome (§ "User-chosen domain colour") — and the Sector
+   Monitor's body (§ "Named exception: the Sector Monitor body").
 
 ---
 
@@ -201,6 +202,29 @@ on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb`
   hex and shows that in dark mode too. That is known and accepted; storing a token name would fix it,
   at the cost of an API change.
 
+### Named exception: the Sector Monitor body
+
+**Operations → Sector Monitor** (`/ops/sectors`) draws its body exactly like vTBFM's Sector Monitor,
+the tool controllers already use, by the owner's decision (#794). It is the one signed-in screen that
+does not follow this file's look, and only inside its body:
+
+- **What it copies:** vTBFM's beige page (`#EFDFCE`) with no side padding; each table in a `2px outset`
+  bevelled frame; cyan sector and MAP columns; green, yellow and red bins; a bottom `HHMM` footer with
+  `2px` black borders; vTBFM's monospace stack at weight 500; its slider; and its cream right-click
+  menu with stacked inset bevels. Source: `zla-artcc/vTBFM` `b7328138`,
+  `src/components/SectorMonitorPage.tsx` and `src/components/SectorContextMenu.tsx`.
+- **Where the values live:** every colour literal, the font stack, the bevels and the grid's column
+  and row sizes are in one file, `web/src/features/sector-demand/vtbfm-palette.ts`; the remaining
+  spacings are vTBFM's own, copied inline beside the markup they size. `colours.guard.test.ts`
+  exempts that file and no other source of the page, and refuses an import of it from anywhere
+  outside `web/src/features/sector-demand/`, so the exception can't spread.
+- **What stays OIS:** the shell (sidebar, breadcrumb, page header) and the facility picker above the
+  body. No other page changes, and nothing here is precedent: a new screen does not get to copy it.
+- **What it waives:** inside the body only, non-negotiables 2 (the slider's two-tone track), 3 (the
+  menu's inset bevel bands), 4 (2px outset frames and the footer's 2px borders), 5 (square corners),
+  6 (weight 500), 7 (monospace for labels too) and 9 (vTBFM's literals and spacings), and the
+  "legible in both themes" row: the body is the same in light and dark, as vTBFM's is.
+
 ## Components (one each, tokens only)
 
 - **Nav item** — icon + label + right-aligned mono count. Active = `--panel-2` tile, icon shifts to
@@ -217,17 +241,6 @@ on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb`
   name(600) + email link. Every table shows a default row cap with a "Show all" expand, then
   paginates — except live operational lists (departures, GDP flights, IDST, runway arrivals),
   which page from the first row (`rowCap={Infinity}`) so no flight is hidden behind an expand.
-- **Sector grid** — `SectorGrid` in `@ois/ui`: one row per sector, one column per 15-minute bin on a
-  rolling Zulu time axis (#724). **Not a `DataTable`, deliberately:** a `DataTable`'s columns are an
-  entity's attributes (select boxes, pills, avatars); these are up to 24 load-carrying cells over time,
-  which `DataTable`'s header, row cap and paging would only get in the way of. Its rules:
-  sector and limit columns are sticky while the time axis scrolls inside the grid (never the page);
-  each cell's figure is **`--ink`**, mono tabular, on a `--level-ok/watch/over` tint with a solid bar
-  in the same token — the colour is a non-text signal (≥ 3:1 on each theme's ground, tested), because
-  the light theme's green is too faint for small coloured text; hover carries both figures, combined
-  peak and airborne alone; the footer labels each bin's start in `HHMM` Zulu; the limit cell is
-  editable only where the viewer may edit, and is plain text with no affordance otherwise; a combined
-  row lists the sectors it carries under its id, in `--ink-3`, truncated inside the sticky column.
 - **Buttons** — primary = solid `--brand` **pill** with **dark ink** (`--primary-foreground`; white
   fails AA on a pastel accent). Secondary = `--panel-2` pill with a hairline. Press = scale 0.97,
   150–220ms ease-out, no bounce.
@@ -273,11 +286,13 @@ Report each miss as `file:line — rule → fix`.
 - [ ] One accent: interactive state uses `primary`/`brand`; status colours only mean status.
 - [ ] IDs, counts, times and money render `font-mono` (tabular).
 - [ ] The page renders inside the shell; its title comes from route meta, not a hand-rolled `<h1>`.
-- [ ] Tables use `DataTable` (a sector-by-time matrix uses `SectorGrid`); charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
+- [ ] Tables use `DataTable`; charts use the `@ois/ui` chart components; overlays use `Dialog`/`Sheet`.
 - [ ] Links and nav items the user can't use are not rendered.
 - [ ] Legible in both dark and light.
 - [ ] A page listed under § "Standalone pages outside the app" is exempt from the hex, shell and
       dark/light rows above — check it against the conditions there instead, not against this list.
+- [ ] The Sector Monitor's body is checked against vTBFM, not this list (§ "Named exception: the
+      Sector Monitor body"); its literals stay in `vtbfm-palette.ts`.
 
 ---
 

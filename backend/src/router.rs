@@ -442,7 +442,8 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         // Sector consolidation (#723): read with the sector data, changed per ARTCC by its TMU
         .route(
             "/api/v1/flow/sector-consolidations/{artcc}",
-            get(sector_consolidations::list_sector_consolidations),
+            get(sector_consolidations::list_sector_consolidations)
+                .put(sector_consolidations::consolidate_sectors),
         )
         .route(
             "/api/v1/flow/sector-consolidations/{artcc}/{sector_id}",
