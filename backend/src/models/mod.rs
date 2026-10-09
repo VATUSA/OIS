@@ -120,7 +120,7 @@ pub struct AccessResetRequest {
 }
 
 /// One stored grant row a reset adds or removes. `artcc_id` `None` = national.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessResetGrant {
     /// `group` for a group membership, `permission` for a direct permission.
     pub kind: String,
@@ -133,7 +133,7 @@ pub struct AccessResetGrant {
 }
 
 /// What a reset changes, or would change, for one member.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessResetUser {
     pub cid: Option<i64>,
     pub display_name: String,
@@ -144,7 +144,7 @@ pub struct AccessResetUser {
 }
 
 /// A reset's result, or a dry run's prediction. Only members whose access changes are listed.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessResetBody {
     /// `true` for the dry run: nothing was written.
     pub dry_run: bool,
@@ -161,12 +161,32 @@ pub struct AccessResetBody {
 
 /// Why a reset did not finish. `users_reset` members were reset and audited before it stopped; the rest
 /// are untouched.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessResetFailure {
-    /// `vatusa_pull_failed`, `vatusa_not_configured` or `reset_incomplete`.
+    /// `vatusa_pull_failed`, `vatusa_not_configured`, `reset_incomplete`, `reset_failed`, or
+    /// `reset_interrupted` when the backend running it stopped.
     pub error: String,
     pub message: String,
     pub users_reset: i64,
+}
+
+/// A reset that was started (202), or the one already running (409): poll
+/// `GET /api/v1/admin/access/vatusa-reset/runs/{run_id}` for its result.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetStarted {
+    pub run_id: String,
+}
+
+/// One reset run (#806). `result` is set once it succeeded, `failure` once it failed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetRun {
+    pub id: String,
+    /// `running`, `succeeded` or `failed`.
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub result: Option<AccessResetBody>,
+    pub failure: Option<AccessResetFailure>,
 }
 
 /// A lightweight user match for the directory search.

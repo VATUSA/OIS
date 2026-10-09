@@ -50,14 +50,36 @@ export interface paths {
         get: operations["preview_vatusa_reset"];
         put?: never;
         /**
-         * Reset every member's access to VATUSA (#795): pull the division fresh (refused with 503 when
-         *     VATUSA is not configured), then, one transaction per
-         *     member, put them back on role sync, delete every hand-made grant except the baseline `USER` and
-         *     `SERVER_ADMIN` groups, and reconcile their VATUSA grants. `system` grants are left alone. Each
-         *     changed member gets one `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the
-         *     result can differ from the dry run if VATUSA changed since the last pull. Server admin only.
+         * Start a reset of every member's access to VATUSA (#795) and answer at once with its run id (#806).
+         *     The run pulls the division fresh, then, one transaction per member, puts them back on role sync,
+         *     deletes every hand-made grant except the baseline `USER` and `SERVER_ADMIN` groups, and reconciles
+         *     their VATUSA grants. `system` grants are left alone. Each changed member gets one `USER_ACCESS`
+         *     audit entry with the reason. Because the pull is fresh, the result can differ from the dry run if
+         *     VATUSA changed since the last pull. It runs in the background, so it finishes whether or not the
+         *     caller waits; `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns its result. One reset runs at
+         *     a time, never alongside the division pull. Server admin only.
          */
         post: operations["apply_vatusa_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/access/vatusa-reset/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One reset run (#806): `running` until it finishes, then its result or why it failed. A run whose
+         *     backend stopped before it finished is reported as failed (`reset_interrupted`). Server admin only.
+         */
+        get: operations["get_vatusa_reset_run"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3721,7 +3743,10 @@ export interface components {
          *     are untouched.
          */
         AccessResetFailure: {
-            /** @description `vatusa_pull_failed`, `vatusa_not_configured` or `reset_incomplete`. */
+            /**
+             * @description `vatusa_pull_failed`, `vatusa_not_configured`, `reset_incomplete`, `reset_failed`, or
+             *     `reset_interrupted` when the backend running it stopped.
+             */
             error: string;
             message: string;
             /** Format: int64 */
@@ -3741,6 +3766,25 @@ export interface components {
         /** @description Reset every member's access to VATUSA. The reason is recorded on each changed member's audit entry. */
         AccessResetRequest: {
             reason: string;
+        };
+        /** @description One reset run (#806). `result` is set once it succeeded, `failure` once it failed. */
+        AccessResetRun: {
+            failure?: null | components["schemas"]["AccessResetFailure"];
+            /** Format: date-time */
+            finished_at?: string | null;
+            id: string;
+            result?: null | components["schemas"]["AccessResetBody"];
+            /** Format: date-time */
+            started_at: string;
+            /** @description `running`, `succeeded` or `failed`. */
+            status: string;
+        };
+        /**
+         * @description A reset that was started (202), or the one already running (409): poll
+         *     `GET /api/v1/admin/access/vatusa-reset/runs/{run_id}` for its result.
+         */
+        AccessResetStarted: {
+            run_id: string;
         };
         /** @description What a reset changes, or would change, for one member. */
         AccessResetUser: {
@@ -7679,12 +7723,13 @@ export interface operations {
             };
         };
         responses: {
-            200: {
+            /** @description The reset started; poll its run for the result */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AccessResetBody"];
+                    "application/json": components["schemas"]["AccessResetStarted"];
                 };
             };
             400: {
@@ -7705,6 +7750,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description A reset is already running; poll that run instead */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetStarted"];
+                };
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -7714,25 +7768,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Stopped part-way; `users_reset` members were reset */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AccessResetFailure"];
-                };
-            };
-            /** @description The VATUSA division pull failed; nothing was reset */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AccessResetFailure"];
-                };
-            };
-            /** @description VATUSA is not configured; nothing was reset */
+            /** @description VATUSA is not configured; nothing was started */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -7740,6 +7776,55 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AccessResetFailure"];
                 };
+            };
+        };
+    };
+    get_vatusa_reset_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The run id the reset's POST returned */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetRun"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

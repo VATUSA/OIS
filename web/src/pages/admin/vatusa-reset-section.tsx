@@ -112,6 +112,12 @@ export function VatusaResetAction() {
             value={confirmWord}
             onChange={(e) => setConfirmWord(e.target.value)}
           />
+          {reset.isPending && (
+            <p className="text-ink-2">
+              The reset runs on the server and finishes even if you close this dialog. A notice shows
+              the result when it is done.
+            </p>
+          )}
           {reset.isError && <p className="text-danger">{reset.error.message}</p>}
         </div>
       </Modal>
