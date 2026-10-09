@@ -27,6 +27,7 @@ import {IdstPage} from "@/pages/idst";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {AadcPage} from "@/pages/aadc";
+import {SectorMonitorPage} from "@/pages/sector-monitor";
 import {DashboardPage} from "@/pages/dashboard";
 import {LandingPage} from "@/pages/landing";
 import {BoardViewPage} from "@/pages/dashboards/board";
@@ -241,6 +242,14 @@ const aadcRoute = createRoute({
   path: "aadc",
   component: AadcPage,
   staticData: { layout: "wide", title: "Arrival demand chart" },
+});
+
+// Sector demand (#725): the facility's enroute and TRACON tables, then its neighbours.
+const sectorMonitorRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "sectors",
+  component: SectorMonitorPage,
+  staticData: { layout: "wide", title: "Sector monitor" },
 });
 
 // --- Advisories (public, read-only) ---
@@ -667,6 +676,7 @@ const routeTree = rootRoute.addChildren([
     runwayRoute,
     idstRoute,
     aadcRoute,
+    sectorMonitorRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),

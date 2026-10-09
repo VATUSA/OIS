@@ -17,8 +17,8 @@ use crate::{
         airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
         events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
         health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences, public,
-        runway, sector_consolidations, sector_limits, service_accounts, stats, taxi_insights, tmu,
-        users, webhooks,
+        runway, sector_consolidations, sector_demand, sector_limits, service_accounts, stats,
+        taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -424,6 +424,11 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/flow/airspace/sectors",
             get(airspace_sectors::list_sectors),
+        )
+        // Predicted sector demand for the Operations page (#725): read with the sector data
+        .route(
+            "/api/v1/flow/sector-demand/{artcc}",
+            get(sector_demand::get_sector_demand),
         )
         // Sector occupancy limits (#722): read with the sector data, set per ARTCC by its TMU
         .route(

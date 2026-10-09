@@ -158,12 +158,16 @@ controller also gets **`CONTROLLER`**, the baseline operational group (migration
   - `tmu.cfr.assign`;
   - `flow.runway.read`, `flow.runway.update`;
   - `tmu.program.read`;
-  - `tmu.tmi.read`, `tmu.adv.read`, `tmu.ntml.read`, `tmu.gdp.read`, `tmu.groundstop.read`, `tmu.delays.read`.
+  - `tmu.tmi.read`, `tmu.adv.read`, `tmu.ntml.read`, `tmu.gdp.read`, `tmu.groundstop.read`, `tmu.delays.read`;
+  - `flow.sectors.read` (#725, migration 0129), so a controller opens Operations → Sector Monitor.
 
   Every write among them is ARTCC-scoped in its handler. Runway writes became so with this change:
-  they're checked against the airport's ARTCC, so a ZDC grant writes only ZDC's airports. There's no
-  Planning (`events.plan.*`), Historical (`stats.*`), admin or `*.publish` permission.
-  `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.
+  they're checked against the airport's ARTCC, so a ZDC grant writes only ZDC's airports. A read gate
+  is met by a grant at any scope, so `flow.sectors.read` at ZDC reads every ARTCC's sector demand (the
+  page's view-only neighbour tables) and also opens the admin sector viewer (Admin → Flow → Sectors);
+  it edits no limit or consolidation, which have their own scoped permissions. There's no Planning
+  (`events.plan.*`), Historical (`stats.*`) or `*.publish` permission, and no admin permission beyond
+  that one read. `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.
 
 ## Freshness
 

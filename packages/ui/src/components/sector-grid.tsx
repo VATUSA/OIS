@@ -18,6 +18,11 @@ export interface SectorGridRow {
   id: string;
   name?: string;
   limit: number;
+  /**
+   * The sectors worked at this one (#723), when it is a combined row. Listed under its id so a merged
+   * row never reads as the target sector alone; its limit is still the target's.
+   */
+  carries?: readonly string[];
   /** One per column of `binStarts`, in the same order. */
   cells: SectorGridCell[];
 }
@@ -45,18 +50,21 @@ const STICKY = "sticky z-10 bg-card";
  * caller.
  *
  * Pass `onLimitChange` only where the viewer may edit limits; without it the limit cell is plain text
- * with no affordance at all.
+ * with no affordance at all. Bump a sector's count in `limitResets` to put its input back on the stored
+ * limit (after a refused write); only that input remounts, so a draft in another row survives.
  */
 export function SectorGrid({
   rows,
   binStarts,
   caption,
   onLimitChange,
+  limitResets,
 }: {
   rows: SectorGridRow[];
   binStarts: number[];
   caption: string;
   onLimitChange?: (sectorId: string, limit: number) => void;
+  limitResets?: Readonly<Record<string, number>>;
 }) {
   const times = binStarts.map(hhmm);
   return (
@@ -84,10 +92,24 @@ export function SectorGrid({
               <th scope="row" className={cn(STICKY, "left-0 w-28 min-w-28 px-2 py-1 text-left font-semibold text-ink")}>
                 {row.id}
                 {row.name && <span className="ml-1.5 font-sans text-ink-3">{row.name}</span>}
+                {row.carries && row.carries.length > 0 && (
+                  <span
+                    data-carries=""
+                    title={`${row.id} carries ${row.carries.join(", ")}`}
+                    className="block max-w-24 truncate font-normal text-ink-3"
+                  >
+                    <span className="sr-only">carries </span>+{row.carries.join(" +")}
+                  </span>
+                )}
               </th>
               <td className={cn(STICKY, "left-28 w-14 min-w-14 border-r border-line-soft px-1 py-1 text-right text-ink-2")}>
                 {onLimitChange ? (
-                  <SectorLimitInput sectorId={row.id} limit={row.limit} onCommit={onLimitChange} />
+                  <SectorLimitInput
+                    key={limitResets?.[row.id] ?? 0}
+                    sectorId={row.id}
+                    limit={row.limit}
+                    onCommit={onLimitChange}
+                  />
                 ) : (
                   <span className="px-1">{row.limit}</span>
                 )}
@@ -130,7 +152,7 @@ export function SectorGrid({
 }
 
 /** The editable limit: commits a positive whole number on Enter or blur, reverts on Escape. */
-export function SectorLimitInput({
+function SectorLimitInput({
   sectorId,
   limit,
   onCommit,

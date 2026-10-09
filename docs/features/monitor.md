@@ -1,9 +1,9 @@
 # Sector dataset — altitude-bounded ATC sector volumes
 
-> **Status: dataset kept; the Airspace Monitor was removed (#719).** The Monitor (#593, #594–#602) is
-> gone: its MAPs, consolidation, alert ladder, page and `flow.monitor.*` permissions were dropped by
-> migration 0125. What stays is the sector **dataset**, its importer, and the admin sector viewer, as the
-> input to a rebuilt feature (its own epic). Known coverage gaps: #728.
+> **Status: rebuilt (#720).** The old Airspace Monitor (#593, #594–#602) was removed in #719 (migration
+> 0125). The sector **dataset**, its importer and the admin sector viewer stayed, and the rebuild reads
+> them: occupancy (#721), limits (#722), consolidation (#723), `SectorGrid` (#724), TRACON strata (#726)
+> and the Operations page (#725). Known coverage gaps: #727, #728.
 
 ## Data model
 
@@ -57,7 +57,7 @@ all, which the TRACON view (#725) should report as "no TRACON sector data" rathe
 ## Sector occupancy (#721)
 
 The engine behind the sector-forecasting epic (#720). It is pure and DB-free, reading the cached table
-above. It has no endpoint yet; #725 serves it.
+above. `GET /api/v1/flow/sector-demand/{artcc}` serves it (Operations page, below).
 
 - **Cell value** (`feed/sector_load.rs`, `sector_loads`): for each sector and 15-minute bin, the **peak
   one-minute concurrent occupancy**. Each minute it counts the distinct flights counted by any of the
@@ -126,6 +126,107 @@ Sectors worked at one position combine into one row. Stored in `flow.sector_cons
   Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a
   cache another replica's write has left behind. A write that changes anything also publishes
   `flow.sector_consolidations`.
+
+## Operations page (#725): the serving contract
+
+The page under **Operations** draws one ARTCC's demand as an enroute table and a TRACON table, plus a
+collapsed, view-only table per neighbour. Everything it draws comes from one read.
+
+**`GET /api/v1/flow/sector-demand/{artcc}`** (`handlers/sector_demand.rs`), gated `flow.sectors.read` like
+the limit and consolidation reads. The ARTCC is case-insensitive. There is no range parameter: the server
+always sends all 24 bins, and the 2–6 h slider and the alert filter slice them client-side, with no refetch.
+
+| Field | |
+| --- | --- |
+| `status` | `no_sector_data`, `pending` or `ready` (below) |
+| `cycle_at` | the VATSIM publish the counts were projected from (its `update_timestamp`); null unless `ready` |
+| `bin_minutes`, `bin_starts_ms` | 15, and each bin's start as epoch ms on absolute Zulu quarter-hours, the first containing `cycle_at` (`SectorGrid`'s `binStarts`) |
+| `default_limit` | what an unset limit reads |
+| `limits_editable`, `consolidations_editable` | the caller's `flow.sector_limits.update` / `flow.sector_consolidations.update` scope covers this ARTCC |
+| `neighbours` | the bordering OIS ARTCCs, sorted (`feed::neighbors::tier1` over the active `org.facilities`) |
+| `enroute`, `tracon` | `{ has_sector_data, rows }`: Low/High/Ultra High rows, and Approach Control rows |
+
+Each row is `sector_id`, `name`, `tier`, `limit`, `limit_overridden`, `consolidated` (the sources worked
+at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `level`.
+
+- **Levels are the server's.** Each bin's `level` is `feed::sector_limits::level` against `row_limit`, so a
+  combined row is judged by its target's limit and a peak equal to the limit is `ok`. The page colours
+  from `level` and never recomputes it.
+- **Consolidation applied.** The engine is called with `AppState::sector_consolidations`, so a source has
+  no row and its target's row lists it in `consolidated`.
+- **The three states, none of them an empty grid.** `no_sector_data`: the dataset has no volume for the
+  ARTCC at all (ZLA, ZAN, HCF until #727); the page names it, "No sector data for ZLA". It wins over
+  a missing feed snapshot, and an empty dataset reads this way for every ARTCC once it has been loaded.
+  `pending`: the sector table hasn't been loaded since startup (`AppState::airspace_sectors_loaded`), so
+  its emptiness says nothing yet, or there is no feed snapshot yet; nothing has been counted. `ready`: counted. Within `ready`, a table with `has_sector_data: false` is a
+  gap in the data (ZSE has no TRACON volumes), distinct from a quiet table of zero rows.
+- **Neighbours are view-only on this page.** The flags describe the caller's scope at the requested
+  ARTCC, so a national TMU reads `true` for a neighbour too. The page ignores them for neighbour tables;
+  the writes stay scoped server-side (a facility TMU gets 403 at a neighbour).
+- **Computed once per publish, not per request.** Projection (`sector_tracks::project_tracks`, boxed to
+  the ARTCC's volumes) and binning (`sector_loads`, over the **whole** table for TRACON precedence) run
+  under `spawn_blocking` once per ARTCC per change, into `AppState::sector_demand`
+  (`handlers::sector_demand_cache`), and every viewer, table and neighbour read of that ARTCC is served
+  from it. An entry is reused while the VATSIM publish (the snapshot's `source_timestamp`, not the
+  snapshot: the poller installs a new one on every 2 s poll, repeats included), the airport, nav, profile,
+  wind and sector tables (by identity), the consolidations, the excluded callsigns and the grounded flights' wheels-up (by value)
+  are the ones it was built from. A consolidation write force-reloads its cache, so the next read
+  re-projects; a limit write only re-judges the cached rows; a refresh job's reload that changes nothing
+  costs nothing. The first read after a change computes and concurrent reads of the same ARTCC wait for it
+  (single-flight); nothing is computed for an ARTCC nobody reads, so the feed tick does no extra work.
+- **Per request,** the database is read for the caller's two edit scopes, the locked wheels-up of the
+  grounded flights and prefiles (`repos::flow::locked_wheels_up`, part of the key) and the facility list
+  for the neighbours. Flights any facility has excluded count nowhere. The projection and its bins start
+  from the publish time, not the fetch's or the request's, so a repeated poll can't move them and a
+  limit-only re-render keeps its projection's clock.
+- **The walk skips what the box can't see.** A track is resolved minute by minute with the trajectory
+  model's `distance_after`, but only for the minutes on legs that can reach the ARTCC's box (each leg cut
+  into 20 nm pieces and bounded around its great circle), found by bisecting the minutes. The fixes are
+  bit-for-bit those of the every-minute walk (`sector_tracks`' tests pin it).
+
+**Realtime.** No new topic. The web query key is `["sector-demand", artcc]` (`useSectorDemand`,
+`web/src/features/sector-demand/sector-demand.ts`), and `web/src/lib/realtime.ts` refetches it on:
+
+- `feed.tick` (a new cycle; at most once a minute);
+- `flow.sector_limits` (cells recolour) and `flow.sector_consolidations` (rows merge or split), at once:
+  each is a deliberate, rare edit someone is waiting to see;
+- `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did),
+  **coalesced into the next `feed.tick`** (`COALESCED_KEYS`). These can arrive several times a minute
+  while a program runs, and each wheels-up change is a fresh projection per open ARTCC on the server.
+  Held until the tick, a burst becomes one refetch that every client makes against the same new
+  snapshot, so the server normally projects once per ARTCC per publish however many nudges came (a
+  wheels-up committed between two clients' refetches on one tick costs a second); the change
+  shows within one publish (~15 s). With no tick, `COALESCE_MS` (20 s) refetches it anyway. A
+  reconnect's catch-up drops anything held.
+
+## Operations page (#725): the page
+
+**Operations → Sector Monitor** (`/ops/sectors`, `web/src/pages/sector-monitor.tsx`, components in
+`web/src/features/sector-demand/`). The nav item and the page are gated on `flow.sectors.read`, the
+endpoint's own gate; without it the page says so and asks for nothing. A rostered controller holds it
+through `CONTROLLER` (migration 0129); a grant at their facility reads every ARTCC, edits none.
+
+- **The set follows the facility selector and nothing else.** It opens on the viewer's VATUSA home
+  facility and the pick is not remembered, so a controller who moves facilities does not keep the old
+  one's tables. The set is keyed by facility, so a switch replaces every table, control and neighbour.
+- **Top to bottom:** the facility's enroute table, its TRACON table, then each neighbour, collapsed and
+  fetched only when opened. Neighbour grids get no limit editor whatever `limits_editable` says; the
+  facility's own grid edits limits only when it is `true` (the write's 403 is the real gate). Limits are
+  edited only here, inline in the grid; #722's standalone limit table was never placed and is gone, and
+  the web no longer calls `GET /flow/sector-limits/{artcc}`. Consolidations have no editor yet (#792).
+- **Controls, per table:** a 2–6 h range slider (default 4 h) and "only alerting in the next N h" (a
+  quarter-hour span up to 6 h, **on by default at 2 h**; switching it off is remembered like the rest). The span is judged over all six computed
+  hours, independent of the range, and both only slice what the server sent, never refetching.
+- **Remembered per browser:** each table's controls under `ois.sectorDemand.view.<ARTCC>.<table>`, and a
+  neighbour's open state under `ois.sectorDemand.open.<facility>.<neighbour>`, in `localStorage`. Every
+  access is guarded; with storage blocked, the defaults apply.
+- **States:** `no_sector_data` reads "No sector data for ZLA"; `pending` reads "Waiting for the first
+  cycle" and says it needs both the sector data and a feed cycle; a table without volumes reads "No TRACON sector data for ZSE"; a filter that hides every
+  row reads "No ZDC sectors alerting in the next 2.00 h" ("No ZDC TRACON sectors…" for TRACON). None of
+  them is a grid.
+- **A combined row** lists the sectors it carries under its id (`SectorGrid`'s `carries`).
+- **Colour** is tokens only, pinned by `web/src/features/sector-demand/colours.guard.test.ts` over the
+  feature and the page, alongside the grid's own guard in `packages/ui`.
 
 ## The sector dataset
 
