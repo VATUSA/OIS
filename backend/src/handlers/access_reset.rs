@@ -271,7 +271,12 @@ async fn start_reset(
     );
     state.jobs.begin(RESET_JOB);
 
-    let (state, user, reason) = (state.clone(), user.clone(), reason.to_string());
+    let (state, pool, user, reason) = (
+        state.clone(),
+        pool.clone(),
+        user.clone(),
+        reason.to_string(),
+    );
     tokio::spawn(async move {
         let outcome = match locks.lock_division().await {
             Ok(()) => reset_to_vatusa(&state, &user, &reason, ip_address, pull).await,
@@ -282,17 +287,20 @@ async fn start_reset(
         };
         let outcome = outcome.map_err(|e| match e {
             ResetError::Failed(_, failure) => failure,
-            ResetError::Api(e) => AccessResetFailure {
+            other => AccessResetFailure {
                 error: "reset_failed".to_string(),
-                message: format!("the reset could not run ({e}); nothing was reset"),
+                message: match other {
+                    ResetError::Api(e) => {
+                        format!("the reset could not run ({e}); nothing was reset")
+                    }
+                    _ => "the reset could not run; nothing was reset".to_string(),
+                },
                 users_reset: 0,
             },
-            ResetError::Running(_) => unreachable!("only start_reset refuses a second run"),
         });
         // Stored while the locks are still held: a `running` row with no lock holder reads as
         // interrupted.
-        let pool = state.db.as_ref().expect("start_reset checked the pool");
-        if let Err(e) = reset_runs::finish_run(pool, run_id, outcome.as_ref()).await {
+        if let Err(e) = reset_runs::finish_run(&pool, run_id, outcome.as_ref()).await {
             tracing::error!(error = %e, %run_id, "access reset to VATUSA finished but its result was not stored");
         }
         match &outcome {
