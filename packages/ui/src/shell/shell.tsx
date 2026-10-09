@@ -10,14 +10,10 @@ import {Tooltip, TooltipContent, TooltipTrigger} from "../components/tooltip";
  * collapsible sidebar and the main area. The main area is a breadcrumb row over the page's content
  * panel, inset and rounded on all four corners.
  *
- * The outer edge of the app *is* the window's bounding box — no gutter, no CSS rounding of its own and
- * no frame shadow (#402). On the desktop app the native title bar is hidden, so a gutter here would
- * have read as a second chrome bar under it.
- *
- * The *window* does have rounded corners, put there by the OS rather than by this component (#419):
- * macOS rounds a decorated window itself and Windows 11 is asked to via DWM, and the compositor clips
- * the webview to that shape. So there is deliberately no `border-radius` here to match — adding one
- * would double the curve inside the OS's. The page's own 16px side gutters come from
+ * The outer edge of the app *is* the viewport — no gutter, no CSS rounding of its own and no frame
+ * shadow (#402). On the desktop app that viewport sits inside the OS's own title bar and frame (#796),
+ * and any rounding of the window's corners is the OS's, so there is deliberately no `border-radius`
+ * here to match. The page's own 16px side gutters come from
  * {@link ShellContent}'s padding, and the content panel is held off the window edge by its own
  * `mx-2 mb-2` — with the gutter gone there is nothing else to do it.
  *
@@ -28,7 +24,6 @@ export function Shell({
   sidebar,
   breadcrumbs,
   leading,
-  topBarProps,
   children,
   className,
 }: {
@@ -37,23 +32,6 @@ export function Shell({
   breadcrumbs?: React.ReactNode;
   /** Sits before the breadcrumbs (e.g. the phone menu button). */
   leading?: React.ReactNode;
-  /**
-   * Spread onto the top bar. Kept generic so this package stays free of platform assumptions: the
-   * desktop app passes a Tauri drag region through it (#402), and the web build passes nothing.
-   *
-   * `className` is excluded on purpose, and the props are spread *before* it, so a caller cannot
-   * replace the row's height and padding — by the type or by accident.
-   *
-   * `onDoubleClick` is excluded for a sharper reason: when this row is a Tauri drag region, Tauri's
-   * own injected `drag.js` already toggles maximize on a double-click inside it. A handler here fires
-   * *as well*, so one double-click toggled twice — dead on Windows and Linux, unrestorable on macOS
-   * (#402 review). React's synthetic events also bubble, where Tauri's drag matching is self-only, so
-   * the same handler fired for every button and breadcrumb in the row. Excluding it makes putting one
-   * back a type error rather than a defect a reviewer has to find twice.
-   */
-  topBarProps?: Omit<React.HTMLAttributes<HTMLDivElement>, "className" | "onDoubleClick"> & {
-    [attr: `data-${string}`]: unknown;
-  };
   children: React.ReactNode;
   className?: string;
 }) {
@@ -62,8 +40,7 @@ export function Shell({
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-panel">
         {sidebar}
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Spread first: the row's own layout classes must win over anything a caller passes. */}
-          <div {...topBarProps} className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5">
+          <div className="flex h-11 shrink-0 items-center gap-2 px-3 md:px-5">
             {leading}
             {breadcrumbs}
           </div>

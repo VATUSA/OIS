@@ -52,16 +52,6 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         // Pop-outs and route windows close with the main window rather than outliving it (#349, #350).
         .on_window_event(popout::on_window_event)
-        // The main window's corners (#419). macOS rounds a decorated window itself — see
-        // `tauri.macos.conf.json` — so this is Windows' undecorated window asking the compositor for
-        // the same shape; `window_shape::round_corners` is a no-op everywhere else. Only the main
-        // window: pop-outs and route windows keep their native frames.
-        .setup(|app| {
-            if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
-                window_shape::round_corners(&window);
-            }
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             auth::store_token,
             auth::get_token,

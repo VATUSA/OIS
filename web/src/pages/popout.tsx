@@ -6,8 +6,10 @@ import {PanelsTopLeft} from "lucide-react";
 import {useDashboard} from "@/lib/dashboards";
 import {normalize} from "@/features/dashboard/useDashboardState";
 import {useFcaTraffic, useFcas} from "@/lib/fca";
+import {useAirportFlow} from "@/lib/feed";
 import {WidgetBody} from "@/features/dashboard/render";
 import {Ladder} from "@/pages/fca/ladder";
+import {LadderView} from "@/pages/airport";
 
 /**
  * The pages a pop-out mini-window shows (#349).
@@ -66,6 +68,26 @@ export function PopoutFcaLadderPage() {
       <div className="min-h-0 flex-1 overflow-auto p-2">
         <QueryState isLoading={traffic.isLoading} isError={traffic.isError}>
           <Ladder flights={traffic.data ?? []} now={now} name={fca?.name ?? "FCA"} />
+        </QueryState>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * An airport's whole arrival ladder (#790), every gate column, floated beside the scope. Renders the
+ * airport page's own `LadderView`, so it follows `ladder.style` and draws the same columns.
+ */
+export function PopoutAirportLadderPage() {
+  const {icao} = useParams({from: "/popout/airport/$icao"});
+  const flow = useAirportFlow(icao);
+
+  return (
+    <div className="flex h-full w-full flex-col overflow-hidden">
+      <div className="shrink-0 border-b border-line px-3 py-2 font-mono text-xs font-semibold text-ink">{icao}</div>
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        <QueryState isLoading={!flow.data && !flow.isError} isError={flow.isError}>
+          {flow.data && <LadderView flow={flow.data} />}
         </QueryState>
       </div>
     </div>

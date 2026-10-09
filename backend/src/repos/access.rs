@@ -2016,7 +2016,8 @@ mod tests {
     /// #730: CONTROLLER is exactly the owner's operational baseline — equality, not containment, so a
     /// permission slipped into it fails here. And nothing from Planning (`events.plan.*`), Historical
     /// (`stats.*`) or any publish verb is in it, checked against the whole catalog so a permission
-    /// added to those domains later can't arrive through this group unnoticed.
+    /// added to those domains later can't arrive through this group unnoticed. #725 widened it by one
+    /// read, `flow.sectors.read`, deliberately.
     #[sqlx::test]
     async fn the_controller_group_is_exactly_the_operational_baseline(pool: sqlx::PgPool) {
         use std::collections::BTreeSet;
@@ -2043,6 +2044,9 @@ mod tests {
             "tmu.gdp.read",
             "tmu.groundstop.read",
             "tmu.delays.read",
+            // #725 (owner decision 4, migration 0129): a rostered controller reads the Sector Monitor.
+            // A read gate, so a grant at their facility opens every ARTCC's demand, view-only.
+            "flow.sectors.read",
         ]
         .into_iter()
         .map(String::from)

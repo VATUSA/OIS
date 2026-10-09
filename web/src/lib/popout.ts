@@ -32,7 +32,7 @@ export type PopoutSpec = {
 /**
  * The pop-out for one panel.
  *
- * Every id is encoded into its route segment: a board, widget or FCA id containing `/`, `?` or `#`
+ * Every id is encoded into its route segment: a board, widget, FCA id or ICAO containing `/`, `?` or `#`
  * would otherwise change the shape of the URL and open the wrong page.
  */
 export const popoutSpecs = {
@@ -45,6 +45,12 @@ export const popoutSpecs = {
     id: `fca-${fcaId}`,
     title: `${name} · metering`,
     route: `/popout/fca/${encodeURIComponent(fcaId)}`,
+  }),
+  /** The whole airport arrival ladder, every gate column (#790). */
+  airportLadder: (icao: string): PopoutSpec => ({
+    id: `airport-${icao}`,
+    title: `${icao} · ladder`,
+    route: `/popout/airport/${encodeURIComponent(icao)}`,
   }),
 };
 
