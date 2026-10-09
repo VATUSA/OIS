@@ -49,7 +49,7 @@ export function VatusaResetAction() {
         onClose={close}
         size="lg"
         title="Reset all access to VATUSA"
-        description="Pulls VATUSA fresh, then gives every user exactly their system grants plus what VATUSA justifies. Hand-made groups and permissions are removed, except USER and SERVER_ADMIN, and everyone goes back on VATUSA role sync. This cannot be undone; each change is audited with its before state."
+        description="Pulls VATUSA fresh, then gives every user exactly their system grants plus what VATUSA justifies. Hand-made groups and permissions are removed, and everyone goes back on VATUSA role sync. This cannot be undone; each change is audited with its before state."
         footer={
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={close}>

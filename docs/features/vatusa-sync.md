@@ -194,8 +194,9 @@ holding exactly their `system` grants plus what VATUSA justifies.
   `succeeded` with the result or `failed` with the failure. Runs live in `access.vatusa_reset_runs`
   (0131), so any replica answers. The dialog polls it each second and shows the result when it
   finishes; closing the dialog doesn't stop the run.
-- **`USER` and `SERVER_ADMIN` are never removed**, whatever their `source`. Migration 0098 backfilled
-  both as `manual` for everyone who held them then.
+- **`USER` and `SERVER_ADMIN` stay** because they are `system` rows. Migration 0098 backfilled both
+  as `manual`; 0130 re-tagged them `system` (#805). A `SERVER_ADMIN` row written by hand as `manual`
+  is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` alone grants and removes it.
 - **A failure part-way** fails the run with `reset_incomplete`. Users before it are reset and
   audited, the failing user is rolled back whole, and users after it are untouched. `users_reset`
   says how many were done; running it again finishes the rest. A run whose backend stopped (a crash

@@ -52,12 +52,12 @@ export interface paths {
         /**
          * Start a reset of every member's access to VATUSA (#795) and answer at once with its run id (#806).
          *     The run pulls the division fresh, then, one transaction per member, puts them back on role sync,
-         *     deletes every hand-made grant except the baseline `USER` and `SERVER_ADMIN` groups, and reconciles
-         *     their VATUSA grants. `system` grants are left alone. Each changed member gets one `USER_ACCESS`
-         *     audit entry with the reason. Because the pull is fresh, the result can differ from the dry run if
-         *     VATUSA changed since the last pull. It runs in the background, so it finishes whether or not the
-         *     caller waits; `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns its result. One reset runs at
-         *     a time, never alongside the division pull. Server admin only.
+         *     deletes every hand-made grant, and reconciles their VATUSA grants. `system` grants, the baseline
+         *     `USER` and `SERVER_ADMIN` groups among them, are left alone. Each changed member gets one
+         *     `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the result can differ from the
+         *     dry run if VATUSA changed since the last pull. It runs in the background, so it finishes whether or
+         *     not the caller waits; `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns its result. One reset
+         *     runs at a time, never alongside the division pull. Server admin only.
          */
         post: operations["apply_vatusa_reset"];
         delete?: never;

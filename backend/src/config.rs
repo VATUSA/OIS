@@ -27,16 +27,49 @@ pub fn cookie_secure() -> bool {
     env_flag_enabled("COOKIE_SECURE")
 }
 
-/// CIDs that should hold the SERVER_ADMIN role. Single CID or comma-separated list.
-/// Server admin is env-configured only — never grantable through the permissions UI.
-pub fn configured_server_admin_cids() -> Vec<i64> {
-    let Ok(raw) = std::env::var("OIS_SERVER_ADMIN_CID") else {
-        return Vec::new();
-    };
-    raw.split(',')
-        .filter_map(|part| part.trim().parse::<i64>().ok())
-        .filter(|cid| *cid > 0)
-        .collect()
+/// `OIS_SERVER_ADMIN_CID`, parsed: a single CID or a comma-separated list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerAdminCids {
+    /// The CIDs that hold SERVER_ADMIN.
+    pub cids: Vec<i64>,
+    /// Every non-blank part that is not a positive integer, as written. A demotion pass demotes no
+    /// one while there is any (#805): a typo would otherwise strip the admin it meant to keep.
+    pub rejected: Vec<String>,
+}
+
+/// Parses an `OIS_SERVER_ADMIN_CID` value. Blank parts (`"1,,2"`, a trailing comma) are skipped.
+pub fn parse_server_admin_cids(raw: &str) -> ServerAdminCids {
+    let mut list = ServerAdminCids::default();
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        match part.parse::<i64>() {
+            Ok(cid) if cid > 0 => list.cids.push(cid),
+            _ => list.rejected.push(part.to_string()),
+        }
+    }
+    list
+}
+
+/// `OIS_SERVER_ADMIN_CID` from the environment. Server admin is env-configured only: the list alone
+/// grants and removes it, never the permissions UI.
+pub fn server_admin_cids() -> ServerAdminCids {
+    server_admin_cids_from(std::env::var("OIS_SERVER_ADMIN_CID"))
+}
+
+/// Unset is an empty list. A value that is set but not valid UTF-8 is one rejected part, not an empty
+/// list: it is malformed, so a demotion pass demotes no one rather than everyone.
+fn server_admin_cids_from(value: Result<String, std::env::VarError>) -> ServerAdminCids {
+    match value {
+        Ok(raw) => parse_server_admin_cids(&raw),
+        Err(std::env::VarError::NotPresent) => ServerAdminCids::default(),
+        Err(std::env::VarError::NotUnicode(raw)) => ServerAdminCids {
+            cids: Vec::new(),
+            rejected: vec![raw.to_string_lossy().into_owned()],
+        },
+    }
 }
 
 /// Origins that are valid OAuth `return_to` targets but must NOT be granted credentialed CORS.
@@ -221,7 +254,56 @@ fn normalize_origin(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_origin;
+    use super::{normalize_origin, parse_server_admin_cids, server_admin_cids_from};
+
+    /// Unset is no admin; set but not UTF-8 is malformed, so it must not read as unset (#805).
+    #[test]
+    fn server_admin_cids_tell_unset_from_unreadable() {
+        use std::env::VarError;
+        assert_eq!(
+            server_admin_cids_from(Err(VarError::NotPresent)),
+            Default::default()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let raw = std::ffi::OsString::from_vec(vec![b'1', 0xff]);
+            let list = server_admin_cids_from(Err(VarError::NotUnicode(raw)));
+            assert!(list.cids.is_empty() && list.rejected.len() == 1, "{list:?}");
+        }
+        assert_eq!(server_admin_cids_from(Ok("1, 2".to_string())).cids, [1, 2]);
+    }
+
+    /// What `OIS_SERVER_ADMIN_CID` parses to (#805). Sign-in grants the CIDs, and nothing demotes
+    /// anyone while any part is rejected, so a typo must land in `rejected`, not vanish.
+    #[test]
+    fn server_admin_cids_parse_and_reject_by_part() {
+        let parsed = |raw: &str| {
+            let list = parse_server_admin_cids(raw);
+            (list.cids, list.rejected)
+        };
+        let none: Vec<String> = Vec::new();
+        assert_eq!(parsed(""), (vec![], none.clone()));
+        assert_eq!(
+            parsed(" 1234567 , 7654321 ,"),
+            (vec![1234567, 7654321], none.clone())
+        );
+        assert_eq!(parsed("1,,+2"), (vec![1, 2], none.clone()));
+        assert_eq!(
+            parsed("1234567;7654321"),
+            (vec![], vec!["1234567;7654321".to_string()])
+        );
+        assert_eq!(
+            parsed("1234567, 765432l, 0, -5, 1 2"),
+            (
+                vec![1234567],
+                vec!["765432l", "0", "-5", "1 2"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+    }
 
     #[test]
     fn normalizes_default_and_custom_ports() {

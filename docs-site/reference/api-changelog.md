@@ -32,5 +32,6 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   `running`, then `succeeded` with `result` (`AccessResetBody`) or `failed` with `failure`
   (`AccessResetFailure`: `error` is `vatusa_pull_failed`, `reset_incomplete`, `reset_failed` or
   `reset_interrupted`, with `message` and `users_reset`). The dry run reads the VATUSA data the last
-  pull stored and the reset pulls fresh, so the two can differ if VATUSA changed in between. Additive;
-  no existing caller changes.
+  pull stored and the reset pulls fresh, so the two can differ if VATUSA changed in between. The reset
+  keeps `system` grants, so the baseline `USER` and `SERVER_ADMIN` stay; a row of either written by
+  hand as `manual` is removed like any other (#805). Additive; no existing caller changes.

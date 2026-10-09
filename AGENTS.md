@@ -436,7 +436,12 @@ The full list with dev defaults is in `.env.example`. The ones that gate functio
 - **VATSIM OAuth** (required to sign in): `VATSIM_CLIENT_ID`, `VATSIM_CLIENT_SECRET`,
   `VATSIM_REDIRECT_URI`, `VATSIM_DEV_MODE`.
 - **Server admin bootstrap**: `OIS_SERVER_ADMIN_CID` (comma-separated CIDs) — the only way to grant
-  `SERVER_ADMIN`.
+  or remove `SERVER_ADMIN` (#805). Every holder not listed is demoted before the backend serves, then
+  every 5 minutes (the `server_admin_reconcile` job), and at their sign-in; an empty or unset list
+  means no server admin. If any part is not a CID, nobody is demoted (at start, on the timer or at
+  sign-in) and each bad part is logged as an error, while the CIDs that parse are still granted.
+  **After editing it, restart every replica** (a Recreate rollout): a replica still on the old list
+  demotes a newly added admin on its timer, wiping their national direct grants, until it restarts.
 - **VATUSA** (optional roster sync): `VATUSA_API_BASE`, `VATUSA_API_KEY`, `OIS_PUBLIC_URL`, and
   `OIS_SECRET_KEY` (32 base64 bytes; encrypts the webhook secret — without it there is no webhook, the
   daily division pull still runs). See `docs/features/vatusa-sync.md`.
