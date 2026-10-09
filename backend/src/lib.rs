@@ -246,6 +246,7 @@ mod tests {
         let pass = &source[source
             .find("async fn demote_removed_server_admins")
             .unwrap()..];
+        let pass = &pass[..pass.find("\n}\n").unwrap()];
         assert!(pass.contains("let admin_cids = config::configured_server_admin_cids();"));
         assert!(pass.contains("demote_unconfigured_server_admins(pool, &admin_cids)"));
     }
