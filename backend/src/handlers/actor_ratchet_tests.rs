@@ -29,6 +29,7 @@ const CURRENT_USER_HANDLERS: &[(&str, &str, Intent)] = &[
     ("access", "resync_user_vatusa", UserOnly("re-attaching a person to VATUSA role sync changes their access, like update_user_access; a machine here could grant access")),
     ("access_reset", "preview_vatusa_reset", UserOnly("gated on the server admin's own SERVER_ADMIN group, which only a person holds")),
     ("access_reset", "apply_vatusa_reset", UserOnly("resets every person's access; gated on the server admin's own SERVER_ADMIN group, which only a person holds")),
+    ("access_reset", "get_vatusa_reset_run", UserOnly("reads a reset's result, which lists people's grants; gated on the server admin's own SERVER_ADMIN group, which only a person holds")),
     ("access", "create_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
     ("access", "update_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
     ("access", "delete_group", UserOnly("editing what a group grants is a human act, like update_user_access; a machine here could grant access")),
