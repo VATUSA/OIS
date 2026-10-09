@@ -197,7 +197,8 @@ holding exactly their `system` grants plus what VATUSA justifies.
   says how many were done; running it again finishes the rest. A run whose backend stopped (a crash
   or a redeploy) reads as `reset_interrupted`, with `users_reset` counted from its audit entries.
 - **One at a time, never beside the pull.** A run holds a Postgres advisory lock for its whole life,
-  so a second `POST` gets `409` with the running run's id (the dialog says so and waits for that run). It
+  so a second `POST` gets `409` with the running run's id (the dialog says so and waits for that run).
+  If the lock stays held for 2 s with no run recorded, the `POST` gets `503 reset_lock_busy`. A run
   also holds the division lock from before its pull until its last member. The division pull job
   takes the same lock, so a scheduled, admin-triggered or webhook-driven pull waits for a reset, and
   a reset waits for a pull. The locks are in Postgres, so they hold across replicas; as a side effect,

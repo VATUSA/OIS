@@ -163,8 +163,8 @@ pub struct AccessResetBody {
 /// are untouched.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessResetFailure {
-    /// `vatusa_pull_failed`, `vatusa_not_configured`, `reset_incomplete`, `reset_failed`, or
-    /// `reset_interrupted` when the backend running it stopped.
+    /// `vatusa_pull_failed`, `vatusa_not_configured`, `reset_lock_busy`, `reset_incomplete`,
+    /// `reset_failed`, or `reset_interrupted` when the backend running it stopped.
     pub error: String,
     pub message: String,
     pub users_reset: i64,

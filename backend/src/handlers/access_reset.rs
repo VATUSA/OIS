@@ -129,7 +129,7 @@ pub async fn preview_vatusa_reset(
         (status = 401),
         (status = 403),
         (status = 409, description = "A reset is already running; poll that run instead", body = AccessResetStarted),
-        (status = 503, description = "VATUSA is not configured; nothing was started", body = AccessResetFailure)
+        (status = 503, description = "VATUSA is not configured, or the reset lock is held with no run recorded; nothing was started", body = AccessResetFailure)
     ),
     security(("session" = []))
 )]
@@ -235,7 +235,7 @@ async fn division_pull(
 pub const RESET_JOB: &str = "vatusa_access_reset";
 
 /// How long a start waits, at most, for a reset lock that is held with no run recorded (see
-/// [`start_reset`]) before answering a bare 409.
+/// [`start_reset`]) before answering 503 `reset_lock_busy`.
 const CLAIM_TRIES: usize = 20;
 const CLAIM_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -272,7 +272,19 @@ async fn start_reset(
         tokio::time::sleep(CLAIM_RETRY).await;
     }
     let Some(mut locks) = claimed else {
-        return Err(ApiError::Conflict.into());
+        // Still held and still no run: whatever holds it is not a reset this backend can name, such
+        // as one whose backend stopped between storing its result and letting go.
+        tracing::warn!("access reset refused: the reset lock is held, but no run is recorded");
+        return Err(ResetError::Failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            AccessResetFailure {
+                error: "reset_lock_busy".to_string(),
+                message: "the reset lock is held, but no reset is running; nothing was started — \
+                          try again shortly"
+                    .to_string(),
+                users_reset: 0,
+            },
+        ));
     };
     let run_id = reset_runs::start_run(pool, &user.id, reason).await?;
     state.jobs.register(
@@ -1653,12 +1665,14 @@ mod tests {
         assert_eq!(everything(&w.pool).await, before);
     }
 
-    async fn audit_entry(pool: &PgPool, reason: &str, age: &str) {
-        sqlx::query(&format!(
+    async fn audit_entry(pool: &PgPool, resource_type: &str, reason: &str, age: &str) {
+        sqlx::query(
             "insert into access.audit_logs (action, resource_type, resource_id, reason, created_at) \
-             values ('UPDATE', 'USER_ACCESS', 'someone', $1, now() - interval '{age}')"
-        ))
+             values ('UPDATE', $1, 'someone', $2, now() - $3::interval)",
+        )
+        .bind(resource_type)
         .bind(reason)
+        .bind(age)
         .execute(pool)
         .await
         .unwrap();
@@ -1666,13 +1680,15 @@ mod tests {
 
     /// A run left `running` by a backend that died holds no lock: it reads as interrupted, with the
     /// members its audit entries show it reset, and the next reset closes it. Neither a reset entry
-    /// from before it started nor another kind of access entry counts, and the division lock held
-    /// elsewhere doesn't make it live. A live run, whose task holds the lock, still reads as running.
+    /// from before it started, another kind of access entry, nor a reset-worded entry on another
+    /// resource counts, and no other lock makes it live. A live run, whose task holds the lock, still
+    /// reads as running.
     #[sqlx::test]
     async fn a_run_left_by_a_dead_backend_reads_as_interrupted(pool: PgPool) {
         let w = world(pool).await;
         audit_entry(
             &w.pool,
+            "USER_ACCESS",
             "Reset to VATUSA: an earlier run (removed group ACE)",
             "1 hour",
         )
@@ -1685,16 +1701,31 @@ mod tests {
         .fetch_one(&w.pool)
         .await
         .unwrap();
-        audit_entry(&w.pool, "Granted EC at ZDC", "1 second").await;
+        audit_entry(&w.pool, "USER_ACCESS", "Granted EC at ZDC", "1 second").await;
+        audit_entry(
+            &w.pool,
+            "USER",
+            "Reset to VATUSA: not an access entry",
+            "1 second",
+        )
+        .await;
         // The dead run got as far as the admin and the member.
         reset(&w).await.ok().unwrap();
 
+        // Locks that are not the reset lock don't make it live: the division lock, and the reset
+        // lock's number under another class.
         let division_pull = reset_runs::lock_division(&w.pool).await.unwrap();
+        let mut other_class = w.pool.acquire().await.unwrap().detach();
+        sqlx::query("select pg_advisory_lock(1, 2)")
+            .execute(&mut other_class)
+            .await
+            .unwrap();
         let run = reset_runs::fetch_run(&w.pool, &dead)
             .await
             .unwrap()
             .unwrap();
-        drop(division_pull);
+        division_pull.release().await;
+        sqlx::Connection::close(other_class).await.unwrap();
         assert_eq!(run.status, "failed");
         assert!(run.finished_at.is_none());
         let failure = run.failure.unwrap();
@@ -1730,5 +1761,83 @@ mod tests {
 
         release.notify_one();
         assert_eq!(finished(&w.pool, &live).await.status, "succeeded");
+    }
+
+    /// Hold the reset lock by raw SQL on a connection of its own, with no run recorded: another
+    /// replica's start between taking the lock and recording its run, or a run between storing its
+    /// result and letting go.
+    async fn hold_reset_lock(pool: &PgPool) -> sqlx::PgConnection {
+        let mut conn = pool.acquire().await.unwrap().detach();
+        sqlx::query("select pg_advisory_lock(5196115, 2)")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn
+    }
+
+    async fn run_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from access.vatusa_reset_runs")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A start that finds the reset lock held with no run recorded waits for it rather than refusing,
+    /// and goes ahead once it is let go.
+    #[sqlx::test]
+    async fn a_start_waits_briefly_for_a_reset_lock_with_no_run(pool: PgPool) {
+        let w = world(pool).await;
+        let mut held = hold_reset_lock(&w.pool).await;
+        let starting = tokio::spawn({
+            let (state, admin) = (w.state.clone(), admin_user(&w));
+            async move {
+                start_reset(&state, &admin, "back to VATUSA", None, pulled())
+                    .await
+                    .ok()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!starting.is_finished(), "the start gave up at once");
+        sqlx::query("select pg_advisory_unlock(5196115, 2)")
+            .execute(&mut held)
+            .await
+            .unwrap();
+
+        let id = within("the start", starting)
+            .await
+            .unwrap()
+            .expect("the start goes ahead once the lock is let go");
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
+        assert_eq!(run_count(&w.pool).await, 1);
+    }
+
+    /// A reset lock that stays held with no run recorded gets a 503 `reset_lock_busy` after about 2 s,
+    /// and nothing starts.
+    #[sqlx::test]
+    async fn a_start_gives_up_on_a_reset_lock_held_with_no_run(pool: PgPool) {
+        let w = world(pool).await;
+        let held = hold_reset_lock(&w.pool).await;
+        let before = everything(&w.pool).await;
+        let began = std::time::Instant::now();
+        let refused = within(
+            "the start",
+            start_reset(&w.state, &admin_user(&w), "back to VATUSA", None, pulled()),
+        )
+        .await;
+        assert!(
+            began.elapsed() >= std::time::Duration::from_millis(1_800),
+            "gave up after {:?}",
+            began.elapsed()
+        );
+        let Err(ResetError::Failed(status, failure)) = refused else {
+            panic!("a start must give up on a lock held with no run");
+        };
+        assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(failure.error, "reset_lock_busy");
+        assert_eq!(failure.users_reset, 0);
+        assert_eq!(run_count(&w.pool).await, 0);
+        assert!(reset_job(&w).is_none());
+        assert_eq!(everything(&w.pool).await, before);
+        sqlx::Connection::close(held).await.unwrap();
     }
 }

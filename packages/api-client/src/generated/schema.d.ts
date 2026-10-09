@@ -3744,8 +3744,8 @@ export interface components {
          */
         AccessResetFailure: {
             /**
-             * @description `vatusa_pull_failed`, `vatusa_not_configured`, `reset_incomplete`, `reset_failed`, or
-             *     `reset_interrupted` when the backend running it stopped.
+             * @description `vatusa_pull_failed`, `vatusa_not_configured`, `reset_lock_busy`, `reset_incomplete`,
+             *     `reset_failed`, or `reset_interrupted` when the backend running it stopped.
              */
             error: string;
             message: string;
@@ -7768,7 +7768,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description VATUSA is not configured; nothing was started */
+            /** @description VATUSA is not configured, or the reset lock is held with no run recorded; nothing was started */
             503: {
                 headers: {
                     [name: string]: unknown;

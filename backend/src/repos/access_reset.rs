@@ -62,15 +62,17 @@ pub async fn lock_division(pool: &PgPool) -> Result<AdvisoryLocks, sqlx::Error> 
     Ok(locks)
 }
 
-/// Claim the reset lock, or `None` when another reset, on any replica, holds it.
+/// Claim the reset lock, or `None` when another reset, on any replica, holds it. The attempt uses an
+/// ordinary pooled connection, taken out of the pool only once it holds the lock, so a refused attempt
+/// costs no new connection.
 pub async fn try_lock_reset(pool: &PgPool) -> Result<Option<AdvisoryLocks>, sqlx::Error> {
-    let mut locks = AdvisoryLocks::connect(pool).await?;
+    let mut conn = pool.acquire().await?;
     let claimed: bool = sqlx::query_scalar("select pg_try_advisory_lock($1, $2)")
         .bind(LOCK_CLASS)
         .bind(RESET_LOCK)
-        .fetch_one(&mut locks.0)
+        .fetch_one(&mut *conn)
         .await?;
-    Ok(claimed.then_some(locks))
+    Ok(claimed.then(|| AdvisoryLocks(conn.detach())))
 }
 
 // The two SQL fragments below are spliced into queries with `format!`. Both are constants of this

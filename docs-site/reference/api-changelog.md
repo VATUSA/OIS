@@ -19,8 +19,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   user's access to what VATUSA justifies, and the reset's result. Server admin only. The `POST` takes
   `AccessResetRequest` (`reason`) and answers at once with `202 AccessResetStarted` (`run_id`); the
   reset runs in the background and finishes whether or not the caller waits. A second `POST` while one
-  runs gets `409` with the running run's `AccessResetStarted`; an unconfigured VATUSA gets `503`
-  `AccessResetFailure`, and nothing starts. Poll the run's `GET` for `AccessResetRun`: `status` is
+  runs gets `409` with the running run's `AccessResetStarted`. An unconfigured VATUSA
+  (`vatusa_not_configured`), or a reset lock held with no run recorded (`reset_lock_busy`, try again),
+  gets `503` `AccessResetFailure`, and nothing starts. Poll the run's `GET` for `AccessResetRun`: `status` is
   `running`, then `succeeded` with `result` (`AccessResetBody`) or `failed` with `failure`
   (`AccessResetFailure`: `error` is `vatusa_pull_failed`, `reset_incomplete`, `reset_failed` or
   `reset_interrupted`, with `message` and `users_reset`). The dry run reads the VATUSA data the last
