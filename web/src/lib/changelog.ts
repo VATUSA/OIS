@@ -48,7 +48,7 @@ export const CHANGELOG: ChangelogEntry[] = [
           "Operations → Sector Monitor replaces the Airspace Monitor. Pick a facility and it shows how many flights each enroute and TRACON sector will hold over the next six hours, in 15-minute Zulu bins, colored against each sector's limit.",
           "It looks and works like vTBFM's monitor: a table per facility and stratum, your TRACON under your ARTCC, each neighbor's tables collapsed below, and green, yellow and red bins.",
           "Every sector's limit starts at 10. Traffic management staff can change it per sector, and setting it back to 10 clears the override.",
-          "Right-click a sector on your own facility's table to consolidate it into another sector or split it back out. A consolidated sector's traffic is counted under the sector that works it.",
+          "Traffic management staff can right-click a sector on their own facility's table to consolidate it into another sector or split it back out. A consolidated sector's traffic is counted under the sector that works it.",
           "Inside TRACON airspace only the TRACON's sectors count a flight, so an arrival is no longer counted again by the enroute sector above it.",
         ],
       },
@@ -67,7 +67,7 @@ export const CHANGELOG: ChangelogEntry[] = [
           "On the desktop app, the airport page's arrival ladder can pop out into its own small always-on-top window.",
           "The FCA page remembers the ARTCC you picked, in every browser and in the desktop app.",
           "The departures list shows a flight's latest locked release time rather than its earliest.",
-          "Only event planners can edit or delete an event's FCAs, and an unpublished event's FCAs stay hidden from everyone else.",
+          "Only event planners can edit or delete an event's FCAs, and an event FCA that isn't published stays hidden from everyone else.",
         ],
       },
       {
