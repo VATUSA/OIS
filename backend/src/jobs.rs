@@ -50,7 +50,8 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// and only adds load.
 const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often the server admin reconciliation re-runs after the one before serving (#805). It bounds
+/// How often the server admin reconciliation runs (#805): once on starting, like every `run_interval`
+/// job, beside the pass `run()` makes before serving, then at this interval. It bounds
 /// how long a removed admin can hold the role after a replica still on the old
 /// `OIS_SERVER_ADMIN_CID` grants it back at their sign-in during a rolling restart, or after a row
 /// is written by hand. Five minutes, as the TMU cleanup above; each pass is one indexed query when
@@ -1113,7 +1114,8 @@ async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<S
 }
 
 /// Demote every server admin not in `OIS_SERVER_ADMIN_CID`, every
-/// [`SERVER_ADMIN_RECONCILE_INTERVAL`] (#805). `run()` also runs it once before serving.
+/// [`SERVER_ADMIN_RECONCILE_INTERVAL`] from startup (#805), so a boot runs it twice: here and in
+/// `run()` before serving. A second pass right after the first finds nothing to do.
 pub fn spawn_server_admin_reconcile(reg: Arc<JobRegistry>, pool: PgPool) {
     tokio::spawn(run_interval(
         reg,
@@ -2237,6 +2239,21 @@ mod registration_tests {
             .filter_map(|rest| rest.split(['(', '<']).next())
             .map(|name| format!("spawn_{name}"))
             .collect()
+    }
+
+    /// The server admin reconciliation passes the configured list, malformed parts and all, so a
+    /// part that is not a CID stops it as it stops the pass before serving, and re-runs often
+    /// enough to bound a re-grant from a replica on the old list (#805).
+    #[test]
+    fn the_server_admin_reconcile_passes_the_configured_list() {
+        let code = without_line_comments(JOBS_RS);
+        let start = code.find("pub fn spawn_server_admin_reconcile(").unwrap();
+        let spawn = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        assert!(spawn.contains("SERVER_ADMIN_RECONCILE_INTERVAL,"));
+        assert!(spawn.contains(
+            "server_admin_reconcile_once(&pool, &crate::config::server_admin_cids()).await"
+        ));
+        assert!(super::SERVER_ADMIN_RECONCILE_INTERVAL <= std::time::Duration::from_secs(5 * 60));
     }
 
     #[test]

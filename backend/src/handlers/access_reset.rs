@@ -605,7 +605,7 @@ mod tests {
             &w.admin,
             ADMIN_CID,
             false,
-            &[ADMIN_CID],
+            &crate::config::parse_server_admin_cids(&ADMIN_CID.to_string()),
         )
         .await
         .unwrap();

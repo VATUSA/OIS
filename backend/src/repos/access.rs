@@ -1675,9 +1675,9 @@ mod tests {
         assert_eq!(rows(&pool).await, after, "and changes nothing");
     }
 
-    /// #805 AC4: the 0130 audit (`backend/audits/0130_retag_effect.sql`), run from its own SETUP and
-    /// REPORT blocks, lists every SERVER_ADMIN holder before and after, and singles out the former
-    /// admins the deploy demotes from the configured ones it leaves alone.
+    /// #805 AC4: the 0130 audit (`backend/audits/0130_retag_effect.sql`), run from its own SETUP,
+    /// PARSE, NOT_A_CID and REPORT blocks, lists every SERVER_ADMIN holder before and after, and
+    /// singles out the former admins the deploy demotes from the configured ones it leaves alone.
     #[sqlx::test]
     async fn the_0130_audit_lists_every_server_admin_before_and_after(pool: sqlx::PgPool) {
         const AUDIT: &str = include_str!("../../audits/0130_retag_effect.sql");
@@ -1731,12 +1731,10 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("the audit parses the list");
-        let not_a_cid: Vec<String> = sqlx::query_scalar(
-            "select part from audit_admin_cid_parts where cid is null or cid <= 0 order by part",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
+        let not_a_cid: Vec<String> = sqlx::query_scalar(block("NOT_A_CID"))
+            .fetch_all(&mut *tx)
+            .await
+            .expect("the audit lists the parts that are not CIDs");
         assert_eq!(not_a_cid, ["0", "x1"]);
         sqlx::raw_sql(MIGRATION_0130)
             .execute(&mut *tx)

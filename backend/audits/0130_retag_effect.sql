@@ -24,8 +24,8 @@
 --   * `configured` — the holder's CID is in `admin_cids`. Every holder with `false` is demoted when the
 --     release starts, whatever their sources; check each is a former admin.
 --
--- `repos::access::tests::the_0130_audit_lists_every_server_admin_before_and_after` runs the SETUP, PARSE
--- and REPORT blocks below, verbatim, so this file cannot drift from what the test proves.
+-- `repos::access::tests::the_0130_audit_lists_every_server_admin_before_and_after` runs the SETUP, PARSE,
+-- NOT_A_CID and REPORT blocks below, verbatim, so this file cannot drift from what the test proves.
 
 begin;
 
@@ -60,7 +60,10 @@ select distinct cid from audit_admin_cid_parts where cid > 0;
 -- END PARSE
 ;
 
-select part as not_a_cid from audit_admin_cid_parts where cid is null or cid <= 0;
+-- BEGIN NOT_A_CID
+select part as not_a_cid from audit_admin_cid_parts where cid is null or cid <= 0 order by part
+-- END NOT_A_CID
+;
 
 \i backend/migrations/0130_retag_system_groups.sql
 

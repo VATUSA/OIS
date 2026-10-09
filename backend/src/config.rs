@@ -53,17 +53,23 @@ pub fn parse_server_admin_cids(raw: &str) -> ServerAdminCids {
     list
 }
 
-/// `OIS_SERVER_ADMIN_CID` from the environment; unset is an empty list. Server admin is
-/// env-configured only: the list alone grants and removes it, never the permissions UI.
+/// `OIS_SERVER_ADMIN_CID` from the environment. Server admin is env-configured only: the list alone
+/// grants and removes it, never the permissions UI.
 pub fn server_admin_cids() -> ServerAdminCids {
-    std::env::var("OIS_SERVER_ADMIN_CID")
-        .map(|raw| parse_server_admin_cids(&raw))
-        .unwrap_or_default()
+    server_admin_cids_from(std::env::var("OIS_SERVER_ADMIN_CID"))
 }
 
-/// The CIDs that should hold the SERVER_ADMIN role, skipping any part that isn't one.
-pub fn configured_server_admin_cids() -> Vec<i64> {
-    server_admin_cids().cids
+/// Unset is an empty list. A value that is set but not valid UTF-8 is one rejected part, not an empty
+/// list: it is malformed, so a demotion pass demotes no one rather than everyone.
+fn server_admin_cids_from(value: Result<String, std::env::VarError>) -> ServerAdminCids {
+    match value {
+        Ok(raw) => parse_server_admin_cids(&raw),
+        Err(std::env::VarError::NotPresent) => ServerAdminCids::default(),
+        Err(std::env::VarError::NotUnicode(raw)) => ServerAdminCids {
+            cids: Vec::new(),
+            rejected: vec![raw.to_string_lossy().into_owned()],
+        },
+    }
 }
 
 /// Origins that are valid OAuth `return_to` targets but must NOT be granted credentialed CORS.
@@ -248,10 +254,28 @@ fn normalize_origin(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_origin, parse_server_admin_cids};
+    use super::{normalize_origin, parse_server_admin_cids, server_admin_cids_from};
 
-    /// What `OIS_SERVER_ADMIN_CID` parses to (#805). Sign-in uses the CIDs alone; a demotion pass
-    /// demotes no one while any part is rejected, so a typo must land in `rejected`, not vanish.
+    /// Unset is no admin; set but not UTF-8 is malformed, so it must not read as unset (#805).
+    #[test]
+    fn server_admin_cids_tell_unset_from_unreadable() {
+        use std::env::VarError;
+        assert_eq!(
+            server_admin_cids_from(Err(VarError::NotPresent)),
+            Default::default()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let raw = std::ffi::OsString::from_vec(vec![b'1', 0xff]);
+            let list = server_admin_cids_from(Err(VarError::NotUnicode(raw)));
+            assert!(list.cids.is_empty() && list.rejected.len() == 1, "{list:?}");
+        }
+        assert_eq!(server_admin_cids_from(Ok("1, 2".to_string())).cids, [1, 2]);
+    }
+
+    /// What `OIS_SERVER_ADMIN_CID` parses to (#805). Sign-in grants the CIDs, and nothing demotes
+    /// anyone while any part is rejected, so a typo must land in `rejected`, not vanish.
     #[test]
     fn server_admin_cids_parse_and_reject_by_part() {
         let parsed = |raw: &str| {
