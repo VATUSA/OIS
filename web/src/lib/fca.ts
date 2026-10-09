@@ -1,4 +1,5 @@
 import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
+import {useState} from "react";
 import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
@@ -6,6 +7,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
 import {fetchHistTraffic} from "./historical";
+import {usePreferences, useSavePreferences} from "./preferences";
 import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Fca = components["schemas"]["FcaBody"];
@@ -640,4 +642,39 @@ export function toUpsert(fca: Fca): UpsertFca {
     mit: fca.mit,
     enabled: fca.enabled,
   };
+}
+
+/** The FCA page's ARTCC filter as stored in the account's `fca` preferences namespace (#789). */
+export type FcaPrefs = { artcc?: string };
+const FCA_PREFS_NS = "fca";
+
+/**
+ * The FCA page's ARTCC filter, saved to the account so it follows the user across browsers and the
+ * desktop app (#789). `""` is ALL ARTCCs and is saved like any other choice. With `persist` off it's
+ * plain page state that starts at ALL, as on the advisories overview and the event builder.
+ *
+ * Mirrors `useIdstScope`: nothing is written until the stored value has loaded, so the `""` default
+ * shown while it loads can't overwrite a saved ARTCC. A pick made before then (or while signed out,
+ * when the load fails) still applies on this page; it just isn't saved. Until the user picks, a
+ * refetch that brings back a value saved on another device replaces the shown one.
+ *
+ * `ignoreStored` shows ALL in place of the saved ARTCC without touching it: a notification's
+ * `?fca=` deep link must not land on an FCA the saved filter hides (owner decision on #789). A pick
+ * made during that visit still saves.
+ */
+export function useFcaArtccFilter(
+  persist: boolean,
+  { ignoreStored = false }: { ignoreStored?: boolean } = {},
+): [string, (artcc: string) => void] {
+  const prefs = usePreferences<FcaPrefs>(FCA_PREFS_NS, { enabled: persist });
+  const save = useSavePreferences<FcaPrefs>(FCA_PREFS_NS);
+  const [picked, setPicked] = useState<string | null>(null);
+  // A disabled query still hands back whatever is cached, so `persist` gates the read too.
+  const stored = persist && !ignoreStored ? prefs.data?.artcc : undefined;
+  const artcc = picked ?? (typeof stored === "string" ? stored : "");
+  const setArtcc = (next: string) => {
+    setPicked(next);
+    if (persist && prefs.isSuccess) save.mutate({ artcc: next });
+  };
+  return [artcc, setArtcc];
 }

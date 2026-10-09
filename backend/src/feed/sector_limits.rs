@@ -31,8 +31,7 @@ pub fn limit_for(limits: &SectorLimits, artcc: &str, sector_id: &str) -> i32 {
         .unwrap_or(DEFAULT_LIMIT)
 }
 
-/// A bin's load against its sector's limit, drawn as `--level-ok` / `--level-watch` / `--level-over`
-/// (`SectorGrid`'s `LoadLevel` in `@ois/ui`).
+/// A bin's load against its sector's limit: green, yellow and red on the Sector Monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SectorLoadLevel {

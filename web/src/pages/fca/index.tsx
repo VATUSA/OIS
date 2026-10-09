@@ -6,5 +6,5 @@ import {FcaMapView} from "@/components/map/FcaMapView";
 export function FcaPage() {
   // `?fca=<id>` selects that FCA on arrival — where a desktop release/metering notification lands.
   const initialFcaId = useSearch({ from: "/ops/fca" }).fca;
-  return <FcaMapView persistKey="ops-fca" initialFcaId={initialFcaId} />;
+  return <FcaMapView persistKey="ops-fca" initialFcaId={initialFcaId} persistArtccFilter />;
 }

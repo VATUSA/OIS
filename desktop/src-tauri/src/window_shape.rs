@@ -1,132 +1,109 @@
-//! The main window's outer shape (#419).
+//! The main window's frame (#796).
 //!
-//! The window has no title bar of its own to draw the app's chrome under (#402), and on macOS it is
-//! the OS that draws both the traffic lights and the rounded corners — so that platform gets its
-//! decorations back through `tauri.macos.conf.json` (`titleBarStyle: "Overlay"`, `hiddenTitle`, and a
-//! `trafficLightPosition` that insets the lights into the app's own top bar) and needs nothing here.
-//!
-//! Windows is the platform that needs code: an undecorated window there is left square by the
-//! compositor, so the rounded corners have to be asked for explicitly. Everything in this module is
-//! Windows-only for that reason; on every other target [`round_corners`] is a no-op.
-
-/// Ask the compositor to round the window's corners.
-///
-/// Windows 11 only: `DWMWA_WINDOW_CORNER_PREFERENCE` was added in build 22000, and `DwmSetWindowAttribute`
-/// answers `E_INVALIDARG` on Windows 10 — which is why the result is discarded rather than surfaced.
-/// A Windows 10 user keeps square corners, and that is the accepted outcome: the alternative is a
-/// transparent window with a CSS radius, which costs the native drop shadow and leaves the corners
-/// click-through.
-///
-/// The rounding is the compositor's, so it also clips the webview — nothing in the page needs a
-/// matching `border-radius`, and `DESIGN.md`'s "the shell is flush to the viewport" still holds.
-#[cfg(windows)]
-pub fn round_corners(window: &tauri::WebviewWindow) {
-    use windows_sys::Win32::Graphics::Dwm::{
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
-    };
-
-    let Ok(hwnd) = window.hwnd() else {
-        // No handle means no window to shape; the app is still perfectly usable square.
-        return;
-    };
-    let preference = DWMWCP_ROUND;
-    // SAFETY: `hwnd` is a live window handle owned by the window we were handed, and the value is a
-    // `DWM_WINDOW_CORNER_PREFERENCE` matching the size passed. The call only reads from `preference`.
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd.0 as _,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            &raw const preference as *const _,
-            size_of_val(&preference) as u32,
-        );
-    }
-}
-
-/// Non-Windows targets: macOS rounds a decorated window itself, and on Linux it is the compositor's
-/// business, not ours.
-#[cfg(not(windows))]
-pub fn round_corners(_window: &tauri::WebviewWindow) {}
+//! The main window uses each platform's standard title bar: macOS draws its own strip with the
+//! traffic lights in their usual place, Windows draws minimize / maximize / close at the top right,
+//! and Linux gets whatever its window manager draws. All of that is configuration in
+//! `tauri.conf.json` (`decorations: true`), so there is no runtime code here; the tests below pin
+//! that configuration, on every platform.
 
 #[cfg(test)]
 mod tests {
-    /// #419: `tauri.macos.conf.json` exists because `decorations` has to differ per platform for one
-    /// window label — macOS needs `true` (an `Overlay` title bar keeps the native traffic lights and
-    /// the native corners), Windows and Linux need `false`.
-    ///
-    /// Tauri merges a platform config over the base with `json_patch::merge`, which **replaces**
-    /// arrays rather than merging them element-wise, so the override has to repeat the whole
-    /// `app.windows[0]` object — width, minimums, background and all. That duplication is silent: a
-    /// size changed in `tauri.conf.json` alone would simply not apply on macOS, and nothing would
-    /// fail. This pins the two against each other, so any shared key that drifts fails here instead.
+    use std::path::Path;
+
+    /// The window-frame keys that only matter when the app hides or overlays the native title bar.
+    /// Any of them on the main window brings back a shape the app then has to draw chrome for.
+    const FRAMELESS_KEYS: [&str; 4] = [
+        "titleBarStyle",
+        "hiddenTitle",
+        "trafficLightPosition",
+        "transparent",
+    ];
+
+    /// The per-platform overrides Tauri merges over `tauri.conf.json` when it builds on that OS.
+    const PLATFORM_CONFIGS: [&str; 3] = [
+        "tauri.macos.conf.json",
+        "tauri.windows.conf.json",
+        "tauri.linux.conf.json",
+    ];
+
+    fn main_window(config: &serde_json::Value) -> &serde_json::Map<String, serde_json::Value> {
+        config["app"]["windows"]
+            .as_array()
+            .expect("app.windows is an array")
+            .iter()
+            .find(|w| w["label"] == "main")
+            .and_then(serde_json::Value::as_object)
+            .expect("app.windows has a `main` window")
+    }
+
+    /// #796: the base config is the one every platform builds from, and its main window is decorated
+    /// with no frameless styling, so Windows and Linux get their native title bar.
     #[test]
-    fn the_macos_window_override_matches_the_base_config() {
+    fn the_main_window_keeps_the_native_title_bar() {
         let base: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
-        let macos: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.macos.conf.json"))
-                .expect("tauri.macos.conf.json");
-
-        let window = |config: &serde_json::Value| {
-            config["app"]["windows"][0]
-                .as_object()
-                .expect("app.windows[0] is an object")
-                .clone()
-        };
-        // Only `windows[0]` is compared below, so pin the count too: Tauri replaces the whole array,
-        // and a second window added to the base alone would simply not exist on macOS (#419 review).
-        let count = |config: &serde_json::Value| {
-            config["app"]["windows"]
-                .as_array()
-                .expect("app.windows is an array")
-                .len()
-        };
-        assert_eq!(
-            count(&macos),
-            count(&base),
-            "tauri.macos.conf.json must repeat every window in tauri.conf.json — Tauri replaces the \
-             whole array, so one left out here does not exist on macOS at all"
-        );
-
-        let (base_window, macos_window) = (window(&base), window(&macos));
-
-        // The keys the override exists to change, plus the macOS-only ones it adds.
-        const MACOS_ONLY: [&str; 4] = [
-            "decorations",
-            "titleBarStyle",
-            "hiddenTitle",
-            "trafficLightPosition",
-        ];
-
-        for (key, value) in &base_window {
-            if MACOS_ONLY.contains(&key.as_str()) {
-                continue;
-            }
-            assert_eq!(
-                macos_window.get(key),
-                Some(value),
-                "tauri.macos.conf.json must repeat `{key}` from tauri.conf.json unchanged — Tauri \
-                 replaces the whole windows array, so a value left out here silently does not apply \
-                 on macOS"
-            );
-        }
-
-        for key in macos_window.keys() {
-            assert!(
-                base_window.contains_key(key) || MACOS_ONLY.contains(&key.as_str()),
-                "tauri.macos.conf.json sets `{key}`, which is neither in the base config nor a \
-                 known macOS-only key — add it to the base or to MACOS_ONLY deliberately"
-            );
-        }
+        let window = main_window(&base);
 
         assert_eq!(
-            macos_window.get("decorations"),
+            window.get("decorations"),
             Some(&serde_json::Value::Bool(true)),
-            "macOS keeps its decorations: the native traffic lights and rounded corners come with them"
+            "the main window must keep the OS's own title bar and window buttons (#796)"
         );
-        assert_eq!(
-            base_window.get("decorations"),
-            Some(&serde_json::Value::Bool(false)),
-            "Windows and Linux draw our own controls, so the base config stays undecorated"
-        );
+        for key in FRAMELESS_KEYS {
+            assert!(
+                !window.contains_key(key),
+                "tauri.conf.json sets `{key}` on the main window, which hides or overlays the native \
+                 title bar (#796)"
+            );
+        }
+    }
+
+    /// Why a platform config must not touch `app.windows`, or `None` when it doesn't.
+    fn reshapes_the_windows(config: &serde_json::Value) -> Option<&'static str> {
+        config["app"].get("windows").map(|_| {
+            "it overrides app.windows, which replaces the base config's decorated main window on \
+             that platform (#796)"
+        })
+    }
+
+    /// #796: macOS used to get its own shape from `tauri.macos.conf.json` (an `Overlay` title bar with
+    /// the lights inset into the sidebar). Tauri merges a platform file over the base and **replaces**
+    /// the whole `app.windows` array when it does, so a platform file that touches the windows at all
+    /// decides that platform's frame on its own. None may: every platform takes the base config's
+    /// decorated window. None of the files exists today, so the loop reads nothing; the next test
+    /// proves the check fires on the override this branch deleted.
+    #[test]
+    fn no_platform_config_reshapes_the_windows() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in PLATFORM_CONFIGS {
+            let text = match std::fs::read_to_string(dir.join(name)) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => panic!("{name}: {e}"),
+            };
+            let config: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            if let Some(why) = reshapes_the_windows(&config) {
+                panic!("{name}: {why}");
+            }
+        }
+    }
+
+    /// The check above has to reject the macOS override #419 shipped, or it is decoration.
+    #[test]
+    fn the_old_macos_override_would_be_rejected() {
+        let old = serde_json::json!({
+            "app": {"windows": [{
+                "label": "main",
+                "decorations": true,
+                "titleBarStyle": "Overlay",
+                "hiddenTitle": true,
+                "trafficLightPosition": {"x": 10, "y": 28}
+            }]}
+        });
+        assert!(reshapes_the_windows(&old).is_some());
+
+        let unrelated = serde_json::json!({"bundle": {"macOS": {"minimumSystemVersion": "11.0"}}});
+        assert!(reshapes_the_windows(&unrelated).is_none());
     }
 }

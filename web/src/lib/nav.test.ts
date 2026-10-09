@@ -59,6 +59,7 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/ops/idst": ["flow.fca.read"],
   "/ops/runway": ["flow.runway.read"],
   "/ops/aadc": ["tmu.program.read"],
+  "/ops/sectors": ["flow.sectors.read"],
   "/admin/planning/events": ["events.plan.read"],
   "/admin/planning/airport-configs": ["events.plan.read"],
   "/admin/planning/facility-documents": ["facilities.docs.read"],
