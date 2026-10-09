@@ -36,6 +36,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/access/vatusa-reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dry run of the reset (#795): every member whose access would change, and the grant rows each would
+         *     gain and lose, from the VATUSA data the last division pull stored. Writes nothing. Server admin only.
+         */
+        get: operations["preview_vatusa_reset"];
+        put?: never;
+        /**
+         * Reset every member's access to VATUSA (#795): pull the division fresh (refused with 503 when
+         *     VATUSA is not configured), then, one transaction per
+         *     member, put them back on role sync, delete every hand-made grant except the baseline `USER` and
+         *     `SERVER_ADMIN` groups, and reconcile their VATUSA grants. `system` grants are left alone. Each
+         *     changed member gets one `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the
+         *     result can differ from the dry run if VATUSA changed since the last pull. Server admin only.
+         */
+        post: operations["apply_vatusa_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/api-keys": {
         parameters: {
             query?: never;
@@ -3697,6 +3725,64 @@ export interface components {
             /** @description Every assignable permission as the nested checkbox tree. */
             permissions: Record<string, never>;
             roles: string[];
+        };
+        /** @description A reset's result, or a dry run's prediction. Only members whose access changes are listed. */
+        AccessResetBody: {
+            /** @description `true` for the dry run: nothing was written. */
+            dry_run: boolean;
+            /**
+             * @description The VATUSA division pull the reset ran first. `None` for a dry run, which reads the VATUSA
+             *     data the last pull stored.
+             */
+            pull_summary?: string | null;
+            users: components["schemas"]["AccessResetUser"][];
+            /**
+             * Format: int64
+             * @description How many members there are. Only those a reset can change are examined: detached, holding a
+             *     hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
+             */
+            users_checked: number;
+            /**
+             * Format: int64
+             * @description How many members were reset (or, in a dry run, would be).
+             */
+            users_reset: number;
+        };
+        /**
+         * @description Why a reset did not finish. `users_reset` members were reset and audited before it stopped; the rest
+         *     are untouched.
+         */
+        AccessResetFailure: {
+            /** @description `vatusa_pull_failed`, `vatusa_not_configured` or `reset_incomplete`. */
+            error: string;
+            message: string;
+            /** Format: int64 */
+            users_reset: number;
+        };
+        /** @description One stored grant row a reset adds or removes. `artcc_id` `None` = national. */
+        AccessResetGrant: {
+            artcc_id?: string | null;
+            /** @description `false` for a direct deny. Always `true` for a group. */
+            granted: boolean;
+            /** @description `group` for a group membership, `permission` for a direct permission. */
+            kind: string;
+            name: string;
+            /** @description Whose row it is: `manual`, `vatusa` or `system`. */
+            source: string;
+        };
+        /** @description Reset every member's access to VATUSA. The reason is recorded on each changed member's audit entry. */
+        AccessResetRequest: {
+            reason: string;
+        };
+        /** @description What a reset changes, or would change, for one member. */
+        AccessResetUser: {
+            added: components["schemas"]["AccessResetGrant"][];
+            /** Format: int64 */
+            cid?: number | null;
+            display_name: string;
+            /** @description They were off VATUSA role sync and are put back on it. */
+            reattached: boolean;
+            removed: components["schemas"]["AccessResetGrant"][];
         };
         /**
          * @description One claim on an ACE request — who took a slot, with their notes + availability window (within the
@@ -7694,6 +7780,123 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    preview_vatusa_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    apply_vatusa_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccessResetRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetBody"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Stopped part-way; `users_reset` members were reset */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetFailure"];
+                };
+            };
+            /** @description The VATUSA division pull failed; nothing was reset */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetFailure"];
+                };
+            };
+            /** @description VATUSA is not configured; nothing was reset */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetFailure"];
+                };
             };
         };
     };

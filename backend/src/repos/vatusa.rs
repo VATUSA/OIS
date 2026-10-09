@@ -395,6 +395,339 @@ pub async fn resync(
         .map(|_| ())
 }
 
+// --- Reset everyone's access to VATUSA (#795) ---
+
+/// Groups a reset never removes, whatever their `source`. Migration 0098 backfilled every grant that
+/// existed then as `manual`, the baseline group and `SERVER_ADMIN` included, so matching on `source`
+/// alone would strip older members' baseline and the server admin's own role.
+pub const RESET_KEEPS_GROUPS: [&str; 2] = [access_repo::BASELINE_ROLE, acl::SERVER_ADMIN_ROLE];
+
+/// One stored grant row: a group membership or a direct permission, at a scope (`None` = national),
+/// with whose row it is. `granted` is `false` for a direct deny and always `true` for a group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GrantRow {
+    pub is_group: bool,
+    pub name: String,
+    pub artcc_id: Option<String>,
+    pub source: String,
+    pub granted: bool,
+}
+
+impl GrantRow {
+    fn label(&self) -> String {
+        let what = match (self.is_group, self.granted) {
+            (true, _) => format!("group {}", self.name),
+            (false, true) => format!("permission {}", self.name),
+            (false, false) => format!("deny {}", self.name),
+        };
+        format!("{what} {} ({})", scope_label(&self.artcc_id), self.source)
+    }
+}
+
+/// What a reset changed, or would change, for one member.
+#[derive(Debug)]
+pub struct MemberReset {
+    pub user_id: String,
+    pub cid: Option<i64>,
+    pub display_name: String,
+    /// They were off VATUSA role sync and are back on it.
+    pub reattached: bool,
+    pub added: Vec<GrantRow>,
+    pub removed: Vec<GrantRow>,
+    pub before: UserAccessBody,
+    pub after: UserAccessBody,
+}
+
+impl MemberReset {
+    /// The audit reason: the admin's reason, then every row the reset added or removed. The snapshots
+    /// either side show access, not provenance or denies, so the list is what makes the entry an undo
+    /// trail.
+    fn audit_reason(&self, reason: &str) -> String {
+        let mut changes: Vec<String> = self
+            .removed
+            .iter()
+            .map(|row| format!("removed {}", row.label()))
+            .chain(
+                self.added
+                    .iter()
+                    .map(|row| format!("added {}", row.label())),
+            )
+            .collect();
+        if self.reattached {
+            changes.push("re-attached to VATUSA role sync".to_string());
+        }
+        format!("Reset to VATUSA: {reason} ({})", changes.join("; "))
+    }
+}
+
+async fn grant_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<BTreeSet<GrantRow>, ApiError> {
+    let rows = sqlx::query_as::<_, (bool, String, Option<String>, String, bool)>(
+        "select true, role_name, artcc_id, source, true from access.user_roles where user_id = $1 \
+         union all \
+         select false, permission_name, artcc_id, source, granted from access.user_permissions \
+         where user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|(is_group, name, artcc_id, source, granted)| GrantRow {
+            is_group,
+            name,
+            artcc_id,
+            source,
+            granted,
+        })
+        .collect())
+}
+
+/// Reset one member to exactly their `system` grants plus what VATUSA justifies, in the caller's
+/// transaction: put them back on role sync, delete every `manual` group and direct-permission row
+/// (allow or deny) except [`RESET_KEEPS_GROUPS`], and reconcile their `vatusa` grants against their
+/// stored VATUSA roles. Writes no audit; the caller audits, or rolls back for a dry run.
+///
+/// Returns `None` when nothing changed. Takes the member's `identity.users` row lock, the lock a sync
+/// holds, so a concurrent sync for the same member waits.
+pub async fn reset_member(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<Option<MemberReset>, ApiError> {
+    let Some((cid, display_name, detached)) = sqlx::query_as::<_, (Option<i64>, String, bool)>(
+        "select cid, display_name, vatusa_roles_detached_at is not null from identity.users \
+             where id = $1 for update",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?
+    else {
+        return Ok(None);
+    };
+    let rows_before = grant_rows(tx, user_id).await?;
+    let before = access_snapshot(tx, user_id, cid.unwrap_or_default()).await?;
+
+    if detached {
+        sqlx::query(
+            "update identity.users \
+             set vatusa_roles_detached_at = null, vatusa_roles_detached_by = null where id = $1",
+        )
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    }
+    sqlx::query(
+        "delete from access.user_roles \
+         where user_id = $1 and source = 'manual' and role_name <> all($2)",
+    )
+    .bind(user_id)
+    .bind(RESET_KEEPS_GROUPS)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    sqlx::query("delete from access.user_permissions where user_id = $1 and source = 'manual'")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    if let Some(cid) = cid {
+        let justified_now = desired_vatusa_grants(tx, cid).await?;
+        let (grants, revokes) = pending_changes(tx, user_id, &justified_now).await?;
+        for ((group, scope), _) in &grants {
+            access_repo::set_user_role_scoped(
+                tx,
+                user_id,
+                group,
+                true,
+                scope.as_deref(),
+                GrantSource::Vatusa,
+            )
+            .await?;
+        }
+        for (group, scope) in &revokes {
+            access_repo::set_user_role_scoped(
+                tx,
+                user_id,
+                group,
+                false,
+                scope.as_deref(),
+                GrantSource::Vatusa,
+            )
+            .await?;
+        }
+    }
+
+    let rows_after = grant_rows(tx, user_id).await?;
+    let removed: Vec<GrantRow> = rows_before.difference(&rows_after).cloned().collect();
+    let added: Vec<GrantRow> = rows_after.difference(&rows_before).cloned().collect();
+    if !detached && removed.is_empty() && added.is_empty() {
+        return Ok(None);
+    }
+    let after = access_snapshot(tx, user_id, cid.unwrap_or_default()).await?;
+    Ok(Some(MemberReset {
+        user_id: user_id.to_string(),
+        cid,
+        display_name,
+        reattached: detached,
+        added,
+        removed,
+        before,
+        after,
+    }))
+}
+
+/// Whether a reset writes, and who it is audited as.
+pub enum ResetMode<'a> {
+    /// Every member's reset runs in a transaction that is rolled back: nothing is written.
+    DryRun,
+    Apply {
+        actor_id: Option<String>,
+        reason: &'a str,
+        ip_address: Option<String>,
+    },
+}
+
+/// The outcome of a reset over every member. `failure` is set when it stopped part-way: the members
+/// in `changed` are reset (or, in a dry run, would be) and the rest are untouched.
+pub struct ResetRun {
+    /// Every member, examined or not.
+    pub users_checked: usize,
+    pub changed: Vec<MemberReset>,
+    pub failure: Option<ApiError>,
+}
+
+/// The members a reset can change, in CID order: detached, holding a `manual` row other than a
+/// [`RESET_KEEPS_GROUPS`] group, or holding `vatusa` group grants that differ from what their stored
+/// VATUSA roles justify. Everyone else already holds exactly their `system` grants plus VATUSA's, so
+/// [`reset_member`] would change nothing for them. The division pull seeds every rostered controller
+/// into `identity.users` and reconciles every attached member, so most members are in none of these
+/// groups, and a reset opens a transaction only for the members it touches.
+///
+/// "Justified" here is the set form of [`desired_vatusa_grants`], over every member at once. The
+/// `vatusa` drift is one set-based diff (justified `FULL JOIN` held, keeping the rows with one side
+/// missing), not a per-member comparison: a correlated subquery over the CTE rescans it once per
+/// member, which took 31 s at 15,000 users. A full join needs a hashable condition, so a national
+/// (null) scope is compared through `coalesce(artcc_id, '')`, as the unique index does (0098).
+pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiError> {
+    sqlx::query_scalar(
+        r#"
+        with justified(cid, role_name, artcc_id) as (
+            select vr.cid, m.role_name, case when vr.facility = 'ZHQ' then null else f.id end
+            from identity.vatusa_roles vr
+            join access.vatusa_role_mappings m
+              on m.vatusa_role = vr.role and (m.facility is null or m.facility = vr.facility)
+            left join org.facilities f on f.id = vr.facility
+            where vr.facility = 'ZHQ' or f.id is not null
+            union
+            select u.cid, $2, f.id
+            from identity.users u join org.facilities f on f.id = u.home_facility
+            union
+            select v.cid, $2, f.id
+            from identity.vatusa_visits v join org.facilities f on f.id = v.facility
+        ),
+        drift(user_id) as (
+            select coalesce(j.user_id, h.user_id)
+            from (select u.id as user_id, g.role_name, g.artcc_id
+                  from justified g join identity.users u on u.cid = g.cid) j
+            full join (select r.user_id, r.role_name, r.artcc_id from access.user_roles r
+                       where r.source = 'vatusa') h
+              on h.user_id = j.user_id and h.role_name = j.role_name
+             and coalesce(h.artcc_id, '') = coalesce(j.artcc_id, '')
+            where j.user_id is null or h.user_id is null
+        )
+        select u.id from identity.users u
+        where u.vatusa_roles_detached_at is not null
+           or exists (select 1 from access.user_roles r
+                      where r.user_id = u.id and r.source = 'manual' and r.role_name <> all($1))
+           or exists (select 1 from access.user_permissions p
+                      where p.user_id = u.id and p.source = 'manual')
+           or u.id in (select user_id from drift)
+        order by u.cid nulls last, u.id
+        "#,
+    )
+    .bind(RESET_KEEPS_GROUPS)
+    .bind(ROSTER_GROUP)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+/// Reset every member (#795) a reset can change ([`reset_candidates`]), one transaction each, in CID
+/// order. A member's reset, its audit entry and its re-attach commit together, so a failure part-way
+/// leaves no member half-reset; it stops the run and is returned beside the members already reset. A
+/// member with no change gets no audit entry.
+pub async fn reset_all(pool: &PgPool, mode: &ResetMode<'_>) -> ResetRun {
+    let mut run = ResetRun {
+        users_checked: 0,
+        changed: Vec::new(),
+        failure: None,
+    };
+    let total: Result<i64, _> = sqlx::query_scalar("select count(*) from identity.users")
+        .fetch_one(pool)
+        .await;
+    let (total, users) = match (total, reset_candidates(pool).await) {
+        (Ok(total), Ok(users)) => (total, users),
+        (Err(_), _) | (_, Err(_)) => {
+            run.failure = Some(ApiError::Internal);
+            return run;
+        }
+    };
+    run.users_checked = total as usize;
+    for user_id in &users {
+        match reset_one(pool, user_id, mode).await {
+            Ok(change) => run.changed.extend(change),
+            Err(e) => {
+                tracing::error!(user_id, error = %e, "access reset to VATUSA failed for a member");
+                run.failure = Some(e);
+                break;
+            }
+        }
+    }
+    run
+}
+
+async fn reset_one(
+    pool: &PgPool,
+    user_id: &str,
+    mode: &ResetMode<'_>,
+) -> Result<Option<MemberReset>, ApiError> {
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    let change = reset_member(&mut tx, user_id).await?;
+    match mode {
+        ResetMode::DryRun => tx.rollback().await.map_err(|_| ApiError::Internal)?,
+        ResetMode::Apply {
+            actor_id,
+            reason,
+            ip_address,
+        } => {
+            if let Some(change) = &change {
+                audit_repo::record_audit(
+                    &mut *tx,
+                    audit_repo::AuditEntry {
+                        actor_id: actor_id.clone(),
+                        action: "UPDATE".to_string(),
+                        resource_type: "USER_ACCESS".to_string(),
+                        resource_id: Some(change.user_id.clone()),
+                        artcc_id: None,
+                        reason: Some(change.audit_reason(reason)),
+                        before_state: serde_json::to_value(&change.before).ok(),
+                        after_state: serde_json::to_value(&change.after).ok(),
+                        ip_address: ip_address.clone(),
+                    },
+                )
+                .await?;
+            }
+            tx.commit().await.map_err(|_| ApiError::Internal)?;
+        }
+    }
+    Ok(change)
+}
+
 /// Make the member's `source = 'vatusa'` group grants equal what their VATUSA roles justify. Compares
 /// against the rows actually held rather than the previous sync's view, so a mapping edited between
 /// syncs, or a sync that failed half-way, converges on the next run.

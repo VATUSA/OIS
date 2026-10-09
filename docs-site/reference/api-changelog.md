@@ -21,3 +21,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   all or nothing: a self-reference, two keys naming one sector or more than 200 entries (400), an unknown or other ARTCC's
   sector (404) or a loop (409) writes none of it. Answers with the ARTCC's consolidations. Existing
   callers need do nothing. (#794)
+- **New: `GET /api/v1/admin/access/vatusa-reset` and `POST /api/v1/admin/access/vatusa-reset`**
+  (#795). The dry run and the reset of every user's access to what VATUSA justifies. Server admin
+  only. The `POST` takes `AccessResetRequest` (`reason`) and returns `AccessResetBody`; a failed VATUSA
+  pull (`502`), an unconfigured VATUSA (`503`) or a run that stopped part-way (`500`) returns
+  `AccessResetFailure` with `error`, `message` and `users_reset`. The dry run reads the VATUSA data the last pull stored and the reset pulls fresh, so the two
+  can differ if VATUSA changed in between. Additive; no existing caller changes.

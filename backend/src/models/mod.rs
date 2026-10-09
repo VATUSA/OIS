@@ -115,6 +115,62 @@ pub struct VatusaResyncRequest {
     pub reason: String,
 }
 
+/// Reset every member's access to VATUSA. The reason is recorded on each changed member's audit entry.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AccessResetRequest {
+    pub reason: String,
+}
+
+/// One stored grant row a reset adds or removes. `artcc_id` `None` = national.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetGrant {
+    /// `group` for a group membership, `permission` for a direct permission.
+    pub kind: String,
+    pub name: String,
+    pub artcc_id: Option<String>,
+    /// Whose row it is: `manual`, `vatusa` or `system`.
+    pub source: String,
+    /// `false` for a direct deny. Always `true` for a group.
+    pub granted: bool,
+}
+
+/// What a reset changes, or would change, for one member.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetUser {
+    pub cid: Option<i64>,
+    pub display_name: String,
+    /// They were off VATUSA role sync and are put back on it.
+    pub reattached: bool,
+    pub added: Vec<AccessResetGrant>,
+    pub removed: Vec<AccessResetGrant>,
+}
+
+/// A reset's result, or a dry run's prediction. Only members whose access changes are listed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetBody {
+    /// `true` for the dry run: nothing was written.
+    pub dry_run: bool,
+    /// The VATUSA division pull the reset ran first. `None` for a dry run, which reads the VATUSA
+    /// data the last pull stored.
+    pub pull_summary: Option<String>,
+    /// How many members there are. Only those a reset can change are examined: detached, holding a
+    /// hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
+    pub users_checked: i64,
+    /// How many members were reset (or, in a dry run, would be).
+    pub users_reset: i64,
+    pub users: Vec<AccessResetUser>,
+}
+
+/// Why a reset did not finish. `users_reset` members were reset and audited before it stopped; the rest
+/// are untouched.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetFailure {
+    /// `vatusa_pull_failed`, `vatusa_not_configured` or `reset_incomplete`.
+    pub error: String,
+    pub message: String,
+    pub users_reset: i64,
+}
+
 /// A lightweight user match for the directory search.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct UserSummary {

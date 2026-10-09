@@ -13,12 +13,12 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
-        events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
-        health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences, public,
-        runway, sector_consolidations, sector_demand, sector_limits, service_accounts, stats,
-        taxi_insights, tmu, users, webhooks,
+        access, access_reset, ace, admin, aircraft_profiles, airport_configs, airport_surface,
+        airports, airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics,
+        docs, events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow,
+        gdp, health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences,
+        public, runway, sector_consolidations, sector_demand, sector_limits, service_accounts,
+        stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -148,6 +148,11 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/users/{cid}/vatusa/resync",
             post(access::resync_user_vatusa),
+        )
+        // Reset everyone's access to VATUSA, and its dry run — #795
+        .route(
+            "/api/v1/admin/access/vatusa-reset",
+            get(access_reset::preview_vatusa_reset).post(access_reset::apply_vatusa_reset),
         )
         // Group (role) management — #545
         .route(

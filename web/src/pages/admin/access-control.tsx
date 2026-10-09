@@ -14,8 +14,10 @@ import {
   useSaveUserAccess,
   useUserAccess,
 } from "@/lib/access";
+import {useMe} from "@/lib/auth";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {VatusaDetachedPill, VatusaSyncSection} from "./vatusa-sync-section";
+import {VatusaResetAction} from "./vatusa-reset-section";
 import {
   PermissionScopeTree,
   ScopeChips,
@@ -86,6 +88,7 @@ export function AdminAccessControl() {
   const [usersPage, setUsersPage] = useState(1);
   const [selected, setSelected] = useState<{ cid: number; name: string } | null>(null);
 
+  const {data: me} = useMe();
   const catalog = useCatalog();
   const access = useUserAccess(cid);
   const save = useSaveUserAccess();
@@ -257,6 +260,12 @@ export function AdminAccessControl() {
             className="rounded-full pl-9"
           />
         </div>
+        {/* Server admin only (#795); the server refuses anyone else. */}
+        {me?.server_admin && (
+          <div className="ml-auto">
+            <VatusaResetAction />
+          </div>
+        )}
       </FilterBar>
 
       <DataTable
