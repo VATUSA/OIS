@@ -257,6 +257,7 @@ describe("Reset all access to VATUSA (VATUSA/OIS#795)", () => {
     });
     await apply(host);
     await vi.waitFor(() => expect(document.body.textContent).toContain("5 of 40 users changed"));
+    expect(document.body.textContent).toContain("A reset is already running");
     expect(polls).toEqual(["run-0"]);
   });
 

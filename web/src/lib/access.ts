@@ -232,7 +232,7 @@ function resetError(message: string, usersReset?: number, status?: number): Rese
 }
 
 /** Poll a reset run (#806) until it finishes: its result, or its failure thrown. */
-async function waitForReset(id: string): Promise<AccessResetBody> {
+export async function waitForReset(id: string): Promise<AccessResetBody> {
   for (let misses = 0; misses < RESET_POLL_TRIES; ) {
     let run: components["schemas"]["AccessResetRun"] | undefined;
     try {
@@ -272,7 +272,13 @@ export function useVatusaReset() {
       const { data, error, response } = await ois.POST("/api/v1/admin/access/vatusa-reset", {
         body: { reason },
       });
-      const runId = data?.run_id ?? (error as { run_id?: string } | undefined)?.run_id;
+      const running = (error as { run_id?: string } | undefined)?.run_id;
+      if (running) {
+        toast.info("A reset is already running", {
+          description: "Waiting for that reset instead. Yours was not started, and its reason was not used.",
+        });
+      }
+      const runId = data?.run_id ?? running;
       if (!runId) {
         const failure = error as { message?: string; users_reset?: number } | undefined;
         throw resetError(failure?.message ?? "reset failed", failure?.users_reset, response?.status);

@@ -11,7 +11,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use uuid::Uuid;
 
 use crate::{
     auth::{
@@ -188,8 +187,7 @@ pub async fn get_vatusa_reset_run(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     require_server_admin(&state, user).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let id = Uuid::parse_str(&id).map_err(|_| ApiError::NotFound)?;
-    reset_runs::fetch_run(pool, id)
+    reset_runs::fetch_run(pool, &id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
@@ -236,6 +234,11 @@ async fn division_pull(
 /// The reset's entry in the job registry, so a run shows in Background Tasks and `/metrics`.
 pub const RESET_JOB: &str = "vatusa_access_reset";
 
+/// How long a start waits, at most, for a reset lock that is held with no run recorded (see
+/// [`start_reset`]) before answering a bare 409.
+const CLAIM_TRIES: usize = 20;
+const CLAIM_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Start a reset in a task of its own and return its run id at once (#806): the run belongs to no
 /// request, so a client or ingress that gives up cannot stop it part-way. The task holds the reset lock
 /// for the whole run and the division lock from before its pull until its last member, so no other
@@ -253,14 +256,23 @@ async fn start_reset(
     if reason.is_empty() {
         return Err(ApiError::BadRequest.into());
     }
-    let Some(mut locks) = reset_runs::try_lock_reset(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?
-    else {
-        return match reset_runs::running_run(pool).await? {
-            Some(run_id) => Err(ResetError::Running(run_id.to_string())),
-            None => Err(ApiError::Conflict.into()),
-        };
+    let mut claimed = None;
+    for _ in 0..CLAIM_TRIES {
+        claimed = reset_runs::try_lock_reset(pool)
+            .await
+            .map_err(|_| ApiError::Internal)?;
+        if claimed.is_some() {
+            break;
+        }
+        if let Some(run_id) = reset_runs::running_run(pool).await? {
+            return Err(ResetError::Running(run_id));
+        }
+        // Held with no run recorded: another start is between taking the lock and recording its
+        // run, or a run is between storing its result and letting go. Either lasts a moment.
+        tokio::time::sleep(CLAIM_RETRY).await;
+    }
+    let Some(mut locks) = claimed else {
+        return Err(ApiError::Conflict.into());
     };
     let run_id = reset_runs::start_run(pool, &user.id, reason).await?;
     state.jobs.register(
@@ -271,11 +283,12 @@ async fn start_reset(
     );
     state.jobs.begin(RESET_JOB);
 
-    let (state, pool, user, reason) = (
+    let (state, pool, user, reason, task_run_id) = (
         state.clone(),
         pool.clone(),
         user.clone(),
         reason.to_string(),
+        run_id.clone(),
     );
     tokio::spawn(async move {
         let outcome = match locks.lock_division().await {
@@ -298,11 +311,6 @@ async fn start_reset(
                 users_reset: 0,
             },
         });
-        // Stored while the locks are still held: a `running` row with no lock holder reads as
-        // interrupted.
-        if let Err(e) = reset_runs::finish_run(&pool, run_id, outcome.as_ref()).await {
-            tracing::error!(error = %e, %run_id, "access reset to VATUSA finished but its result was not stored");
-        }
         match &outcome {
             Ok(body) => state.jobs.finish(
                 RESET_JOB,
@@ -314,9 +322,15 @@ async fn start_reset(
             ),
             Err(failure) => state.jobs.finish(RESET_JOB, false, failure.message.clone()),
         }
-        drop(locks);
+        // Stored while the locks are still held: a `running` row with no lock holder reads as
+        // interrupted.
+        let run_id = task_run_id;
+        if let Err(e) = reset_runs::finish_run(&pool, &run_id, outcome.as_ref()).await {
+            tracing::error!(error = %e, run_id, "access reset to VATUSA finished but its result was not stored");
+        }
+        locks.release().await;
     });
-    Ok(run_id.to_string())
+    Ok(run_id)
 }
 
 /// The reset itself, run by [`start_reset`]'s task. The pull runs first; if it fails, nothing is reset.
@@ -367,6 +381,7 @@ async fn reset_to_vatusa(
 mod tests {
     use serde_json::json;
     use sqlx::PgPool;
+    use uuid::Uuid;
 
     use super::*;
     use crate::scope_test_support::{grant, send, send_json, session_cookie, test_state};
@@ -1113,6 +1128,10 @@ mod tests {
         );
         assert!(handler.contains("start_reset("));
         assert!(
+            handler.contains("Ok((StatusCode::ACCEPTED, Json(AccessResetStarted { run_id })))"),
+            "apply_vatusa_reset must answer 202 with the run id"
+        );
+        assert!(
             handler.contains("&payload.reason,"),
             "apply_vatusa_reset must reset with the reason the admin sent"
         );
@@ -1265,22 +1284,28 @@ mod tests {
         (pull, reached_rx, release)
     }
 
+    /// `fut`, or a panic naming `what` if it takes more than 10 s.
+    async fn within<T>(what: &str, fut: impl Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .unwrap_or_else(|_| panic!("{what} took more than 10 s"))
+    }
+
     async fn start(
         w: &World,
         pull: impl Future<Output = Result<String, PullError>> + Send + 'static,
-    ) -> Uuid {
+    ) -> String {
         // Starting returns at once, whatever the run is waiting on.
-        let started = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+        within(
+            "start_reset",
             start_reset(&w.state, &admin_user(w), "back to VATUSA", None, pull),
         )
         .await
-        .expect("start_reset waited for the run");
-        let run_id = started.ok().expect("the reset starts");
-        Uuid::parse_str(&run_id).unwrap()
+        .ok()
+        .expect("the reset starts")
     }
 
-    async fn latest_run(pool: &PgPool) -> Uuid {
+    async fn latest_run(pool: &PgPool) -> String {
         sqlx::query_scalar(
             "select id from access.vatusa_reset_runs order by started_at desc limit 1",
         )
@@ -1290,7 +1315,7 @@ mod tests {
     }
 
     /// The run once it has finished.
-    async fn finished(pool: &PgPool, id: Uuid) -> AccessResetRun {
+    async fn finished(pool: &PgPool, id: &str) -> AccessResetRun {
         for _ in 0..600 {
             let run = reset_runs::fetch_run(pool, id).await.unwrap().unwrap();
             if run.status != "running" {
@@ -1301,7 +1326,7 @@ mod tests {
         panic!("the run did not finish within 30 s");
     }
 
-    async fn status_of(pool: &PgPool, id: Uuid) -> String {
+    async fn status_of(pool: &PgPool, id: &str) -> String {
         reset_runs::fetch_run(pool, id)
             .await
             .unwrap()
@@ -1317,13 +1342,32 @@ mod tests {
             .find(|j| j.name == RESET_JOB)
     }
 
-    /// Long enough for a run that is not held back to have reached its pull.
-    const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    /// Wait until some session is queued on the division lock: advisory key (0x004F4953, 1), written
+    /// out here so a change to the key fails this rather than moving with it.
+    async fn someone_waits_for_the_division_lock(pool: &PgPool) {
+        within("waiting for a session to queue on the division lock", async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "select exists (select 1 from pg_locks where locktype = 'advisory' \
+                     and not granted and classid = 5196115 and objid = 1 and objsubid = 2 \
+                     and database = (select oid from pg_database where datname = current_database()))",
+                )
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+    }
 
-    /// #806 AC: the client goes away mid-run and the run still completes, resets every member and
-    /// publishes `ACCESS_GRANTED`. The request's future is aborted while the run waits in its pull, as
-    /// hyper drops a handler's future when its connection closes; run inline in the request, the reset
-    /// would stop there.
+    /// #806 AC: the client goes away mid-run and the run still completes, resets every member with the
+    /// admin's reason and publishes `ACCESS_GRANTED`. The request's future is aborted while the run
+    /// waits in its pull, as hyper drops a handler's future when its connection closes; run inline in
+    /// the request, the reset would stop there.
     #[sqlx::test]
     async fn a_dropped_client_does_not_stop_the_run(pool: PgPool) {
         let w = world(pool).await;
@@ -1334,12 +1378,14 @@ mod tests {
             let _ = start_reset(&state, &admin, "back to VATUSA", None, pull).await;
             std::future::pending::<()>().await;
         });
-        reached.await.expect("the run reaches its pull");
+        within("the run reaching its pull", reached)
+            .await
+            .expect("the run reaches its pull");
         request.abort();
         assert!(request.await.unwrap_err().is_cancelled());
         release.notify_one();
 
-        let run = finished(&w.pool, latest_run(&w.pool).await).await;
+        let run = finished(&w.pool, &latest_run(&w.pool).await).await;
         assert_eq!(
             run.status,
             "succeeded",
@@ -1351,6 +1397,11 @@ mod tests {
         assert_eq!(result.users_checked, 3);
         assert_eq!(result.pull_summary.as_deref(), Some("pulled"));
         assert_eq!(rows(&w.pool, &w.member).await, member_after());
+        let (_, reason, _) = &audits(&w.pool, &w.member).await[0];
+        assert!(
+            reason.starts_with("Reset to VATUSA: back to VATUSA ("),
+            "{reason}"
+        );
         let nudge = nudges.try_recv().expect("the run tells signed-in browsers");
         assert_eq!(nudge.topic, crate::realtime::topic::ACCESS_GRANTED);
     }
@@ -1362,12 +1413,12 @@ mod tests {
         assert!(reset_job(&w).is_none(), "registered before any run");
         let (pull, reached, release) = gated_pull();
         let id = start(&w, pull).await;
-        reached.await.unwrap();
+        within("the run reaching its pull", reached).await.unwrap();
         let running = reset_job(&w).expect("a started run is listed");
         assert!(running.running);
         assert!(!running.triggerable && running.interval_secs.is_none());
         release.notify_one();
-        finished(&w.pool, id).await;
+        finished(&w.pool, &id).await;
 
         let done = reset_job(&w).unwrap();
         assert!(!done.running);
@@ -1388,7 +1439,7 @@ mod tests {
             ))
         })
         .await;
-        let run = finished(&w.pool, id).await;
+        let run = finished(&w.pool, &id).await;
         assert_eq!(run.status, "failed");
         assert!(run.result.is_none());
         let failure = run.failure.unwrap();
@@ -1407,27 +1458,47 @@ mod tests {
         assert_eq!(everything(&w.pool).await, before);
     }
 
-    /// #806 AC: a reset does not pull while the division pull holds the division lock; it starts once
-    /// the pull lets go.
+    /// #806 AC: a reset started while the division pull job is mid-pull does not pull until that pull
+    /// has finished. The stand-in pull runs through `with_division_lock`, as the job's body does.
     #[sqlx::test]
     async fn a_reset_waits_for_the_division_pull(pool: PgPool) {
         let w = world(pool).await;
-        let division_pull = reset_runs::lock_division(&w.pool).await.unwrap();
+        let (job_reached, job_reached_rx) = tokio::sync::oneshot::channel();
+        let job_release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let division_pull = tokio::spawn({
+            let (pool, gate) = (w.pool.clone(), job_release.clone());
+            async move {
+                crate::feed::vatusa::with_division_lock(&pool, async move {
+                    let _ = job_reached.send(());
+                    gate.notified().await;
+                    Ok(())
+                })
+                .await
+            }
+        });
+        within("the division pull starting", job_reached_rx)
+            .await
+            .unwrap();
+
         let (pull, mut reached, release) = gated_pull();
         let id = start(&w, pull).await;
-        tokio::time::sleep(SETTLE).await;
+        someone_waits_for_the_division_lock(&w.pool).await;
         assert!(
             reached.try_recv().is_err(),
             "the reset pulled while the division pull ran"
         );
-        assert_eq!(status_of(&w.pool, id).await, "running");
+        assert_eq!(status_of(&w.pool, &id).await, "running");
 
-        drop(division_pull);
-        reached
+        job_release.notify_one();
+        within("the division pull finishing", division_pull)
+            .await
+            .unwrap()
+            .unwrap();
+        within("the reset reaching its pull", reached)
             .await
             .expect("the reset pulls once the division pull is done");
         release.notify_one();
-        assert_eq!(finished(&w.pool, id).await.status, "succeeded");
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
     }
 
     /// #806 AC: the division pull, through the lock its job takes, waits for a running reset and runs
@@ -1437,7 +1508,7 @@ mod tests {
         let w = world(pool).await;
         let (pull, reached, release) = gated_pull();
         let id = start(&w, pull).await;
-        reached.await.unwrap();
+        within("the run reaching its pull", reached).await.unwrap();
 
         let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let division_pull = tokio::spawn({
@@ -1450,15 +1521,18 @@ mod tests {
                 .await
             }
         });
-        tokio::time::sleep(SETTLE).await;
+        someone_waits_for_the_division_lock(&w.pool).await;
         assert!(
             !ran.load(std::sync::atomic::Ordering::SeqCst),
             "the division pull ran during a reset"
         );
 
         release.notify_one();
-        assert_eq!(finished(&w.pool, id).await.status, "succeeded");
-        division_pull.await.unwrap().unwrap();
+        assert_eq!(finished(&w.pool, &id).await.status, "succeeded");
+        within("the division pull", division_pull)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -1476,22 +1550,26 @@ mod tests {
         assert!(locked < pulled, "the pull must run inside the locked block");
     }
 
-    /// One reset at a time: a second start while one runs is refused with the running run's id, and a
-    /// start after it finished goes ahead.
+    /// One reset at a time: a second start while one runs is refused with 409 and the running run's id,
+    /// and a start right after it finished goes ahead and leaves the earlier run's result alone.
     #[sqlx::test]
     async fn a_second_reset_is_refused_while_one_runs(pool: PgPool) {
         let w = world(pool).await;
         let (pull, reached, release) = gated_pull();
         let first = start(&w, pull).await;
-        reached.await.unwrap();
+        within("the run reaching its pull", reached).await.unwrap();
 
         let second = start_reset(&w.state, &admin_user(&w), "again", None, pulled()).await;
-        let Err(ResetError::Running(running)) = second else {
+        let Err(refused) = second else {
             panic!("a second reset must be refused while one runs");
         };
-        assert_eq!(running, first.to_string());
-        let response = ResetError::Running(running).into_response();
+        let response = refused.into_response();
         assert_eq!(response.status(), http::StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, json!({"run_id": first}));
         let count: i64 = sqlx::query_scalar("select count(*) from access.vatusa_reset_runs")
             .fetch_one(&w.pool)
             .await
@@ -1499,9 +1577,15 @@ mod tests {
         assert_eq!(count, 1, "the refused start recorded a run");
 
         release.notify_one();
-        assert_eq!(finished(&w.pool, first).await.status, "succeeded");
+        assert_eq!(finished(&w.pool, &first).await.status, "succeeded");
         let third = start(&w, pulled()).await;
-        assert_eq!(finished(&w.pool, third).await.status, "succeeded");
+        assert_eq!(finished(&w.pool, &third).await.status, "succeeded");
+        let earlier = reset_runs::fetch_run(&w.pool, &first)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(earlier.status, "succeeded", "a later start rewrote it");
+        assert_eq!(earlier.result.unwrap().users_reset, 2);
     }
 
     /// The run's route answers the server admin with the run, and refuses everyone else.
@@ -1509,12 +1593,12 @@ mod tests {
     async fn the_run_is_read_through_its_route(pool: PgPool) {
         let w = world(pool).await;
         let id = start(&w, pulled()).await;
-        finished(&w.pool, id).await;
+        finished(&w.pool, &id).await;
         let uri = format!("/api/v1/admin/access/vatusa-reset/runs/{id}");
 
         let (status, run) = send_json(&w.state, http::Method::GET, &uri, &w.admin_cookie).await;
         assert_eq!(status, http::StatusCode::OK, "{run}");
-        assert_eq!(run["id"], id.to_string());
+        assert_eq!(run["id"], id);
         assert_eq!(run["status"], "succeeded");
         assert_eq!(run["result"]["users_reset"], 2);
         assert_eq!(run["failure"], serde_json::Value::Null);
@@ -1545,6 +1629,10 @@ mod tests {
     /// With `VATUSA_API_KEY` unset, the admin's POST is refused with 503 and starts no run.
     #[sqlx::test]
     async fn an_unconfigured_vatusa_starts_nothing(pool: PgPool) {
+        assert!(
+            crate::config::vatusa_api_key().is_none(),
+            "VATUSA_API_KEY is set: this test would start a real reset that calls VATUSA"
+        );
         let w = world(pool).await;
         let before = everything(&w.pool).await;
         let status = send(
@@ -1565,13 +1653,31 @@ mod tests {
         assert_eq!(everything(&w.pool).await, before);
     }
 
+    async fn audit_entry(pool: &PgPool, reason: &str, age: &str) {
+        sqlx::query(&format!(
+            "insert into access.audit_logs (action, resource_type, resource_id, reason, created_at) \
+             values ('UPDATE', 'USER_ACCESS', 'someone', $1, now() - interval '{age}')"
+        ))
+        .bind(reason)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     /// A run left `running` by a backend that died holds no lock: it reads as interrupted, with the
-    /// members its audit entries show it reset, and the next reset closes it. A live run, whose task
-    /// holds the lock, still reads as running.
+    /// members its audit entries show it reset, and the next reset closes it. Neither a reset entry
+    /// from before it started nor another kind of access entry counts, and the division lock held
+    /// elsewhere doesn't make it live. A live run, whose task holds the lock, still reads as running.
     #[sqlx::test]
     async fn a_run_left_by_a_dead_backend_reads_as_interrupted(pool: PgPool) {
         let w = world(pool).await;
-        let dead: Uuid = sqlx::query_scalar(
+        audit_entry(
+            &w.pool,
+            "Reset to VATUSA: an earlier run (removed group ACE)",
+            "1 hour",
+        )
+        .await;
+        let dead: String = sqlx::query_scalar(
             "insert into access.vatusa_reset_runs (started_by, reason, started_at) \
              values ($1, 'back to VATUSA', now() - interval '1 minute') returning id",
         )
@@ -1579,10 +1685,16 @@ mod tests {
         .fetch_one(&w.pool)
         .await
         .unwrap();
+        audit_entry(&w.pool, "Granted EC at ZDC", "1 second").await;
         // The dead run got as far as the admin and the member.
         reset(&w).await.ok().unwrap();
 
-        let run = reset_runs::fetch_run(&w.pool, dead).await.unwrap().unwrap();
+        let division_pull = reset_runs::lock_division(&w.pool).await.unwrap();
+        let run = reset_runs::fetch_run(&w.pool, &dead)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(division_pull);
         assert_eq!(run.status, "failed");
         assert!(run.finished_at.is_none());
         let failure = run.failure.unwrap();
@@ -1591,12 +1703,12 @@ mod tests {
 
         let (pull, reached, release) = gated_pull();
         let live = start(&w, pull).await;
-        reached.await.unwrap();
-        assert_eq!(status_of(&w.pool, live).await, "running");
+        within("the run reaching its pull", reached).await.unwrap();
+        assert_eq!(status_of(&w.pool, &live).await, "running");
         let stored: (String, bool) = sqlx::query_as(
             "select status, finished_at is not null from access.vatusa_reset_runs where id = $1",
         )
-        .bind(dead)
+        .bind(&dead)
         .fetch_one(&w.pool)
         .await
         .unwrap();
@@ -1606,7 +1718,7 @@ mod tests {
             "the next reset closes it"
         );
         assert_eq!(
-            reset_runs::fetch_run(&w.pool, dead)
+            reset_runs::fetch_run(&w.pool, &dead)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1617,6 +1729,6 @@ mod tests {
         );
 
         release.notify_one();
-        assert_eq!(finished(&w.pool, live).await.status, "succeeded");
+        assert_eq!(finished(&w.pool, &live).await.status, "succeeded");
     }
 }

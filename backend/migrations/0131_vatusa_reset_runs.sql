@@ -8,7 +8,7 @@
 -- died, and is reported as interrupted.
 
 create table access.vatusa_reset_runs (
-    id          uuid primary key default gen_random_uuid(),
+    id          text primary key default gen_random_uuid()::text,
     started_by  text references identity.users(id) on delete set null,
     reason      text not null,
     started_at  timestamptz not null default now(),

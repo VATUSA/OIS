@@ -2,8 +2,7 @@
 //! pull from running at once on any backend replica.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgPool};
-use uuid::Uuid;
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::errors::ApiError;
 use crate::models::{AccessResetBody, AccessResetFailure, AccessResetRun};
@@ -30,6 +29,19 @@ pub struct AdvisoryLocks(PgConnection);
 impl AdvisoryLocks {
     async fn connect(pool: &PgPool) -> Result<Self, sqlx::Error> {
         Ok(Self(pool.acquire().await?.detach()))
+    }
+
+    /// Release every lock now and close the connection. Postgres would release them anyway once it
+    /// noticed the dropped connection, but only some time later; a reset that starts right after a run
+    /// finishes must find the reset lock free.
+    pub async fn release(mut self) {
+        if let Err(e) = sqlx::query("select pg_advisory_unlock_all()")
+            .execute(&mut self.0)
+            .await
+        {
+            tracing::warn!(error = %e, "could not release the access reset's advisory locks; closing their connection");
+        }
+        let _ = self.0.close().await;
     }
 
     /// Wait for the division lock.
@@ -61,21 +73,25 @@ pub async fn try_lock_reset(pool: &PgPool) -> Result<Option<AdvisoryLocks>, sqlx
     Ok(claimed.then_some(locks))
 }
 
+// The two SQL fragments below are spliced into queries with `format!`. Both are constants of this
+// module, never input; every value they compare against is bound.
+
 /// `true` while some session in this database holds the reset lock.
 const RESET_LOCK_HELD: &str = "exists (select 1 from pg_locks \
      where locktype = 'advisory' and granted and objsubid = 2 \
        and database = (select oid from pg_database where datname = current_database()) \
        and classid = $1::int8::oid and objid = $2::int8::oid)";
 
-/// How many members a run starting at `started_at` has reset so far, counted from their audit entries.
-/// Runs never overlap, so every reset entry since it started is its own.
-const RESET_SO_FAR: &str = "(select count(*) from access.audit_logs a \
+/// How many members a run `r` still `running` has reset so far, counted from their audit entries
+/// (0 for a finished run, which stored its own count). Runs never overlap, so every reset entry since
+/// it started is its own.
+const RESET_SO_FAR: &str = "(case when r.status = 'running' then (select count(*) from access.audit_logs a \
      where a.resource_type = 'USER_ACCESS' and a.reason like 'Reset to VATUSA: %' \
-       and a.created_at >= r.started_at)";
+       and a.created_at >= r.started_at) else 0 end)";
 
 /// Record a new run as `running`, and return its id. The caller holds the reset lock, so any other
 /// row still `running` belongs to a process that died: it is closed as interrupted first.
-pub async fn start_run(pool: &PgPool, started_by: &str, reason: &str) -> Result<Uuid, ApiError> {
+pub async fn start_run(pool: &PgPool, started_by: &str, reason: &str) -> Result<String, ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     sqlx::query(&format!(
         "update access.vatusa_reset_runs r set status = 'failed', finished_at = now(), \
@@ -102,13 +118,21 @@ pub async fn start_run(pool: &PgPool, started_by: &str, reason: &str) -> Result<
 /// Store a run's outcome.
 pub async fn finish_run(
     pool: &PgPool,
-    id: Uuid,
+    id: &str,
     outcome: Result<&AccessResetBody, &AccessResetFailure>,
 ) -> Result<(), ApiError> {
     let (status, result, failure) = match outcome {
-        Ok(body) => ("succeeded", serde_json::to_string(body).ok(), None),
-        Err(failure) => ("failed", None, serde_json::to_string(failure).ok()),
+        Ok(body) => ("succeeded", Some(serde_json::to_string(body)), None),
+        Err(failure) => ("failed", None, Some(serde_json::to_string(failure))),
     };
+    let stored = |json: Option<serde_json::Result<String>>| match json {
+        Some(Err(e)) => {
+            tracing::error!(error = %e, run_id = id, "an access reset's outcome could not be serialized");
+            None
+        }
+        other => other.and_then(Result::ok),
+    };
+    let (result, failure) = (stored(result), stored(failure));
     // Serialized to text and cast, as the audit log's snapshots are: sqlx is built without `json`.
     sqlx::query(
         "update access.vatusa_reset_runs set status = $2, finished_at = now(), \
@@ -125,7 +149,7 @@ pub async fn finish_run(
 }
 
 /// The run in progress, if any: the newest `running` row.
-pub async fn running_run(pool: &PgPool) -> Result<Option<Uuid>, ApiError> {
+pub async fn running_run(pool: &PgPool) -> Result<Option<String>, ApiError> {
     sqlx::query_scalar(
         "select id from access.vatusa_reset_runs where status = 'running' \
          order by started_at desc limit 1",
@@ -137,7 +161,7 @@ pub async fn running_run(pool: &PgPool) -> Result<Option<Uuid>, ApiError> {
 
 /// One run, or `None` if there is no such run. A row still `running` while no session holds the reset
 /// lock was left by a process that died, and is reported as failed with how far it got.
-pub async fn fetch_run(pool: &PgPool, id: Uuid) -> Result<Option<AccessResetRun>, ApiError> {
+pub async fn fetch_run(pool: &PgPool, id: &str) -> Result<Option<AccessResetRun>, ApiError> {
     type Row = (
         String,
         DateTime<Utc>,
@@ -165,10 +189,13 @@ pub async fn fetch_run(pool: &PgPool, id: Uuid) -> Result<Option<AccessResetRun>
         status,
         started_at,
         finished_at,
-        result: result.and_then(|v| serde_json::from_str(&v).ok()),
-        failure: failure.and_then(|v| serde_json::from_str(&v).ok()),
+        result: stored_json(id, result),
+        failure: stored_json(id, failure),
     };
-    if run.status == "running" && !live {
+    // The row comes from the statement's snapshot and the locks are read live, so a run that stored
+    // its result and released its locks while the statement ran looks `running` with no holder. Read
+    // the status again before calling it interrupted.
+    if run.status == "running" && !live && still_running(pool, id).await? {
         run.status = "failed".to_string();
         run.failure = Some(AccessResetFailure {
             error: INTERRUPTED.to_string(),
@@ -177,4 +204,25 @@ pub async fn fetch_run(pool: &PgPool, id: Uuid) -> Result<Option<AccessResetRun>
         });
     }
     Ok(Some(run))
+}
+
+async fn still_running(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
+    sqlx::query_scalar("select status = 'running' from access.vatusa_reset_runs where id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map(|running| running.unwrap_or(false))
+        .map_err(|_| ApiError::Internal)
+}
+
+/// A stored result or failure, read back. One that no longer parses is logged rather than dropped
+/// silently.
+fn stored_json<T: serde::de::DeserializeOwned>(id: &str, json: Option<String>) -> Option<T> {
+    match serde_json::from_str(json.as_deref()?) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::error!(error = %e, run_id = id, "an access reset's stored outcome does not parse");
+            None
+        }
+    }
 }

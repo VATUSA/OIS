@@ -14,9 +14,15 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
-- **New: `GET /api/v1/admin/access/vatusa-reset` and `POST /api/v1/admin/access/vatusa-reset`**
-  (#795). The dry run and the reset of every user's access to what VATUSA justifies. Server admin
-  only. The `POST` takes `AccessResetRequest` (`reason`) and returns `AccessResetBody`; a failed VATUSA
-  pull (`502`), an unconfigured VATUSA (`503`) or a run that stopped part-way (`500`) returns
-  `AccessResetFailure` with `error`, `message` and `users_reset`. The dry run reads the VATUSA data the last pull stored and the reset pulls fresh, so the two
-  can differ if VATUSA changed in between. Additive; no existing caller changes.
+- **New: `GET /api/v1/admin/access/vatusa-reset`, `POST /api/v1/admin/access/vatusa-reset` and
+  `GET /api/v1/admin/access/vatusa-reset/runs/{id}`** (#795, #806). The dry run, the reset of every
+  user's access to what VATUSA justifies, and the reset's result. Server admin only. The `POST` takes
+  `AccessResetRequest` (`reason`) and answers at once with `202 AccessResetStarted` (`run_id`); the
+  reset runs in the background and finishes whether or not the caller waits. A second `POST` while one
+  runs gets `409` with the running run's `AccessResetStarted`; an unconfigured VATUSA gets `503`
+  `AccessResetFailure`, and nothing starts. Poll the run's `GET` for `AccessResetRun`: `status` is
+  `running`, then `succeeded` with `result` (`AccessResetBody`) or `failed` with `failure`
+  (`AccessResetFailure`: `error` is `vatusa_pull_failed`, `reset_incomplete`, `reset_failed` or
+  `reset_interrupted`, with `message` and `users_reset`). The dry run reads the VATUSA data the last
+  pull stored and the reset pulls fresh, so the two can differ if VATUSA changed in between. Additive;
+  no existing caller changes.
