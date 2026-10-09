@@ -14,13 +14,15 @@ import {
   StatusPill,
   Tabs,
 } from "@ois/ui";
-import {Clock, Filter, Lock, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
+import {Clock, Filter, Lock, PictureInPicture2, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import type {LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
+import {can} from "@/lib/platform";
+import {openPopout, popoutSpecs} from "@/lib/popout";
 import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
@@ -400,8 +402,16 @@ export function airportLadderItems(flow: Flow, filters: LadderFilters | undefine
  * The arrival ladder as TGUI columns (#557): one per arrival gate (a meter fix), in the order the
  * gates first appear in the sequence, with gateless arrivals in a last "OTHER" column. The schedule
  * rail is the classic ladder's own time; no STA means no delay label, never an invented one.
+ *
+ * A gate with no traffic gets no column unless `gates` (the ladder's gate filter) names it (#791):
+ * a configured gate keeps its column while empty, so the ladder can be set up before traffic files
+ * through it, but an unfiltered ladder stays traffic-only rather than a column for every STAR.
  */
-export function airportTguiColumns(items: ReturnType<typeof airportLadderItems>, now: number): TguiColumn[] {
+export function airportTguiColumns(
+  items: ReturnType<typeof airportLadderItems>,
+  now: number,
+  gates: readonly string[] = [],
+): TguiColumn[] {
   const byGate = new Map<string, TguiColumn>();
   const sorted = [...items].sort((a, b) => a.min - b.min);
   for (const { key, min, time, data: f } of sorted) {
@@ -423,12 +433,27 @@ export function airportTguiColumns(items: ReturnType<typeof airportLadderItems>,
       wake: f.category ?? null,
     });
   }
+  for (const gate of [...gates].sort()) {
+    if (!byGate.has(gate)) byGate.set(gate, { id: gate, name: gate, kind: "MFX", items: [] });
+  }
   const columns = [...byGate.values()];
   // Gateless traffic is the residue, not a stream; it goes last.
   return [...columns.filter((c) => c.id !== "OTHER"), ...columns.filter((c) => c.id === "OTHER")];
 }
 
-export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilters }) {
+/**
+ * `popoutIcao` adds the pop-out control (#790). Only the airport page passes it: the pop-out window
+ * and the dashboard widget render this same ladder and must not offer to pop out themselves.
+ */
+export function LadderView({
+  flow,
+  filters,
+  popoutIcao,
+}: {
+  flow: Flow;
+  filters?: LadderFilters;
+  popoutIcao?: string;
+}) {
   const [win, setWin] = useState(60);
   const style = useSetting<string>("ladder.style", "classic");
   const now = Date.now();
@@ -476,12 +501,25 @@ export function LadderView({ flow, filters }: { flow: Flow; filters?: LadderFilt
           >
             +30
           </Button>
+          {/* Float the whole ladder over CRC/vATIS/charts. Desktop only (#790, as #349). */}
+          {popoutIcao && can("miniWindows") && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8 text-ink-3 hover:text-ink"
+              title="Pop out into a floating window"
+              aria-label="Pop out into a floating window"
+              onClick={() => void openPopout(popoutSpecs.airportLadder(popoutIcao))}
+            >
+              <PictureInPicture2 className="size-3.5" />
+            </Button>
+          )}
         </div>
       </div>
       {/* Nothing until the style is known, rather than the classic ladder flashing first. */}
       {style.isLoading ? null : style.value === "tgui" ? (
         <TguiLadder
-          columns={airportTguiColumns(items, now)}
+          columns={airportTguiColumns(items, now, filters?.gates)}
           now={now}
           win={win}
           emptyMessage={noMatch ? "No matching arrivals" : "No ETAs in window"}
@@ -635,7 +673,7 @@ export function AirportPage() {
               <Tabs value={sub} onChange={setSub} items={tabs} />
               {sub === "summary" && <SummaryView flow={flow.data} />}
               {sub === "aircraft" && <AircraftView flow={flow.data} />}
-              {sub === "ladder" && <LadderView flow={flow.data} />}
+              {sub === "ladder" && <LadderView flow={flow.data} popoutIcao={icao} />}
               {sub === "demand" && <DemandView flow={flow.data} />}
               {sub === "departures" && <DeparturesView icao={icao} />}
               {sub === "taxi" && <TaxiView icao={icao} />}

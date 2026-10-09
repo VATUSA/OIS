@@ -50,7 +50,8 @@ typed client** and **Permissions** sections:
 ## Pull requests
 
 - Target `next`.
-- Keep `just ci` green (fmt, clippy, tests, `pnpm lint`/`typecheck`) before requesting review.
+- Run `just ci-full` before requesting review (`just ci` is not CI: `AGENTS.md` § Commands lists
+  what it skips). CI's check-runs on the PR are the verdict (`AGENTS.md` § Testing & verification).
 - Keep the change scoped to the linked issue — don't fold in unrelated cleanup.
 - Use conventional-commit-style messages (`type(scope): summary`) and a clear PR description
   (what changed, why, how you verified it).

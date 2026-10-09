@@ -5,6 +5,8 @@
 //! regenerate the client in the same change, or CI's `client-drift` fails. See `AGENTS.md`
 //! § "The API contract → typed client".
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -111,6 +113,82 @@ pub struct VatusaGrantChange {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VatusaResyncRequest {
     pub reason: String,
+}
+
+/// Reset every member's access to VATUSA. The reason is recorded on each changed member's audit entry.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AccessResetRequest {
+    pub reason: String,
+}
+
+/// One stored grant row a reset adds or removes. `artcc_id` `None` = national.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccessResetGrant {
+    /// `group` for a group membership, `permission` for a direct permission.
+    pub kind: String,
+    pub name: String,
+    pub artcc_id: Option<String>,
+    /// Whose row it is: `manual`, `vatusa` or `system`.
+    pub source: String,
+    /// `false` for a direct deny. Always `true` for a group.
+    pub granted: bool,
+}
+
+/// What a reset changes, or would change, for one member.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccessResetUser {
+    pub cid: Option<i64>,
+    pub display_name: String,
+    /// They were off VATUSA role sync and are put back on it.
+    pub reattached: bool,
+    pub added: Vec<AccessResetGrant>,
+    pub removed: Vec<AccessResetGrant>,
+}
+
+/// A reset's result, or a dry run's prediction. Only members whose access changes are listed.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccessResetBody {
+    /// `true` for the dry run: nothing was written.
+    pub dry_run: bool,
+    /// The VATUSA division pull the reset ran first. `None` for a dry run, which reads the VATUSA
+    /// data the last pull stored.
+    pub pull_summary: Option<String>,
+    /// How many members there are. Only those a reset can change are examined: detached, holding a
+    /// hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
+    pub users_checked: i64,
+    /// How many members were reset (or, in a dry run, would be).
+    pub users_reset: i64,
+    pub users: Vec<AccessResetUser>,
+}
+
+/// Why a reset did not finish. `users_reset` members were reset and audited before it stopped; the rest
+/// are untouched.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccessResetFailure {
+    /// `vatusa_pull_failed`, `vatusa_not_configured`, `reset_lock_busy`, `reset_incomplete`,
+    /// `reset_failed`, or `reset_interrupted` when the backend running it stopped.
+    pub error: String,
+    pub message: String,
+    pub users_reset: i64,
+}
+
+/// A reset that was started (202), or the one already running (409): poll
+/// `GET /api/v1/admin/access/vatusa-reset/runs/{run_id}` for its result.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetStarted {
+    pub run_id: String,
+}
+
+/// One reset run (#806). `result` is set once it succeeded, `failure` once it failed.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccessResetRun {
+    pub id: String,
+    /// `running`, `succeeded` or `failed`.
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub result: Option<AccessResetBody>,
+    pub failure: Option<AccessResetFailure>,
 }
 
 /// A lightweight user match for the directory search.
@@ -1534,6 +1612,160 @@ pub struct SectorVolumeBody {
     /// Closed `[lat, lon]` rings, one per polygon part.
     #[schema(value_type = Vec<Vec<Vec<f64>>>)]
     pub rings: Vec<Vec<[f64; 2]>>,
+}
+
+/// One sector and the occupancy limit its counts are judged against (#722).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorLimitBody {
+    pub sector_id: String,
+    /// The sector's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume.
+    pub tier: String,
+    /// The sector's limit: its override, or the default.
+    pub limit: i32,
+    /// Whether `limit` is a stored override rather than the default.
+    pub overridden: bool,
+}
+
+/// An ARTCC's sectors with their occupancy limits (#722). An ARTCC with no sector data has no sectors.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorLimitsBody {
+    pub artcc: String,
+    /// What a sector reads until it is overridden.
+    pub default_limit: i32,
+    /// Whether the caller may set this ARTCC's limits (`flow.sector_limits.update`, nationally or for
+    /// this ARTCC).
+    pub editable: bool,
+    /// Ordered by `sector_id`.
+    pub sectors: Vec<SectorLimitBody>,
+}
+
+/// Set a sector's occupancy limit: a positive whole number. Setting the default removes the override.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetSectorLimitRequest {
+    pub limit: i32,
+}
+
+/// One sector worked at another sector's position (#723). Its airspace counts in the target's row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorConsolidationBody {
+    pub sector_id: String,
+    /// Where `sector_id` is worked. Never itself worked elsewhere: the arrangement is kept flat.
+    pub target_sector_id: String,
+}
+
+/// An ARTCC's consolidations (#723). A sector not listed is worked on its own.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorConsolidationsBody {
+    pub artcc: String,
+    /// Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`,
+    /// nationally or for this ARTCC).
+    pub editable: bool,
+    /// Ordered by `sector_id`.
+    pub consolidations: Vec<SectorConsolidationBody>,
+}
+
+/// Work a sector at another of the same ARTCC's sectors.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorRequest {
+    pub target_sector_id: String,
+}
+
+/// Change several of one ARTCC's consolidations at once (#794), all or nothing.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConsolidateSectorsRequest {
+    /// Each sector to change, mapped to the sector to work it at, or to null to give it its own row
+    /// back.
+    pub into: BTreeMap<String, Option<String>>,
+}
+
+/// Whether an ARTCC's sector demand can be drawn (#725). Each state has its own message on the page;
+/// none of them is an empty grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SectorDemandStatus {
+    /// The sector dataset has no volume for this ARTCC at all (ZLA, ZAN and HCF today): name the
+    /// facility and say so. Never drawn as an empty or all-green table, which reads as "quiet".
+    NoSectorData,
+    /// Nothing has been counted yet: the server has not loaded the sector dataset since it started,
+    /// or has not yet received its first feed cycle.
+    Pending,
+    /// Counted from the feed cycle at `cycle_at`.
+    Ready,
+}
+
+/// One 15-minute bin of a sector row (#725): the peak one-minute counts and the level they read
+/// against the row's limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandBin {
+    /// Peak one-minute count of airborne flights alone.
+    pub active: i32,
+    /// Peak one-minute count of flights still on the ground holding a locked wheels-up.
+    pub proposed: i32,
+    /// Peak one-minute count of both together, taken minute by minute; never `active + proposed`.
+    pub combined: i32,
+    /// `over` when `active` alone exceeds the limit, `watch` when only `combined` does, else `ok`. A
+    /// peak equal to the limit is `ok`.
+    pub level: crate::feed::sector_limits::SectorLoadLevel,
+}
+
+/// One row of a sector-demand table (#725): a sector, or a target with the sectors worked at it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandRow {
+    pub sector_id: String,
+    /// The sector's name in the dataset, when it has one.
+    pub name: Option<String>,
+    /// The row's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume.
+    pub tier: String,
+    /// The limit every bin is judged against. A combined row reads its target's (this row's own
+    /// sector's), never a sum or maximum of the sources'.
+    pub limit: i32,
+    /// Whether `limit` is a stored override rather than the default.
+    pub limit_overridden: bool,
+    /// The sectors worked at this one, sorted; non-empty marks a combined row, which counts the union
+    /// of their airspace.
+    pub consolidated: Vec<String>,
+    /// One per entry of the body's `bin_starts_ms`, in the same order.
+    pub bins: Vec<SectorDemandBin>,
+}
+
+/// One of an ARTCC's two sector-demand tables (#725).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct SectorDemandTable {
+    /// Whether the dataset has any volume for this table's tiers in the ARTCC. False is a gap in the
+    /// data (ZSE has no TRACON volumes), to be named, and is distinct from a quiet table of zeros.
+    pub has_sector_data: bool,
+    /// Ordered by `sector_id`. Empty unless the body's status is `ready`.
+    pub rows: Vec<SectorDemandRow>,
+}
+
+/// An ARTCC's predicted sector demand (#725): per sector, peak one-minute occupancy in each Zulu
+/// quarter-hour over the next six hours, judged against its limit. The server always computes all six
+/// hours; how many a view draws is the client's choice.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SectorDemandBody {
+    pub artcc: String,
+    pub status: SectorDemandStatus,
+    /// The feed cycle the counts were projected from; null unless `status` is `ready`.
+    pub cycle_at: Option<DateTime<Utc>>,
+    /// Width of every bin, in minutes.
+    pub bin_minutes: i32,
+    /// Start of each bin as epoch milliseconds, aligned to absolute Zulu quarter-hours. The first is
+    /// the quarter-hour containing `cycle_at`. Empty unless `status` is `ready`.
+    pub bin_starts_ms: Vec<i64>,
+    /// What a sector's limit reads until it is overridden.
+    pub default_limit: i32,
+    /// Whether the caller may set this ARTCC's limits (`flow.sector_limits.update` here).
+    pub limits_editable: bool,
+    /// Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`
+    /// here).
+    pub consolidations_editable: bool,
+    /// The ARTCCs bordering this one, sorted. Each is its own request, and a neighbour's table is
+    /// view-only on this ARTCC's page whatever the caller may edit there.
+    pub neighbours: Vec<String>,
+    /// Low, High and Ultra High sectors.
+    pub enroute: SectorDemandTable,
+    /// Approach Control sectors, kept apart: a different controller with a different workload.
+    pub tracon: SectorDemandTable,
 }
 
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
@@ -3341,117 +3573,4 @@ pub struct FlightExclusionsBody {
 pub struct ExcludeFlightRequest {
     #[serde(default)]
     pub reason: String,
-}
-
-/// One Airspace Monitor sector and the alert parameter its count is coloured against (#598).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SectorMapBody {
-    pub sector_id: String,
-    pub name: Option<String>,
-    /// The sector's Monitor Alert Parameter: its override, or the default.
-    pub map: i32,
-    /// Whether `map` is a stored override rather than the default.
-    pub overridden: bool,
-}
-
-/// One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
-/// against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MonitorBinBody {
-    /// The bin's start, an absolute Zulu quarter-hour.
-    pub start: DateTime<Utc>,
-    pub active: i64,
-    pub proposed: i64,
-    pub combined: i64,
-    pub alert: crate::feed::monitor_alert::SectorAlert,
-}
-
-/// One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MonitorRowBody {
-    pub sector_id: String,
-    pub name: Option<String>,
-    pub map: i32,
-    /// The sectors worked at this one; non-empty marks a combined row.
-    pub consolidated: Vec<String>,
-    /// Someone is working this sector now (vNAS). Shown, never used to hide a row.
-    pub staffed: bool,
-    /// Six hours of bins, the first being the quarter-hour that contains `as_of`.
-    pub bins: Vec<MonitorBinBody>,
-}
-
-/// An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MonitorNeighboursBody {
-    pub artcc: String,
-    /// Directly bordering ARTCCs that OIS runs, sorted.
-    pub neighbours: Vec<String>,
-}
-
-/// An ARTCC's Airspace Monitor (#701), computed from the live feed on request.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MonitorTableBody {
-    pub artcc: String,
-    /// Whether the caller may change this ARTCC's MAPs and consolidations.
-    pub editable: bool,
-    pub as_of: DateTime<Utc>,
-    pub rows: Vec<MonitorRowBody>,
-}
-
-/// An ARTCC's sectors with their Monitor Alert Parameters (#598).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SectorMapsBody {
-    /// Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped).
-    pub editable: bool,
-    /// What a sector reads until overridden.
-    pub default_map: i32,
-    pub sectors: Vec<SectorMapBody>,
-}
-
-/// Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct SetSectorMapRequest {
-    pub map: i32,
-}
-
-/// A sector worked at another sector's position (#599).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SectorConsolidationBody {
-    pub sector_id: String,
-    pub target_sector_id: String,
-}
-
-/// An ARTCC's sector consolidations (#599).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SectorConsolidationsBody {
-    /// Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
-    /// or scoped).
-    pub editable: bool,
-    /// Sorted by sector.
-    pub consolidations: Vec<SectorConsolidationBody>,
-}
-
-/// Work a sector at another sector's position in the same ARTCC.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ConsolidateSectorRequest {
-    pub target_sector_id: String,
-}
-
-/// Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct BulkConsolidateRequest {
-    /// The sector everything is worked at.
-    pub target_sector_id: String,
-    pub mode: BulkConsolidateMode,
-}
-
-/// Which sectors a bulk consolidation moves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum BulkConsolidateMode {
-    /// Every other sector, and the target gets its own row back if it was worked elsewhere.
-    All,
-    /// Only sectors in no consolidation: neither worked elsewhere nor worked at by others. Refused if
-    /// the target is itself worked elsewhere.
-    ExceptConsolidated,
 }

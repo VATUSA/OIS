@@ -15,9 +15,6 @@ pub mod flow;
 pub mod forecast;
 pub mod gdp;
 pub mod metar;
-pub mod monitor;
-pub mod monitor_alert;
-pub mod monitor_tracks;
 pub mod nav;
 mod nav_dns;
 pub mod nav_source;
@@ -25,6 +22,14 @@ pub mod neighbors;
 pub mod predict;
 pub mod runway;
 pub mod runway_db;
+pub mod sector_consolidations;
+#[cfg(test)]
+mod sector_consolidations_tests;
+pub mod sector_limits;
+#[cfg(test)]
+mod sector_limits_tests;
+pub mod sector_load;
+pub mod sector_tracks;
 pub mod sectors;
 pub mod stats;
 pub mod taxi;
@@ -34,7 +39,6 @@ pub mod tracon;
 pub mod trajectory;
 pub mod vatsim;
 pub mod vatusa;
-pub mod vnas;
 pub mod winds;
 
 use std::collections::HashMap;
@@ -202,7 +206,7 @@ fn should_mark_unhealthy(consecutive_failures: u32) -> bool {
 /// published new data, for [`apply_and_tick`] to announce (#648). It holds no realtime sender, so it
 /// can't tell clients anything before the snapshot it installs is in place. Split out of [`poller`]
 /// so the tick is tested where it is wired, not just as a rule.
-async fn apply_fetch(
+pub(crate) async fn apply_fetch(
     state: &FeedState,
     data: VatsimData,
     now: DateTime<Utc>,

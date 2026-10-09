@@ -1,5 +1,5 @@
 //! ATC sector volumes (#594): altitude-bounded polygons OIS owns in `flow.airspace_sector`
-//! (migration 0111), for the Airspace Monitor (#593).
+//! (migration 0111). The Airspace Monitor that first used them was removed (#719); the dataset stays.
 //!
 //! No public feed supplies these, so they are imported offline by `bin/airspace_sector_importer.rs`
 //! and loaded into `AppState::airspace_sectors` by `jobs::spawn_airspace_sectors_refresh`. The
@@ -7,9 +7,44 @@
 //! import shows up on the job's next tick. An in-app editor would call `repos::airspace_sectors::
 //! load_all` and store the result after each write, as `handlers::aircraft_profiles` does.
 //!
+//! **Which volumes count a fix (#726).** A volume *contains* a fix when it is laterally inside a ring
+//! and in the half-open band `base_alt_ft <= alt < top_alt_ft` ([`SectorVolume::contains`]). That alone
+//! still double-counts, because the source's enroute Low volumes start at the surface and sit
+//! laterally over the TRACONs, so their bands overlap the approach volumes' (KATL at 3,000 ft is inside
+//! both `ZTL 70` 0–4,000 and `ZTL 59` 0–23,000). So [`SectorTable::counting`] applies **TRACON
+//! precedence**, the airspace an approach control has been delegated:
+//!
+//! 1. The candidates are every volume that contains the fix.
+//! 2. If any candidate's tier is [`APPROACH_TIER`], only the approach candidates count; otherwise
+//!    every candidate does.
+//! 3. Precedence is global, not per ARTCC: an approach volume anywhere claims the fix, so a ZJX
+//!    approach suppresses a ZMA enroute volume over it.
+//! 4. Approach-vs-approach and enroute-vs-enroute overlaps between different sectors are not
+//!    resolved; each counts.
+//!
+//! Precedence only holds while the fix is *in* the approach band, so it releases at the TRACON's top
+//! (the half-open band puts the top in the stratum above), and laterally outside the TRACON the
+//! enroute volume counts as before. A fix with an unknown altitude laterally inside a TRACON counts in
+//! the TRACON only. The altitude is the shared trajectory model's per-minute prediction, set by
+//! `sector_tracks` — this module does not predict.
+//!
+//! **Known source gap: ZSE has no TRACON volumes.** At the pinned source commit (vTSD
+//! `f33ef73f21091e71456e45cfe9019ddf3ba76247`, `Data/sectors.json`) ZSE has 27 Low and 31 Ultra High
+//! volumes and **no** Approach Control or High ones, and at 3,000 ft KSEA and KPDX are inside no volume
+//! at all, because the enroute Lows are carved around them. The TRACONs do exist: the same repo's
+//! `Data/tracon-boundaries.json` lists `S46Z` "Seattle Approach" and `P80Z` "Portland Approach", but
+//! only as lateral boundaries without altitudes. So this is a gap in the dataset, not a real absence,
+//! and OIS invents no volumes for it; the fix belongs in the source data. The occupancy engine keeps
+//! the two states apart: it emits a row only for a sector that has a volume, so a quiet TRACON is a row
+//! of zeros while ZSE has no approach row at all, for the TRACON view (#725) to report as "no TRACON
+//! sector data" rather than render as quiet.
+//!
 //! Pure data and validation only — the feed reads this through the cache and never queries.
 
 use crate::feed::airspace::point_in_ring;
+
+/// The tier whose volumes take precedence over every other volume containing the same fix (#726).
+pub const APPROACH_TIER: &str = "approach";
 
 /// One stored volume. A sector can be several volumes (the source splits some into pieces), so
 /// `volume_id` — not `sector_id` — is unique within an ARTCC.
@@ -30,7 +65,11 @@ pub struct SectorVolume {
 impl SectorVolume {
     /// Whether a point at `alt_ft` is inside this volume (#596): laterally inside a ring **and** in the
     /// half-open band `base_alt_ft <= alt < top_alt_ft`, so a sector's top is the next stratum's floor
-    /// and stacked strata over one footprint never both claim an altitude.
+    /// and, at a shared boundary altitude, stacked strata over one footprint never both claim it.
+    ///
+    /// Containment is not counting: volumes whose bands *overlap* (an enroute Low from the surface over
+    /// a TRACON) both contain a fix in the overlap. [`SectorTable::counting`] resolves that with TRACON
+    /// precedence (#726, see the module docs); occupancy goes through it, not through this.
     ///
     /// One altitude, supplied by the caller (the trajectory's predicted altitude at that point) — not
     /// the FCA's "filed **or** current" rule, which would count a climber below the floor and could
@@ -50,7 +89,7 @@ pub struct SectorTable {
 
 impl SectorTable {
     /// One ARTCC's sectors, each once, as `(sector_id, name)` ordered by sector — a sector spans one
-    /// or more volumes, so this is what an Airspace Monitor row is.
+    /// or more volumes.
     pub fn sectors_of(&self, artcc: &str) -> Vec<(String, Option<String>)> {
         let mut sectors = std::collections::BTreeMap::new();
         for v in self.volumes.iter().filter(|v| v.artcc == artcc) {
@@ -74,20 +113,20 @@ impl SectorTable {
             .iter()
             .filter(move |v| v.contains(lat, lon, alt_ft))
     }
-}
 
-/// The Monitor Alert Parameter a sector reads until a TMU overrides it (#598). Taken from vTBFM, which
-/// tunes it down from real high-sector values of about 16–20 for VATSIM traffic levels.
-pub const DEFAULT_MAP: i32 = 10;
-
-/// Stored MAP overrides by `(artcc, sector_id)`, as cached in `AppState::sector_maps`.
-pub type SectorMaps = std::collections::HashMap<(String, String), i32>;
-
-/// A sector's MAP: its override, or [`DEFAULT_MAP`].
-pub fn map_for(maps: &SectorMaps, artcc: &str, sector_id: &str) -> i32 {
-    maps.get(&(artcc.to_string(), sector_id.to_string()))
-        .copied()
-        .unwrap_or(DEFAULT_MAP)
+    /// Indices into `volumes` of every volume that counts a fix here (#726): the volumes that
+    /// [contain](SectorVolume::contains) it, narrowed to the [`APPROACH_TIER`] ones when there are any.
+    /// Precedence is global across ARTCCs and releases at a TRACON's top — see the module docs.
+    pub fn counting(&self, lat: f64, lon: f64, alt_ft: Option<f64>) -> Vec<usize> {
+        let is_approach = |&i: &usize| self.volumes[i].tier == APPROACH_TIER;
+        let mut candidates: Vec<usize> = (0..self.volumes.len())
+            .filter(|&i| self.volumes[i].contains(lat, lon, alt_ft))
+            .collect();
+        if candidates.iter().any(is_approach) {
+            candidates.retain(is_approach);
+        }
+        candidates
+    }
 }
 
 /// Why a volume can't be stored, or `Ok` if it can. The single gate every write passes through

@@ -30,13 +30,16 @@ These are project rules, not preferences:
   switch branches." `main` is promoted from `next` via a separate, manual release PR only — don't
   target `main` directly for issue work.
 - **Always produce a commit message** for a completed unit of work — conventional-commit style
-  (`type(scope): summary`), a short body, a `Closes #N` line when it maps to an issue, and the
-  `Co-Authored-By` trailer the session specifies. Commit/push only when the user asks.
+  (`type(scope): summary`), a short body, and a `Closes #N` line when it maps to an issue. Commit/push
+  only when the user asks. **No AI attribution, anywhere**: the rule (commits, PRs, issues, comments)
+  is stated once, in `AGENTS.md` § Git workflow.
 - **Regenerate the typed client after any contract change.** Editing an endpoint or a
   `#[derive(ToSchema)]` model and *not* regenerating leaves the web typecheck compiling against a
   stale contract — a silent failure. See `AGENTS.md` § "The API contract → typed client".
-- **Verify before "done": run `just ci`.** For a contract change, that means regenerate the client
-  first, then `pnpm typecheck`. For DB behavior, run the stack and exercise the endpoint.
+- **Verify before "done": run `just ci-full`**, which mirrors CI (`just ci` is the fast subset; it
+  skips clippy, vitest, the audits and client drift — see `AGENTS.md` § Commands). For a contract
+  change, regenerate the client first. For DB behavior, run the stack and exercise the endpoint. Once
+  the PR is open, read its check-runs before calling CI green (`AGENTS.md` § Testing & verification).
 - **Filing issues** follows [`docs/github-issues.md`](docs/github-issues.md) (labels, body structure,
   scope tests, board). Don't self-assign/close/merge; keep comments to real moments; other repos are
   read-only.
@@ -53,10 +56,16 @@ From `AGENTS.md`, repeated here only as a checklist because missing one fails si
   + `insert into access.permissions` migration. All three.
 - A **new assignable role** → `access.roles` migration + `default_roles()` + `ASSIGNABLE_USER_ROLES`.
 - A **new endpoint** → `router.rs` route + `openapi.rs` path (+ schema) + regenerated client.
-- The **trajectory model** (`feed/trajectory.rs`) has three callers (FCA metering, airport-flow
-  demand, runway ETE) — a change reaches all three; verify each.
+- The **trajectory model** (`feed/trajectory.rs`) is shared by every ETA surface — a change reaches
+  all of its callers (`AGENTS.md` § The trajectory / ETA model lists them); verify each.
 - The **feed subsystem has no DB handle** — it reads `AppState` `ArcSwap` caches, never queries
   inline. New feed-visible config follows the "cache + refresh job + force-reload on write" pattern.
+
+## Rules (`.claude/rules/`)
+
+Review, test, git, lifecycle, and prose standards live in `.claude/rules/`. Seven load in every
+session; `rust-backend`, `secure-coding`, `database-postgres`, and `web-frontend` have `paths:`
+frontmatter and load only when Claude reads or edits a matching file. Rules link to `AGENTS.md`.
 
 ## Tool selection
 

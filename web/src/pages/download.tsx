@@ -2,8 +2,8 @@
 // before you have any reason to be signed in — and from the sidebar's User group once signed in
 // (#534).
 //
-// Each row links to `/api/v1/public/desktop/download/{platform}`, which resolves the current
-// release's installer server-side and redirects to it. That replaced a browser-side call to
+// Each row links to `/api/v1/public/desktop/download/{platform}` on the API origin, which resolves
+// the current release's installer server-side and redirects to it. That replaced a browser-side call to
 // `api.github.com` (#534), which failed in two ordinary situations and silently degraded every row
 // to the generic releases page:
 //
@@ -16,7 +16,9 @@
 import * as React from "react";
 import {Apple, Download, Monitor, Terminal} from "lucide-react";
 
+import {isTauri} from "@/lib/platform";
 import {usePageHeader} from "@/components/shell/page-meta";
+import {API_BASE} from "@/lib/api";
 
 /** Kept as an explicit secondary link, never as a silent substitute for a platform row. */
 const RELEASES_URL = "https://github.com/VATUSA/OIS/releases";
@@ -33,8 +35,16 @@ const PLATFORMS: Platform[] = [
   { id: "linux", label: "Linux", icon: Terminal },
 ];
 
-/** The server-side resolver. Which asset a platform maps to is decided in `handlers::desktop`. */
-const downloadHref = (platform: Platform["id"]) => `/api/v1/public/desktop/download/${platform}`;
+/**
+ * The server-side resolver. Which asset a platform maps to is decided in `handlers::desktop`.
+ *
+ * Built from `API_BASE` exactly as the typed client builds its URLs (trailing slash stripped, then
+ * the path appended), because in production the API is a different host from this page (#738). A
+ * root-relative path resolved against the web origin, where nginx answers with the SPA shell. An
+ * empty `API_BASE` (same-origin deployment) leaves the relative path, which is then correct.
+ */
+const downloadHref = (platform: Platform["id"]) =>
+  `${API_BASE.replace(/\/$/, "")}/api/v1/public/desktop/download/${platform}`;
 
 /** Best guess at the visitor's OS, only ever used to decide what to put first. */
 function detectPlatform(): Platform["id"] | undefined {
@@ -80,28 +90,42 @@ export function DownloadPage() {
   return (
     <div className="flex w-full max-w-2xl flex-col gap-4">
       <section className="flex flex-col gap-3">
-        <div className="flex flex-col gap-2">
-          {ordered.map((platform) => (
-            <PlatformRow
-              key={platform.id}
-              platform={platform}
-              primary={platform.id === detected}
-            />
-          ))}
-        </div>
-
         {/*
-          The installers are deliberately not OS-code-signed yet — `.github/workflows/release.yml`
-          documents the decision — so the first launch shows a publisher warning. Saying so here is
-          the difference between a user thinking the download is broken and knowing what to click.
-          This note goes away with the signing work (#535).
+          Inside the desktop app (#751) the platform rows have no job: the user already has the app,
+          and it updates itself. A bare link there would also navigate the main window off-app, to
+          the installer redirect, with no way back.
         */}
-        <p className="text-sm text-ink-3">
-          The installers aren&apos;t signed yet, so the first launch shows a warning about an
-          unidentified developer. On macOS, open it from Finder with <strong>right-click → Open</strong>;
-          on Windows, choose <strong>More info → Run anyway</strong>. Updates after that are
-          automatic and verified.
-        </p>
+        {isTauri() ? (
+          <p className="text-sm text-ink-3">
+            You&apos;re already running the desktop app, and it keeps itself up to date. To install it
+            on another computer, open OIS in a browser there and come back to this page.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-col gap-2">
+              {ordered.map((platform) => (
+                <PlatformRow
+                  key={platform.id}
+                  platform={platform}
+                  primary={platform.id === detected}
+                />
+              ))}
+            </div>
+
+            {/*
+              The installers are deliberately not OS-code-signed yet — `.github/workflows/release.yml`
+              documents the decision — so the first launch shows a publisher warning. Saying so here is
+              the difference between a user thinking the download is broken and knowing what to click.
+              This note goes away with the signing work (#535).
+            */}
+            <p className="text-sm text-ink-3">
+              The installers aren&apos;t signed yet, so the first launch shows a warning about an
+              unidentified developer. On macOS, open it from Finder with <strong>right-click → Open</strong>;
+              on Windows, choose <strong>More info → Run anyway</strong>. Updates after that are
+              automatic and verified.
+            </p>
+          </>
+        )}
 
         <p className="text-sm text-ink-3">
           Looking for an older build, or a format not listed here? See{" "}

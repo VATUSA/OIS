@@ -22,6 +22,9 @@ always matches the running API.
 | --- | --- | --- |
 | `/api/v1/access/catalog` | GET | `access.catalog.read` |
 | `/api/v1/access/self` | GET | `access.self.read` |
+| `/api/v1/admin/access/vatusa-reset` | GET | — (no permission marker) |
+| `/api/v1/admin/access/vatusa-reset` | POST | — (no permission marker) |
+| `/api/v1/admin/access/vatusa-reset/runs/{id}` | GET | — (no permission marker) |
 | `/api/v1/admin/api-keys` | GET | `api_keys.key.read` |
 | `/api/v1/admin/api-keys/{id}` | DELETE | `api_keys.key.delete` |
 | `/api/v1/admin/api-keys/{id}/disable` | POST | `api_keys.key.delete` |
@@ -175,14 +178,6 @@ always matches the running API.
 | `/api/v1/flow/fcas/{id}/swap` | POST | `flow.fca.update` |
 | `/api/v1/flow/fcas/{id}/traffic` | GET | — (no permission marker) |
 | `/api/v1/flow/idst` | GET | `flow.fca.read` |
-| `/api/v1/flow/monitor/{artcc}` | GET | `flow.monitor.read` |
-| `/api/v1/flow/monitor/{artcc}/consolidations` | GET | `flow.monitor.read` |
-| `/api/v1/flow/monitor/{artcc}/consolidations` | POST | `flow.monitor.update` |
-| `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | DELETE | `flow.monitor.update` |
-| `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | PUT | `flow.monitor.update` |
-| `/api/v1/flow/monitor/{artcc}/maps` | GET | `flow.monitor.read` |
-| `/api/v1/flow/monitor/{artcc}/maps/{sector_id}` | PUT | `flow.monitor.update` |
-| `/api/v1/flow/monitor/{artcc}/neighbours` | GET | `flow.monitor.read` |
 | `/api/v1/flow/resolve-routes` | POST | `stats.data.read` |
 | `/api/v1/flow/route-coverage` | GET | — (no permission marker) |
 | `/api/v1/flow/routes` | GET | — (no permission marker) |
@@ -194,6 +189,13 @@ always matches the running API.
 | `/api/v1/flow/runway/{icao}/configs` | GET | `flow.runway.read` |
 | `/api/v1/flow/runway/{icao}/configs/{name}` | DELETE | `flow.runway.update` |
 | `/api/v1/flow/runway/{icao}/configs/{name}` | PUT | `flow.runway.update` |
+| `/api/v1/flow/sector-consolidations/{artcc}` | GET | `flow.sectors.read` |
+| `/api/v1/flow/sector-consolidations/{artcc}` | PUT | `flow.sector_consolidations.update` |
+| `/api/v1/flow/sector-consolidations/{artcc}/{sector_id}` | DELETE | `flow.sector_consolidations.update` |
+| `/api/v1/flow/sector-consolidations/{artcc}/{sector_id}` | PUT | `flow.sector_consolidations.update` |
+| `/api/v1/flow/sector-demand/{artcc}` | GET | `flow.sectors.read` |
+| `/api/v1/flow/sector-limits/{artcc}` | GET | `flow.sectors.read` |
+| `/api/v1/flow/sector-limits/{artcc}/{sector_id}` | PUT | `flow.sector_limits.update` |
 | `/api/v1/flow/traffic` | GET | — (no permission marker) |
 | `/api/v1/flow/traffic/projected` | GET | — (no permission marker) |
 | `/api/v1/flow/validate-fixes` | GET | `flow.fca.read` |

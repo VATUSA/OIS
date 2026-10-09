@@ -21,7 +21,7 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
-    models::{ExcludeFlightRequest, FlightExclusionBody, FlightExclusionsBody},
+    models::{ExcludeFlightRequest, FcaBody, FlightExclusionBody, FlightExclusionsBody},
     repos::{flight_exclusions as exclusions_repo, flow as flow_repo},
     state::AppState,
 };
@@ -44,12 +44,37 @@ async fn refresh_exclusions_cache(state: &AppState, pool: &sqlx::PgPool) -> Resu
     Ok(())
 }
 
-/// The ARTCC that owns an FCA — the scope a manual exclusion is recorded under.
-async fn fca_artcc(pool: &sqlx::PgPool, id: &str) -> Result<String, ApiError> {
-    let fca = flow_repo::get_fca(pool, id)
+/// The FCA an exclusion route is working. Its ARTCC is the scope a manual exclusion is recorded under.
+async fn load_fca(pool: &sqlx::PgPool, id: &str) -> Result<FcaBody, ApiError> {
+    flow_repo::get_fca(pool, id)
         .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok(fca.artcc)
+        .ok_or(ApiError::NotFound)
+}
+
+/// `404` for an unpublished (planned or archived) event FCA unless the caller holds
+/// `events.plan.update` (#762) — the same answer as a missing id, so the route never confirms that a
+/// hidden FCA exists. A planner preparing the event keeps listing, adding and removing exclusions on
+/// it; published event FCAs and ordinary FCAs pass. Mirrors the `404` half of
+/// `handlers::flow::require_event_fca_planner` (#736).
+///
+/// Every exclusion route runs this before the ARTCC scope check, so an out-of-scope caller can't
+/// learn from a `403` that a planned FCA exists.
+async fn hide_unpublished_event_fca(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+) -> Result<(), ApiError> {
+    let unpublished_event =
+        fca.event_id.is_some() && fca.event_status.as_deref() != Some("published");
+    if unpublished_event
+        && principal
+            .permission_scope(state, "events.plan.update")
+            .await?
+            .is_empty()
+    {
+        return Err(ApiError::NotFound);
+    }
+    Ok(())
 }
 
 /// Fail closed unless the caller holds `flow.fca.update` nationally or for `artcc`.
@@ -98,7 +123,9 @@ pub async fn list_flight_exclusions(
     Path(id): Path<String>,
 ) -> Result<Json<FlightExclusionsBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    let artcc = fca_artcc(pool, &id).await?;
+    let fca = load_fca(pool, &id).await?;
+    hide_unpublished_event_fca(&state, &principal, &fca).await?;
+    let artcc = fca.artcc;
     // Read is gated on `flow.fca.read`, so a viewer without any write grant still gets the list —
     // they just get `editable: false` with it.
     let editable = may_edit_artcc(&state, &principal, &artcc).await?;
@@ -128,7 +155,9 @@ pub async fn exclude_flight(
     if callsign.is_empty() {
         return Err(ApiError::BadRequest);
     }
-    let artcc = fca_artcc(pool, &id).await?;
+    let fca = load_fca(pool, &id).await?;
+    hide_unpublished_event_fca(&state, &principal, &fca).await?;
+    let artcc = fca.artcc;
     require_artcc_scope(&state, &principal, &artcc).await?;
     let row = exclusions_repo::upsert(
         pool,
@@ -158,7 +187,9 @@ pub async fn restore_flight(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let callsign = callsign.trim().to_ascii_uppercase();
-    let artcc = fca_artcc(pool, &id).await?;
+    let fca = load_fca(pool, &id).await?;
+    hide_unpublished_event_fca(&state, &principal, &fca).await?;
+    let artcc = fca.artcc;
     require_artcc_scope(&state, &principal, &artcc).await?;
     if !exclusions_repo::delete(pool, &artcc, &callsign).await? {
         return Err(ApiError::NotFound);
@@ -275,7 +306,7 @@ mod scope_tests {
     // differently — no permission is 401, the wrong facility 403 — so each test pins one of them.
 
     use http::{Method, StatusCode};
-    use scope_test_support::{send, session_cookie};
+    use scope_test_support::{send, send_json, session_cookie};
 
     const EXCLUSION: &str = "/api/v1/flow/fcas/f-zdc/exclusions/AAL1";
 
@@ -327,5 +358,304 @@ mod scope_tests {
         let restore = send(&state, Method::DELETE, EXCLUSION, &cookie, None).await;
         assert_eq!(exclude, StatusCode::OK, "exclude");
         assert_eq!(restore, StatusCode::NO_CONTENT, "restore");
+    }
+
+    // --- Unpublished event FCAs (VATUSA/OIS#762) ---
+    //
+    // A planned or archived event FCA answers every exclusion route with the same `404` as a missing
+    // id unless the caller holds `events.plan.update` — checked before the ARTCC scope, so an
+    // out-of-scope caller can't tell from a `403` that it exists. Published event FCAs and ordinary
+    // FCAs answer as before.
+
+    /// ZDC's event 7620 with one planned, one published and one archived FCA, an ordinary ZDC FCA
+    /// (`f-zdc`), and a live ZDC exclusion of `AAL1` that a refused `DELETE` must leave in place.
+    async fn seed_event_fcas(pool: &PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values \
+               (7620, 'Exclusion guard', now() + interval '1 day', now() + interval '2 days')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.fca (id, name, artcc, enabled, event_id, event_status) values \
+               ('ev-planned',   'Planned',   'ZDC', true, 7620, 'planned'), \
+               ('ev-published', 'Published', 'ZDC', true, 7620, 'published'), \
+               ('ev-archived',  'Archived',  'ZDC', true, 7620, 'archived'), \
+               ('f-zdc',        'ZDC FCA',   'ZDC', true, null, null)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into flow.manual_flight_exclusion (callsign, artcc, reason, expires_at) \
+             values ('AAL1', 'ZDC', 'ghost track', now() + interval '2 hours')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Every exclusion row as `(artcc, callsign, reason)`, to prove a refused request changed nothing.
+    async fn exclusion_rows(pool: &PgPool) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "select artcc, callsign, reason from flow.manual_flight_exclusion \
+             order by artcc, callsign",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A user holding each of `grants` at `artcc`, as a session cookie.
+    async fn caller(pool: &PgPool, grants: &[(&str, &str)]) -> String {
+        let user = scope_test_support::seed_user(pool).await;
+        for (permission, artcc) in grants {
+            grant(pool, &user, permission, Some(artcc)).await;
+        }
+        session_cookie(pool, &user).await
+    }
+
+    /// One request through the real router, answering its status and raw body — so a refusal can be
+    /// compared byte for byte with a missing id's, not just by status.
+    async fn call(
+        state: &crate::state::AppState,
+        method: Method,
+        uri: &str,
+        cookie: &str,
+        json: Option<serde_json::Value>,
+    ) -> (StatusCode, Vec<u8>) {
+        use tower::ServiceExt;
+        let builder = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(http::header::COOKIE, cookie);
+        let request = match json {
+            Some(body) => builder
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_string())),
+            None => builder.body(axum::body::Body::empty()),
+        }
+        .unwrap();
+        let response = crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, body)
+    }
+
+    /// The three exclusion routes against FCA `id`: list, exclude `UAL2` (not yet excluded, so a
+    /// refusal that leaked would add a row) and restore `AAL1` (excluded, so one would remove it).
+    async fn all_three(
+        state: &crate::state::AppState,
+        id: &str,
+        cookie: &str,
+    ) -> [(&'static str, (StatusCode, Vec<u8>)); 3] {
+        let list = format!("/api/v1/flow/fcas/{id}/exclusions");
+        let exclude = format!("/api/v1/flow/fcas/{id}/exclusions/UAL2");
+        let restore = format!("/api/v1/flow/fcas/{id}/exclusions/AAL1");
+        [
+            ("GET", call(state, Method::GET, &list, cookie, None).await),
+            (
+                "POST",
+                call(state, Method::POST, &exclude, cookie, reason()).await,
+            ),
+            (
+                "DELETE",
+                call(state, Method::DELETE, &restore, cookie, None).await,
+            ),
+        ]
+    }
+
+    /// The acceptance case: a controller scoped elsewhere gets, on every route, exactly the `404` a
+    /// missing id gets for a planned and an archived event FCA — not the `403` (writes) or `200`
+    /// (list) that would confirm it exists. Nothing changes. Fails if any route drops the guard or
+    /// runs it after the scope check.
+    #[sqlx::test]
+    async fn an_out_of_scope_caller_gets_the_missing_id_404_for_an_unpublished_event_fca(
+        pool: PgPool,
+    ) {
+        seed_event_fcas(&pool).await;
+        let cookie = caller(
+            &pool,
+            &[("flow.fca.read", "ZNY"), ("flow.fca.update", "ZNY")],
+        )
+        .await;
+        let state = state_with_zdc(pool.clone());
+        let before = exclusion_rows(&pool).await;
+
+        let missing = all_three(&state, "no-such-fca", &cookie).await;
+        for (route, answer) in &missing {
+            assert_eq!(answer.0, StatusCode::NOT_FOUND, "{route} on a missing id");
+        }
+        for id in ["ev-planned", "ev-archived"] {
+            for ((route, answer), (_, missing)) in
+                all_three(&state, id, &cookie).await.iter().zip(&missing)
+            {
+                assert_eq!(answer, missing, "{route} {id} must answer as a missing id");
+            }
+        }
+        assert_eq!(exclusion_rows(&pool).await, before, "nothing changed");
+
+        // Positive control: a published event FCA and an ordinary one answer this caller as before —
+        // listed (read is national), and refused the writes by the ARTCC scope with a 403.
+        for id in ["ev-published", "f-zdc"] {
+            let statuses = all_three(&state, id, &cookie)
+                .await
+                .map(|(r, (s, _))| (r, s));
+            assert_eq!(
+                statuses,
+                [
+                    ("GET", StatusCode::OK),
+                    ("POST", StatusCode::FORBIDDEN),
+                    ("DELETE", StatusCode::FORBIDDEN),
+                ],
+                "{id}"
+            );
+        }
+        assert_eq!(exclusion_rows(&pool).await, before, "nothing changed");
+    }
+
+    /// The owning facility's own controller is no planner either: on ZDC's planned and archived event
+    /// FCAs every route answers `404` and nothing changes, while ZDC's published event FCA and its
+    /// ordinary FCA still list, exclude and restore as before.
+    #[sqlx::test]
+    async fn an_in_scope_non_planner_gets_404_for_an_unpublished_event_fca(pool: PgPool) {
+        seed_event_fcas(&pool).await;
+        let cookie = caller(
+            &pool,
+            &[("flow.fca.read", "ZDC"), ("flow.fca.update", "ZDC")],
+        )
+        .await;
+        let state = state_with_zdc(pool.clone());
+        let before = exclusion_rows(&pool).await;
+
+        let missing = all_three(&state, "no-such-fca", &cookie).await;
+        for id in ["ev-planned", "ev-archived"] {
+            for ((route, answer), (_, missing)) in
+                all_three(&state, id, &cookie).await.iter().zip(&missing)
+            {
+                assert_eq!(answer.0, StatusCode::NOT_FOUND, "{route} {id}");
+                assert_eq!(answer, missing, "{route} {id} must answer as a missing id");
+            }
+        }
+        assert_eq!(exclusion_rows(&pool).await, before, "nothing changed");
+
+        // Positive control: unchanged for a published event FCA and an ordinary one.
+        for id in ["ev-published", "f-zdc"] {
+            let statuses = all_three(&state, id, &cookie)
+                .await
+                .map(|(r, (s, _))| (r, s));
+            assert_eq!(
+                statuses,
+                [
+                    ("GET", StatusCode::OK),
+                    ("POST", StatusCode::OK),
+                    ("DELETE", StatusCode::NO_CONTENT),
+                ],
+                "{id}"
+            );
+            // Put AAL1 back for the next FCA's restore, and drop UAL2 so its exclude adds it again.
+            sqlx::query(
+                "insert into flow.manual_flight_exclusion (callsign, artcc, reason, expires_at) \
+                 values ('AAL1', 'ZDC', 'ghost track', now() + interval '2 hours')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("delete from flow.manual_flight_exclusion where callsign = 'UAL2'")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A planner preparing the event keeps all three routes on a planned and an archived event FCA —
+    /// and the ARTCC scope check still runs after the guard, so a planner whose `flow.fca.update` is
+    /// elsewhere is refused the writes with the usual `403`.
+    #[sqlx::test]
+    async fn a_planner_lists_adds_and_removes_on_an_unpublished_event_fca(pool: PgPool) {
+        seed_event_fcas(&pool).await;
+        let planner = caller(
+            &pool,
+            &[
+                ("events.plan.update", "ZDC"),
+                ("flow.fca.read", "ZDC"),
+                ("flow.fca.update", "ZDC"),
+            ],
+        )
+        .await;
+        let elsewhere = caller(
+            &pool,
+            &[
+                ("events.plan.update", "ZDC"),
+                ("flow.fca.read", "ZNY"),
+                ("flow.fca.update", "ZNY"),
+            ],
+        )
+        .await;
+        let state = state_with_zdc(pool.clone());
+
+        for id in ["ev-planned", "ev-archived"] {
+            let (status, body) = send_json(
+                &state,
+                Method::GET,
+                &format!("/api/v1/flow/fcas/{id}/exclusions"),
+                &planner,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "GET {id}");
+            assert_eq!(body["editable"], true, "GET {id}: {body}");
+            assert!(
+                body.to_string().contains("AAL1"),
+                "GET {id} lists AAL1: {body}"
+            );
+
+            let excluded = format!("/api/v1/flow/fcas/{id}/exclusions/UAL2");
+            assert_eq!(
+                send(&state, Method::POST, &excluded, &planner, reason()).await,
+                StatusCode::OK,
+                "POST {id}"
+            );
+            assert!(
+                exclusion_rows(&pool)
+                    .await
+                    .iter()
+                    .any(|(_, c, _)| c == "UAL2"),
+                "POST {id} added UAL2"
+            );
+            assert_eq!(
+                send(&state, Method::DELETE, &excluded, &planner, None).await,
+                StatusCode::NO_CONTENT,
+                "DELETE {id}"
+            );
+            assert!(
+                !exclusion_rows(&pool)
+                    .await
+                    .iter()
+                    .any(|(_, c, _)| c == "UAL2"),
+                "DELETE {id} removed UAL2"
+            );
+
+            let before = exclusion_rows(&pool).await;
+            let statuses = all_three(&state, id, &elsewhere)
+                .await
+                .map(|(r, (s, _))| (r, s));
+            assert_eq!(
+                statuses,
+                [
+                    ("GET", StatusCode::OK),
+                    ("POST", StatusCode::FORBIDDEN),
+                    ("DELETE", StatusCode::FORBIDDEN),
+                ],
+                "{id}, planner scoped elsewhere for flow.fca.update"
+            );
+            assert_eq!(exclusion_rows(&pool).await, before, "nothing changed");
+        }
     }
 }

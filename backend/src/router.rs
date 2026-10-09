@@ -13,11 +13,12 @@ use crate::{
     auth::middleware::resolve_current_user,
     config::build_cors_layer,
     handlers::{
-        access, ace, admin, aircraft_profiles, airport_configs, airport_surface, airports,
-        airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics, docs,
-        events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow, gdp,
-        health, integration, jobs as jobs_handler, metrics as metrics_handler, monitor,
-        preferences, public, runway, service_accounts, stats, taxi_insights, tmu, users, webhooks,
+        access, access_reset, ace, admin, aircraft_profiles, airport_configs, airport_surface,
+        airports, airspace_sectors, api_keys, atc, audit, auth, dashboards, desktop, diagnostics,
+        docs, events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow,
+        gdp, health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences,
+        public, runway, sector_consolidations, sector_demand, sector_limits, service_accounts,
+        stats, taxi_insights, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -147,6 +148,15 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/admin/users/{cid}/vatusa/resync",
             post(access::resync_user_vatusa),
+        )
+        // Reset everyone's access to VATUSA, and its dry run — #795
+        .route(
+            "/api/v1/admin/access/vatusa-reset",
+            get(access_reset::preview_vatusa_reset).post(access_reset::apply_vatusa_reset),
+        )
+        .route(
+            "/api/v1/admin/access/vatusa-reset/runs/{id}",
+            get(access_reset::get_vatusa_reset_run),
         )
         // Group (role) management — #545
         .route(
@@ -424,6 +434,31 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
             "/api/v1/flow/airspace/sectors",
             get(airspace_sectors::list_sectors),
         )
+        // Predicted sector demand for the Operations page (#725): read with the sector data
+        .route(
+            "/api/v1/flow/sector-demand/{artcc}",
+            get(sector_demand::get_sector_demand),
+        )
+        // Sector occupancy limits (#722): read with the sector data, set per ARTCC by its TMU
+        .route(
+            "/api/v1/flow/sector-limits/{artcc}",
+            get(sector_limits::list_sector_limits),
+        )
+        .route(
+            "/api/v1/flow/sector-limits/{artcc}/{sector_id}",
+            put(sector_limits::set_sector_limit),
+        )
+        // Sector consolidation (#723): read with the sector data, changed per ARTCC by its TMU
+        .route(
+            "/api/v1/flow/sector-consolidations/{artcc}",
+            get(sector_consolidations::list_sector_consolidations)
+                .put(sector_consolidations::consolidate_sectors),
+        )
+        .route(
+            "/api/v1/flow/sector-consolidations/{artcc}/{sector_id}",
+            put(sector_consolidations::consolidate_sector)
+                .delete(sector_consolidations::release_sector),
+        )
         // Persisted VATSIM stats (historical read API)
         .route("/api/v1/stats/network/history", get(stats::network_history))
         .route("/api/v1/stats/airports/top", get(stats::airports_top))
@@ -504,27 +539,6 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/flow/fcas/{id}/exclusions/{callsign}",
             post(flight_exclusions::exclude_flight).delete(flight_exclusions::restore_flight),
-        )
-        .route("/api/v1/flow/monitor/{artcc}", get(monitor::monitor_table))
-        .route(
-            "/api/v1/flow/monitor/{artcc}/neighbours",
-            get(monitor::monitor_neighbours),
-        )
-        .route(
-            "/api/v1/flow/monitor/{artcc}/maps",
-            get(monitor::list_sector_maps),
-        )
-        .route(
-            "/api/v1/flow/monitor/{artcc}/maps/{sector_id}",
-            put(monitor::set_sector_map),
-        )
-        .route(
-            "/api/v1/flow/monitor/{artcc}/consolidations",
-            get(monitor::list_consolidations).post(monitor::consolidate_all_sectors),
-        )
-        .route(
-            "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}",
-            put(monitor::consolidate_sector).delete(monitor::release_sector),
         )
         // Shared named map routes (polylines)
         .route(

@@ -140,6 +140,12 @@ answer with no credential:
 | `GET /flow/facilities` | `atc::list_flow_facilities` |
 | `GET /public/flight/{callsign}` | `flight_advisory` |
 
+`PUT`/`DELETE /flow/fcas/{id}` write an **event** FCA only for a caller holding `events.plan.update`
+(#736). Event FCAs belong to the planner lifecycle at `/events/{id}/fcas` (publish, archive,
+auto-publish), so anyone else holding `flow.fca.*` at the ARTCC is refused. An unpublished one answers
+`404`, so the route never confirms it exists; a published one answers `409 event_fca`. The check runs
+before the ARTCC scope check, so an out-of-scope caller can't learn from a `403` that one exists.
+
 `GET /flow/fcas/{id}/traffic` is public only for an FCA that `GET /flow/fcas` lists. For a **hidden**
 FCA it answers `404` to an anonymous caller, as if the FCA didn't exist. An unpublished event FCA
 (planned or archived) is served to a caller holding `events.plan.read`, the gate on
@@ -250,10 +256,15 @@ releases for FCA crossings (a native port of vatflow's idst view).
 
 CFR releases stored in `flow.fca_release` (frozen `cta_ms`/`edct_ms`) also feed the TMU
 **departures** view and IDST metering, so a release set on the FCA page surfaces
-everywhere — even when the destination has no GDP program (e.g. KSAN metered by an FCA,
-not a GDP). In `departures_response` (`handlers/feed.rs`), an FCA release for a pending
-departure counts as a frozen CFR: the GDP-program CFR is preferred when present,
-otherwise the flight falls back to the FCA's release time and is marked metered.
+everywhere — even when the destination has no rate program (e.g. KSAN metered by an FCA).
+
+In `departures_response` (`handlers/feed.rs`), a pending departure's release time is its
+**latest locked time** (#732): the latest of its issued CFR, its releases in live FCAs (enabled,
+not deleted) and its slot EDCT in a published GDP (`repos::flow::locked_wheels_up`). A flight
+held by two FCAs at 14:30 and 15:00 shows 15:00, because it can't leave before then. Any locked
+time marks the flight issued and metered. Only when nothing is locked does the arrival rate
+program's **proposed** CFR show, still unissued, so a proposal never hides a binding time. The
+flight advisory and the sector occupancy engine (#721) use the same rule.
 `POST`/`DELETE /api/v1/flow/fcas/{id}/release/{callsign}` publish the `flow.release`
 realtime topic (the additive `/api/v1/ws` push hub) so those views nudge-and-refetch.
 

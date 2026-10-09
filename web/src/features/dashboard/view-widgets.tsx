@@ -51,6 +51,19 @@ function chipClass(active: boolean): string {
   );
 }
 
+/**
+ * The arrival-gate choices for an airport's ladder filter (#791): every STAR the nav data says
+ * serves it, every gate live traffic is filed on, and every gate already selected, so a gate can be
+ * picked before anyone files it and a saved one stays toggleable after its traffic is gone. The nav
+ * STARs and live gates both go through `summaryGateName`, the one normalizer the columns use too.
+ */
+export function ladderGateOptions(flow: Flow, selected: readonly string[] = []): string[] {
+  const names = [...(flow.stars ?? []), ...flow.flights.map((fl) => fl.gate)]
+    .map(summaryGateName)
+    .filter((g): g is string => !!g);
+  return [...new Set([...names, ...selected])].sort();
+}
+
 const parseList = (raw: string): string[] =>
   raw
     .split(/[,\s]+/)
@@ -68,11 +81,7 @@ function LadderFilterBar({
   onChange: (next: LadderFilters) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const gates = useMemo(
-    () =>
-      [...new Set(flow.flights.map((fl) => summaryGateName(fl.gate)).filter((g): g is string => !!g))].sort(),
-    [flow.flights],
-  );
+  const gates = useMemo(() => ladderGateOptions(flow, filters.gates), [flow, filters.gates]);
   const activeCount =
     (filters.gates?.length ? 1 : 0) +
     (filters.statuses?.length ? 1 : 0) +
@@ -130,7 +139,7 @@ function LadderFilterBar({
           <div>
             <div className="mb-1 font-semibold text-ink-2">Arrival gate</div>
             {gates.length === 0 ? (
-              <span className="text-ink-3">none in current data</span>
+              <span className="text-ink-3">none known for this airport</span>
             ) : (
               <div className="flex flex-wrap gap-1">
                 {gates.map((g) => (
@@ -234,7 +243,7 @@ function TguiWidget({
         />
       )}
       <TguiLadder
-        columns={airportTguiColumns(airportLadderItems(flow.data, filters, now), now)}
+        columns={airportTguiColumns(airportLadderItems(flow.data, filters, now), now, filters.gates)}
         now={now}
         win={60}
         emptyMessage="No ETAs in window"

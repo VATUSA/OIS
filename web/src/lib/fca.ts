@@ -1,4 +1,5 @@
 import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
+import {useState} from "react";
 import {keepPreviousData, useMutation, useQueries, useQuery, useQueryClient} from "@tanstack/react-query";
 import type {components} from "@ois/api-client";
 import {useToast} from "@ois/ui";
@@ -6,6 +7,7 @@ import {useToast} from "@ois/ui";
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
 import {fetchHistTraffic} from "./historical";
+import {usePreferences, useSavePreferences} from "./preferences";
 import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type Fca = components["schemas"]["FcaBody"];
@@ -449,10 +451,41 @@ export function useFcaTrafficMany(ids: string[]) {
   });
 }
 
+/**
+ * Whether this FCA is live: an ordinary FCA, or an event FCA that has been published. The live
+ * operations — release, swap, reorder — answer 404 on one that isn't (planned or archived) to anyone
+ * but an event planner (#746, as #736 does for edit/delete), so a screen showing it to anyone else
+ * shouldn't offer them.
+ */
+export function fcaIsLive(fca: Pick<Fca, "event_id" | "event_status">): boolean {
+  return fca.event_id == null || fca.event_status === "published";
+}
+
+/** A live-operation route answered 404: the FCA (or the flight on it) went away since the screen
+ *  loaded — archived or pulled back to planning (#746), deleted, or the flight stopped crossing. */
+class GoneError extends Error {}
+
+/** Say so neutrally and refetch everything that could still show the stale FCA or flight. An event's
+ *  FCA list isn't here: the change that hid the FCA publishes `flow.fca`, which refetches it
+ *  (`TOPIC_KEYS`), and `fcaKey` stays that key's only builder, as #647's guard requires. */
+function useOnGone(fcaId: string) {
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  return () => {
+    toast.info("No longer available", {
+      description: "This FCA or flight changed since the page loaded. It’s been refreshed.",
+    });
+    for (const queryKey of [["fcas"], ["fca-traffic", fcaId], ["idst"], ["departures"]]) {
+      queryClient.invalidateQueries({ queryKey });
+    }
+  };
+}
+
 /** Issue a CFR release (RDY = earliest slot; `ready` HHMMz = pinned wheels-up). */
 export function useMarkRelease(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
+  const onGone = useOnGone(fcaId);
   return useMutation({
     mutationFn: async ({
       callsign,
@@ -461,10 +494,11 @@ export function useMarkRelease(fcaId: string) {
       callsign: string;
       ready?: string;
     }) => {
-      const { data, error } = await ois.POST(
+      const { data, error, response } = await ois.POST(
         "/api/v1/flow/fcas/{id}/release/{callsign}",
         { params: { path: { id: fcaId, callsign } }, body: { ready } },
       );
+      if (response.status === 404) throw new GoneError();
       if (error || !data) throw new Error("release failed");
       return data;
     },
@@ -475,19 +509,21 @@ export function useMarkRelease(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["idst"] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: () => toast.error("Couldn’t issue the release"),
+    onError: (e) => (e instanceof GoneError ? onGone() : toast.error("Couldn’t issue the release")),
   });
 }
 
 export function useClearRelease(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
+  const onGone = useOnGone(fcaId);
   return useMutation({
     mutationFn: async (callsign: string) => {
-      const { data, error } = await ois.DELETE(
+      const { data, error, response } = await ois.DELETE(
         "/api/v1/flow/fcas/{id}/release/{callsign}",
         { params: { path: { id: fcaId, callsign } } },
       );
+      if (response.status === 404) throw new GoneError();
       if (error || !data) throw new Error("clear failed");
       return data;
     },
@@ -496,7 +532,7 @@ export function useClearRelease(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["idst"] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: () => toast.error("Couldn’t clear the release"),
+    onError: (e) => (e instanceof GoneError ? onGone() : toast.error("Couldn’t clear the release")),
   });
 }
 
@@ -517,12 +553,14 @@ const SWAP_REFUSALS: Record<string, string> = {
 export function useSwapReleases(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
+  const onGone = useOnGone(fcaId);
   return useMutation({
     mutationFn: async ({ a, b }: { a: string; b: string }) => {
       const { error, response } = await ois.POST("/api/v1/flow/fcas/{id}/swap", {
         params: { path: { id: fcaId } },
         body: { a, b },
       });
+      if (response.status === 404) throw new GoneError();
       if (!response.ok) {
         const code = (error as { error?: string } | undefined)?.error;
         throw new Error((code && SWAP_REFUSALS[code]) ?? "Couldn’t swap the releases");
@@ -533,7 +571,10 @@ export function useSwapReleases(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Couldn’t swap the releases"),
+    onError: (e) =>
+      e instanceof GoneError
+        ? onGone()
+        : toast.error(e instanceof Error ? e.message : "Couldn’t swap the releases"),
   });
 }
 
@@ -541,13 +582,15 @@ export function useSwapReleases(fcaId: string) {
 export function useReorderFca(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
+  const onGone = useOnGone(fcaId);
   const key = ["fca-traffic", fcaId] as const;
   return useMutation({
     mutationFn: async (order: string[]) => {
-      const { error } = await ois.PUT("/api/v1/flow/fcas/{id}/order", {
+      const { error, response } = await ois.PUT("/api/v1/flow/fcas/{id}/order", {
         params: { path: { id: fcaId } },
         body: { order },
       });
+      if (response.status === 404) throw new GoneError();
       if (error) throw new Error("reorder failed");
     },
     // Optimistically apply the new order so the dropped row stays put instead of snapping back
@@ -568,9 +611,10 @@ export function useReorderFca(fcaId: string) {
       }
       return { prev };
     },
-    onError: (_e, _order, ctx) => {
+    onError: (e, _order, ctx) => {
       if (ctx?.prev) queryClient.setQueryData(key, ctx.prev);
-      toast.error("Couldn’t reorder");
+      if (e instanceof GoneError) onGone();
+      else toast.error("Couldn’t reorder");
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: key });
@@ -598,4 +642,39 @@ export function toUpsert(fca: Fca): UpsertFca {
     mit: fca.mit,
     enabled: fca.enabled,
   };
+}
+
+/** The FCA page's ARTCC filter as stored in the account's `fca` preferences namespace (#789). */
+export type FcaPrefs = { artcc?: string };
+const FCA_PREFS_NS = "fca";
+
+/**
+ * The FCA page's ARTCC filter, saved to the account so it follows the user across browsers and the
+ * desktop app (#789). `""` is ALL ARTCCs and is saved like any other choice. With `persist` off it's
+ * plain page state that starts at ALL, as on the advisories overview and the event builder.
+ *
+ * Mirrors `useIdstScope`: nothing is written until the stored value has loaded, so the `""` default
+ * shown while it loads can't overwrite a saved ARTCC. A pick made before then (or while signed out,
+ * when the load fails) still applies on this page; it just isn't saved. Until the user picks, a
+ * refetch that brings back a value saved on another device replaces the shown one.
+ *
+ * `ignoreStored` shows ALL in place of the saved ARTCC without touching it: a notification's
+ * `?fca=` deep link must not land on an FCA the saved filter hides (owner decision on #789). A pick
+ * made during that visit still saves.
+ */
+export function useFcaArtccFilter(
+  persist: boolean,
+  { ignoreStored = false }: { ignoreStored?: boolean } = {},
+): [string, (artcc: string) => void] {
+  const prefs = usePreferences<FcaPrefs>(FCA_PREFS_NS, { enabled: persist });
+  const save = useSavePreferences<FcaPrefs>(FCA_PREFS_NS);
+  const [picked, setPicked] = useState<string | null>(null);
+  // A disabled query still hands back whatever is cached, so `persist` gates the read too.
+  const stored = persist && !ignoreStored ? prefs.data?.artcc : undefined;
+  const artcc = picked ?? (typeof stored === "string" ? stored : "");
+  const setArtcc = (next: string) => {
+    setPicked(next);
+    if (persist && prefs.isSuccess) save.mutate({ artcc: next });
+  };
+  return [artcc, setArtcc];
 }

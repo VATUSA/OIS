@@ -148,20 +148,27 @@ fn client() -> reqwest::Client {
 /// at sign-in, for `discord_id` (which v3 does not carry) and a brand-new member's first sign-in.
 /// `api_key` is passed as `?apikey=` so visits are populated. (Email is not parsed: sign-in has it from
 /// VATSIM Connect.)
+///
+/// Every error is stripped of its URL: reqwest's `Display` appends the request URL, query and all, so a
+/// failed fetch would otherwise write the key into the sign-in warning log (#757).
 async fn fetch_member(
     http: &reqwest::Client,
+    base: &str,
     api_key: &str,
     cid: i64,
 ) -> Result<VatusaMember, reqwest::Error> {
-    let url = format!("{}/v2/user/{cid}", vatusa_api_base());
-    let env: Envelope<VatusaMember> = http
-        .get(&url)
-        .query(&[("apikey", api_key)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let url = format!("{base}/v2/user/{cid}");
+    let env: Envelope<VatusaMember> = async {
+        http.get(&url)
+            .query(&[("apikey", api_key)])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+    }
+    .await
+    .map_err(reqwest::Error::without_url)?;
     Ok(env.data)
 }
 
@@ -171,7 +178,7 @@ pub async fn sync_member(pool: &PgPool, cid: i64) -> Result<(), String> {
     let Some(api_key) = vatusa_api_key() else {
         return Ok(()); // sync disabled
     };
-    let member = fetch_member(&client(), &api_key, cid)
+    let member = fetch_member(&client(), &vatusa_api_base(), &api_key, cid)
         .await
         .map_err(|e| format!("VATUSA fetch for {cid} failed: {e}"))?;
     repo::upsert_member(pool, &member)
@@ -355,7 +362,7 @@ pub async fn apply_division(
         .await
         .map_err(|e| format!("clear departed members: {e}"))?;
     let summary = format!(
-        "{} controllers ({seeded} new); roles changed for {changed}; {departed} departed",
+        "{} controllers ({seeded} new); access changed for {changed}; {departed} departed",
         members.len()
     );
     Ok((summary, changed + departed > 0))
@@ -400,6 +407,17 @@ async fn fetch_division(api_key: &str) -> Result<ControllersAndRoles, String> {
         .map_err(|e| format!("VATUSA division pull returned an unreadable body: {e}"))
 }
 
+/// Fetch and store the division once, then announce any access change. The daily job runs it, and so
+/// does the access reset (#795) before it reads anyone's VATUSA roles.
+pub async fn pull_division(
+    pool: &PgPool,
+    api_key: &str,
+    events: &crate::realtime::Events,
+) -> Result<String, String> {
+    let pulled = fetch_division(api_key).await?;
+    apply_and_announce(pool, &division_members(pulled), events).await
+}
+
 /// Pull the division daily (and on demand: from Background Tasks, or when a verified webhook delivery
 /// says the roster changed). Replaces the old 6-hourly reconcile, which refreshed ≤ 800 already-signed-in
 /// members a day over v2, one fetch each.
@@ -410,14 +428,16 @@ pub fn spawn_division_pull(reg: Arc<JobRegistry>, pool: PgPool, events: crate::r
     tokio::spawn(division_pull_job(reg, move || {
         let (pool, api_key, events) = (pool.clone(), api_key.clone(), events.clone());
         async move {
-            let pulled = fetch_division(&api_key).await?;
-            let summary = apply_and_announce(&pool, &division_members(pulled), &events).await?;
-            // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
-            // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
-            match ensure_webhook(&pool, &api_key).await {
-                Ok(()) => Ok(summary),
-                Err(e) => Ok(format!("{summary}; webhook: {e}")),
-            }
+            with_division_lock(&pool, async {
+                let summary = pull_division(&pool, &api_key, &events).await?;
+                // Daily is also when a webhook VATUSA dropped, or one whose secret we can no longer
+                // decrypt, gets replaced. Its failure is reported but doesn't fail the pull.
+                match ensure_webhook(&pool, &api_key).await {
+                    Ok(()) => Ok(summary),
+                    Err(e) => Ok(format!("{summary}; webhook: {e}")),
+                }
+            })
+            .await
         }
     }));
 }
@@ -437,6 +457,20 @@ where
         pull,
     )
     .await;
+}
+
+/// Run a division pull holding the division lock (#806). An access reset holds the same lock from before
+/// its own pull until its last member, so the scheduled, triggered or webhook-driven pull waits for it
+/// rather than rewriting VATUSA data under it. The lock is in Postgres, so it holds across replicas, and
+/// it also stops two replicas' pulls overlapping.
+pub async fn with_division_lock<T>(
+    pool: &PgPool,
+    pull: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let _lock = crate::repos::access_reset::lock_division(pool)
+        .await
+        .map_err(|e| format!("could not take the division lock: {e}"))?;
+    pull.await
 }
 
 // --- The division webhook (v3, #605) ---
@@ -623,6 +657,38 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{addr}/v3/webhooks")
+    }
+
+    /// #757: the v2 member fetch sends the key as `?apikey=`, and reqwest's error text carries the request
+    /// URL. Whatever goes wrong, the error that reaches the sign-in warning log must not hold the key.
+    const KEY: &str = "vatusa-secret-key-757";
+
+    #[tokio::test]
+    async fn a_failed_member_fetch_does_not_log_the_api_key() {
+        let url = serve_once("500 Internal Server Error", String::new()).await;
+        let base = url.trim_end_matches("/v3/webhooks");
+        let err = fetch_member(&client(), base, KEY, 1_757_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(KEY), "the key leaked into the error: {err}");
+        assert!(
+            err.contains("500"),
+            "the error should still say what failed: {err}"
+        );
+    }
+
+    /// A transport failure is an error from `send`, not from `error_for_status`: pin that path too.
+    #[tokio::test]
+    async fn an_unreachable_vatusa_does_not_log_the_api_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let err = fetch_member(&client(), &base, KEY, 1_757_000)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(KEY), "the key leaked into the error: {err}");
     }
 
     /// #688 AC5: a refused call says what VATUSA said, not only the status — a `400` from a bad key
@@ -892,7 +958,7 @@ mod tests {
 
         let summary = apply_and_announce(&pool, &members, &hub()).await.unwrap();
         assert!(
-            summary.starts_with("1200 controllers (1200 new); roles changed for 1;"),
+            summary.starts_with("1200 controllers (1200 new); access changed for 1200;"),
             "{summary}"
         );
 
@@ -916,7 +982,7 @@ mod tests {
 
         let again = apply_and_announce(&pool, &members, &hub()).await.unwrap();
         assert!(
-            again.starts_with("1200 controllers (0 new); roles changed for 0"),
+            again.starts_with("1200 controllers (0 new); access changed for 0"),
             "{again}"
         );
         let users_after: i64 = sqlx::query_scalar("select count(*) from identity.users")
@@ -970,13 +1036,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(held(&pool, 1_605_200).await.len(), 1);
+        // EC from the mapping, and CONTROLLER from the ZDC home (#730).
+        assert_eq!(held(&pool, 1_605_200).await.len(), 2);
 
         apply_and_announce(&pool, &pulled(present(), vec![]), &hub())
             .await
             .unwrap();
 
-        assert!(held(&pool, 1_605_200).await.is_empty());
+        // The mapped EC goes with the role; the roster grant stays, since they're still at ZDC.
+        assert_eq!(held(&pool, 1_605_200).await.len(), 1);
         let reason: String = sqlx::query_scalar(
             "select reason from access.audit_logs where actor_id = 'vatusa-sync' \
              order by created_at desc, id desc limit 1",
@@ -1023,7 +1091,8 @@ mod tests {
         assert!(summary.ends_with("1 departed"), "{summary}");
         assert!(stored_roles(&pool, everyone[0]).await.is_empty());
         assert!(held(&pool, everyone[0]).await.is_empty());
-        assert_eq!(held(&pool, everyone[1]).await.len(), 1);
+        // Still present: their mapped EC, and the roster CONTROLLER their ZDC home grants (#730).
+        assert_eq!(held(&pool, everyone[1]).await.len(), 2);
     }
 
     /// AC5. v3 carries no `discord_id`. The bot resolves DMs through this mapping, which sign-in
@@ -1179,8 +1248,8 @@ mod tests {
         assert_eq!(access_nudges(&mut rx), 1, "one nudge for the whole pull");
         assert_eq!(
             held(&pool, everyone[0]).await.len(),
-            1,
-            "and the access it announces is already stored"
+            2,
+            "and the access it announces is already stored (the MTR mapping, beside the roster grant)"
         );
     }
 
@@ -1271,7 +1340,8 @@ mod tests {
             assert!(refused.is_err_and(|e| e.contains("role list looks truncated")));
         }
         for cid in &everyone {
-            assert_eq!(held(&pool, *cid).await.len(), 1, "{cid} kept their access");
+            // The mapped grant and the roster grant (#730).
+            assert_eq!(held(&pool, *cid).await.len(), 2, "{cid} kept their access");
         }
 
         // The floor is half: losing a few roles is a real change, and applies.
@@ -1282,7 +1352,8 @@ mod tests {
         apply_and_announce(&pool, &pulled(roster(), most), &hub())
             .await
             .unwrap();
-        assert!(held(&pool, everyone[9]).await.is_empty());
+        // Their mapped grant went with the role; the roster grant stays, since they're still at ZDC.
+        assert_eq!(held(&pool, everyone[9]).await.len(), 1);
     }
 
     /// The one remaining v2 call is sign-in's (AC8). Counted across the whole backend source, so a

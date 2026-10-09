@@ -38,6 +38,49 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-09-sector-monitor",
+    date: "2026-10-09",
+    title: "The Sector Monitor, controller access, and a reset to VATUSA",
+    sections: [
+      {
+        heading: "Sector Monitor",
+        highlights: [
+          "Operations → Sector Monitor replaces the Airspace Monitor. Pick a facility and it shows how many flights each enroute and TRACON sector will hold over the next six hours, in 15-minute Zulu bins, colored against each sector's limit.",
+          "It looks and works like vTBFM's monitor: a table per facility and stratum, your TRACON under your ARTCC, each neighbor's tables collapsed below, and green, yellow and red bins.",
+          "Every sector's limit starts at 10. Traffic management staff can change it per sector, and setting it back to 10 clears the override.",
+          "Traffic management staff can right-click a sector on their own facility's table to consolidate it into another sector or split it back out. A consolidated sector's traffic is counted under the sector that works it.",
+          "Inside TRACON airspace only the TRACON's sectors count a flight, so an arrival is no longer counted again by the enroute sector above it.",
+        ],
+      },
+      {
+        heading: "Access",
+        highlights: [
+          "Rostered controllers now get operational access at their home and visiting facilities from the VATUSA sync, instead of being granted it by hand, and can open the Sector Monitor.",
+          "The server admin can reset everyone's access to what VATUSA says from Admin → Access, after a dry run that lists what would change. Hand-made grants are removed. The reset runs on the server, so closing the dialog does not stop it.",
+          "Server admin is now granted and removed only by the server's configured list, and someone taken off that list loses it within five minutes.",
+        ],
+      },
+      {
+        heading: "Flow, TMU and FCAs",
+        highlights: [
+          "TGUI offers an airport's STARs as gates before any traffic has filed them, so a ladder can be set up ahead of the push.",
+          "On the desktop app, the airport page's arrival ladder can pop out into its own small always-on-top window.",
+          "The FCA page remembers the ARTCC you picked, in every browser and in the desktop app.",
+          "The departures list shows a flight's latest locked release time rather than its earliest.",
+          "Only event planners can edit or delete an event's FCAs, and an event FCA that isn't published stays hidden from everyone else.",
+        ],
+      },
+      {
+        heading: "Desktop and reliability",
+        highlights: [
+          "The desktop app uses each operating system's own title bar again, so Windows and Linux no longer show Mac-style window buttons.",
+          "Map polygon fills no longer break into stray wedges when a layer shrinks.",
+          "A backend memory spike that restarted the servers every ten minutes is fixed.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-04-airspace-monitor",
     date: "2026-10-04",
     title: "The Airspace Monitor, live screens, and an API for machines",

@@ -389,6 +389,7 @@ pub const ASSIGNABLE_USER_ROLES: &[&str] = &[
     "ACE",
     "NTMO",
     "DCC_STAFF",
+    "CONTROLLER",
 ];
 
 /// All permission names in the catalog (the assignable set for the editor).
@@ -695,6 +696,11 @@ pub async fn set_user_role(
     set_user_role_scoped(tx, user_id, role_name, held, None, source).await
 }
 
+/// The group every signed-in user holds. Its permission set lives in `access.role_permissions`
+/// (migration 0094) rather than being copied onto each user — editing the group changes everyone's
+/// baseline with no backfill, which is the whole point of #542.
+pub const BASELINE_ROLE: &str = "USER";
+
 /// Who created a grant, and therefore whose row it is to remove (VATUSA/OIS#547).
 ///
 /// Typed rather than a string so a writer cannot mistype it, and so adding a source is a compile
@@ -796,22 +802,60 @@ pub async fn assign_server_admin(
     Ok(())
 }
 
-/// Revokes SERVER_ADMIN. Returns true if a row was actually removed (a demotion).
+/// Revokes SERVER_ADMIN, whatever its `source`. Returns true if a row was actually removed (a
+/// demotion).
+///
+/// `OIS_SERVER_ADMIN_CID` is the only thing that decides who is server admin (#805): no editor can
+/// grant or remove it, so a row of any source held by a CID not in the list is one to remove.
 pub async fn revoke_server_admin(
     tx: &mut Transaction<'_, Postgres>,
     user_id: &str,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        // `system`: the row this reconciliation created. A SERVER_ADMIN granted some other way is not
-        // this function's to remove (#547).
-        "delete from access.user_roles \
-         where user_id = $1 and role_name = 'SERVER_ADMIN' and source = 'system'",
+        "delete from access.user_roles where user_id = $1 and role_name = 'SERVER_ADMIN'",
     )
     .bind(user_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Demotes a server admin to the baseline in the caller's transaction: revoke SERVER_ADMIN, clear
+/// their national direct grants, and put them in [`BASELINE_ROLE`]. Returns false, changing nothing,
+/// when they held no SERVER_ADMIN. The three share one transaction because a former admin holds no
+/// other access, so a crash between a bare revoke and the seed could lock the account out.
+pub async fn demote_server_admin(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<bool, ApiError> {
+    if !revoke_server_admin(tx, user_id).await? {
+        return Ok(false);
+    }
+    // The wipe is what makes it a demotion: a former admin must hold no national grants of their
+    // own beyond the baseline.
+    replace_user_permissions(tx, user_id, &[]).await?;
+    // `System`: OIS grants the baseline group itself, so sync and admins both leave it alone.
+    set_user_role(tx, user_id, BASELINE_ROLE, true, GrantSource::System).await?;
+    Ok(true)
+}
+
+/// Every user holding SERVER_ADMIN (any source) whose CID is not in `admin_cids`, a user with no CID
+/// included, as `(user_id, cid)` in CID order.
+pub async fn server_admins_not_in<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    admin_cids: &[i64],
+) -> Result<Vec<(String, Option<i64>)>, ApiError> {
+    sqlx::query_as(
+        "select distinct u.id, u.cid from access.user_roles r \
+         join identity.users u on u.id = r.user_id \
+         where r.role_name = 'SERVER_ADMIN' and (u.cid is null or u.cid <> all($1)) \
+         order by u.cid nulls last, u.id",
+    )
+    .bind(admin_cids)
+    .fetch_all(executor)
+    .await
+    .map_err(|_| ApiError::Internal)
 }
 
 /// All direct permission grants (granted = true), as `(artcc_id, permission_name)`.
@@ -1450,7 +1494,8 @@ mod tests {
     }
 
     /// The `SERVER_ADMIN` env reconciliation owns its row as `system`, so neither a sync nor an admin
-    /// save can take it away — and its revoke only removes what it granted.
+    /// save can take it away. Its revoke removes SERVER_ADMIN of every source, since the env list is
+    /// the only thing that decides who holds it (#805), and nothing else of the user's or anyone's.
     #[sqlx::test]
     async fn the_server_admin_reconciliation_owns_a_system_row(pool: sqlx::PgPool) {
         let user: String = sqlx::query_scalar(
@@ -1474,32 +1519,273 @@ mod tests {
         .unwrap();
         assert_eq!(source, "system");
 
-        // A hand-made SERVER_ADMIN is a separate row, and the reconciliation's revoke leaves it.
+        // Rows of other sources coexist with it (no editor writes one; 0098 backfilled `manual`). The
+        // user's other group and another user's SERVER_ADMIN are the revoke's neighbors.
+        let other: String = sqlx::query_scalar(
+            "insert into identity.users (full_name, display_name) values ('O', 'O') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         sqlx::query(
-            "insert into access.user_roles (user_id, role_name, source) \
-             values ($1, 'SERVER_ADMIN', 'manual')",
+            "insert into access.user_roles (user_id, role_name, source) values \
+             ($1, 'SERVER_ADMIN', 'manual'), ($1, 'SERVER_ADMIN', 'vatusa'), ($1, 'EC', 'manual'), \
+             ($2, 'SERVER_ADMIN', 'system')",
         )
         .bind(&user)
+        .bind(&other)
         .execute(&pool)
         .await
-        .expect("a manual row coexists with the system one");
+        .expect("rows of other sources coexist with the system one");
 
         let mut tx = pool.begin().await.unwrap();
-        super::revoke_server_admin(&mut tx, &user).await.unwrap();
+        assert!(super::revoke_server_admin(&mut tx, &user).await.unwrap());
         tx.commit().await.unwrap();
 
         let remaining: Vec<String> = sqlx::query_scalar(
-            "select source from access.user_roles \
-             where user_id = $1 and role_name = 'SERVER_ADMIN'",
+            "select u.display_name || ':' || r.role_name || ':' || r.source \
+             from access.user_roles r join identity.users u on u.id = r.user_id order by 1",
         )
-        .bind(&user)
         .fetch_all(&pool)
         .await
         .unwrap();
         assert_eq!(
             remaining,
-            vec!["manual".to_string()],
-            "the env reconciliation must revoke only its own grant"
+            ["O:SERVER_ADMIN:system", "T:EC:manual"],
+            "every SERVER_ADMIN of the user goes, and nothing else"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            !super::revoke_server_admin(&mut tx, &user).await.unwrap(),
+            "a revoke that removes nothing is not a demotion"
+        );
+    }
+
+    /// 0130 (#805) re-tags the `manual` USER and SERVER_ADMIN rows 0098 backfilled as `system`, and
+    /// deletes the `manual` row instead where a `system` twin exists. Each user below is the
+    /// surviving neighbor of one predicate: drop that predicate and that user's rows come out wrong.
+    #[sqlx::test]
+    async fn migration_0130_retags_the_backfilled_system_groups(pool: sqlx::PgPool) {
+        const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
+
+        /// A group row: role, scope (`None` = national), source.
+        type Row = (&'static str, Option<&'static str>, &'static str);
+        let fixture: &[(&str, &[Row])] = &[
+            // The twin: the backfilled row goes, the login's row stays.
+            (
+                "twin",
+                &[
+                    ("SERVER_ADMIN", None, "manual"),
+                    ("SERVER_ADMIN", None, "system"),
+                ],
+            ),
+            // Backfill only: updated. Its `system` neighbor is another user's (delete's user match).
+            ("backfill only", &[("SERVER_ADMIN", None, "manual")]),
+            ("other user", &[("SERVER_ADMIN", None, "system")]),
+            // A `system` row of another group is no twin (delete's role match).
+            (
+                "other group",
+                &[("USER", None, "manual"), ("SERVER_ADMIN", None, "system")],
+            ),
+            // A `system` row at another scope is no twin (delete's scope match); both re-tag.
+            (
+                "other scope",
+                &[("USER", Some("ZDC"), "manual"), ("USER", None, "system")],
+            ),
+            // A `vatusa` row is no twin (delete's `s.source`), and is never touched itself
+            // (delete's and update's `m.source`).
+            (
+                "vatusa",
+                &[
+                    ("SERVER_ADMIN", None, "manual"),
+                    ("SERVER_ADMIN", None, "vatusa"),
+                ],
+            ),
+            (
+                "vatusa beside system",
+                &[("USER", None, "vatusa"), ("USER", None, "system")],
+            ),
+            // Another group's rows are not 0130's (delete's and update's role filter).
+            (
+                "assignable",
+                &[("EC", None, "manual"), ("EC", None, "system")],
+            ),
+        ];
+        for (name, rows) in fixture {
+            let user: String = sqlx::query_scalar(
+                "insert into identity.users (full_name, display_name) values ($1, $1) returning id",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            for (role, artcc, source) in *rows {
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                     values ($1, $2, $3, $4)",
+                )
+                .bind(&user)
+                .bind(role)
+                .bind(artcc)
+                .bind(source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        async fn rows(pool: &sqlx::PgPool) -> Vec<String> {
+            sqlx::query_scalar(
+                "select u.display_name || ': ' || r.role_name || '@' \
+                        || coalesce(r.artcc_id, 'national') || ':' || r.source \
+                 from access.user_roles r join identity.users u on u.id = r.user_id \
+                 order by 1",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        sqlx::raw_sql(MIGRATION_0130).execute(&pool).await.unwrap();
+        let after = rows(&pool).await;
+        assert_eq!(
+            after,
+            [
+                "assignable: EC@national:manual",
+                "assignable: EC@national:system",
+                "backfill only: SERVER_ADMIN@national:system",
+                "other group: SERVER_ADMIN@national:system",
+                "other group: USER@national:system",
+                "other scope: USER@national:system",
+                "other scope: USER@ZDC:system",
+                "other user: SERVER_ADMIN@national:system",
+                "twin: SERVER_ADMIN@national:system",
+                "vatusa beside system: USER@national:system",
+                "vatusa beside system: USER@national:vatusa",
+                "vatusa: SERVER_ADMIN@national:system",
+                "vatusa: SERVER_ADMIN@national:vatusa",
+            ]
+        );
+
+        sqlx::raw_sql(MIGRATION_0130)
+            .execute(&pool)
+            .await
+            .expect("a second run doesn't fail");
+        assert_eq!(rows(&pool).await, after, "and changes nothing");
+    }
+
+    /// #805 AC4: the 0130 audit (`backend/audits/0130_retag_effect.sql`), run from its own SETUP,
+    /// PARSE, NOT_A_CID and REPORT blocks, lists every SERVER_ADMIN holder before and after, and
+    /// singles out the former admins the deploy demotes from the configured ones it leaves alone.
+    #[sqlx::test]
+    async fn the_0130_audit_lists_every_server_admin_before_and_after(pool: sqlx::PgPool) {
+        const AUDIT: &str = include_str!("../../audits/0130_retag_effect.sql");
+        const MIGRATION_0130: &str = include_str!("../../migrations/0130_retag_system_groups.sql");
+        fn block(name: &str) -> &'static str {
+            let begin = format!("-- BEGIN {name}\n");
+            let start = AUDIT.find(&begin).expect("the block opens") + begin.len();
+            let len = AUDIT[start..]
+                .find(&format!("-- END {name}"))
+                .expect("the block closes");
+            &AUDIT[start..start + len]
+        }
+
+        for (cid, name, sources) in [
+            (1_805_001_i64, "Configured Backfill", &["manual"][..]),
+            (1_805_002, "Configured Twin", &["manual", "system"][..]),
+            (1_805_003, "Former Backfill", &["manual"][..]),
+            (1_805_004, "Former Vatusa", &["vatusa"][..]),
+        ] {
+            let user: String = sqlx::query_scalar(
+                "insert into identity.users (cid, full_name, display_name) values ($1, $2, $2) \
+                 returning id",
+            )
+            .bind(cid)
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            for source in sources {
+                sqlx::query(
+                    "insert into access.user_roles (user_id, role_name, source) \
+                     values ($1, 'SERVER_ADMIN', $2)",
+                )
+                .bind(&user)
+                .bind(source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(block("SETUP"))
+            .execute(&mut *tx)
+            .await
+            .expect("the audit's setup runs");
+        // The psql `admin_cids` variable, substituted as psql would: a tab, a leading `+`, a blank
+        // part, and two parts that are not CIDs.
+        let parse = block("PARSE").replace(":'admin_cids'", "E' 1805001 ,\\t+1805002,, 0, x1'");
+        sqlx::raw_sql(&parse)
+            .execute(&mut *tx)
+            .await
+            .expect("the audit parses the list");
+        let not_a_cid: Vec<String> = sqlx::query_scalar(block("NOT_A_CID"))
+            .fetch_all(&mut *tx)
+            .await
+            .expect("the audit lists the parts that are not CIDs");
+        assert_eq!(not_a_cid, ["0", "x1"]);
+        sqlx::raw_sql(MIGRATION_0130)
+            .execute(&mut *tx)
+            .await
+            .expect("the migration runs");
+        let report: Vec<(i64, String, String, String, bool)> = sqlx::query_as(block("REPORT"))
+            .fetch_all(&mut *tx)
+            .await
+            .expect("the audit's report runs");
+        tx.rollback().await.unwrap();
+
+        let row = |cid, name: &str, before: &str, after: &str, configured| {
+            (
+                cid,
+                name.to_string(),
+                before.to_string(),
+                after.to_string(),
+                configured,
+            )
+        };
+        assert_eq!(
+            report,
+            [
+                row(1_805_001, "Configured Backfill", "manual", "system", true),
+                row(
+                    1_805_002,
+                    "Configured Twin",
+                    "manual,system",
+                    "system",
+                    true
+                ),
+                row(1_805_003, "Former Backfill", "manual", "system", false),
+                row(1_805_004, "Former Vatusa", "vatusa", "vatusa", false),
+            ]
+        );
+    }
+
+    /// The 0130 audit is read-only: outside the blocks the test above runs, the file opens a
+    /// transaction first, rolls it back last, and commits nothing in between.
+    #[test]
+    fn the_0130_audit_always_rolls_back() {
+        let statements: String = include_str!("../../audits/0130_retag_effect.sql")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--") && !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(statements.starts_with("begin;"), "{statements}");
+        assert!(statements.ends_with("rollback;"), "{statements}");
+        assert!(
+            !statements.to_lowercase().contains("commit"),
+            "{statements}"
         );
     }
 
@@ -2005,6 +2291,65 @@ mod tests {
             );
             assert!(!actual.is_empty(), "{role} must bundle something (#544)");
         }
+    }
+
+    /// #730: CONTROLLER is exactly the owner's operational baseline — equality, not containment, so a
+    /// permission slipped into it fails here. And nothing from Planning (`events.plan.*`), Historical
+    /// (`stats.*`) or any publish verb is in it, checked against the whole catalog so a permission
+    /// added to those domains later can't arrive through this group unnoticed. #725 widened it by one
+    /// read, `flow.sectors.read`, deliberately.
+    #[sqlx::test]
+    async fn the_controller_group_is_exactly_the_operational_baseline(pool: sqlx::PgPool) {
+        use std::collections::BTreeSet;
+        let held: BTreeSet<String> = sqlx::query_scalar(
+            "select permission_name from access.role_permissions where role_name = 'CONTROLLER'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+        let expected: BTreeSet<String> = [
+            "flow.fca.read",
+            "flow.fca.update",
+            "flow.fca.delete",
+            "flow.route.update",
+            "tmu.cfr.assign",
+            "flow.runway.read",
+            "flow.runway.update",
+            "tmu.program.read",
+            "tmu.tmi.read",
+            "tmu.adv.read",
+            "tmu.ntml.read",
+            "tmu.gdp.read",
+            "tmu.groundstop.read",
+            "tmu.delays.read",
+            // #725 (owner decision 4, migration 0129): a rostered controller reads the Sector Monitor.
+            // A read gate, so a grant at their facility opens every ARTCC's demand, view-only.
+            "flow.sectors.read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(held, expected);
+
+        let off_limits: BTreeSet<String> = crate::repos::access::fetch_access_catalog_names(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|p| {
+                p.starts_with("events.plan.") || p.starts_with("stats.") || p.ends_with(".publish")
+            })
+            .collect();
+        assert!(
+            !off_limits.is_empty(),
+            "the catalog has such permissions to keep out"
+        );
+        assert!(
+            held.is_disjoint(&off_limits),
+            "CONTROLLER reaches {:?}",
+            held.intersection(&off_limits).collect::<Vec<_>>()
+        );
     }
 
     /// The baseline every signed-in user gets, now held by the `USER` group rather than copied onto

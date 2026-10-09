@@ -1,4 +1,5 @@
 pub mod access;
+pub mod access_reset;
 pub mod ace;
 pub mod admin;
 pub mod aircraft_profiles;
@@ -26,12 +27,15 @@ pub mod health;
 pub mod integration;
 pub mod jobs;
 pub mod metrics;
-pub mod monitor;
 pub mod preferences;
 pub mod public;
 pub mod release_authority;
 pub mod restriction_artcc;
 pub mod runway;
+pub mod sector_consolidations;
+pub mod sector_demand;
+pub mod sector_demand_cache;
+pub mod sector_limits;
 pub mod service_accounts;
 pub mod stats;
 pub mod taxi_insights;
@@ -43,9 +47,18 @@ pub mod webhooks;
 mod topic_publish_tests;
 
 #[cfg(test)]
+mod sector_consolidations_tests;
+#[cfg(test)]
+mod sector_demand_tests;
+#[cfg(test)]
+mod sector_limits_tests;
+
+#[cfg(test)]
 mod actor_ratchet_tests;
 #[cfg(test)]
 mod auth_annotation_tests;
+#[cfg(test)]
+mod flow_event_fca_visibility_tests;
 #[cfg(test)]
 mod machine_actor_tests;
 #[cfg(test)]

@@ -38,6 +38,14 @@ describe("FcaPage (VATUSA/OIS#348 review)", () => {
     expect(mapProps.current).toMatchObject({initialFcaId: "f-zdc"});
   });
 
+  // #789: only /ops/fca saves the ARTCC filter to the account; the advisories overview and the event
+  // builder render the same FcaMapView without it and keep resetting to ALL.
+  it("saves the ARTCC filter on /ops/fca", () => {
+    search.current = {};
+    render();
+    expect(mapProps.current?.persistArtccFilter).toBe(true);
+  });
+
   it("selects nothing when no FCA is named", () => {
     search.current = {};
     render();

@@ -1,4 +1,5 @@
 pub mod access;
+pub mod access_reset;
 pub mod ace;
 pub mod admin;
 pub mod aircraft_profiles;
@@ -27,7 +28,11 @@ pub mod preferences;
 pub mod public;
 pub mod runway;
 pub mod sector_consolidations;
-pub mod sector_maps;
+#[cfg(test)]
+mod sector_consolidations_tests;
+pub mod sector_limits;
+#[cfg(test)]
+mod sector_limits_tests;
 pub mod service_accounts;
 pub mod stats;
 pub mod taxi_insights;

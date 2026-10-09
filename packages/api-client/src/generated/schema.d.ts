@@ -36,6 +36,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/access/vatusa-reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dry run of the reset (#795): every member whose access would change, and the grant rows each would
+         *     gain and lose, from the VATUSA data the last division pull stored. Writes nothing. Server admin only.
+         */
+        get: operations["preview_vatusa_reset"];
+        put?: never;
+        /**
+         * Start a reset of every member's access to VATUSA (#795) and answer at once with its run id (#806).
+         *     The run pulls the division fresh, then, one transaction per member, puts them back on role sync,
+         *     deletes every hand-made grant, and reconciles their VATUSA grants. `system` grants, the baseline
+         *     `USER` and `SERVER_ADMIN` groups among them, are left alone. Each changed member gets one
+         *     `USER_ACCESS` audit entry with the reason. Because the pull is fresh, the result can differ from the
+         *     dry run if VATUSA changed since the last pull. It runs in the background, so it finishes whether or
+         *     not the caller waits; `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns its result. One reset
+         *     runs at a time, never alongside the division pull. Server admin only.
+         */
+        post: operations["apply_vatusa_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/access/vatusa-reset/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One reset run (#806): `running` until it finishes, then its result or why it failed. A run whose
+         *     backend stopped before it finished is reported as failed (`reset_interrupted`). Server admin only.
+         */
+        get: operations["get_vatusa_reset_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/api-keys": {
         parameters: {
             query?: never;
@@ -1973,130 +2023,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/flow/monitor/{artcc}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * `artcc`'s Airspace Monitor (#701): every sector's peak occupancy per 15-minute bin over six hours,
-         *     classified against its MAP, with consolidations and vNAS staffing. Computed on request from the
-         *     live feed and the cached sectors, MAPs and consolidations, so nothing about it is stored. Live
-         *     flights are projected along their routes by the shared trajectory model (`feed::monitor_tracks`).
-         */
-        get: operations["monitor_table"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flow/monitor/{artcc}/consolidations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_consolidations"];
-        put?: never;
-        /**
-         * Consolidate many of this ARTCC's sectors into one at once (#713): every other sector, or only those in
-         *     no consolidation yet. One transaction — a refused or failed save changes nothing — gated like the
-         *     single-sector write. See [`consolidations_repo::consolidate_all`].
-         */
-        post: operations["consolidate_all_sectors"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Work a sector at another sector's position (#599). Both must be this ARTCC's sectors, so a
-         *     cross-ARTCC target can't be named (404). A sector can't be worked at itself (400), and a save that
-         *     would make a loop is refused (409). The arrangement stays flat — see
-         *     [`consolidations_repo::consolidate`] — and the save is all-or-nothing.
-         */
-        put: operations["consolidate_sector"];
-        post?: never;
-        /** Give a consolidated sector its own row back. A sector that isn't consolidated is a no-op. */
-        delete: operations["release_sector"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flow/monitor/{artcc}/maps": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_sector_maps"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flow/monitor/{artcc}/maps/{sector_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Set one sector's MAP. Only a positive whole number that differs from the current value is
-         *     written: zero or negative is refused (400) and leaves any override in place, and the current value
-         *     is a no-op (204, nothing written). There is no delete — typing the default is the reset.
-         */
-        put: operations["set_sector_map"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/flow/monitor/{artcc}/neighbours": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * `artcc`'s first-tier neighbours (#712): the ARTCCs whose Monitor tables follow its own, collapsed
-         *     and view-only. Restricted to facilities OIS runs (active), which drops the Canadian and oceanic
-         *     FIRs in the adjacency data, as the ACE fan-out does (`events::generate_tier1`).
-         */
-        get: operations["monitor_neighbours"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/flow/resolve-routes": {
         parameters: {
             query?: never;
@@ -2227,6 +2153,124 @@ export interface paths {
         post?: never;
         /** Delete a named runway config. */
         delete: operations["delete_config"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-consolidations/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `artcc`'s consolidations: which sectors are worked at which, with `editable` for the caller. */
+        get: operations["list_sector_consolidations"];
+        /**
+         * Change several of this ARTCC's consolidations at once, all or nothing: the Sector Monitor's "All"
+         *     commands and its checklists (#794, #792). `into` maps each sector to the sector to work it at, or to
+         *     null to give it its own row back. Every sector being worked somewhere, and every target, must be
+         *     this ARTCC's (404 otherwise); a release is not checked against the dataset, like the single release.
+         *     A self-reference, two keys naming one sector, or more than 200 entries is a 400, and a loop
+         *     (including one between the batch's own entries) a 409; neither writes anything. Answers with the
+         *     ARTCC's consolidations after the save; a batch that changed something tells every viewer once.
+         */
+        put: operations["consolidate_sectors"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-consolidations/{artcc}/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Work a sector at another of this ARTCC's sectors. Both must be this ARTCC's (404 otherwise, which
+         *     is how a cross-ARTCC consolidation is refused). A sector can't be worked at itself (400), and a save
+         *     that would make a loop is refused (409); neither writes anything. The arrangement stays flat: a
+         *     target worked elsewhere resolves to where it is worked, and the sectors worked at this one move with
+         *     it. Answers with the ARTCC's consolidations after the save.
+         */
+        put: operations["consolidate_sector"];
+        post?: never;
+        /**
+         * Give a consolidated sector its own row back. A sector that isn't worked elsewhere is a no-op (200,
+         *     nothing written). Not checked against the dataset, so a consolidation left behind by a re-import
+         *     can still be released. Answers with the ARTCC's consolidations after the release.
+         */
+        delete: operations["release_sector"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-demand/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s predicted sector demand: an enroute and a TRACON table, each row a sector (or a target with
+         *     the sectors worked at it) over 24 Zulu quarter-hours. An ARTCC with no sector data answers
+         *     `no_sector_data`, and one asked before the server has loaded the sector dataset or received its
+         *     first feed cycle answers `pending`, both with no rows, so the page can say which rather than draw an
+         *     empty grid.
+         */
+        get: operations["get_sector_demand"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-limits/{artcc}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `artcc`'s sectors, each with its limit. An ARTCC with no sector data answers with no sectors, so
+         *     the page can name the gap rather than draw an empty table.
+         */
+        get: operations["list_sector_limits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/flow/sector-limits/{artcc}/{sector_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set one sector's limit. Only a positive whole number that differs from the stored value is written:
+         *     zero or negative is refused (400) and leaves any override in place, and the stored value is a no-op
+         *     (200, nothing written). Setting the default removes the override. There is no delete.
+         */
+        put: operations["set_sector_limit"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3704,6 +3748,86 @@ export interface components {
             permissions: Record<string, never>;
             roles: string[];
         };
+        /** @description A reset's result, or a dry run's prediction. Only members whose access changes are listed. */
+        AccessResetBody: {
+            /** @description `true` for the dry run: nothing was written. */
+            dry_run: boolean;
+            /**
+             * @description The VATUSA division pull the reset ran first. `None` for a dry run, which reads the VATUSA
+             *     data the last pull stored.
+             */
+            pull_summary?: string | null;
+            users: components["schemas"]["AccessResetUser"][];
+            /**
+             * Format: int64
+             * @description How many members there are. Only those a reset can change are examined: detached, holding a
+             *     hand-made grant, or holding VATUSA grants out of line with their VATUSA roles.
+             */
+            users_checked: number;
+            /**
+             * Format: int64
+             * @description How many members were reset (or, in a dry run, would be).
+             */
+            users_reset: number;
+        };
+        /**
+         * @description Why a reset did not finish. `users_reset` members were reset and audited before it stopped; the rest
+         *     are untouched.
+         */
+        AccessResetFailure: {
+            /**
+             * @description `vatusa_pull_failed`, `vatusa_not_configured`, `reset_lock_busy`, `reset_incomplete`,
+             *     `reset_failed`, or `reset_interrupted` when the backend running it stopped.
+             */
+            error: string;
+            message: string;
+            /** Format: int64 */
+            users_reset: number;
+        };
+        /** @description One stored grant row a reset adds or removes. `artcc_id` `None` = national. */
+        AccessResetGrant: {
+            artcc_id?: string | null;
+            /** @description `false` for a direct deny. Always `true` for a group. */
+            granted: boolean;
+            /** @description `group` for a group membership, `permission` for a direct permission. */
+            kind: string;
+            name: string;
+            /** @description Whose row it is: `manual`, `vatusa` or `system`. */
+            source: string;
+        };
+        /** @description Reset every member's access to VATUSA. The reason is recorded on each changed member's audit entry. */
+        AccessResetRequest: {
+            reason: string;
+        };
+        /** @description One reset run (#806). `result` is set once it succeeded, `failure` once it failed. */
+        AccessResetRun: {
+            failure?: null | components["schemas"]["AccessResetFailure"];
+            /** Format: date-time */
+            finished_at?: string | null;
+            id: string;
+            result?: null | components["schemas"]["AccessResetBody"];
+            /** Format: date-time */
+            started_at: string;
+            /** @description `running`, `succeeded` or `failed`. */
+            status: string;
+        };
+        /**
+         * @description A reset that was started (202), or the one already running (409): poll
+         *     `GET /api/v1/admin/access/vatusa-reset/runs/{run_id}` for its result.
+         */
+        AccessResetStarted: {
+            run_id: string;
+        };
+        /** @description What a reset changes, or would change, for one member. */
+        AccessResetUser: {
+            added: components["schemas"]["AccessResetGrant"][];
+            /** Format: int64 */
+            cid?: number | null;
+            display_name: string;
+            /** @description They were off VATUSA role sync and are put back on it. */
+            reattached: boolean;
+            removed: components["schemas"]["AccessResetGrant"][];
+        };
         /**
          * @description One claim on an ACE request — who took a slot, with their notes + availability window (within the
          *     event). Aggregated onto the request via `json_agg`.
@@ -4327,17 +4451,6 @@ export interface components {
             /** Format: int32 */
             value: number;
         };
-        /**
-         * @description Which sectors a bulk consolidation moves.
-         * @enum {string}
-         */
-        BulkConsolidateMode: "all" | "except_consolidated";
-        /** @description Consolidate many of an ARTCC's sectors into one at once (#713), all or nothing. */
-        BulkConsolidateRequest: {
-            mode: components["schemas"]["BulkConsolidateMode"];
-            /** @description The sector everything is worked at. */
-            target_sector_id: string;
-        };
         /** @description A saved/open capture window (for the replay picker). */
         CaptureSummaryBody: {
             /** Format: date-time */
@@ -4387,9 +4500,19 @@ export interface components {
             /** Format: int64 */
             unique_pilots: number;
         };
-        /** @description Work a sector at another sector's position in the same ARTCC. */
+        /** @description Work a sector at another of the same ARTCC's sectors. */
         ConsolidateSectorRequest: {
             target_sector_id: string;
+        };
+        /** @description Change several of one ARTCC's consolidations at once (#794), all or nothing. */
+        ConsolidateSectorsRequest: {
+            /**
+             * @description Each sector to change, mapped to the sector to work it at, or to null to give it its own row
+             *     back.
+             */
+            into: {
+                [key: string]: string | null;
+            };
         };
         /** @description The new board id returned when copying a shared board. */
         CopyResponse: {
@@ -5495,6 +5618,12 @@ export interface components {
             /** @description `demand_60min > aar` when a program exists, else null. */
             over_capacity?: boolean | null;
             proposed: number;
+            /**
+             * @description Every STAR the nav data says serves this airport (raw procedure names, e.g. `CAPPS3`),
+             *     sorted, whether or not any traffic is filed on it. Lets a gate be picked before a flight
+             *     files through it; group it with the same normalizer as `FlowFlight.gate`.
+             */
+            stars: string[];
         };
         /**
          * @description An ATC facility (ARTCC/center or TRACON/approach) and the airports it covers — the dashboard's
@@ -6054,52 +6183,6 @@ export interface components {
              */
             tmu_national: boolean;
             vatusa?: null | components["schemas"]["VatusaProfile"];
-        };
-        /**
-         * @description One 15-minute bin of a Monitor row (#701): the peak one-minute counts and the alert they earn
-         *     against the row's MAP. `combined` is active and proposed counted minute by minute, never summed peaks.
-         */
-        MonitorBinBody: {
-            /** Format: int64 */
-            active: number;
-            alert: components["schemas"]["SectorAlert"];
-            /** Format: int64 */
-            combined: number;
-            /** Format: int64 */
-            proposed: number;
-            /**
-             * Format: date-time
-             * @description The bin's start, an absolute Zulu quarter-hour.
-             */
-            start: string;
-        };
-        /** @description An ARTCC's first-tier neighbours (#712), whose Monitor tables are shown view-only beneath its own. */
-        MonitorNeighboursBody: {
-            artcc: string;
-            /** @description Directly bordering ARTCCs that OIS runs, sorted. */
-            neighbours: string[];
-        };
-        /** @description One row of an ARTCC's Airspace Monitor (#701): a sector, or a sector with others consolidated into it. */
-        MonitorRowBody: {
-            /** @description Six hours of bins, the first being the quarter-hour that contains `as_of`. */
-            bins: components["schemas"]["MonitorBinBody"][];
-            /** @description The sectors worked at this one; non-empty marks a combined row. */
-            consolidated: string[];
-            /** Format: int32 */
-            map: number;
-            name?: string | null;
-            sector_id: string;
-            /** @description Someone is working this sector now (vNAS). Shown, never used to hide a row. */
-            staffed: boolean;
-        };
-        /** @description An ARTCC's Airspace Monitor (#701), computed from the live feed on request. */
-        MonitorTableBody: {
-            artcc: string;
-            /** Format: date-time */
-            as_of: string;
-            /** @description Whether the caller may change this ARTCC's MAPs and consolidations. */
-            editable: boolean;
-            rows: components["schemas"]["MonitorRowBody"][];
         };
         /**
          * @description One ACE position the signed-in user has claimed, for an event still to come.
@@ -6740,49 +6823,167 @@ export interface components {
             permissions: Record<string, never>;
             role_names?: string[] | null;
         };
-        /**
-         * @description One cell of the Monitor.
-         * @enum {string}
-         */
-        SectorAlert: "green" | "amber" | "red";
-        /** @description A sector worked at another sector's position (#599). */
+        /** @description One sector worked at another sector's position (#723). Its airspace counts in the target's row. */
         SectorConsolidationBody: {
             sector_id: string;
+            /** @description Where `sector_id` is worked. Never itself worked elsewhere: the arrangement is kept flat. */
             target_sector_id: string;
         };
-        /** @description An ARTCC's sector consolidations (#599). */
+        /** @description An ARTCC's consolidations (#723). A sector not listed is worked on its own. */
         SectorConsolidationsBody: {
-            /** @description Sorted by sector. */
+            artcc: string;
+            /** @description Ordered by `sector_id`. */
             consolidations: components["schemas"]["SectorConsolidationBody"][];
             /**
-             * @description Whether the caller may change this ARTCC's consolidations (`flow.monitor.update`, nationally
-             *     or scoped).
+             * @description Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`,
+             *     nationally or for this ARTCC).
              */
             editable: boolean;
         };
-        /** @description One Airspace Monitor sector and the alert parameter its count is coloured against (#598). */
-        SectorMapBody: {
+        /**
+         * @description One 15-minute bin of a sector row (#725): the peak one-minute counts and the level they read
+         *     against the row's limit.
+         */
+        SectorDemandBin: {
             /**
              * Format: int32
-             * @description The sector's Monitor Alert Parameter: its override, or the default.
+             * @description Peak one-minute count of airborne flights alone.
              */
-            map: number;
+            active: number;
+            /**
+             * Format: int32
+             * @description Peak one-minute count of both together, taken minute by minute; never `active + proposed`.
+             */
+            combined: number;
+            /**
+             * @description `over` when `active` alone exceeds the limit, `watch` when only `combined` does, else `ok`. A
+             *     peak equal to the limit is `ok`.
+             */
+            level: components["schemas"]["SectorLoadLevel"];
+            /**
+             * Format: int32
+             * @description Peak one-minute count of flights still on the ground holding a locked wheels-up.
+             */
+            proposed: number;
+        };
+        /**
+         * @description An ARTCC's predicted sector demand (#725): per sector, peak one-minute occupancy in each Zulu
+         *     quarter-hour over the next six hours, judged against its limit. The server always computes all six
+         *     hours; how many a view draws is the client's choice.
+         */
+        SectorDemandBody: {
+            artcc: string;
+            /**
+             * Format: int32
+             * @description Width of every bin, in minutes.
+             */
+            bin_minutes: number;
+            /**
+             * @description Start of each bin as epoch milliseconds, aligned to absolute Zulu quarter-hours. The first is
+             *     the quarter-hour containing `cycle_at`. Empty unless `status` is `ready`.
+             */
+            bin_starts_ms: number[];
+            /**
+             * @description Whether the caller may change this ARTCC's consolidations (`flow.sector_consolidations.update`
+             *     here).
+             */
+            consolidations_editable: boolean;
+            /**
+             * Format: date-time
+             * @description The feed cycle the counts were projected from; null unless `status` is `ready`.
+             */
+            cycle_at?: string | null;
+            /**
+             * Format: int32
+             * @description What a sector's limit reads until it is overridden.
+             */
+            default_limit: number;
+            /** @description Low, High and Ultra High sectors. */
+            enroute: components["schemas"]["SectorDemandTable"];
+            /** @description Whether the caller may set this ARTCC's limits (`flow.sector_limits.update` here). */
+            limits_editable: boolean;
+            /**
+             * @description The ARTCCs bordering this one, sorted. Each is its own request, and a neighbour's table is
+             *     view-only on this ARTCC's page whatever the caller may edit there.
+             */
+            neighbours: string[];
+            status: components["schemas"]["SectorDemandStatus"];
+            /** @description Approach Control sectors, kept apart: a different controller with a different workload. */
+            tracon: components["schemas"]["SectorDemandTable"];
+        };
+        /** @description One row of a sector-demand table (#725): a sector, or a target with the sectors worked at it. */
+        SectorDemandRow: {
+            /** @description One per entry of the body's `bin_starts_ms`, in the same order. */
+            bins: components["schemas"]["SectorDemandBin"][];
+            /**
+             * @description The sectors worked at this one, sorted; non-empty marks a combined row, which counts the union
+             *     of their airspace.
+             */
+            consolidated: string[];
+            /**
+             * Format: int32
+             * @description The limit every bin is judged against. A combined row reads its target's (this row's own
+             *     sector's), never a sum or maximum of the sources'.
+             */
+            limit: number;
+            /** @description Whether `limit` is a stored override rather than the default. */
+            limit_overridden: boolean;
+            /** @description The sector's name in the dataset, when it has one. */
             name?: string | null;
-            /** @description Whether `map` is a stored override rather than the default. */
+            sector_id: string;
+            /** @description The row's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume. */
+            tier: string;
+        };
+        /**
+         * @description Whether an ARTCC's sector demand can be drawn (#725). Each state has its own message on the page;
+         *     none of them is an empty grid.
+         * @enum {string}
+         */
+        SectorDemandStatus: "no_sector_data" | "pending" | "ready";
+        /** @description One of an ARTCC's two sector-demand tables (#725). */
+        SectorDemandTable: {
+            /**
+             * @description Whether the dataset has any volume for this table's tiers in the ARTCC. False is a gap in the
+             *     data (ZSE has no TRACON volumes), to be named, and is distinct from a quiet table of zeros.
+             */
+            has_sector_data: boolean;
+            /** @description Ordered by `sector_id`. Empty unless the body's status is `ready`. */
+            rows: components["schemas"]["SectorDemandRow"][];
+        };
+        /** @description One sector and the occupancy limit its counts are judged against (#722). */
+        SectorLimitBody: {
+            /**
+             * Format: int32
+             * @description The sector's limit: its override, or the default.
+             */
+            limit: number;
+            /** @description Whether `limit` is a stored override rather than the default. */
             overridden: boolean;
             sector_id: string;
+            /** @description The sector's stratum (`low`, `high`, `ultra_high`, `approach`), from its first volume. */
+            tier: string;
         };
-        /** @description An ARTCC's sectors with their Monitor Alert Parameters (#598). */
-        SectorMapsBody: {
+        /** @description An ARTCC's sectors with their occupancy limits (#722). An ARTCC with no sector data has no sectors. */
+        SectorLimitsBody: {
+            artcc: string;
             /**
              * Format: int32
-             * @description What a sector reads until overridden.
+             * @description What a sector reads until it is overridden.
              */
-            default_map: number;
-            /** @description Whether the caller may set this ARTCC's MAPs (`flow.monitor.update`, nationally or scoped). */
+            default_limit: number;
+            /**
+             * @description Whether the caller may set this ARTCC's limits (`flow.sector_limits.update`, nationally or for
+             *     this ARTCC).
+             */
             editable: boolean;
-            sectors: components["schemas"]["SectorMapBody"][];
+            /** @description Ordered by `sector_id`. */
+            sectors: components["schemas"]["SectorLimitBody"][];
         };
+        /**
+         * @description A bin's load against its sector's limit: green, yellow and red on the Sector Monitor.
+         * @enum {string}
+         */
+        SectorLoadLevel: "ok" | "watch" | "over";
         /**
          * @description One ATC sector volume as the admin sector map draws it (#602): a stored row of
          *     `flow.airspace_sector` (#594), straight from the in-memory cache.
@@ -6865,10 +7066,10 @@ export interface components {
             /** Format: int32 */
             rate_limit_per_min?: number | null;
         };
-        /** @description Set a sector's Monitor Alert Parameter. A positive whole number; typing the default is the reset. */
-        SetSectorMapRequest: {
+        /** @description Set a sector's occupancy limit: a positive whole number. Setting the default removes the override. */
+        SetSectorLimitRequest: {
             /** Format: int32 */
-            map: number;
+            limit: number;
         };
         /** @description A full replace of an account's direct `(permission, scope)` grants. `artcc_id = null` is national. */
         SetServiceAccountPermissionsRequest: {
@@ -7610,6 +7811,164 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    preview_vatusa_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetBody"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    apply_vatusa_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccessResetRequest"];
+            };
+        };
+        responses: {
+            /** @description The reset started; poll its run for the result */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetStarted"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A reset is already running; poll that run instead */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetStarted"];
+                };
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description VATUSA is not configured, or the reset lock is held with no run recorded; nothing was started */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetFailure"];
+                };
+            };
+        };
+    };
+    get_vatusa_reset_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The run id the reset's POST returned */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessResetRun"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14093,6 +14452,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description `event_fca`: an event FCA; manage it through /events/{id}/fcas */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -14135,6 +14501,13 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `event_fca`: an event FCA; manage it through /events/{id}/fcas */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14327,6 +14700,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14395,6 +14769,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14477,6 +14852,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, or an unpublished event FCA (#746) */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14556,6 +14932,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description No such FCA, an unpublished event FCA (#746), or a flight holds no release */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -14655,390 +15032,6 @@ export interface operations {
                 headers: {
                     /** @description Seconds until the next request will be accepted. */
                     "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    monitor_table: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MonitorTableBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_consolidations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SectorConsolidationsBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    consolidate_all_sectors: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BulkConsolidateRequest"];
-            };
-        };
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The target isn't one of this ARTCC's sectors */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description `except_consolidated`, and the target is itself worked elsewhere */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    consolidate_sector: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-                sector_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConsolidateSectorRequest"];
-            };
-        };
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description A sector can't be worked at itself */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Either sector isn't one of this ARTCC's */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The save would make a loop */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    release_sector: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-                sector_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_sector_maps: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SectorMapsBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    set_sector_map: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-                sector_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SetSectorMapRequest"];
-            };
-        };
-        responses: {
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description `map` is not a positive whole number */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description The caller's `flow.monitor.update` does not cover this ARTCC */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description No such sector in this ARTCC */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    monitor_neighbours: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                artcc: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MonitorNeighboursBody"];
-                };
-            };
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            503: {
-                headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
@@ -15353,6 +15346,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -15449,6 +15449,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
             429: {
                 headers: {
@@ -15492,6 +15499,426 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller's `flow.runway.update` does not cover this airport's ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sector_consolidations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    consolidate_sectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsolidateSectorsRequest"];
+            };
+        };
+        responses: {
+            /** @description The ARTCC's consolidations after the save, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description An entry works a sector at itself, two entries name the same sector, or there are more than 200 entries; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A sector being consolidated, or a target, is not one of this ARTCC's; nothing is written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The batch would make a loop; nothing is written */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    consolidate_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                /** @description The sector to work elsewhere */
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsolidateSectorRequest"];
+            };
+        };
+        responses: {
+            /** @description The ARTCC's consolidations after the save, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description A sector can't be worked at itself; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Either sector is not one of this ARTCC's */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The target is worked at this sector, so the save would make a loop; nothing is written */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    release_sector: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                /** @description The sector to work on its own again */
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The ARTCC's consolidations after the release */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorConsolidationsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sector_consolidations.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_consolidations.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_sector_demand: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorDemandBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sector_limits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorLimitsBody"];
+                };
+            };
+            /** @description Not signed in, or without `flow.sectors.read` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next request will be accepted. */
+                    "Retry-After"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    set_sector_limit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description ARTCC id, case-insensitive */
+                artcc: string;
+                sector_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetSectorLimitRequest"];
+            };
+        };
+        responses: {
+            /** @description The sector's limit after the request, written or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SectorLimitBody"];
+                };
+            };
+            /** @description `limit` is not a positive whole number; nothing is written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not signed in, or without `flow.sector_limits.update` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller's `flow.sector_limits.update` does not cover this ARTCC */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such sector in this ARTCC */
             404: {
                 headers: {
                     [name: string]: unknown;

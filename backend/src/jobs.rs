@@ -1,7 +1,7 @@
 //! Background maintenance jobs.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -15,6 +15,8 @@ use crate::errors::ApiError;
 use crate::feed::FeedState;
 use crate::feed::nav::NavData;
 use crate::feed::nav_source;
+use crate::feed::sector_consolidations::SectorConsolidations;
+use crate::feed::sector_limits::SectorLimits;
 use crate::feed::sectors::SectorTable;
 use crate::feed::trajectory::ProfileTable;
 use crate::feed::winds::{self, Winds};
@@ -29,6 +31,8 @@ use crate::repos::events as events_repo;
 use crate::repos::flight_exclusions as flight_exclusions_repo;
 use crate::repos::flow as flow_repo;
 use crate::repos::integration as integration_repo;
+use crate::repos::sector_consolidations as sector_consolidations_repo;
+use crate::repos::sector_limits as sector_limits_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
 
@@ -45,6 +49,14 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// work on horizons of 12 hours and longer, where running three times as often changes no outcome
 /// and only adds load.
 const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How often the server admin reconciliation runs (#805): once on starting, like every `run_interval`
+/// job, beside the pass `run()` makes before serving, then at this interval. It bounds
+/// how long a removed admin can hold the role after a replica still on the old
+/// `OIS_SERVER_ADMIN_CID` grants it back at their sign-in during a rolling restart, or after a row
+/// is written by hand. Five minutes, as the TMU cleanup above; each pass is one indexed query when
+/// there is nothing to do.
+const SERVER_ADMIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
@@ -130,9 +142,14 @@ const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How often to reload ATC sector volumes from the DB. Their only writer is the offline importer,
 /// a separate process the server can't hear, so this tick is how an import goes live.
 const AIRSPACE_SECTORS_INTERVAL: Duration = Duration::from_secs(5 * 60);
-/// How often the Monitor Alert Parameter cache reloads (#598). A write reloads only its own replica,
-/// so this bounds how long another replica shows the old value. The table is tiny, so poll often.
-const SECTOR_MAPS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often to reload sector limit overrides (#722). The handler force-reloads on write, so this
+/// tick only carries another replica's edits to this one.
+const SECTOR_LIMITS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How often to reload sector consolidations (#723). The handler force-reloads on write, so this tick
+/// only carries another replica's edits to this one.
+const SECTOR_CONSOLIDATIONS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often to reload airport surface gates from the DB (staff edits are rare, and the handler
 /// force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
@@ -488,11 +505,13 @@ pub fn spawn_credential_usage_flush(
 
 /// Keep the ATC sector volume cache current for the DB-less feed (#594): load at startup, then
 /// reload periodically so an offline import goes live. Fails safe — a failed load keeps the
-/// current table (initially empty).
+/// current table (initially empty). `loaded` is set on the first successful load, so a reader can
+/// tell an empty table that hasn't been read yet from one the DB holds no volumes for.
 pub fn spawn_airspace_sectors_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
     sectors: Arc<ArcSwap<SectorTable>>,
+    loaded: Arc<AtomicBool>,
 ) {
     tokio::spawn(run_interval(
         reg,
@@ -500,12 +519,13 @@ pub fn spawn_airspace_sectors_refresh(
         "Reload ATC sector volumes from the DB",
         AIRSPACE_SECTORS_INTERVAL,
         move || {
-            let (pool, sectors) = (pool.clone(), sectors.clone());
+            let (pool, sectors, loaded) = (pool.clone(), sectors.clone(), loaded.clone());
             async move {
                 match airspace_sectors_repo::load_all(&pool).await {
                     Ok(table) => {
                         let n = table.volumes.len();
                         sectors.store(Arc::new(table));
+                        loaded.store(true, Ordering::Release);
                         Ok(format!("{n} volumes"))
                     }
                     Err(e) => Err(format!("{e:?}")),
@@ -515,25 +535,26 @@ pub fn spawn_airspace_sectors_refresh(
     ));
 }
 
-/// Keep the Monitor Alert Parameter cache current (#598). Writes force-reload it
-/// (`handlers::monitor`); this is the backstop. Fails safe — a failed load keeps the current map.
-pub fn spawn_sector_maps_refresh(
+/// Keep the sector limit overrides (#722) current for the DB-less feed: load at startup, then reload
+/// periodically so another replica's edit reaches this one. Fails safe — a failed load keeps the
+/// current table (initially empty, every sector at the default).
+pub fn spawn_sector_limits_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
-    maps: Arc<ArcSwap<crate::feed::sectors::SectorMaps>>,
+    cache: Arc<ArcSwap<SectorLimits>>,
 ) {
     tokio::spawn(run_interval(
         reg,
-        "sector_maps_refresh",
-        "Reload Monitor Alert Parameters from the DB",
-        SECTOR_MAPS_INTERVAL,
+        "sector_limits_refresh",
+        "Reload sector occupancy limits from the DB",
+        SECTOR_LIMITS_INTERVAL,
         move || {
-            let (pool, maps) = (pool.clone(), maps.clone());
+            let (pool, cache) = (pool.clone(), cache.clone());
             async move {
-                match crate::repos::sector_maps::load_all(&pool).await {
-                    Ok(loaded) => {
-                        let n = loaded.len();
-                        maps.store(Arc::new(loaded));
+                match sector_limits_repo::load_all(&pool).await {
+                    Ok(limits) => {
+                        let n = limits.len();
+                        cache.store(Arc::new(limits));
                         Ok(format!("{n} overrides"))
                     }
                     Err(e) => Err(format!("{e:?}")),
@@ -543,26 +564,27 @@ pub fn spawn_sector_maps_refresh(
     ));
 }
 
-/// Keep the sector consolidation cache current (#599). Writes force-reload it (`handlers::monitor`);
-/// this is the backstop, and what carries another replica's write. Fails safe.
+/// Keep the sector consolidations (#723) current for the DB-less feed: load at startup, then reload
+/// periodically so another replica's edit reaches this one. Fails safe — a failed load keeps the
+/// current arrangement (initially empty, every sector its own row).
 pub fn spawn_sector_consolidations_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
-    consolidations: Arc<ArcSwap<crate::feed::monitor::Consolidations>>,
+    cache: Arc<ArcSwap<SectorConsolidations>>,
 ) {
     tokio::spawn(run_interval(
         reg,
         "sector_consolidations_refresh",
         "Reload sector consolidations from the DB",
-        SECTOR_MAPS_INTERVAL,
+        SECTOR_CONSOLIDATIONS_INTERVAL,
         move || {
-            let (pool, consolidations) = (pool.clone(), consolidations.clone());
+            let (pool, cache) = (pool.clone(), cache.clone());
             async move {
-                match crate::repos::sector_consolidations::load_all(&pool).await {
-                    Ok(loaded) => {
-                        let n = loaded.len();
-                        consolidations.store(Arc::new(loaded));
-                        Ok(format!("{n} consolidated sectors"))
+                match sector_consolidations_repo::load_all(&pool).await {
+                    Ok(consolidations) => {
+                        let n = consolidations.len();
+                        cache.store(Arc::new(consolidations));
+                        Ok(format!("{n} consolidations"))
                     }
                     Err(e) => Err(format!("{e:?}")),
                 }
@@ -1089,6 +1111,43 @@ async fn ace_reminder_scheduler_once(pool: &PgPool, events: &Events) -> Result<S
     } else {
         format!("{sent} reminder(s) enqueued")
     })
+}
+
+/// Demote every server admin not in `OIS_SERVER_ADMIN_CID`, every
+/// [`SERVER_ADMIN_RECONCILE_INTERVAL`] from startup (#805), so a boot runs it twice: here and in
+/// `run()` before serving. A second pass right after the first finds nothing to do.
+pub fn spawn_server_admin_reconcile(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "server_admin_reconcile",
+        "Demote server admins not in OIS_SERVER_ADMIN_CID",
+        SERVER_ADMIN_RECONCILE_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { server_admin_reconcile_once(&pool, &crate::config::server_admin_cids()).await }
+        },
+    ));
+}
+
+/// One reconciliation pass, reported for the job registry: a skipped pass (a part of the list is not
+/// a CID) or any holder it could not demote is a failure, so `/metrics` and Background Tasks show it.
+pub(crate) async fn server_admin_reconcile_once(
+    pool: &PgPool,
+    list: &crate::config::ServerAdminCids,
+) -> Result<String, String> {
+    let pass = crate::handlers::auth::demote_unconfigured_server_admins(pool, list)
+        .await
+        .map_err(|error| format!("could not list server admins: {error:?}"))?;
+    if pass.skipped {
+        return Err(format!(
+            "OIS_SERVER_ADMIN_CID has parts that are not CIDs ({}); demoted no one",
+            list.rejected.join(", ")
+        ));
+    }
+    if pass.failed > 0 {
+        return Err(format!("{} demoted, {} failed", pass.demoted, pass.failed));
+    }
+    Ok(format!("{} demoted", pass.demoted))
 }
 
 /// Periodically expire finished TMIs/ground stops, delete ones that ended over an hour ago, and
@@ -2074,7 +2133,10 @@ mod outbound_job_reaper_tests {
 
 #[cfg(test)]
 mod airspace_sectors_refresh_tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use arc_swap::ArcSwap;
     use sqlx::PgPool;
@@ -2086,25 +2148,60 @@ mod airspace_sectors_refresh_tests {
         repos::airspace_sectors,
     };
 
+    /// Start the job on `pool` and wait for its first run to finish. Waits on the registry, so "the job
+    /// hasn't run yet" can't read as "the job ran and left the flag false". Returns the cache, the
+    /// flag and whether the run succeeded.
+    async fn first_run(pool: PgPool) -> (Arc<ArcSwap<SectorTable>>, Arc<AtomicBool>, bool) {
+        let reg = Arc::new(JobRegistry::new());
+        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_airspace_sectors_refresh(reg.clone(), pool, cache.clone(), loaded.clone());
+        for _ in 0..200 {
+            let status = reg
+                .snapshot()
+                .into_iter()
+                .find(|j| j.name == "airspace_sectors_refresh");
+            if let Some(ok) = status.filter(|j| j.runs >= 1).and_then(|j| j.last_ok) {
+                return (cache, loaded, ok);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the job never finished its first run");
+    }
+
     /// The importer writes from another process, so this job is the only way an import reaches the
-    /// feed's cache: its first tick must load what is in the table.
+    /// feed's cache: its first tick must load what is in the table, and mark it loaded (#725 Q5).
     #[sqlx::test]
     async fn the_job_loads_imported_volumes_into_the_cache(pool: PgPool) {
         let vols = [volume("ZDC", "01001")];
         airspace_sectors::replace_artcc(&pool, "ZDC", &vols, "s", "1")
             .await
             .unwrap();
-        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
 
-        spawn_airspace_sectors_refresh(Arc::new(JobRegistry::new()), pool, cache.clone());
-
-        for _ in 0..100 {
-            if !cache.load().volumes.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(ok);
         assert_eq!(cache.load().volumes, vols);
+        assert!(loaded.load(Ordering::Acquire));
+    }
+
+    /// A table with no volumes at all is loaded too: it is what lets the handler say `no_sector_data`
+    /// for every ARTCC instead of `pending` forever.
+    #[sqlx::test]
+    async fn an_empty_successful_load_still_marks_the_table_loaded(pool: PgPool) {
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(ok);
+        assert!(cache.load().volumes.is_empty());
+        assert!(loaded.load(Ordering::Acquire));
+    }
+
+    /// A failed load says nothing about the table, so it stays unloaded and every ARTCC `pending`.
+    #[sqlx::test]
+    async fn a_failed_load_leaves_the_table_unloaded(pool: PgPool) {
+        pool.close().await;
+        let (cache, loaded, ok) = first_run(pool).await;
+        assert!(!ok, "the closed pool must fail the load");
+        assert!(cache.load().volumes.is_empty());
+        assert!(!loaded.load(Ordering::Acquire));
     }
 }
 
@@ -2144,6 +2241,21 @@ mod registration_tests {
             .collect()
     }
 
+    /// The server admin reconciliation passes the configured list, malformed parts and all, so a
+    /// part that is not a CID stops it as it stops the pass before serving, and re-runs often
+    /// enough to bound a re-grant from a replica on the old list (#805).
+    #[test]
+    fn the_server_admin_reconcile_passes_the_configured_list() {
+        let code = without_line_comments(JOBS_RS);
+        let start = code.find("pub fn spawn_server_admin_reconcile(").unwrap();
+        let spawn = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        assert!(spawn.contains("SERVER_ADMIN_RECONCILE_INTERVAL,"));
+        assert!(spawn.contains(
+            "server_admin_reconcile_once(&pool, &crate::config::server_admin_cids()).await"
+        ));
+        assert!(super::SERVER_ADMIN_RECONCILE_INTERVAL <= std::time::Duration::from_secs(5 * 60));
+    }
+
     #[test]
     fn every_background_job_is_started_in_lib() {
         let names = spawn_fn_names(JOBS_RS);
@@ -2170,6 +2282,35 @@ mod registration_tests {
         assert!(
             missing.is_empty(),
             "defined in jobs.rs but never started in lib.rs, so they silently never run: {missing:?}"
+        );
+    }
+
+    /// The arguments `lib.rs` passes to `jobs::{name}(`, comments stripped.
+    fn call_args(lib: &str, name: &str) -> Option<String> {
+        let lib = without_line_comments(lib);
+        let start = lib.find(&format!("jobs::{name}("))?;
+        let rest = &lib[start..];
+        Some(rest[..rest.find(");")?].to_string())
+    }
+
+    /// #725 Q5: the sector-demand handler reads `AppState::airspace_sectors_loaded`, so the refresh job
+    /// must be handed that flag and not one of its own. Every job test passes its own flag, so only
+    /// this sees `lib.rs` get it wrong.
+    #[test]
+    fn the_sector_refresh_sets_the_states_own_loaded_flag() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_airspace_sectors_refresh")
+                .is_some_and(|args| args.contains("state.airspace_sectors_loaded.clone()"))
+        };
+        assert!(
+            wired(LIB_RS),
+            "lib.rs must pass state.airspace_sectors_loaded"
+        );
+        let detached = "jobs::spawn_airspace_sectors_refresh(reg, pool, state.airspace_sectors.clone(), \
+                        Arc::new(AtomicBool::new(false)));";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a flag of the job's own"
         );
     }
 }

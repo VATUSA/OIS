@@ -3,7 +3,7 @@ name = "ois-desktop"
 # Crate version only. The *shipped* version comes from `tauri.conf.json`'s `version`, which the
 # release job rewrites from the git tag — the bundle no longer inherits this number, because
 # inheriting it meant every release shipped 0.1.0 and `check()` never saw an update (#347).
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -39,8 +39,6 @@ mac-notification-sys.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification.workspace = true
-# Rounded corners for the undecorated window (#419, `src/window_shape.rs`).
-windows-sys.workspace = true
 
 [dev-dependencies]
 # `tauri::test::mock_app` — lets the click path be exercised without a display.

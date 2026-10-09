@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from "react";
-import {Button, cn, ConfirmButton, Input, QueryState, Select, Switch, useToast} from "@ois/ui";
+import {Button, cn, ConfirmButton, Input, QueryState, Select, useToast} from "@ois/ui";
 import {closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors} from "@dnd-kit/core";
 import {arrayMove, SortableContext, useSortable, verticalListSortingStrategy} from "@dnd-kit/sortable";
 import {CSS} from "@dnd-kit/utilities";
@@ -20,6 +20,7 @@ import {
   cycleAgeDays,
   useFcas,
   useFcaTraffic,
+  useFcaArtccFilter,
   useFcaTrafficMany,
   useRefreshData,
   useTraffic,
@@ -39,7 +40,7 @@ import boundariesGeo from "@/assets/artcc-boundaries.json";
 import {TrafficMap} from "./TrafficMap";
 import {useMapCamera} from "./hooks/useMapCamera";
 import {usePersistedOrder} from "./hooks/usePersistedOrder";
-import {useFcaColors, useMapPalette, useRouteColors, swatchCss} from "./lib/colors";
+import {useFcaColors, useMapPalette, useRouteColors} from "./lib/colors";
 import {MAP_BUTTON, MAP_BUTTON_ON, MAP_PANEL} from "./lib/overlay";
 import {US_HOME} from "./lib/constants";
 import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
@@ -50,6 +51,7 @@ import type {NamedRoute} from "./layers/routes";
 import type {MapFca} from "./layers/fca";
 import {RoutePopup} from "./fca/RoutePopup";
 import {CoveragePanel} from "./fca/CoveragePanel";
+import {FcaRow} from "./fca/FcaRow";
 import {
   blankDraft,
   blankRouteForm,
@@ -68,101 +70,6 @@ import {
 const BOUNDARIES = boundariesGeo as GeoJSON.FeatureCollection;
 /** deck initial camera framing the CONUS (matches the legacy US_HOME zoom ~4.3 at zoom 3.9). */
 const FCA_INITIAL = { longitude: US_HOME.longitude, latitude: US_HOME.latitude, zoom: 3.9 };
-
-/** One draggable row in the sidebar FCA list (see #109 — order is per-viewer, via `usePersistedOrder`). */
-function FcaRow({
-  fca,
-  selected,
-  count,
-  canEdit,
-  canDelete,
-  onSelect,
-  onToggleEnabled,
-  onEdit,
-  onDelete,
-}: {
-  fca: Fca;
-  selected: boolean;
-  count: number;
-  canEdit: boolean;
-  canDelete: boolean;
-  onSelect: () => void;
-  onToggleEnabled: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: fca.id,
-  });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : fca.enabled ? 1 : 0.55,
-  };
-  return (
-    <li
-      ref={setNodeRef}
-      style={style}
-      className={cn("flex items-center gap-2 border-b border-line-soft px-3 py-2 text-sm", selected && "bg-brand-soft")}
-    >
-      <button
-        type="button"
-        className="cursor-grab text-ink-3 hover:text-ink"
-        {...attributes}
-        {...listeners}
-      >
-        <GripVertical className="size-3.5" />
-      </button>
-      <span
-        className="size-3 shrink-0 rounded-full"
-        style={{ background: swatchCss(fca.color) }}
-        title={fca.enabled ? "Enabled" : "Disabled"}
-      />
-      <button type="button" onClick={onSelect} className="flex-1 truncate text-left font-mono">
-        {fca.name}
-        {fca.artcc && <span className="ml-1.5 text-xs text-ink-3">{fca.artcc}</span>}
-      </button>
-      <span
-        className={cn(
-          "shrink-0 rounded-full px-1.5 font-mono text-xs font-semibold",
-          count > 0 ? "bg-brand-soft text-brand-ink" : "text-ink-3",
-        )}
-      >
-        {count}
-      </span>
-      {canEdit && (
-        <span
-          className="flex shrink-0 items-center"
-          title={fca.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
-        >
-          <Switch
-            checked={fca.enabled}
-            onCheckedChange={onToggleEnabled}
-            aria-label={`${fca.enabled ? "Disable" : "Enable"} the ${fca.name} FCA`}
-            className="scale-[0.68]"
-          />
-        </span>
-      )}
-      {canEdit && (
-        <button type="button" title="Edit" onClick={onEdit} className="text-ink-3 hover:text-ink">
-          <Pencil className="size-3.5" />
-        </button>
-      )}
-      {canDelete && (
-        <ConfirmButton
-          size="icon"
-          className="size-7"
-          title="Delete"
-          aria-label="Delete FCA"
-          onConfirm={onDelete}
-          warn={`Delete the “${fca.name}” FCA?`}
-        >
-          <Trash2 className="size-3.5" />
-        </ConfirmButton>
-      )}
-    </li>
-  );
-}
 
 /** One draggable row in the ROUTES panel (see #109 — order is per-viewer, via `usePersistedOrder`). */
 function RouteRow({
@@ -271,6 +178,7 @@ export function FcaMapView({
   initialFcaId,
   embedded = false,
   persistKey,
+  persistArtccFilter = false,
 }: {
   readOnly?: boolean;
   /** ARTCC overview: overlay every active FCA in the selected ARTCC — matched traffic (tinted +
@@ -285,6 +193,8 @@ export function FcaMapView({
   embedded?: boolean;
   /** Stable key for remembering this map instance's pan/zoom (gated by the map.persistView setting). */
   persistKey?: string;
+  /** Save the ARTCC filter to the account and frame the map to it (#789). Only `/ops/fca` sets it. */
+  persistArtccFilter?: boolean;
 }) {
   const { data: me } = useMe();
   const toast = useToast();
@@ -358,7 +268,11 @@ export function FcaMapView({
   const [routeCallsign, setRouteCallsign] = useState<string | null>(null);
   const [mobileList, setMobileList] = useState(false);
   const [filter, setFilter] = useState("");
-  const [artccFilter, setArtccFilter] = useState("");
+  // On /ops/fca this is saved per account (#789): it comes back on the next visit, in another
+  // browser and on desktop. A `?fca=` arrival shows ALL instead, so the linked FCA is never hidden.
+  const [artccFilter, setArtccFilter] = useFcaArtccFilter(persistArtccFilter, {
+    ignoreStored: !!initialFcaId,
+  });
 
   const [planeIcons, setPlaneIcons] = useState(() => {
     try {
@@ -735,23 +649,27 @@ export function FcaMapView({
     if (from < 0 || to < 0) return;
     setFcaOrder(arrayMove(fcaOrder, from, to));
   }
+  // A saved ARTCC with no FCAs today stays in the list (#789): the selector keeps showing what the
+  // filter is, the list reads "No FCAs.", and the stored choice is never rewritten to ALL.
   const artccOptions = useMemo(
-    () => [...new Set((fcas.data ?? []).map((f) => f.artcc).filter(Boolean))].sort(),
-    [fcas.data],
+    () =>
+      [...new Set([...(fcas.data ?? []).map((f) => f.artcc), artccFilter].filter(Boolean))].sort(),
+    [fcas.data, artccFilter],
   );
-  // Frame the map to the ARTCC selection in overview mode: a specific ARTCC's extent, or the whole
-  // CONUS for "ALL" (which stacks every FCA nationwide).
+  // Frame the map to the ARTCC selection: a specific ARTCC's extent, or in overview mode the whole
+  // CONUS for "ALL" (which stacks every FCA nationwide). On /ops/fca (#789) a specific ARTCC is
+  // framed when it's restored and on every pick; ALL leaves the camera where map.persistView put it.
   useEffect(() => {
-    if (!overview) return;
+    if (!overview && !persistArtccFilter) return;
     if (!artccFilter) {
-      camera.home();
+      if (overview) camera.home();
       return;
     }
     const feature = facilityFeature(artccFilter);
     const pts = feature ? facilityPoints(feature) : [];
     if (pts.length) camera.fitBounds(pts, { padding: 40, maxZoom: 7 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overview, artccFilter]);
+  }, [overview, persistArtccFilter, artccFilter]);
 
   if (!canRead) {
     return (

@@ -2,7 +2,7 @@ import {readdirSync, readFileSync, statSync} from "node:fs";
 import {join} from "node:path";
 import {describe, expect, it} from "vitest";
 
-import {TOPIC_KEYS} from "./realtime";
+import {COALESCED_KEYS, TOPIC_KEYS} from "./realtime";
 
 /**
  * VATUSA/OIS#647: `TOPIC_KEYS` is hand-maintained against query keys defined elsewhere, and a dead
@@ -39,6 +39,13 @@ describe("TOPIC_KEYS names only query keys that exist (#647)", () => {
   it("every topic's keys are built by some hook", () => {
     expect(SOURCES.length, "scanned the web source").toBeGreaterThan(50);
     expect(deadKeys(TOPIC_KEYS, SOURCES)).toEqual([]);
+  });
+
+  // #725: a key held for the next tick is refetched by the same invalidation, so it must exist too, and
+  // its topic must be one the client subscribes to: the subscribe frame lists TOPIC_KEYS' topics only.
+  it("every coalesced key is built by some hook, on a topic the client subscribes to", () => {
+    expect(deadKeys(COALESCED_KEYS, SOURCES)).toEqual([]);
+    expect(Object.keys(COALESCED_KEYS).filter((t) => !(t in TOPIC_KEYS))).toEqual([]);
   });
 
   it("an event's FCA list is among them: fcaKey builds [\"event-fcas\", eventId]", () => {

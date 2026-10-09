@@ -51,6 +51,7 @@ pub fn default_roles() -> Vec<&'static str> {
         "ACE",          // ACE team
         "NTMO",         // national traffic management officer
         "DCC_STAFF",    // DCC staff
+        "CONTROLLER", // rostered controller: baseline ops, granted per facility by VATUSA sync (#730)
         // Machine actors
         "BOT",
         "SERVICE_APP",
@@ -152,8 +153,8 @@ pub fn draft_new_permission_names() -> Vec<&'static str> {
         "flow.aircraft_profiles.read", // view aircraft performance profiles
         "flow.aircraft_profiles.update", // manage aircraft performance profiles (national)
         "flow.sectors.read",        // view ATC sector volumes on the admin sector map
-        "flow.monitor.read",        // view Airspace Monitor sectors and their alert parameters
-        "flow.monitor.update",      // set a sector's Monitor Alert Parameter (facility-scoped)
+        "flow.sector_limits.update", // set a sector's occupancy limit (facility-scoped)
+        "flow.sector_consolidations.update", // work a sector at another's position (facility-scoped)
         // --- system: background-jobs viewer (read status; update = trigger a run) ---
         "system.jobs.read",
         "system.jobs.update",

@@ -1,50 +1,11 @@
-# Airspace Monitor — sector loading
+# Sector dataset — altitude-bounded ATC sector volumes
 
-> **Status: core built; not yet live.** The sector dataset, the bins, the alert ladder, Monitor Alert
-> Parameters (MAPs) and consolidation are on `next` (#594, #596–#600). Nothing projects live flights into
-> the bins yet and no endpoint serves sector loads (#701), and there is no Monitor page (#601) and no
-> sector map layer (#602). Those sections say "pending" below rather than describing unmerged work.
-> Epic: #593.
-
-**Naming:** "Monitor" alone already means the **Taxi Monitor** (`backend/src/feed/taxi.rs`). This feature
-is the **Airspace Monitor** (or Sector Monitor) everywhere, to keep the two apart.
-
-## Problem
-
-TMU staff can see airport demand (`aadc.md`) but not airspace demand: nothing says that a high sector
-will hold more aircraft than one controller can work in forty minutes' time. The Monitor counts, per ATC
-sector and per 15-minute bin, how many flights will be inside it at the busiest minute, compares that with
-the sector's Monitor Alert Parameter, and colours the bin, the way vTBFM's sector monitor does.
-
-## Scope
-
-**Built:**
-
-- Altitude-bounded ATC sector volumes, imported offline into Postgres.
-- 3D containment, the 15-minute peak-occupancy binner, and the green / amber / red classifier.
-- Per-sector MAPs (default 10), editable on the admin page **Monitor Alert Parameters**
-  (`/admin/planning/sector-maps`, `web/src/pages/planning/sector-maps.tsx`).
-- Sector consolidation (one controller working several sectors), API only.
-- Polling vNAS for ERAM sector identities and which sectors are staffed.
-
-**Not built yet:**
-
-| Piece | Where it lands |
-| --- | --- |
-| Projecting live flights into the binner, and the two populations (airborne, proposed) | #701 |
-| An endpoint serving sector loads and colours (`GET /api/v1/flow/monitor/{artcc}`) | #701 |
-| The Monitor page | #601 |
-| Sector volumes drawn on the map, and `flow.sectors.read` | #602 (PR #677) |
-| Realtime fan-out of Monitor changes | #600 asked for it; nothing publishes yet |
-| Joining vNAS staffing to sector rows, and expiring a stale vNAS snapshot | open (see below) |
-| A UI for consolidation | none filed |
-
-**Out of scope:** Class A–E airspace (the FAA `Class_Airspace` layer has real vertical limits but is not
-ATC sectors), per #593.
+> **Status: rebuilt (#720).** The old Airspace Monitor (#593, #594–#602) was removed in #719 (migration
+> 0125). The sector **dataset**, its importer and the admin sector viewer stayed, and the rebuild reads
+> them: occupancy (#721), limits (#722), consolidation (#723), TRACON strata (#726)
+> and the Operations page (#725), redrawn as vTBFM's monitor (#794). #724's `SectorGrid` was removed in #794. Known coverage gaps: #727, #728.
 
 ## Data model
-
-Three tables in `flow`, all ARTCC-keyed, and an in-memory cache of each.
 
 **`flow.airspace_sector`** (`backend/migrations/0111_airspace_sector.sql`), one row per sector **volume**.
 A sector can be several volumes.
@@ -62,71 +23,232 @@ a positive band, at least one ring, each closed with ≥ 4 points, in range, no 
 crossing edges. The only writer is `repos::airspace_sectors::replace_artcc`, which replaces one ARTCC's
 volumes in a transaction.
 
-**`flow.sector_map`** (`0116_sector_monitor_alert_parameters.sql`): per-sector MAPs, primary key
-`(artcc, sector_id)`, `map > 0`. A sector with no row uses `DEFAULT_MAP = 10` (`feed/sectors.rs`), taken
-from vTBFM, which tunes down from real high-sector values of about 16–20 for VATSIM traffic. There is no
-foreign key to `flow.airspace_sector`, so a re-import never cascades away an override.
+**Cache:** `AppState::airspace_sectors`, reloaded every 5 minutes by `airspace_sectors_refresh`
+(`backend/src/jobs.rs`). The importer is a separate process, so a new import shows on the next tick. A
+failed refresh keeps the current table.
 
-**There is no way to remove an override yet (#706).** The only write is an upsert. Entering the default on
-a sector **with no row** is a no-op, but entering it on a sector that **has** an override stores the
-default as an ordinary row. That sector then reports `overridden: true`, and stays at 10 even if
-`DEFAULT_MAP` later changes. #706 makes entering the default delete the row. When it lands, this paragraph
-becomes "setting the default removes the override".
-
-**`flow.sector_consolidation`** (`0118_sector_consolidation.sql`): `(artcc, sector_id) →
-target_sector_id`, `sector_id <> target_sector_id`. It is kept **flat**: a target is never itself a
-source. Same ARTCC only, by construction.
-
-**Caches** live on `AppState` and are refreshed by jobs in `backend/src/jobs.rs`:
-- sectors every 5 minutes (`airspace_sectors_refresh`; the importer is a separate process, so a new
-  import shows on the next tick);
-- MAPs and consolidations every 30 seconds, and **force-reloaded on every write**.
-
-A failed refresh keeps the current table.
-
-## How it counts
+## Containment
 
 **Containment** (`SectorVolume::contains`, `feed/sectors.rs`): laterally inside any ring, and
-`base_alt_ft <= altitude < top_alt_ft`. The band is **half-open**, so a sector's top is the next stratum's
-floor and a flight is never in two strata at once. An unknown altitude fails open: laterally inside counts.
+`base_alt_ft <= altitude < top_alt_ft`. The band is **half-open**, so at a shared boundary altitude a
+sector's top is the next stratum's floor and stacked strata never both claim it. Bands can still
+*overlap*: the source's enroute Lows start at the surface over the TRACONs, so KATL at 3,000 ft is inside
+both `ZTL 70` (0–4,000) and `ZTL 59` (0–23,000). An unknown altitude fails open: laterally inside counts.
 It tests one altitude, the one supplied, not flow's "filed or current" rule.
 
-**Bins** (`backend/src/feed/monitor.rs`, `sector_loads`):
-- The count is the **peak concurrent occupancy**: the busiest minute's count of distinct flights inside the
-  sector, not the number that pass through (vTBFM manual §10). A flight skimming a boundary, or passing
-  between two pieces of a split sector, counts once.
-- Bins are **absolute Zulu quarter-hours**: at 1407Z the first bin starts at 1400.
-- Every sector is computed for a 6-hour horizon, whatever the UI shows.
-- Each bin carries `active`, `proposed` and `combined`. `combined` is the busiest minute of the two
-  together, **never `active + proposed`**.
-- The two populations are defined (`Population`: airborne at ≥ 50 kt, and on the ground holding an issued
-  departure slot) but nothing computes them yet (#701).
+**Counting: TRACON precedence (#726)** (`SectorTable::counting`, `feed/sectors.rs`). Containment is not
+counting. Of the volumes that contain a fix, if any has tier `approach` (`APPROACH_TIER`), only the
+approach volumes count it; otherwise every containing volume does.
 
-**Consolidation** files a worked sector's volumes under its target **before** counting. The combined row
-therefore counts distinct flights across the **union** of the volumes, and can correctly read lower than
-the sum of its parts. Its MAP is the target's own: one controller, one limit, never a sum.
+- Precedence is **global, not per ARTCC**: a ZJX approach volume suppresses a ZMA enroute volume over it.
+  Callers pass the whole table, never one facility's slice.
+- It holds only while the fix is in the approach band: it releases at the TRACON's top (the half-open
+  band puts the top in the stratum above) and laterally outside the TRACON.
+- A fix with an unknown altitude laterally inside a TRACON counts in the TRACON only.
+- Approach-vs-approach and enroute-vs-enroute overlaps between different sectors are not resolved; each
+  counts.
 
-**Alert ladder** (`backend/src/feed/monitor_alert.rs`, `sector_alert`), using a **strictly greater** test,
-so a peak equal to the MAP never alerts:
+**Source gap: ZSE has no TRACON volumes.** At the pinned vTSD commit ZSE has Low and Ultra High volumes
+only, and KSEA and KPDX at 3,000 ft are inside no volume at all. The TRACONs exist in the same repo's
+`Data/tracon-boundaries.json`, but without altitudes, so OIS invents nothing; the data is #727's. The
+engine keeps the two states apart: a quiet TRACON is a row of zeros, while ZSE has no approach row at
+all, which the TRACON view (#725) should report as "no TRACON sector data" rather than render as quiet.
 
-| Colour | When |
+## Sector occupancy (#721)
+
+The engine behind the sector-forecasting epic (#720). It is pure and DB-free, reading the cached table
+above. `GET /api/v1/flow/sector-demand/{artcc}` serves it (Operations page, below).
+
+- **Cell value** (`feed/sector_load.rs`, `sector_loads`): for each sector and 15-minute bin, the **peak
+  one-minute concurrent occupancy**. Each minute it counts the distinct flights counted by any of the
+  sector's volumes (Counting, above), and the cell is the busiest of the bin's fifteen minutes. It is not throughput: 40 flights
+  transiting a sector, never more than 3 at once, read 3. A boundary skim within a minute, or a crossing
+  between a sector's pieces, counts once.
+- **Bins** are absolute Zulu quarter-hours, 24 of them (6 h). The first is the quarter-hour containing now:
+  at 1407Z it starts at 1400.
+- **Two populations**, returned apart per bin. **Active** means airborne (≥ 50 kt), projected from where
+  the flight is. **Proposed** means on the ground holding a locked wheels-up, projected from it. `combined`
+  is the busiest minute of both together, never active-peak plus proposed-peak.
+- **Projection** (`feed/sector_tracks.rs`, `project_tracks`) is a read-only caller of the trajectory model.
+  It makes the same calls as the map's predicted-traffic projection, so it adds no second predictor.
+- **Wheels-up precedence** (`repos::flow::locked_wheels_up`): a flight can hold an issued CFR, a release in
+  each FCA it crosses, and a GDP slot. The engine takes the **latest** of the following:
+  - its CFR (`tmu.issued_cfrs.wheels_up`);
+  - its releases in live FCAs (enabled, not deleted);
+  - its slot EDCT in a `published` GDP.
+
+  The latest is the binding constraint, since a flight held for a later release can't satisfy an earlier
+  one. The flight advisory and the TMU departures list (#732) use the same rule.
+
+## Sector limits (#722)
+
+A sector's occupancy is judged against its **limit**: how many aircraft one controller can work there.
+The limit is shared, so everyone watching an ARTCC sees the same colours.
+
+- **Default 10** (`feed/sector_limits.rs`, `DEFAULT_LIMIT`). Only overrides are stored, in
+  `flow.sector_limit` keyed per `(artcc, sector_id)`. Setting a sector back to 10 deletes its row.
+- **Level** (`level`), strictly greater than: **over** when the active peak alone exceeds the limit,
+  **watch** when only `combined` does, else **ok**. A peak equal to the limit is ok.
+- **Read**: `GET /api/v1/flow/sector-limits/{artcc}` (`flow.sectors.read`) lists the ARTCC's sectors
+  from the cached dataset, with `editable` for the caller. An ARTCC with no sector data returns no
+  sectors, not a 404.
+- **Write**: `PUT /api/v1/flow/sector-limits/{artcc}/{sector_id}` needs `flow.sector_limits.update`
+  for that ARTCC. A TMU at one facility gets a 403 on a neighbour's sectors. Zero or a negative limit is
+  a 400, an unknown sector is a 404, and an unchanged value writes nothing. A refusal never touches an
+  existing override. The comparison is made against the stored row, not the cache.
+- **Cache**: `AppState::sector_limits`, refreshed every 30 s by `sector_limits_refresh`. A write
+  force-reloads it and publishes `flow.sector_limits`, so viewers recolour at once.
+
+## Sector consolidation (#723)
+
+Sectors worked at one position combine into one row. Stored in `flow.sector_consolidation`
+(migration 0128) as `(artcc, sector_id) → target_sector_id`.
+
+- **Union, never a sum** (`sector_loads`, `feed/sector_load.rs`): a consolidated sector has no row of its
+  own. Its volumes are filed under the target's row **before** counting, so the combined row counts
+  distinct flights per minute across all the airspace. An aircraft crossing from a source into the target
+  within a minute counts once. A combined row can read lower than the sum of its parts, and that is
+  correct. `SectorLoad::consolidated` lists the sources, so the row can be labelled.
+- **The target's limit** (`row_limit`, `feed/sector_consolidations.rs`): one controller, one workload.
+  Never the sum of the sources' limits and never their maximum.
+- **Rules**: same ARTCC only, since both sectors are looked up in the path's ARTCC (another ARTCC's
+  sector is a 404). A sector worked at itself is a 400. A loop (a at b, then b at a) is a 409. Neither
+  refusal writes anything.
+- **Flat on every write** (`repos::sector_consolidations::consolidate` and `apply_batch`, one transaction, serialised per
+  ARTCC). A target that is itself worked elsewhere resolves to where it is worked. Sectors worked at the
+  source move with it: 18 at 41, then 41 at 20, leaves 18 at 20.
+- **Read**: `GET /api/v1/flow/sector-consolidations/{artcc}` (`flow.sectors.read`), with `editable`.
+- **Write**: `PUT /api/v1/flow/sector-consolidations/{artcc}/{sector_id}` with `target_sector_id`, and
+  `DELETE` on the same path to release. Both need `flow.sector_consolidations.update` for that ARTCC,
+  which is separate from `flow.sector_limits.update` and granted to the same five groups. A release
+  isn't checked against the dataset, so one left behind by a re-import can still be cleared.
+- **Batch write** (#794): `PUT /api/v1/flow/sector-consolidations/{artcc}` with `{ "into": { "<sector>":
+  "<target>" | null } }`, same permission and scope. All or nothing in one transaction
+  (`repos::sector_consolidations::apply_batch`): releases first, then saves in sector order, each flattened
+  as above, and the first refusal (400, 404 or 409, a loop between the batch's own entries included)
+  writes none of it. A null entry releases without a dataset check, like `DELETE`; two keys that trim to
+  one sector, or more than 200 entries, are a 400. One `flow.sector_consolidations` publish for the whole batch. The Sector
+  Monitor's menu sends every consolidation command through it.
+- **Cache**: `AppState::sector_consolidations`, refreshed every 30 s by `sector_consolidations_refresh`.
+  Every write force-reloads it, so even a no-op answers with the stored arrangement rather than a
+  cache another replica's write has left behind. A write that changes anything also publishes
+  `flow.sector_consolidations`.
+
+## Operations page (#725): the serving contract
+
+The page under **Operations** draws one ARTCC's demand as an enroute table and a TRACON table, plus a
+collapsed, view-only table per neighbour. Everything it draws comes from one read.
+
+**`GET /api/v1/flow/sector-demand/{artcc}`** (`handlers/sector_demand.rs`), gated `flow.sectors.read` like
+the limit and consolidation reads. The ARTCC is case-insensitive. There is no range parameter: the server
+always sends all 24 bins, and the 2–6 h slider and the alert filter slice them client-side, with no refetch.
+
+| Field | |
 | --- | --- |
-| **Red** ("too late") | the airborne peak exceeds the MAP |
-| **Amber** ("act now") | otherwise, the combined peak exceeds it |
-| **Green** | neither |
+| `status` | `no_sector_data`, `pending` or `ready` (below) |
+| `cycle_at` | the VATSIM publish the counts were projected from (its `update_timestamp`); null unless `ready` |
+| `bin_minutes`, `bin_starts_ms` | 15, and each bin's start as epoch ms on absolute Zulu quarter-hours, the first containing `cycle_at` |
+| `default_limit` | what an unset limit reads |
+| `limits_editable`, `consolidations_editable` | the caller's `flow.sector_limits.update` / `flow.sector_consolidations.update` scope covers this ARTCC |
+| `neighbours` | the bordering OIS ARTCCs, sorted (`feed::neighbors::tier1` over the active `org.facilities`) |
+| `enroute`, `tracon` | `{ has_sector_data, rows }`: Low/High/Ultra High rows, and Approach Control rows |
 
-Proposed load can only ever make a bin amber. The web maps the three to the `level-ok` / `level-watch` /
-`level-over` tokens (`web/src/lib/monitor-alert.ts`). A guard test keeps literal colours out of every
-Monitor web file (`web/src/lib/monitor-colors.guard.test.ts`). Colours are computed per request; there is
-no alert-state table and no edge detection.
+Each row is `sector_id`, `name`, `tier`, `limit`, `limit_overridden`, `consolidated` (the sources worked
+at it) and one bin per `bin_starts_ms`: `active`, `proposed`, `combined` and `level`.
 
-**Staffing** (`backend/src/feed/vnas.rs`, #595):
-- ERAM sector identities come from `data-api.vnas.vatsim.net/api/artccs` (daily).
-- Which sectors are staffed comes from `live.env.vnas.vatsim.net/data-feed/controllers.json` (every
-  30 s): active, non-observer controllers with an ERAM sector id.
-- Ids are zero-padded to two digits, and `ZHN` maps to `HCF`. Staffing is an attribute of a sector, never
-  a filter.
-- Nothing reads it yet.
+- **Levels are the server's.** Each bin's `level` is `feed::sector_limits::level` against `row_limit`, so a
+  combined row is judged by its target's limit and a peak equal to the limit is `ok`. The page colours
+  from `level` and never recomputes it.
+- **Consolidation applied.** The engine is called with `AppState::sector_consolidations`, so a source has
+  no row and its target's row lists it in `consolidated`.
+- **The three states, none of them an empty grid.** `no_sector_data`: the dataset has no volume for the
+  ARTCC at all (ZLA, ZAN, HCF until #727); the page names it, "No sector data for ZLA". It wins over
+  a missing feed snapshot, and an empty dataset reads this way for every ARTCC once it has been loaded.
+  `pending`: the sector table hasn't been loaded since startup (`AppState::airspace_sectors_loaded`), so
+  its emptiness says nothing yet, or there is no feed snapshot yet; nothing has been counted. `ready`: counted. Within `ready`, a table with `has_sector_data: false` is a
+  gap in the data (ZSE has no TRACON volumes), distinct from a quiet table of zero rows.
+- **Neighbours are view-only on this page.** The flags describe the caller's scope at the requested
+  ARTCC, so a national TMU reads `true` for a neighbour too. The page ignores them for neighbour tables;
+  the writes stay scoped server-side (a facility TMU gets 403 at a neighbour).
+- **Computed once per publish, not per request.** Projection (`sector_tracks::project_tracks`, boxed to
+  the ARTCC's volumes) and binning (`sector_loads`, over the **whole** table for TRACON precedence) run
+  under `spawn_blocking` once per ARTCC per change, into `AppState::sector_demand`
+  (`handlers::sector_demand_cache`), and every viewer, table and neighbour read of that ARTCC is served
+  from it. An entry is reused while the VATSIM publish (the snapshot's `source_timestamp`, not the
+  snapshot: the poller installs a new one on every 2 s poll, repeats included), the airport, nav, profile,
+  wind and sector tables (by identity), the consolidations, the excluded callsigns and the grounded flights' wheels-up (by value)
+  are the ones it was built from. A consolidation write force-reloads its cache, so the next read
+  re-projects; a limit write only re-judges the cached rows; a refresh job's reload that changes nothing
+  costs nothing. The first read after a change computes and concurrent reads of the same ARTCC wait for it
+  (single-flight); nothing is computed for an ARTCC nobody reads, so the feed tick does no extra work.
+- **Per request,** the database is read for the caller's two edit scopes, the locked wheels-up of the
+  grounded flights and prefiles (`repos::flow::locked_wheels_up`, part of the key) and the facility list
+  for the neighbours. Flights any facility has excluded count nowhere. The projection and its bins start
+  from the publish time, not the fetch's or the request's, so a repeated poll can't move them and a
+  limit-only re-render keeps its projection's clock.
+- **The walk skips what the box can't see.** A track is resolved minute by minute with the trajectory
+  model's `distance_after`, but only for the minutes on legs that can reach the ARTCC's box (each leg cut
+  into 20 nm pieces and bounded around its great circle), found by bisecting the minutes. The fixes are
+  bit-for-bit those of the every-minute walk (`sector_tracks`' tests pin it).
+
+**Realtime.** No new topic. The web query key is `["sector-demand", artcc]` (`useSectorDemand`,
+`web/src/features/sector-demand/sector-demand.ts`), and `web/src/lib/realtime.ts` refetches it on:
+
+- `feed.tick` (a new cycle; at most once a minute);
+- `flow.sector_limits` (cells recolour) and `flow.sector_consolidations` (rows merge or split), at once:
+  each is a deliberate, rare edit someone is waiting to see;
+- `flow.release`, `flow.cfr`, `tmu.gdp` and `flow.fca` (a wheels-up moved, so the proposed counts did),
+  **coalesced into the next `feed.tick`** (`COALESCED_KEYS`). These can arrive several times a minute
+  while a program runs, and each wheels-up change is a fresh projection per open ARTCC on the server.
+  Held until the tick, a burst becomes one refetch that every client makes against the same new
+  snapshot, so the server normally projects once per ARTCC per publish however many nudges came (a
+  wheels-up committed between two clients' refetches on one tick costs a second); the change
+  shows within one publish (~15 s). With no tick, `COALESCE_MS` (20 s) refetches it anyway. A
+  reconnect's catch-up drops anything held.
+
+## Operations page (#725): the page
+
+**Operations → Sector Monitor** (`/ops/sectors`, `web/src/pages/sector-monitor.tsx`, components in
+`web/src/features/sector-demand/`). The nav item and the page are gated on `flow.sectors.read`, the
+endpoint's own gate; without it the page says so and asks for nothing. A rostered controller holds it
+through `CONTROLLER` (migration 0129); a grant at their facility reads every ARTCC, edits none.
+
+- **The set follows the facility selector and nothing else.** It opens on the viewer's VATUSA home
+  facility and the pick is not remembered, so a controller who moves facilities does not keep the old
+  one's tables. The set is keyed by facility, so a switch replaces every table, control and neighbour.
+- **It looks like vTBFM's Sector Monitor** (#794), a named exception in `DESIGN.md`: a beige body, one
+  bevelled table per facility and stratum (`ZLA`, then `ZLA TRACON`), then each neighbour's two. Rows are
+  the sector (`ZLA25`, with a trailing `+` when others are worked at it) and its MAP (`10/10`), then one
+  cell per bin holding the combined peak, green/yellow/red from the server's `level`. Time labels are a
+  bottom footer (blank, `MAP`, then `HHMM`). A cell's tooltip reads `ZLA25 0415Z · peak 3 (airborne 2)
+  vs MAP 10 · red`. The OIS shell and the facility picker stay as they are. Every colour literal is in
+  `web/src/features/sector-demand/vtbfm-palette.ts`, the only file `colours.guard.test.ts` exempts.
+- **Toggle:** ▼/▶ on the facility's own table folds away only its controls; on a neighbour's it hides
+  controls and grid together. Neighbour tables start collapsed and are fetched only once one is opened.
+- **Controls, per table:** `Time Range:` 2–6 h in whole hours (default 4 h), and `Show if alerted in
+  next:` 1.00–6.00 h (**on by default at 2.00 h**, unlike vTBFM). The span is judged over all six
+  computed hours, independent of the range, and both only slice what the server sent, never refetching.
+- **Remembered per browser,** per ARTCC and table, in `localStorage` under
+  `ois.sectorMonitor.<ARTCC>.<enroute|tracon>.<open|range|alertOnly|alertSpan|collapsed|order>`. Every
+  access is guarded; with storage blocked, the defaults apply.
+- **MAP edit** (own facility, `limits_editable`): click the MAP cell for an inline input; Enter or blur
+  commits only a changed positive number, Escape cancels. Optimistic, rolled back with "Could not save
+  MAP for ZLA25 — check TMU access / connection." on a refusal. Limits are edited only here; the web
+  never calls `GET /flow/sector-limits/{artcc}`.
+- **Right-click menu, the consolidation editor (#792)** (own facility, `consolidations_editable`; absent
+  otherwise and on every neighbour): Move Row Up/Down (row order is per browser); Consolidate ▸ All into
+  T, All into T Except Consolidated, into T ▸ (a checklist that stays open); Deconsolidate ▸ All from T,
+  All in ZLA, from T ▸. Every write goes through the batch `PUT` above as one request, optimistic, rolled
+  back on a refusal with a line naming the sector: "ZLA25 can't be consolidated into itself." (400), "Can't
+  consolidate ZLA25 into ZLA30: ZLA30 is worked at ZLA25." (409), "ZLA99 is not one of ZLA's sectors."
+  (404), "You can't change ZLA's consolidations." (403), else "Could not save the consolidation — check
+  TMU access / connection." The row merges or splits without a reload: the success refetches, and
+  `flow.sector_consolidations` reaches every other viewer.
+- **States:** "Waiting for the first sector-monitor cycle…" before the first read and while `pending`;
+  "No sector data for ZLA" for `no_sector_data`, in one table; "No TRACON sector data for ZSE" for a
+  table without volumes; "No sectors for ZLA." / "No TRACON sectors for ZLA." for a table with no rows;
+  "No ZLA sectors alerting in the next 2.00 h." ("No ZLA TRACON sectors…") when the filter hides every
+  row. None of them is a grid.
 
 ## The sector dataset
 
@@ -175,48 +297,8 @@ vNAS source gives altitude-bounded ATC sector volumes.**
 | SDAT | `sdat.faa.gov` does not resolve publicly |
 | vNAS (`data-api.vnas.vatsim.net/api/artccs/{id}`) | Sector **identities** only (e.g. 54 for ZDC, as `{id, sectorId, name, isFromEramData}`). `airspaceConfigurations` is empty; the video maps are incomplete linework with no altitudes |
 
-## Permissions
+## Viewer and permission
 
-| Permission | Lets you |
-| --- | --- |
-| `flow.monitor.read` | read sectors' MAPs and consolidations |
-| `flow.monitor.update` | set a MAP; consolidate or release a sector |
-
-**Scope:** both are ARTCC-scoped through the holder's facility grants. The write handlers check
-`flow.monitor.update` against the path's ARTCC (`require_edit`, `backend/src/handlers/monitor.rs`). With no
-update grant the call is a 401; with one for a different ARTCC it is a 403. The read responses' `editable`
-flag uses the same check.
-
-**Default roles:** both are granted to `VATUSA_STAFF`, `DCC_STAFF`, `EC`, `AEC` and `NTMO`
-(`0116_sector_monitor_alert_parameters.sql`).
-
-**Pending:** `flow.sectors.read`, which gates drawing sector volumes, arrives with #602.
-
-## API
-
-All routes are under `flow`, and `{artcc}` is uppercased.
-
-| Method | Path | Permission | Body → result |
-| --- | --- | --- | --- |
-| GET | `/api/v1/flow/monitor/{artcc}/maps` | `flow.monitor.read` | `SectorMapsBody { editable, default_map, sectors: [{ sector_id, name, map, overridden }] }` |
-| PUT | `/api/v1/flow/monitor/{artcc}/maps/{sector_id}` | `flow.monitor.update` | `{ map }` → 204. 400 if `map <= 0`; 404 if the sector isn't in this ARTCC; unchanged is a no-op 204 |
-| GET | `/api/v1/flow/monitor/{artcc}/consolidations` | `flow.monitor.read` | `SectorConsolidationsBody { editable, consolidations: [{ sector_id, target_sector_id }] }` |
-| PUT | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | `flow.monitor.update` | `{ target_sector_id }` → 204. 400 for itself; 404 for a sector outside this ARTCC; 409 if it would loop. A target already worked elsewhere resolves to where it's worked, and sectors worked at the source follow it |
-| DELETE | `/api/v1/flow/monitor/{artcc}/consolidations/{sector_id}` | `flow.monitor.update` | → 204, also when it wasn't consolidated |
-
-Consolidation writes hold a per-ARTCC advisory lock, so concurrent saves can't build a chain.
-
-**Pending:** `GET /api/v1/flow/monitor/{artcc}`, sector loads and colours (#701).
-
-## Discord
-
-None.
-
-## Open questions
-
-- **Will vNAS sector ids match stored ones?** vNAS ids are zero-padded, but the importer stores the
-  dataset's `sector` string as-is. Whether the two line up needs checking when staffing is joined to rows.
-- **How stale can staffing get?** A failed vNAS refresh keeps the last snapshot indefinitely, with no
-  fetched-at time or expiry (raised in #595's review).
-- **What type is `map`?** `sector_alert` takes `map` as `u32`, while `SectorLoad.map` is `i32`; the
-  integrating handler (#701) has to convert.
+The admin sector viewer (**Admin → Flow → Sectors**, `web/src/pages/flow/sectors.tsx`) draws the volumes
+from `GET /api/v1/flow/airspace/sectors` (`backend/src/handlers/airspace_sectors.rs`). It is gated by
+`flow.sectors.read` (migration 0120), and is how anyone checks an import.

@@ -48,8 +48,9 @@ headers. It should feel calm, precise, and obviously the same product on every s
 9. **Tokens only — never inline a value.** Every colour, radius, space, and font size comes from a
    token. A hardcoded hex or px in a component is a bug; it's what makes a system drift. The
    exceptions are a page that physically cannot load the stylesheet — see § "Standalone pages outside
-   the app", which lists every one and the conditions they must meet — and a colour a **user** chose
-   and saved, which is data rather than chrome (§ "User-chosen domain colour").
+   the app", which lists every one and the conditions they must meet — a colour a **user** chose
+   and saved, which is data rather than chrome (§ "User-chosen domain colour") — and the Sector
+   Monitor's body (§ "Named exception: the Sector Monitor body").
 
 ---
 
@@ -134,15 +135,12 @@ content's left edge and rounding only that inner corner — not by rounding the 
 
 ## The shell (build this first)
 
-The single highest-leverage primitive. Full height, **flush to the viewport on all four sides** — the
-outer edge of the app is the window's bounding box, with no gutter, no CSS rounding of its own and no
-shadow (#402). On the desktop app the native title bar is hidden and the window's buttons sit at the
-top-left of the sidebar's chrome row, so a gutter here would read as a second bar beneath it.
-
-**The window's own corners are rounded, and that is the OS's doing rather than the shell's** (#419):
-macOS rounds a decorated window itself, Windows 11 is asked to through DWM, and the compositor clips
-the webview — so nothing in the page carries a `border-radius` for it. "Flush, no outer rounding" is a
-rule about *this stylesheet*; it does not mean the app is a hard-cornered rectangle on screen. It holds:
+The single highest-leverage primitive. Full height, **flush to the viewport on all four sides**, with
+no gutter, no CSS rounding of its own and no shadow (#402). On the desktop app the viewport sits
+inside each platform's standard title bar and frame (#796): the OS draws the window's buttons, its drag
+area and any rounding of its corners, so the page reserves no room for them and carries no
+`border-radius` for the window. "Flush, no outer rounding" is a rule about *this stylesheet*, inside the
+native frame. It holds:
 
 - **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
   identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
@@ -203,6 +201,29 @@ on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb`
 - **It is stored as a hex, so it drifts with theme.** A swatch picked in light mode stores the light
   hex and shows that in dark mode too. That is known and accepted; storing a token name would fix it,
   at the cost of an API change.
+
+### Named exception: the Sector Monitor body
+
+**Operations → Sector Monitor** (`/ops/sectors`) draws its body exactly like vTBFM's Sector Monitor,
+the tool controllers already use, by the owner's decision (#794). It is the one signed-in screen that
+does not follow this file's look, and only inside its body:
+
+- **What it copies:** vTBFM's beige page (`#EFDFCE`) with no side padding; each table in a `2px outset`
+  bevelled frame; cyan sector and MAP columns; green, yellow and red bins; a bottom `HHMM` footer with
+  `2px` black borders; vTBFM's monospace stack at weight 500; its slider; and its cream right-click
+  menu with stacked inset bevels. Source: `zla-artcc/vTBFM` `b7328138`,
+  `src/components/SectorMonitorPage.tsx` and `src/components/SectorContextMenu.tsx`.
+- **Where the values live:** every colour literal, the font stack, the bevels and the grid's column
+  and row sizes are in one file, `web/src/features/sector-demand/vtbfm-palette.ts`; the remaining
+  spacings are vTBFM's own, copied inline beside the markup they size. `colours.guard.test.ts`
+  exempts that file and no other source of the page, and refuses an import of it from anywhere
+  outside `web/src/features/sector-demand/`, so the exception can't spread.
+- **What stays OIS:** the shell (sidebar, breadcrumb, page header) and the facility picker above the
+  body. No other page changes, and nothing here is precedent: a new screen does not get to copy it.
+- **What it waives:** inside the body only, non-negotiables 2 (the slider's two-tone track), 3 (the
+  menu's inset bevel bands), 4 (2px outset frames and the footer's 2px borders), 5 (square corners),
+  6 (weight 500), 7 (monospace for labels too) and 9 (vTBFM's literals and spacings), and the
+  "legible in both themes" row: the body is the same in light and dark, as vTBFM's is.
 
 ## Components (one each, tokens only)
 
@@ -270,6 +291,8 @@ Report each miss as `file:line — rule → fix`.
 - [ ] Legible in both dark and light.
 - [ ] A page listed under § "Standalone pages outside the app" is exempt from the hex, shell and
       dark/light rows above — check it against the conditions there instead, not against this list.
+- [ ] The Sector Monitor's body is checked against vTBFM, not this list (§ "Named exception: the
+      Sector Monitor body"); its literals stay in `vtbfm-palette.ts`.
 
 ---
 

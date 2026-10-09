@@ -4,7 +4,6 @@ import {LayoutGrid, List, Rows3} from "lucide-react";
 
 import {FeedWatcher} from "@/components/feed-watcher";
 import {AppShell} from "@/components/shell/app-shell";
-import {WindowChromeBar} from "@/components/shell/window-chrome-bar";
 import {RouteErrorScreen} from "@/components/error-boundary";
 import {SendDiagnosticsButton} from "@/components/send-diagnostics";
 import type {RouteMeta} from "@/components/shell/page-meta";
@@ -18,7 +17,7 @@ import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
 import {PrivacyPage} from "@/pages/privacy";
 import {DownloadPage} from "@/pages/download";
-import {PopoutFcaLadderPage, PopoutWidgetPage} from "@/pages/popout";
+import {PopoutAirportLadderPage, PopoutFcaLadderPage, PopoutWidgetPage} from "@/pages/popout";
 import {ProfilePage} from "@/pages/profile";
 import {SettingsPage} from "@/pages/settings";
 import {ApiKeysPage} from "@/pages/api-keys";
@@ -28,6 +27,7 @@ import {IdstPage} from "@/pages/idst";
 import {FacilityMapIndexPage, FacilityMapPage} from "@/pages/facility-map";
 import {RunwayPage} from "@/pages/runway";
 import {AadcPage} from "@/pages/aadc";
+import {SectorMonitorPage} from "@/pages/sector-monitor";
 import {DashboardPage} from "@/pages/dashboard";
 import {LandingPage} from "@/pages/landing";
 import {BoardViewPage} from "@/pages/dashboards/board";
@@ -37,10 +37,8 @@ import {TmuPage} from "@/pages/tmu";
 import {PlanningEventsPage} from "@/pages/planning/events";
 import {EventPlanningPage} from "@/pages/planning/event";
 import {EventFcaBuilderPage} from "@/pages/planning/event-fcas";
-import {MonitorPage} from "@/pages/flow/monitor";
 import {AircraftProfilesPage} from "@/pages/planning/aircraft-profiles";
 import {SectorsPage} from "@/pages/flow/sectors";
-import {SectorMapsPage} from "@/pages/planning/sector-maps";
 import {AirportConfigsPage} from "@/pages/planning/airport-configs";
 import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
@@ -83,9 +81,6 @@ function RootLayout() {
   if (me.isError) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-ground px-6 text-center text-ink">
-        {/* This layout is outside `AppShell`, so it carries the frameless window's controls itself
-            (#423) — without them the window has no title bar and no way to close it. */}
-        <WindowChromeBar />
         <p className="text-xl font-bold">Can’t reach OIS</p>
         <p className="max-w-md text-sm text-ink-2">
           The server isn’t responding right now. This page keeps trying and will reconnect
@@ -102,16 +97,8 @@ function RootLayout() {
     );
   }
 
-  // Signed-out visitors land on the public homepage — no app shell, with the site footer. Outside
-  // `AppShell` it has to carry the frameless window's controls itself (#423): this is the first screen
-  // a new desktop user sees, and without them the window cannot be closed from inside the app.
-  if (pathname === "/" && !me.isLoading && me.data === null)
-    return (
-      <>
-        <WindowChromeBar />
-        <LandingPage />
-      </>
-    );
+  // Signed-out visitors land on the public homepage — no app shell, with the site footer.
+  if (pathname === "/" && !me.isLoading && me.data === null) return <LandingPage />;
 
   if (embed) {
     return (
@@ -257,6 +244,14 @@ const aadcRoute = createRoute({
   staticData: { layout: "wide", title: "Arrival demand chart" },
 });
 
+// Sector demand (#725): the facility's enroute and TRACON tables, then its neighbours.
+const sectorMonitorRoute = createRoute({
+  getParentRoute: () => opsRoute,
+  path: "sectors",
+  component: SectorMonitorPage,
+  staticData: { layout: "wide", title: "Sector monitor" },
+});
+
 // --- Advisories (public, read-only) ---
 
 const advisoriesRoute = createRoute({
@@ -370,6 +365,13 @@ const popoutFcaRoute = createRoute({
   component: PopoutFcaLadderPage,
 });
 
+const popoutAirportRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "popout/airport/$icao",
+  staticData: { layout: "full", title: "Ladder" },
+  component: PopoutAirportLadderPage,
+});
+
 // Public legal/info pages (linked from the footer).
 const downloadRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -396,7 +398,7 @@ const adminRoute = createRoute({
   staticData: { layout: "wide" },
 });
 
-// --- Flow (sector loading, and the sector data behind it) ---
+// --- Flow (the sector dataset; the Airspace Monitor was removed in #719) ---
 
 const adminFlowRoute = createRoute({
   getParentRoute: () => adminRoute,
@@ -410,13 +412,6 @@ const adminFlowSectorsRoute = createRoute({
   path: "sectors",
   staticData: { title: "Sectors" },
   component: SectorsPage,
-});
-
-const adminFlowMonitorRoute = createRoute({
-  getParentRoute: () => adminFlowRoute,
-  path: "monitor",
-  staticData: { title: "Airspace Monitor" },
-  component: MonitorPage,
 });
 
 // --- Planning (pre-event) ---
@@ -477,13 +472,6 @@ const planningAircraftProfilesRoute = createRoute({
   path: "aircraft-profiles",
   staticData: { title: "Aircraft profiles" },
   component: AircraftProfilesPage,
-});
-
-const planningSectorMapsRoute = createRoute({
-  getParentRoute: () => planningRoute,
-  path: "sector-maps",
-  staticData: { title: "Monitor alert parameters" },
-  component: SectorMapsPage,
 });
 
 const planningEventRoute = createRoute({
@@ -688,6 +676,7 @@ const routeTree = rootRoute.addChildren([
     runwayRoute,
     idstRoute,
     aadcRoute,
+    sectorMonitorRoute,
   ]),
   advisoriesRoute.addChildren([advisoriesIndexRoute, advisoriesFcaRoute]),
   facilityMapRoute.addChildren([facilityMapIndexRoute, facilityMapDetailRoute]),
@@ -697,6 +686,7 @@ const routeTree = rootRoute.addChildren([
   apiKeysRoute,
   popoutWidgetRoute,
   popoutFcaRoute,
+  popoutAirportRoute,
   downloadRoute,
   privacyRoute,
   adminRoute.addChildren([
@@ -709,7 +699,7 @@ const routeTree = rootRoute.addChildren([
     adminApiKeysRoute,
     adminServiceAccountsRoute,
     adminDiscordRoute,
-    adminFlowRoute.addChildren([adminFlowMonitorRoute, adminFlowSectorsRoute]),
+    adminFlowRoute.addChildren([adminFlowSectorsRoute]),
     planningRoute.addChildren([
       planningIndexRoute,
       planningEventsRoute,
@@ -717,7 +707,6 @@ const routeTree = rootRoute.addChildren([
       planningFacilityDocumentsRoute,
       planningAirportSurfaceRoute,
       planningAircraftProfilesRoute,
-      planningSectorMapsRoute,
       planningEventRoute,
       planningEventFcasRoute,
     ]),

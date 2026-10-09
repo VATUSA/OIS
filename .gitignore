@@ -28,7 +28,12 @@ deploy/observability/metrics_token
 !.vscode/extensions.json
 
 # Claude Code — ignore personal/ephemeral state, but SHARE the team workflow
-# (slash commands + their helper scripts).
+# (slash commands, helper scripts, rules, agents, hooks, and the hook config).
+# settings.local.json, review markers/, and the vendored skills/ stay ignored.
 .claude/*
 !.claude/commands/
 !.claude/scripts/
+!.claude/rules/
+!.claude/agents/
+!.claude/hooks/
+!.claude/settings.json

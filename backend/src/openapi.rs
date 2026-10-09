@@ -97,6 +97,9 @@ impl Modify for CredentialSchemes {
         crate::handlers::access::update_user_access,
         crate::handlers::access::get_user_vatusa,
         crate::handlers::access::resync_user_vatusa,
+        crate::handlers::access_reset::preview_vatusa_reset,
+        crate::handlers::access_reset::apply_vatusa_reset,
+        crate::handlers::access_reset::get_vatusa_reset_run,
         crate::handlers::access::list_groups,
         crate::handlers::access::create_group,
         crate::handlers::access::update_group,
@@ -213,6 +216,13 @@ impl Modify for CredentialSchemes {
         crate::handlers::aircraft_profiles::upsert_profile,
         crate::handlers::aircraft_profiles::delete_profile,
         crate::handlers::airspace_sectors::list_sectors,
+        crate::handlers::sector_demand::get_sector_demand,
+        crate::handlers::sector_limits::list_sector_limits,
+        crate::handlers::sector_limits::set_sector_limit,
+        crate::handlers::sector_consolidations::list_sector_consolidations,
+        crate::handlers::sector_consolidations::consolidate_sector,
+        crate::handlers::sector_consolidations::consolidate_sectors,
+        crate::handlers::sector_consolidations::release_sector,
         crate::handlers::flow::list_fcas,
         crate::handlers::flow::create_fca,
         crate::handlers::flow::update_fca,
@@ -223,14 +233,6 @@ impl Modify for CredentialSchemes {
         crate::handlers::flight_exclusions::list_flight_exclusions,
         crate::handlers::flight_exclusions::exclude_flight,
         crate::handlers::flight_exclusions::restore_flight,
-        crate::handlers::monitor::monitor_table,
-        crate::handlers::monitor::monitor_neighbours,
-        crate::handlers::monitor::list_sector_maps,
-        crate::handlers::monitor::set_sector_map,
-        crate::handlers::monitor::list_consolidations,
-        crate::handlers::monitor::consolidate_sector,
-        crate::handlers::monitor::consolidate_all_sectors,
-        crate::handlers::monitor::release_sector,
         crate::handlers::flow::clear_release,
         crate::handlers::flow::reorder_fca,
         crate::handlers::flow::fca_counts,
@@ -355,6 +357,13 @@ impl Modify for CredentialSchemes {
         crate::models::UserVatusaBody,
         crate::models::VatusaGrantChange,
         crate::models::VatusaResyncRequest,
+        crate::models::AccessResetRequest,
+        crate::models::AccessResetGrant,
+        crate::models::AccessResetUser,
+        crate::models::AccessResetBody,
+        crate::models::AccessResetFailure,
+        crate::models::AccessResetStarted,
+        crate::models::AccessResetRun,
         crate::models::ScopeAccess,
         crate::models::UpdateUserAccessRequest,
         crate::models::ScopeUpdate,
@@ -409,19 +418,6 @@ impl Modify for CredentialSchemes {
         crate::models::AirportConfigBody,
         crate::models::FlightExclusionBody,
         crate::models::FlightExclusionsBody,
-        crate::models::SectorMapBody,
-        crate::models::SectorMapsBody,
-        crate::models::MonitorTableBody,
-        crate::models::MonitorNeighboursBody,
-        crate::models::MonitorRowBody,
-        crate::models::MonitorBinBody,
-        crate::feed::monitor_alert::SectorAlert,
-        crate::models::SetSectorMapRequest,
-        crate::models::SectorConsolidationBody,
-        crate::models::SectorConsolidationsBody,
-        crate::models::ConsolidateSectorRequest,
-        crate::models::BulkConsolidateRequest,
-        crate::models::BulkConsolidateMode,
         crate::models::ExcludeFlightRequest,
         crate::models::UpsertAirportConfigRequest,
         crate::models::AirportGateBody,
@@ -436,6 +432,19 @@ impl Modify for CredentialSchemes {
         crate::models::FaaRepullResult,
         crate::models::AircraftProfileBody,
         crate::models::SectorVolumeBody,
+        crate::models::SectorLimitBody,
+        crate::models::SectorLimitsBody,
+        crate::models::SetSectorLimitRequest,
+        crate::models::SectorConsolidationBody,
+        crate::models::SectorConsolidationsBody,
+        crate::models::ConsolidateSectorRequest,
+        crate::models::ConsolidateSectorsRequest,
+        crate::models::SectorDemandStatus,
+        crate::models::SectorDemandBin,
+        crate::models::SectorDemandRow,
+        crate::models::SectorDemandTable,
+        crate::models::SectorDemandBody,
+        crate::feed::sector_limits::SectorLoadLevel,
         crate::models::UpsertAircraftProfileRequest,
         crate::models::AirportForecastBody,
         crate::models::TmiPackageBody,
@@ -650,17 +659,61 @@ impl utoipa::Modify for RateLimited {
     }
 }
 
+/// The path [`dump_openapi_json`] writes when `OIS_OPENAPI_OUT` is unset. CI's `client-drift` job
+/// (`.github/workflows/ci.yml`) and `release.yml`'s `openapi` job read this path, each on its own
+/// runner, so they never set the variable.
+#[cfg(test)]
+const DEFAULT_OPENAPI_DUMP_PATH: &str = "/tmp/ois-openapi.json";
+
+/// Where [`dump_openapi_json`] writes, given the value of `OIS_OPENAPI_OUT`: that path when it is
+/// set and non-empty, otherwise [`DEFAULT_OPENAPI_DUMP_PATH`]. A local run passes a per-worktree
+/// path (`just ci-full` uses `target/ois-openapi.json`) so concurrent worktrees don't overwrite each
+/// other's document (#760). A relative path resolves against `backend/`, the test binary's working
+/// directory, so pass an absolute one.
+#[cfg(test)]
+fn openapi_dump_path(out: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    out.filter(|path| !path.is_empty())
+        .map_or_else(|| DEFAULT_OPENAPI_DUMP_PATH.into(), Into::into)
+}
+
 /// A CI utility, not a real test: dumps the current OpenAPI document to a file so the
 /// client-drift check (`.github/workflows/ci.yml`'s `client-drift` job) can regenerate
 /// `@ois/api-client` and diff it against what's committed, without needing a live server + DB —
 /// the document is a pure compile-time/utoipa artifact. `#[ignore]` keeps it out of the normal
-/// `cargo test` run; invoke explicitly with `--ignored`.
+/// `cargo test` run; invoke explicitly with `--ignored`. Writes `/tmp/ois-openapi.json`, or the
+/// path in `OIS_OPENAPI_OUT` when set (see [`openapi_dump_path`]).
 #[test]
 #[ignore = "CI utility — see .github/workflows/ci.yml's client-drift job"]
 fn dump_openapi_json() {
-    std::fs::write(
-        "/tmp/ois-openapi.json",
-        ApiDoc::openapi().to_pretty_json().unwrap(),
-    )
-    .unwrap();
+    let path = openapi_dump_path(std::env::var_os("OIS_OPENAPI_OUT"));
+    std::fs::write(&path, ApiDoc::openapi().to_pretty_json().unwrap())
+        .unwrap_or_else(|e| panic!("writing the OpenAPI document to {}: {e}", path.display()));
+}
+
+#[cfg(test)]
+mod dump_path_tests {
+    use super::openapi_dump_path;
+    use std::path::Path;
+
+    #[test]
+    fn unset_writes_the_path_ci_and_release_read() {
+        // Absolute literal, not DEFAULT_OPENAPI_DUMP_PATH: ci.yml and release.yml hard-code it.
+        assert_eq!(openapi_dump_path(None), Path::new("/tmp/ois-openapi.json"));
+    }
+
+    #[test]
+    fn empty_falls_back_to_the_default() {
+        assert_eq!(
+            openapi_dump_path(Some("".into())),
+            Path::new("/tmp/ois-openapi.json")
+        );
+    }
+
+    #[test]
+    fn set_overrides_the_default() {
+        assert_eq!(
+            openapi_dump_path(Some("/work/wt-a/target/ois-openapi.json".into())),
+            Path::new("/work/wt-a/target/ois-openapi.json")
+        );
+    }
 }
