@@ -3713,8 +3713,37 @@ struct Fixture815 {
 }
 
 impl Fixture815 {
+    /// TEST1 as a prefile.
     async fn new(pool: PgPool) -> Self {
+        Self::build(pool, false).await
+    }
+
+    /// TEST1 as a connected pilot parked at KJFK: `build_candidates`' pilot branch, not the prefile
+    /// one. No gates are seeded and it isn't rolling, so it takes the same airport tier.
+    async fn connected(pool: PgPool) -> Self {
+        Self::build(pool, true).await
+    }
+
+    async fn build(pool: PgPool, connected: bool) -> Self {
         let state = crossing_state(pool.clone()).await;
+        if connected {
+            let mut feed = state.feed.write().await;
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: vec![crate::feed::vatsim::Pilot {
+                    callsign: "TEST1".into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    flight_plan: Some(FlightPlan {
+                        departure: "KJFK".into(),
+                        arrival: "KDCA".into(),
+                        route: "RBV WHITE SIE".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })));
+        }
         let sample = || crate::feed::taxi_estimate::TaxiSample {
             gate_id: None,
             aircraft: None,
@@ -3743,6 +3772,8 @@ impl Fixture815 {
         assert_eq!(status, http::StatusCode::OK, "{traffic}");
         let flight = &traffic[0];
         assert_eq!(flight["callsign"], "TEST1", "{traffic}");
+        let status = if connected { "ground" } else { "proposed" };
+        assert_eq!(flight["status"], status, "{traffic}");
         // Positive control: the seeded samples were read, not the 180/120/480 s default tier.
         let taxi = &flight["debug"]["taxi_estimate"];
         assert_eq!(
@@ -3897,10 +3928,9 @@ async fn a_released_flight_reaches_the_fca_line_at_its_cta(pool: PgPool) {
     );
 }
 
-/// #815: the proposed EDCT on the IDST board is the release RDY then stores, both wheels-up.
-#[sqlx::test]
-async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
-    let fx = Fixture815::new(pool).await;
+/// #815: the proposed EDCT on the IDST board is the release RDY then stores, both wheels-up: one
+/// allowance after the handler's `now`, since TEST1 is alone and its slot is its ETA.
+async fn idst_and_rdy_agree(fx: Fixture815) {
     sqlx::query(
         "insert into access.role_permissions (role_name, permission_name) \
          values ($1, 'flow.fca.read') on conflict do nothing",
@@ -3922,11 +3952,29 @@ async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
     assert_eq!(row["callsign"], "TEST1", "{idst}");
     let proposed = at(&row["edct"]);
     fx.assert_airborne_ete(at(&row["cross_time"]) - proposed, "IDST cross_time − edct");
-
-    let (_, _, (_, edct)) = fx.release(json!({})).await;
-    // TEST1 is alone, so both take its ETA as the slot; the calls are milliseconds apart.
+    let as_of = at(&idst["as_of"]);
     assert!(
-        (edct - proposed).abs() <= SLACK_815_MS,
-        "IDST proposed {proposed}, RDY stored {edct}"
+        (proposed - as_of - ALLOWANCE_815_MS).abs() <= SLACK_815_MS,
+        "IDST proposed {proposed}, as of {as_of}: not one allowance after"
     );
+
+    let (before, after, (cta, edct)) = fx.release(json!({})).await;
+    fx.assert_airborne_ete(cta - edct, "cta − edct");
+    assert!(
+        (before + ALLOWANCE_815_MS - SLACK_815_MS..=after + ALLOWANCE_815_MS + SLACK_815_MS)
+            .contains(&edct),
+        "RDY stored {edct}, now in [{before}, {after}]: not one allowance after"
+    );
+}
+
+#[sqlx::test]
+async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
+    idst_and_rdy_agree(Fixture815::new(pool).await).await;
+}
+
+/// The same for a connected ground pilot, which `build_candidates` times in its own branch.
+#[sqlx::test]
+async fn a_connected_ground_pilot_gets_the_same_wheels_up_release(pool: PgPool) {
+    let fx = Fixture815::connected(pool).await;
+    idst_and_rdy_agree(fx).await;
 }

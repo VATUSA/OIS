@@ -2129,8 +2129,7 @@ fn separation_ms(fca: &FcaBody, cross_speed: f64) -> i64 {
 ///
 /// A ground flight's `eta_ms` carries its ground allowance (pushback, start-up and taxi), so
 /// `eta − now` runs from the gate. Every reader treats the stored release as wheels-up, so only the
-/// airborne part is backed out; taking off the whole `eta − now` stored a gate time, and a pilot
-/// airborne on it crossed one allowance early (#815).
+/// airborne part is backed out (#815).
 fn release_ms(cta_ms: i64, eta_ms: i64, now_ms: i64, ground_allowance_ms: i64) -> i64 {
     cta_ms - (eta_ms - now_ms - ground_allowance_ms)
 }
