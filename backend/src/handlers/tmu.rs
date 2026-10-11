@@ -2267,7 +2267,7 @@ pub async fn cancel_advisory(
     delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
     security(("session" = ["tmu.adv.update"]), ("api_key" = ["tmu.adv.update"]), ("service_account" = ["tmu.adv.update"])),
     params(("id" = String, Path)),
-    responses((status = 204), (status = 401), (status = 409))
+    responses((status = 204), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn delete_advisory(
     State(state): State<AppState>,

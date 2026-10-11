@@ -1,4 +1,4 @@
-import {useMemo, useRef, useState} from "react";
+import {useCallback, useMemo, useRef, useState} from "react";
 import {Link, useNavigate} from "@tanstack/react-router";
 import {
   Button,
@@ -137,6 +137,8 @@ function BoardCard({
   );
 }
 
+const NO_COLLECTIONS: DashboardCollection[] = [];
+
 const GRID = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
 
 export function BoardLibraryPage() {
@@ -152,7 +154,8 @@ export function BoardLibraryPage() {
   const deleteCollection = useDeleteCollection();
 
   const boards = data?.dashboards ?? [];
-  const collections = data?.collections ?? [];
+  // A constant fallback, so the columns memo below doesn't rebuild on every render while loading.
+  const collections = data?.collections ?? NO_COLLECTIONS;
   // A national board is only useful to someone who works the NAS, so it is offered only to them —
   // the same `tmu_national` test the national widgets use (VATUSA/OIS#474, #475, #476). Curation,
   // not a boundary: every widget on that board can be added by hand regardless.
@@ -233,8 +236,8 @@ export function BoardLibraryPage() {
   // go through a ref so they stay current without rebuilding the JSX. `templates` cannot go through
   // that ref: `.map` runs *inside* this memo, so a ref would pin the list to its first-render value,
   // before `useMe` has resolved and while the national template is still filtered out.
-  const handlers = useRef({ createBlank, createFromTemplate, newCollection });
-  handlers.current = { createBlank, createFromTemplate, newCollection };
+  const handlers = useRef({ createBlank, createFromTemplate, newCollection, renameBoard });
+  handlers.current = { createBlank, createFromTemplate, newCollection, renameBoard };
   const actions = useMemo(
     () => (
       <div className="flex items-center gap-2">
@@ -275,67 +278,78 @@ export function BoardLibraryPage() {
   );
   usePageHeader({ subtitle: "Your saved boards.", count: data ? boards.length : null, actions });
 
-  const actionsFor = (b: DashboardSummary): BoardActions => ({
-    onRename: () => void renameBoard(b),
-    onDelete: () => del.mutate(b.id),
-    onMove: (collectionId) => update.mutate({ id: b.id, collection_id: collectionId }),
-  });
+  // Stable, because the list view's columns depend on it: a rebuilt `cell` function remounts the
+  // cell, which would reset an armed ConfirmButton between its two clicks (VATUSA/OIS#824).
+  // `.mutate` is stable; `renameBoard` is not, so it goes through the handlers ref.
+  const deleteBoard = del.mutate;
+  const moveBoard = update.mutate;
+  const actionsFor = useCallback(
+    (b: DashboardSummary): BoardActions => ({
+      onRename: () => void handlers.current.renameBoard(b),
+      onDelete: () => deleteBoard(b.id),
+      onMove: (collectionId) => moveBoard({ id: b.id, collection_id: collectionId }),
+    }),
+    [deleteBoard, moveBoard],
+  );
 
   const cardOf = (b: DashboardSummary) => (
     <BoardCard key={b.id} board={b} collections={collections} {...actionsFor(b)} />
   );
 
   const ungrouped = boards.filter((b) => !b.collection_id);
-  const collectionName = new Map(collections.map((c) => [c.id, c.name]));
+  const collectionName = useMemo(() => new Map(collections.map((c) => [c.id, c.name])), [collections]);
 
-  const columns: DataColumn<DashboardSummary>[] = [
-    {
-      accessorKey: "name",
-      header: "Name",
-      icon: LayoutDashboard,
-      cell: (c) => (
-        <Link
-          to="/ops/my/$boardId"
-          params={{ boardId: c.row.original.id }}
-          className="font-semibold text-ink hover:text-brand-ink"
-        >
-          {c.getValue<string>()}
-        </Link>
-      ),
-    },
-    {
-      id: "collection",
-      accessorFn: (b) => (b.collection_id ? (collectionName.get(b.collection_id) ?? "") : ""),
-      header: "Collection",
-      icon: Folder,
-      cell: (c) => <span className="text-ink-2">{c.getValue<string>() || "—"}</span>,
-    },
-    {
-      accessorKey: "updated_at",
-      header: "Updated",
-      icon: Clock,
-      mono: true,
-      cell: (c) => <span className="whitespace-nowrap text-ink-2">{relativeTime(c.getValue<string>())}</span>,
-    },
-    {
-      id: "shared",
-      accessorFn: (b) => (b.share_slug ? 1 : 0),
-      header: "Sharing",
-      icon: Share2,
-      cell: (c) => (c.row.original.share_slug ? <SharedPill /> : <span className="text-ink-3">Private</span>),
-    },
-    {
-      id: "actions",
-      header: "",
-      enableSorting: false,
-      align: "right",
-      cell: (c) => (
-        <div className="flex justify-end gap-1">
-          <BoardMenu board={c.row.original} collections={collections} {...actionsFor(c.row.original)} />
-        </div>
-      ),
-    },
-  ];
+  const columns = useMemo<DataColumn<DashboardSummary>[]>(
+    () => [
+      {
+        accessorKey: "name",
+        header: "Name",
+        icon: LayoutDashboard,
+        cell: (c) => (
+          <Link
+            to="/ops/my/$boardId"
+            params={{ boardId: c.row.original.id }}
+            className="font-semibold text-ink hover:text-brand-ink"
+          >
+            {c.getValue<string>()}
+          </Link>
+        ),
+      },
+      {
+        id: "collection",
+        accessorFn: (b) => (b.collection_id ? (collectionName.get(b.collection_id) ?? "") : ""),
+        header: "Collection",
+        icon: Folder,
+        cell: (c) => <span className="text-ink-2">{c.getValue<string>() || "—"}</span>,
+      },
+      {
+        accessorKey: "updated_at",
+        header: "Updated",
+        icon: Clock,
+        mono: true,
+        cell: (c) => <span className="whitespace-nowrap text-ink-2">{relativeTime(c.getValue<string>())}</span>,
+      },
+      {
+        id: "shared",
+        accessorFn: (b) => (b.share_slug ? 1 : 0),
+        header: "Sharing",
+        icon: Share2,
+        cell: (c) => (c.row.original.share_slug ? <SharedPill /> : <span className="text-ink-3">Private</span>),
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        align: "right",
+        cell: (c) => (
+          <div className="flex justify-end gap-1">
+            <BoardMenu board={c.row.original} collections={collections} {...actionsFor(c.row.original)} />
+          </div>
+        ),
+      },
+    ],
+    [collections, collectionName, actionsFor],
+  );
 
   return (
     <div className="flex w-full flex-col gap-6">

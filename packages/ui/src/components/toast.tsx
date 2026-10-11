@@ -96,8 +96,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((x) => x.id !== id));
   }, []);
 
+  // Stable across renders: a new object here would re-render every `useToast` consumer on each push,
+  // and a table whose columns depend on one would remount its cells, resetting an armed
+  // ConfirmButton between its two clicks (VATUSA/OIS#824).
+  const value = React.useMemo(() => ({ push }), [push]);
+
   return (
-    <ToastContext.Provider value={{ push }}>
+    <ToastContext.Provider value={value}>
       {children}
       <div className="pointer-events-none fixed bottom-4 right-4 z-[100] flex flex-col gap-2">
         {toasts.map((t) => (

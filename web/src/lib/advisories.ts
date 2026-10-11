@@ -110,17 +110,33 @@ export function useDeleteAdvisory() {
   const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await ois.DELETE("/api/v1/tmu/advisories/{id}", {
+      const { error, response } = await ois.DELETE("/api/v1/tmu/advisories/{id}", {
         params: { path: { id } },
       });
-      if (error) throw new Error("delete failed");
+      if (error) {
+        const err = new Error("delete failed") as Error & { status?: number };
+        err.status = response?.status;
+        throw err;
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["advisories"] });
       toast.success("Draft discarded");
     },
-    // A published advisory is a document that went out; the API answers 409 rather than deleting it.
-    onError: () => toast.error("Only a draft can be discarded"),
+    // `delete_advisory` (backend/src/handlers/tmu.rs) answers 403 when the draft is outside the
+    // caller's facility scope, 404 when it is gone, and 409 when it is no longer a draft: a published
+    // advisory is a document that went out, so it is never deleted.
+    onError: (error: Error & { status?: number }) => {
+      toast.error(
+        error.status === 403
+          ? "You can’t discard drafts for this facility"
+          : error.status === 404
+            ? "That draft no longer exists"
+            : error.status === 409
+              ? "Only a draft can be discarded"
+              : "Couldn’t discard the draft",
+      );
+    },
   });
 }
 
