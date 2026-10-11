@@ -132,7 +132,7 @@ pub async fn load_all(pool: &PgPool) -> Result<ProfileTable, ApiError> {
 }
 
 /// Map a stored row to the pure trajectory profile.
-fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
+pub(crate) fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
     AircraftProfile {
         climb_ias_lo: r.climb_ias_lo,
         climb_ias_hi: r.climb_ias_hi,

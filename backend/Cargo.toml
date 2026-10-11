@@ -23,6 +23,10 @@ path = "src/bin/xplane_gate_importer.rs"
 name = "airspace-sector-importer"
 path = "src/bin/airspace_sector_importer.rs"
 
+[[bin]]
+name = "aircraft-profile-builder"
+path = "src/bin/aircraft_profile_builder.rs"
+
 [dependencies]
 ois-core.workspace = true
 

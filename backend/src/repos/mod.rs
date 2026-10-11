@@ -25,6 +25,7 @@ pub mod integration;
 pub mod metrics;
 pub mod org;
 pub mod preferences;
+pub mod profile_history;
 pub mod public;
 pub mod runway;
 pub mod sector_consolidations;

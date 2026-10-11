@@ -63,9 +63,14 @@ const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Retention horizon for winds and TM history — unrelated to `stats.position`, unaffected by its
-/// compaction ladder rework, still hard-pruned past this age.
+/// Retention horizon for TM history — unrelated to `stats.position`, unaffected by its compaction
+/// ladder rework, still hard-pruned past this age.
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
+/// Retention horizon for `stats.winds` snapshots (#828). The aircraft-profile builder turns a
+/// historical groundspeed into TAS with the winds of that hour, so a position whose winds were
+/// pruned can't feed a speed sample. One snapshot an hour is a few KB (`0042_stats_history.sql`),
+/// so a year of them is small next to `stats.position`.
+const WINDS_RETAIN_DAYS: i64 = 365;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
 
@@ -800,6 +805,7 @@ async fn stats_compaction_once(
     let now = Utc::now();
     let legs_before = now - chrono::Duration::days(DELAY_LEG_RETAIN_DAYS);
     let prune_before = now - chrono::Duration::days(STATS_PRUNE_AFTER_DAYS);
+    let winds_before = now - chrono::Duration::days(WINDS_RETAIN_DAYS);
     // Exactly the run interval, so consecutive ticks tile the timeline with no gap *and* no
     // overlap — an overlap would downsample the same rows twice per tier (see COMPACTION_TIERS).
     let slice = chrono::Duration::from_std(STATS_COMPACTION_INTERVAL)
@@ -826,7 +832,7 @@ async fn stats_compaction_once(
             ));
         }
     }
-    passes.push(("winds", stats_repo::prune_winds(pool, prune_before).await));
+    passes.push(("winds", stats_repo::prune_winds(pool, winds_before).await));
     passes.push((
         "tm-history",
         crate::repos::tmu::prune_history(pool, prune_before).await,
@@ -1822,6 +1828,90 @@ mod departure_runway_prune_tests {
             "0 deleted"
         );
         assert!(get(&pool, "KJFK", "FRESH").await.unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod winds_retention_tests {
+    use std::sync::atomic::AtomicI64;
+
+    use sqlx::PgPool;
+
+    use super::{STATS_PRUNE_AFTER_DAYS, WINDS_RETAIN_DAYS, stats_compaction_once};
+
+    /// Absolute ages straddling the documented horizons, never offsets from the constants (a
+    /// fixture built from the constant moves with it; see `departure_runway_prune_tests`).
+    const WINDS_KEPT_DAYS: i32 = 300;
+    const WINDS_PRUNED_DAYS: i32 = 400;
+    /// Older than the 14-day TM-history horizon and younger than the winds one: winds this old must
+    /// survive while TM history this old is still pruned, which is what splitting the constant buys.
+    const BETWEEN_DAYS: i32 = 20;
+
+    #[test]
+    fn the_fixed_ages_straddle_the_retention_horizons() {
+        assert!(
+            (WINDS_KEPT_DAYS as i64) < WINDS_RETAIN_DAYS
+                && WINDS_RETAIN_DAYS < (WINDS_PRUNED_DAYS as i64),
+            "winds retention is {WINDS_RETAIN_DAYS} days; update the constant and these ages together"
+        );
+        assert!(
+            STATS_PRUNE_AFTER_DAYS < BETWEEN_DAYS as i64
+                && (BETWEEN_DAYS as i64) < WINDS_RETAIN_DAYS,
+            "TM history is pruned after {STATS_PRUNE_AFTER_DAYS} days; {BETWEEN_DAYS} must sit between"
+        );
+    }
+
+    async fn winds_row(pool: &PgPool, days_old: i32) {
+        sqlx::query(
+            "insert into stats.winds (ts, data) \
+             values (now() - make_interval(days => $1::int), '{}'::jsonb)",
+        )
+        .bind(days_old)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn winds_ages(pool: &PgPool) -> Vec<i32> {
+        sqlx::query_scalar::<_, i32>(
+            "select extract(day from now() - ts)::int from stats.winds order by ts desc",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The pass itself, so the test pins the constant the job uses, not a cutoff passed in by hand.
+    #[sqlx::test]
+    async fn winds_are_kept_a_year_while_tm_history_keeps_its_14_days(pool: PgPool) {
+        for d in [BETWEEN_DAYS, WINDS_KEPT_DAYS, WINDS_PRUNED_DAYS] {
+            winds_row(&pool, d).await;
+        }
+        // A published, expired ground stop last touched 20 days ago: past the TM-history horizon.
+        sqlx::query(
+            "insert into tmu.ground_stops (airport, status, published_at, updated_at) \
+             values ('KDCA', 'expired', now() - make_interval(days => $1::int), \
+                     now() - make_interval(days => $1::int))",
+        )
+        .bind(BETWEEN_DAYS)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        stats_compaction_once(&pool, &AtomicI64::new(0))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            winds_ages(&pool).await,
+            vec![BETWEEN_DAYS, WINDS_KEPT_DAYS],
+            "only the snapshot past a year is pruned"
+        );
+        let gs: i64 = sqlx::query_scalar("select count(*) from tmu.ground_stops")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gs, 0, "TM history still goes after 14 days");
     }
 }
 

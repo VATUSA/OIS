@@ -1050,6 +1050,17 @@ fn engine(ty: &str) -> Option<Engine> {
     ENGINE_REF.get(ty).copied()
 }
 
+/// The engine family of an ICAO type from [`ENGINE_REF`] (`"jet"`, `"turboprop"`, `"piston"`), or
+/// None for a type the reference doesn't list. The aircraft-profile builder (#828) reports it for
+/// types too thin to profile, so #818 can give them a family fallback.
+pub(crate) fn engine_family(ty: &str) -> Option<&'static str> {
+    engine(ty).map(|e| match e {
+        Engine::Piston => "piston",
+        Engine::Turboprop => "turboprop",
+        Engine::Jet => "jet",
+    })
+}
+
 // Aircraft engine reference for jets-only metering — ported from vatflow's
 // FALLBACK_AIRCRAFT_REF. Not exhaustive; unknown types are treated as includable.
 static ENGINE_REF: LazyLock<HashMap<&'static str, Engine>> = LazyLock::new(|| {
