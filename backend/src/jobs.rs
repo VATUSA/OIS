@@ -139,8 +139,8 @@ const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// handler force-refreshes on write, so a slow poll is enough to catch out-of-band changes).
 const AIRCRAFT_PROFILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often to reload ATC sector volumes from the DB. Their only writer is the offline importer,
-/// a separate process the server can't hear, so this tick is how an import goes live.
+/// How often to reload ATC sector volumes from the DB. The seed job triggers a reload when it writes;
+/// this tick carries another replica's seed, or a manual `airspace-sector-importer` run, to this one.
 const AIRSPACE_SECTORS_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often to reload sector limit overrides (#722). The handler force-reloads on write, so this
@@ -166,6 +166,11 @@ const FLIGHT_EXCLUSIONS_INTERVAL: Duration = Duration::from_secs(60);
 /// meaningful trigger is `run_interval`'s immediate first tick on every boot (picking up airports a
 /// redeployed extract newly covers), plus the admin Background Tasks page's (#40) on-demand run.
 const FAA_SURFACE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often to run the ATC sector seed (#821). It fetches only when the table isn't at the pinned
+/// `SOURCE_REF`, so like the other seeds the meaningful trigger is the first tick on every boot; the
+/// daily tick retries a seed that failed at boot (an outage at deploy time) without a restart.
+const AIRSPACE_SECTOR_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How often to run the X-Plane gate seed (#431). Like the FAA surface seed, it only fills airports
 /// with no `xplane` stands yet, so the interval isn't about freshness — the meaningful trigger is
@@ -504,7 +509,7 @@ pub fn spawn_credential_usage_flush(
 }
 
 /// Keep the ATC sector volume cache current for the DB-less feed (#594): load at startup, then
-/// reload periodically so an offline import goes live. Fails safe — a failed load keeps the
+/// reload when the seed triggers it, and periodically so another replica's write goes live. Fails safe — a failed load keeps the
 /// current table (initially empty). `loaded` is set on the first successful load, so a reader can
 /// tell an empty table that hasn't been read yet from one the DB holds no volumes for.
 pub fn spawn_airspace_sectors_refresh(
@@ -533,6 +538,53 @@ pub fn spawn_airspace_sectors_refresh(
             }
         },
     ));
+}
+
+/// Load ATC sector volumes from the pinned vtsd commit when the table isn't already at it (#821): at
+/// start, then daily. A failed fetch or write fails the job, visible in `/admin/jobs` and
+/// `ois_job_last_success`, and leaves the table as it was.
+pub fn spawn_airspace_sector_seed(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(airspace_sector_seed_job(
+        reg,
+        pool,
+        crate::feed::sector_source::fetch,
+    ));
+}
+
+/// The registered, triggerable seed job. The fetch is an argument so tests can run the job without
+/// reaching the real source. After a write it triggers `airspace_sectors_refresh`, so the new table
+/// reaches the cache now rather than on that job's next 5-minute tick, and a refresh already in
+/// flight with the old table can't be the last word.
+async fn airspace_sector_seed_job<F, Fut>(reg: Arc<JobRegistry>, pool: PgPool, fetch: F)
+where
+    F: Fn() -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>> + Send,
+{
+    let jobs = reg.clone();
+    run_interval(
+        reg,
+        "airspace_sector_seed",
+        "Load ATC sector volumes from the pinned vtsd sectors.json",
+        AIRSPACE_SECTOR_SEED_INTERVAL,
+        move || {
+            let (pool, jobs, fetch) = (pool.clone(), jobs.clone(), fetch.clone());
+            async move {
+                let outcome = crate::repos::airspace_sector_seed::seed(&pool, false, fetch).await?;
+                if matches!(
+                    outcome,
+                    crate::repos::airspace_sector_seed::SeedOutcome::Seeded { .. }
+                ) && !jobs.trigger("airspace_sectors_refresh")
+                {
+                    // Not registered yet: its first tick hasn't run, and will read the new rows.
+                    tracing::warn!(
+                        "airspace sector seed: airspace_sectors_refresh isn't registered"
+                    );
+                }
+                Ok(outcome.to_string())
+            }
+        },
+    )
+    .await;
 }
 
 /// Keep the sector limit overrides (#722) current for the DB-less feed: load at startup, then reload
@@ -2169,8 +2221,9 @@ mod airspace_sectors_refresh_tests {
         panic!("the job never finished its first run");
     }
 
-    /// The importer writes from another process, so this job is the only way an import reaches the
-    /// feed's cache: its first tick must load what is in the table, and mark it loaded (#725 Q5).
+    /// Another replica's seed or a manual import writes from another process, so this job is how it
+    /// reaches the feed's cache: its first tick must load what is in the table, and mark it loaded
+    /// (#725 Q5).
     #[sqlx::test]
     async fn the_job_loads_imported_volumes_into_the_cache(pool: PgPool) {
         let vols = [volume("ZDC", "01001")];
@@ -2202,6 +2255,260 @@ mod airspace_sectors_refresh_tests {
         assert!(!ok, "the closed pool must fail the load");
         assert!(cache.load().volumes.is_empty());
         assert!(!loaded.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod airspace_sector_seed_tests {
+    //! The seed job (#821) with a stubbed fetch; the real source is never reached. The seed's own
+    //! behavior is tested in `repos::airspace_sector_seed`; these pin the job around it.
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use arc_swap::ArcSwap;
+    use axum::http::{Method, StatusCode};
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::{airspace_sector_seed_job, spawn_airspace_sectors_refresh};
+    use crate::{
+        feed::{
+            Snapshot,
+            sector_source::{SOURCE, tests::FIXTURE},
+            sectors::{SectorTable, tests::volume},
+            vatsim::VatsimData,
+        },
+        job_registry::{JobRegistry, JobStatus},
+        repos::airspace_sectors,
+        scope_test_support::{grant, seed_user, send_json, session_cookie, test_state},
+    };
+
+    /// A fetch that serves the fixture and counts its calls.
+    fn fixture_fetch(
+        calls: Arc<AtomicUsize>,
+    ) -> impl Fn() -> std::future::Ready<Result<Vec<u8>, String>> + Clone + Send + 'static {
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(FIXTURE.as_bytes().to_vec()))
+        }
+    }
+
+    /// Wait until job `name` has finished `runs` runs, and return its status.
+    async fn after_runs(reg: &JobRegistry, name: &str, runs: u64) -> JobStatus {
+        for _ in 0..400 {
+            let status = reg.snapshot().into_iter().find(|j| j.name == name);
+            if let Some(s) = status.filter(|j| j.runs >= runs && !j.running) {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("{name} never finished run {runs}");
+    }
+
+    /// AC1: on a fresh database the seed fills the table and the cache the Sector Monitor reads. The
+    /// refresh has already loaded the empty table, so only the seed's trigger can bring the new rows
+    /// in before its next 5-minute tick.
+    #[sqlx::test]
+    async fn a_fresh_start_fills_the_table_and_the_cache(pool: PgPool) {
+        let reg = Arc::new(JobRegistry::new());
+        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_airspace_sectors_refresh(reg.clone(), pool.clone(), cache.clone(), loaded.clone());
+        after_runs(&reg, "airspace_sectors_refresh", 1).await;
+        assert!(cache.load().volumes.is_empty());
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(airspace_sector_seed_job(
+            reg.clone(),
+            pool.clone(),
+            fixture_fetch(calls.clone()),
+        ));
+        let seed = after_runs(&reg, "airspace_sector_seed", 1).await;
+        assert_eq!(seed.last_ok, Some(true), "{:?}", seed.last_detail);
+        after_runs(&reg, "airspace_sectors_refresh", 2).await;
+
+        let ids: Vec<(String, String)> = cache
+            .load()
+            .volumes
+            .iter()
+            .map(|v| (v.artcc.clone(), v.volume_id.clone()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("ZAU".into(), "02001".into()),
+                ("ZAU".into(), "50001".into()),
+                ("ZDC".into(), "01001".into()),
+                ("ZNY".into(), "07001".into())
+            ]
+        );
+        assert!(loaded.load(Ordering::Acquire));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// AC1, through the route the Operations page calls: on a fresh database, the seed job and the
+    /// refresh job, wired to the app state's own registry, cache and loaded flag as `lib.rs` wires
+    /// them, turn `GET /api/v1/flow/sector-demand/ZDC` from `no_sector_data` into ZDC's seeded
+    /// sector. It lives here because `airspace_sector_seed_job`, the entry point that takes a fetch,
+    /// is private to `jobs.rs`.
+    #[sqlx::test]
+    async fn a_fresh_start_turns_sector_demand_from_no_sector_data_to_the_seeded_sectors(
+        pool: PgPool,
+    ) {
+        let state = test_state(pool.clone(), HashMap::new());
+        let id = seed_user(&pool).await;
+        grant(&pool, &id, "flow.sectors.read", None).await;
+        let cookie = session_cookie(&pool, &id).await;
+        // A quiet feed cycle, so a seeded ZDC answers `ready` rather than `pending`.
+        let fetched_at: DateTime<Utc> = "2026-10-07T14:07:31Z".parse().unwrap();
+        state.feed.write().await.snapshot = Some(Arc::new(Snapshot {
+            fetched_at,
+            source_timestamp: fetched_at.to_rfc3339(),
+            data: VatsimData::default(),
+        }));
+        spawn_airspace_sectors_refresh(
+            state.jobs.clone(),
+            pool.clone(),
+            state.airspace_sectors.clone(),
+            state.airspace_sectors_loaded.clone(),
+        );
+        after_runs(&state.jobs, "airspace_sectors_refresh", 1).await;
+        let uri = "/api/v1/flow/sector-demand/ZDC";
+        let empty = json!({"has_sector_data": false, "rows": []});
+
+        // Control: the empty table is loaded, so the route says no sector data (not `pending`).
+        let (status, before) = send_json(&state, Method::GET, uri, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert_eq!(before["status"], "no_sector_data", "{before}");
+        assert_eq!(before["enroute"], empty);
+        assert_eq!(before["tracon"], empty);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(airspace_sector_seed_job(
+            state.jobs.clone(),
+            pool.clone(),
+            fixture_fetch(calls.clone()),
+        ));
+        let seed = after_runs(&state.jobs, "airspace_sector_seed", 1).await;
+        assert_eq!(seed.last_ok, Some(true), "{:?}", seed.last_detail);
+        // Only the seed's trigger brings run 2 inside the wait; the refresh's own tick is 5 minutes.
+        after_runs(&state.jobs, "airspace_sectors_refresh", 2).await;
+
+        let (status, after) = send_json(&state, Method::GET, uri, &cookie).await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["artcc"], "ZDC");
+        assert_eq!(after["status"], "ready", "{after}");
+        assert_eq!(after["cycle_at"], "2026-10-07T14:07:31Z");
+        assert_eq!(after["enroute"]["has_sector_data"], true);
+        // FIXTURE's ZDC feature: sector "01", full_id "01001", tier "High".
+        let rows: Vec<(&str, &str)> = after["enroute"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["sector_id"].as_str().unwrap(),
+                    r["tier"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [("01", "high")]);
+        assert_eq!(after["tracon"], empty, "FIXTURE has no ZDC approach volume");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// AC2: a second start against a table already at `SOURCE_REF` makes no network call, reports
+    /// success, and triggers no cache reload.
+    #[sqlx::test]
+    async fn a_second_start_makes_no_network_call(pool: PgPool) {
+        let first = Arc::new(AtomicUsize::new(0));
+        let reg = Arc::new(JobRegistry::new());
+        tokio::spawn(airspace_sector_seed_job(
+            reg.clone(),
+            pool.clone(),
+            fixture_fetch(first.clone()),
+        ));
+        assert_eq!(
+            after_runs(&reg, "airspace_sector_seed", 1).await.last_ok,
+            Some(true)
+        );
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+
+        // A new process: a new registry, its refresh, and a new seed job on the same database.
+        let second = Arc::new(AtomicUsize::new(0));
+        let reg = Arc::new(JobRegistry::new());
+        let cache = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_airspace_sectors_refresh(reg.clone(), pool.clone(), cache, loaded);
+        after_runs(&reg, "airspace_sectors_refresh", 1).await;
+        tokio::spawn(airspace_sector_seed_job(
+            reg.clone(),
+            pool,
+            fixture_fetch(second.clone()),
+        ));
+        let status = after_runs(&reg, "airspace_sector_seed", 1).await;
+        // A seed that wrote nothing triggers no reload. A trigger runs the refresh within
+        // milliseconds (a_fresh_start_fills_the_table_and_the_cache); its own tick is 5 minutes.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let refresh = reg
+            .snapshot()
+            .into_iter()
+            .find(|j| j.name == "airspace_sectors_refresh")
+            .unwrap();
+        assert_eq!(refresh.runs, 1, "a current table triggered a reload");
+
+        assert_eq!(status.last_ok, Some(true));
+        assert!(
+            status
+                .last_detail
+                .as_deref()
+                .unwrap()
+                .starts_with("already at"),
+            "{:?}",
+            status.last_detail
+        );
+        assert_eq!(second.load(Ordering::SeqCst), 0, "the second start fetched");
+    }
+
+    /// AC3: a failed fetch fails the job, with the error in its detail for `/admin/jobs`, and the
+    /// rows already stored are untouched.
+    #[sqlx::test]
+    async fn a_failed_fetch_fails_the_job_and_keeps_the_rows(pool: PgPool) {
+        airspace_sectors::replace_artcc(&pool, "ZDC", &[volume("ZDC", "09999")], SOURCE, "old")
+            .await
+            .unwrap();
+        let before: Vec<(String, String, String)> = sqlx::query_as(
+            "select artcc, volume_id, source_cycle from flow.airspace_sector order by 1, 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let reg = Arc::new(JobRegistry::new());
+        let failing = || std::future::ready(Err::<Vec<u8>, _>("fetching: 503".to_string()));
+        tokio::spawn(airspace_sector_seed_job(reg.clone(), pool.clone(), failing));
+        let status = after_runs(&reg, "airspace_sector_seed", 1).await;
+
+        assert_eq!(status.last_ok, Some(false));
+        assert!(
+            status.last_detail.as_deref().unwrap().contains("503"),
+            "{:?}",
+            status.last_detail
+        );
+        let after: Vec<(String, String, String)> = sqlx::query_as(
+            "select artcc, volume_id, source_cycle from flow.airspace_sector order by 1, 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, before);
     }
 }
 
@@ -2311,6 +2618,23 @@ mod registration_tests {
         assert!(
             !wired(detached),
             "the matcher must reject a flag of the job's own"
+        );
+    }
+
+    /// The seed triggers `airspace_sectors_refresh` by name in the registry it is given, and Admin →
+    /// Jobs reads `state.jobs`; a registry of its own would make both silently miss it (#821).
+    #[test]
+    fn the_sector_seed_runs_in_the_states_own_registry() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_airspace_sector_seed")
+                .is_some_and(|args| args.contains("state.jobs.clone()"))
+        };
+        assert!(wired(LIB_RS), "lib.rs must pass state.jobs");
+        let detached =
+            "jobs::spawn_airspace_sector_seed(Arc::new(JobRegistry::new()), pool.clone());";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a registry of the job's own"
         );
     }
 }
