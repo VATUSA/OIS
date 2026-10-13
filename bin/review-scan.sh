@@ -1,23 +1,42 @@
-#!/usr/bin/env bash
-# OIS pitfall scan over the committed diff: the mistakes that compile, pass the tests, and still
-# break something. Each check maps to a rule in AGENTS.md:
-#   * permission three-in-sync: a `permission!` marker, its catalog.rs string, an access.permissions row;
-#   * role three-in-sync: an access.roles row, default_roles(), ASSIGNABLE_USER_ROLES;
-#   * a handler registered in router.rs but not openapi.rs, or the reverse;
-#   * SQL in handlers/ (it belongs in repos/);
-#   * an applied migration edited, renamed or deleted in place (they are append-only);
-#   * a mutating route whose handler takes no RequirePermission<P>, or a RequirePermission removed;
-#   * unwrap()/expect() in handlers/.
-# Test code (`*_tests.rs`, and everything after a handler file's first `#[cfg(test)]`) is skipped.
+#!/bin/bash
+# Deterministic pitfall scan for /code-review Phase 7.
 #
-# Usage: .claude/scripts/review-scan.sh [base-ref]     (default origin/next)
-# Scans base...HEAD: commit first, the review is of a commit. Reads HEAD's tree, not the worktree.
-# Prints `file:line: message` per finding. Exit 0 = clean, 1 = findings, 2 = the scan could not run
-# (so a partial scan never passes). A finding is a prompt to look, not proof: confirm each one.
+# A script so it can run from a worktree session, where the harness refuses git fed
+# to bash through a heredoc or $(...), and so the file list is word-split by bash
+# rather than the zsh the Bash tool uses.
+#
+# Two layers. Each hit is a prompt to look, not proof: confirm it against the diff.
+#
+# 1. Sync invariants over the committed diff, BASE...HEAD, read from HEAD's tree (commit
+#    first: the review is of a commit). Each prints `file:line: message`. They are the
+#    mistakes that compile, pass the tests, and still break something (AGENTS.md):
+#      * permission three-in-sync: a `permission!` marker, its catalog.rs string, an access.permissions row;
+#      * role three-in-sync: an access.roles row, default_roles(), ASSIGNABLE_USER_ROLES;
+#      * a handler registered in router.rs but not openapi.rs, or the reverse;
+#      * SQL in handlers/ (it belongs in repos/);
+#      * an applied migration edited, renamed or deleted in place (they are append-only);
+#      * a mutating route whose handler takes no RequirePermission<P>, or a RequirePermission removed;
+#      * unwrap()/expect() in handlers/.
+#    Test code (`*_tests.rs`, and everything after a handler file's first `#[cfg(test)]`) is skipped.
+#
+# 2. Patterns over whole changed files (real file:line), across the union of committed-vs-
+#    BASE, staged, unstaged and untracked, so a hit may be pre-existing. Each check prints
+#    grep's `file:line:text` hits, then `^ message`. Only .rs, .ts and .tsx files are read,
+#    so this script, the shell tests' fixtures (bin/lib/*.test.sh) and the guidance under
+#    .claude/ never report themselves.
+#
+# Exit 0 with hits printed; exit 1 when the scan itself could not run (a failed git call,
+# an unknown base, an unreadable file), so a partial scan never passes. The last line,
+# `scan covered N file(s)`, is the positive control: 0 on a branch with changes means the
+# file list was empty, not clean.
+#
+# Usage: bash bin/review-scan.sh [base-ref]    (from the checkout under review; default origin/next)
+# Tests: bin/lib/review-scan.test.sh
 set -uo pipefail
 
-fail() { echo "SCAN FAILED: $*" >&2; exit 2; }
+fail() { echo "SCAN FAILED: $*" >&2; exit 1; }
 
+# git prints paths relative to the root, so run from there.
 cd "$(git rev-parse --show-toplevel 2>/dev/null)" || fail "not inside a git checkout"
 base="${1:-origin/next}"
 mb="$(git merge-base "$base" HEAD 2>/dev/null)" || fail "no merge-base between $base and HEAD"
@@ -216,11 +235,89 @@ while IFS= read -r file; do
     done < <(awk -F'\t' -v f="$file" '$1 == f { print $2 "\t" substr($0, length($1) + length($2) + 3) }' "$tmp/removed")
 done < <(git diff --name-only --diff-filter=AM "$mb" HEAD -- "$HANDLERS/*.rs")
 
-files="$(git diff --name-only "$mb" HEAD | wc -l | tr -d ' ')"
+
+# Layer 1's findings, sorted by file then line.
 if [[ -s "$findings" ]]; then
     sort -u "$findings" | sort -s -t: -k1,1 -k2,2n
-    echo "review-scan: $(sort -u "$findings" | wc -l | tr -d ' ') finding(s) across $files changed file(s) vs $base"
+fi
+
+# --- layer 2: patterns over whole changed files ---------------------------------------------------
+LIST="$tmp/list"
+: >"$LIST"
+for cmd in "diff $base...HEAD --name-only" "diff --name-only" "diff --cached --name-only" "ls-files --others --exclude-standard"; do
+    # shellcheck disable=SC2086
+    git $cmd >> "$LIST" || fail "git $cmd"
+done
+
+# Arrays, not word-split strings: tracked paths contain spaces and parentheses.
+EXISTING=() RUST=() TS=() TSX=() TS_TESTS=()
+while IFS= read -r f; do
+    # Deleted files are still listed by the diffs.
+    [[ -f "$f" ]] || continue
+    EXISTING+=("$f")
+    case "$f" in
+        *.rs) RUST+=("$f") ;;
+        # Declaration files are generated (packages/api-client's schema.d.ts) or types only.
+        *.d.ts) ;;
+        *.test.ts|*.test.tsx) TS+=("$f"); TS_TESTS+=("$f") ;;
+        *.ts) TS+=("$f") ;;
+        *.tsx) TS+=("$f"); TSX+=("$f") ;;
+    esac
+done < <(sort -u "$LIST")
+
+ERRORS=0
+# Per-checkout and gitignored; a forced add would ship one checkout's DATABASE_URL and secrets.
+if grep -qxE '\.env(\.local)?' "$LIST"; then
+    echo "CRITICAL: .env is in the diff — per-checkout and gitignored, must never be committed"
+fi
+# check MESSAGE GREP-ARGS... -- FILES...
+# grep exits 1 on no match; 2 means it could not read something, which fails the scan.
+check() {
+    local message="$1"; shift
+    grep "$@"
+    case $? in
+        0) echo "^ $message" ;;
+        1) ;;
+        *) echo "SCAN FAILED: grep $*" >&2; ERRORS=$((ERRORS + 1)) ;;
+    esac
+}
+
+if (( ${#RUST[@]} )); then
+    check "debug output must be removed" -HnE '\bdbg!\(' -- "${RUST[@]}"
+    check "swallowed error — handle it, propagate it, or log it and surface it in the return value (code-quality.md)" \
+        -HnE 'let _ = |\.ok\(\);' -- "${RUST[@]}"
+    check "SQL built with format! — bind values as \$n; format! only for trusted code constants, with a comment saying so (database-postgres.md)" \
+        -HniE 'format!\([[:space:]]*"[[:space:]]*(select|insert|update|delete|with) ' -- "${RUST[@]}"
+    check "#[allow(...)] needs a stated reason; never silence a check to make it pass (code-quality.md)" \
+        -HnE '#!?\[allow\(' -- "${RUST[@]}"
+    check "test skeleton left in — a todo!() body or an #[ignore] with no reason, or a todo one (tdd-planner)" \
+        -HnE '#\[ignore\]|#\[ignore *= *"todo|\btodo!\(' -- "${RUST[@]}"
+    check "negative assertion — confirm a positive control in the same test (test-quality.md)" \
+        -HnE 'assert!\([[:space:]]*!|assert!\(.*\.is_(none|empty)\(\)\)' -- "${RUST[@]}"
+fi
+if (( ${#TS[@]} )); then
+    check "debug output must be removed" -HnE '\bconsole\.log[[:space:]]*\(|^[[:space:]]*debugger[[:space:]]*;?[[:space:]]*$' -- "${TS[@]}"
+    check "@ts-ignore, @ts-expect-error and eslint-disable need a stated reason; never silence a check to make it pass (code-quality.md)" \
+        -HnE '@ts-(ignore|expect-error)|eslint-disable' -- "${TS[@]}"
+fi
+if (( ${#TSX[@]} )); then
+    check "dangerouslySetInnerHTML needs a stated reason the value is safe" -HnF 'dangerouslySetInnerHTML' -- "${TSX[@]}"
+fi
+if (( ${#TS_TESTS[@]} )); then
+    check "focused, skipped or todo test left in a test file" -HnE '\b(it|test|describe)\.(only|skip|todo)\(' -- "${TS_TESTS[@]}"
+    check "negative assertion — confirm a positive control in the same test (test-quality.md)" \
+        -HnE '\.not\.to[A-Za-z]+\(|toHaveBeenCalledTimes\(0\)' -- "${TS_TESTS[@]}"
+fi
+
+if [[ -s "$findings" ]]; then
+    echo "review-scan: $(sort -u "$findings" | wc -l | tr -d ' ') sync-invariant finding(s) vs $base"
+else
+    echo "review-scan: no sync-invariant finding vs $base"
+fi
+# Positive control: 0 on a branch with changes means the list was empty, not clean.
+echo "scan covered ${#EXISTING[@]} file(s)"
+if (( ERRORS )); then
+    echo "SCAN FAILED: ${ERRORS} check(s) could not read their files" >&2
     exit 1
 fi
-echo "review-scan: clean, $files changed file(s) vs $base"
 exit 0

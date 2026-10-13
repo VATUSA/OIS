@@ -1,0 +1,15 @@
+# Review lenses and the rule files each one attests, heading by heading.
+# Read by bin/lib/review-attestation.sh and by /code-review Phase 3. Tab-separated: lens<TAB>file.
+# A lens with file "-" owns no file. "@ac" attests every acceptance criterion of the issue it fetched.
+code	.claude/rules/code-quality.md
+code	.claude/rules/rust-backend.md
+code	.claude/rules/web-frontend.md
+code	.claude/rules/database-postgres.md
+domain	.claude/rules/feed-and-trajectory.md
+domain	.claude/rules/domain-lessons.md
+tests	.claude/rules/test-quality.md
+tests	.claude/rules/test-writing.md
+security	.claude/rules/secure-coding.md
+security	.claude/rules/data-protection.md
+intent	-
+ac	@ac

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Move a VATUSA/OIS "Project 7" card to a named Status column.
-# Usage: .claude/scripts/board-status.sh <issue-number> "<Status column>"
-#   e.g. .claude/scripts/board-status.sh 47 "In build"
+# Usage: bin/board-status.sh <issue-number> "<Status column>"
+#   e.g. bin/board-status.sh 47 "In build"
 # Columns: Blocked · Triaging · To Do · Returned · In build · Post build ·
 #          Testing Queue · In Test · Code Review · Shippable · Done
 set -euo pipefail

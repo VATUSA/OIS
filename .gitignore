@@ -28,12 +28,19 @@ deploy/observability/metrics_token
 !.vscode/extensions.json
 
 # Claude Code — ignore personal/ephemeral state, but SHARE the team workflow
-# (slash commands, helper scripts, rules, agents, hooks, and the hook config).
-# settings.local.json, review markers/, and the vendored skills/ stay ignored.
+# (slash commands, rules, agents, skills, hooks, the hook config and the review-lens map).
+# settings.local.json, markers/ (tests, review and attestation markers), the runtime files
+# .failure-count and .review-complete, and the worktree setup/teardown logs stay ignored.
 .claude/*
 !.claude/commands/
-!.claude/scripts/
 !.claude/rules/
 !.claude/agents/
+!.claude/skills/
 !.claude/hooks/
 !.claude/settings.json
+!.claude/review-lenses.tsv
+# A local clone of its own repo (it carries its own .git), installed per machine.
+.claude/skills/claude-apple-design-system/
+
+# Python bytecode from .claude/hooks/lib and bin/lib
+__pycache__/

@@ -13,7 +13,7 @@ orientation; the real detail lives elsewhere and this just points you at it.
   (or anything) working on OIS with Claude Code.
 - **[docs/](docs/README.md)** — architecture (`docs/architecture/`), per-feature specs
   (`docs/features/`), and deploying (`docs/deploy.md`).
-- **[docs/github-issues.md](docs/github-issues.md)** — how issues, PRs, and the board work.
+- **[.claude/rules/github-issues.md](.claude/rules/github-issues.md)** — how issues, PRs, and the board work.
 
 ## Code of conduct
 
@@ -27,7 +27,7 @@ applies to conduct here.
 
 ## How to contribute
 
-- **Filing a bug or feature request:** see [docs/github-issues.md](docs/github-issues.md) for the
+- **Filing a bug or feature request:** see [.claude/rules/github-issues.md](.claude/rules/github-issues.md) for the
   label taxonomy, body structure, and how issues move through the board.
 - **Picking up work:** issues in **To Do** on
   [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1) are cleared to start.

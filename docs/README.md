@@ -31,8 +31,8 @@ One spec per built subsystem — data model, exact permissions, API surface, Dis
 
 ## Process
 
-- [github-issues.md](github-issues.md) — how issues are labeled, structured, and moved across the
-  board.
+- [../.claude/rules/github-issues.md](../.claude/rules/github-issues.md) — how issues are labeled,
+  structured, and moved across the board.
 
 ## History
 
