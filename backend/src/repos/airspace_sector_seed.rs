@@ -24,7 +24,8 @@ const SEED_LOCK_KEY: i64 = 0x004F_4953_5F53_4543; // "OIS_SEC"
 /// What a [`seed`] call did.
 #[derive(Debug, PartialEq)]
 pub enum SeedOutcome {
-    /// Every row already carries [`SOURCE_REF`]; nothing was fetched or written.
+    /// Every row already carries [`SOURCE_REF`]; nothing was written. A replica that waited on the
+    /// lock has already fetched before finding the table current.
     Current,
     /// The table was replaced.
     Seeded {
@@ -163,15 +164,13 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    /// Every row's content, so "untouched" can be asserted byte for byte.
-    async fn snapshot(pool: &PgPool) -> Vec<(String, String, String, String, String)> {
-        sqlx::query_as(
-            "select artcc, volume_id, source, source_cycle, rings::text \
-             from flow.airspace_sector order by artcc, volume_id",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap()
+    /// Every column of every row, `id` and `imported_at` included, so "untouched" also rules out a
+    /// delete and re-insert of the same data.
+    async fn snapshot(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select s::text from flow.airspace_sector s order by artcc, volume_id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
     }
 
     fn row(artcc: &str, volume_id: &str, cycle: &str) -> (String, String, String) {
@@ -194,6 +193,16 @@ pub(crate) mod tests {
             "loaded 4 volumes across 3 ARTCCs from vtsd sectors.json@\
              f33ef73f21091e71456e45cfe9019ddf3ba76247; skipped 2 \
              (ZTL 07007: inverted; ZOA 99001: unknown tier)"
+        );
+        let none_skipped = SeedOutcome::Seeded {
+            volumes: 4,
+            artccs: 3,
+            skipped: vec![],
+        };
+        assert_eq!(
+            none_skipped.to_string(),
+            "loaded 4 volumes across 3 ARTCCs from vtsd sectors.json@\
+             f33ef73f21091e71456e45cfe9019ddf3ba76247; skipped 0"
         );
         assert_eq!(
             SeedOutcome::Current.to_string(),
@@ -218,7 +227,7 @@ pub(crate) mod tests {
         else {
             panic!("expected a seed, got {outcome:?}");
         };
-        assert_eq!((volumes, artccs, skipped.len()), (4, 3, 4));
+        assert_eq!((volumes, artccs, skipped.len()), (4, 3, 6));
         assert_eq!(
             rows(&pool).await,
             [
@@ -373,20 +382,35 @@ pub(crate) mod tests {
         let doubled = FIXTURE.replace("\"full_id\": \"07001\"", "\"full_id\": \"01001\"");
         let doubled = doubled.replace("\"artcc\": \"ZNY\"", "\"artcc\": \"ZDC\"");
         let fetch = move || std::future::ready(Ok(doubled.into_bytes()));
-        assert!(seed(&pool, false, fetch).await.is_err());
+        let err = seed(&pool, false, fetch).await.unwrap_err();
+        assert!(err.contains("duplicate key"), "{err}");
 
         assert_eq!(snapshot(&pool).await, before);
     }
 
     /// Two replicas starting on an empty table: both fetch, but the lock and the re-check under it
-    /// mean one writes and the other finds the table current, with no duplicate or error.
+    /// mean one writes and the other finds the table current, with no duplicate or error. The fetch
+    /// waits on a barrier, so both seeds have passed the first currency check before either writes:
+    /// without the re-check both would write, and without the lock the second would fail on the
+    /// duplicate `(artcc, volume_id)` key.
     #[sqlx::test]
     async fn concurrent_seeds_write_once(pool: PgPool) {
         let calls = Arc::new(AtomicUsize::new(0));
-        let (a, b) = tokio::join!(
-            seed(&pool, false, counting_fetch(calls.clone())),
-            seed(&pool, false, counting_fetch(calls.clone())),
-        );
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let fetch = || {
+            let (calls, barrier) = (calls.clone(), barrier.clone());
+            move || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                barrier.wait().await;
+                Ok::<_, String>(FIXTURE.as_bytes().to_vec())
+            }
+        };
+        // A seed that stops fetching would leave the other at the barrier forever: fail, don't hang.
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(seed(&pool, false, fetch()), seed(&pool, false, fetch()))
+        })
+        .await
+        .expect("both seeds must fetch before either writes");
         let (a, b) = (a.unwrap(), b.unwrap());
 
         let seeded = [&a, &b]
@@ -394,6 +418,7 @@ pub(crate) mod tests {
             .filter(|o| matches!(o, SeedOutcome::Seeded { .. }))
             .count();
         assert_eq!(seeded, 1, "{a:?} / {b:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "both seeds fetched");
         assert_eq!(rows(&pool).await.len(), 4);
     }
 }

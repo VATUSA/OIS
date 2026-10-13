@@ -509,9 +509,10 @@ pub fn spawn_credential_usage_flush(
 }
 
 /// Keep the ATC sector volume cache current for the DB-less feed (#594): load at startup, then
-/// reload when the seed triggers it, and periodically so another replica's write goes live. Fails safe — a failed load keeps the
-/// current table (initially empty). `loaded` is set on the first successful load, so a reader can
-/// tell an empty table that hasn't been read yet from one the DB holds no volumes for.
+/// reload when the seed triggers it, and periodically so another replica's write goes live. Fails
+/// safe — a failed load keeps the current table (initially empty). `loaded` is set on the first
+/// successful load, so a reader can tell an empty table that hasn't been read yet from one the DB
+/// holds no volumes for.
 pub fn spawn_airspace_sectors_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,

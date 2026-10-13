@@ -77,8 +77,9 @@ hours (#821):
   alone. On a fresh database that means both pages stay empty until the next attempt; use **Run now**
   on Admin → Jobs rather than waiting a day.
 - A database that was loaded one ARTCC at a time with the old importer's `--artcc` flag reads as
-  current while holding only those ARTCCs. Run `airspace-sector-importer` once against it to load
-  them all; it always replaces the whole table.
+  current while holding only those ARTCCs. The backend image ships only `ois-backend`, so load them
+  all from a checkout with `DATABASE_URL` pointing at that database:
+  `cargo run -p ois-backend --bin airspace-sector-importer`. It always replaces the whole table.
 
 The source, its license and the pin are in [`features/monitor.md`](features/monitor.md#the-sector-dataset).
 

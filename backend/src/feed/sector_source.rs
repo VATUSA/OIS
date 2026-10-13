@@ -6,6 +6,9 @@
 //! `Data/sectors.json`, used with its authors' permission. It is fetched at a **pinned commit**
 //! ([`SOURCE_REF`]); the file is never committed to this repo (it is CC BY-NC-SA 4.0, OIS is MIT).
 //! To move to a newer revision, change [`SOURCE_REF`] and deploy: the next start replaces every row.
+//! The seed decides a table is current from `SOURCE_REF` alone, so a change to [`parse`] that alters
+//! what is stored also has to move `SOURCE_REF`, or be followed by one manual
+//! `airspace-sector-importer` run, or databases already at the pin keep the old rows.
 //!
 //! Volumes that fail validation (`feed::sectors::validate_volume`) are skipped and listed, never
 //! repaired. The source has one, ZTL `07007`, whose floor is above its ceiling.
@@ -76,7 +79,7 @@ fn to_volume(f: Feature) -> Result<SectorVolume, String> {
     for poly in polygons {
         if poly.len() != 1 {
             return Err(format!(
-                "polygon has {} rings; holes aren't supported",
+                "polygon has {} rings; only a single outer ring is supported",
                 poly.len()
             ));
         }
@@ -108,8 +111,9 @@ pub struct Parsed {
     pub skipped: Vec<String>,
 }
 
-/// Parse `sectors.json`. Fails only when the document itself isn't the expected GeoJSON; a feature
-/// the table can't hold is skipped and listed.
+/// Parse `sectors.json`. A feature with an unknown tier, a polygon with other than one ring (a hole,
+/// or none), a short position or a volume that fails `validate_volume` is skipped and listed. Anything else that doesn't match the expected
+/// shape (another geometry type, a missing property, a non-integer altitude) fails the whole parse.
 pub fn parse(bytes: &[u8]) -> Result<Parsed, String> {
     let collection: Collection =
         serde_json::from_slice(bytes).map_err(|e| format!("parsing {SOURCE}: {e}"))?;
@@ -151,8 +155,9 @@ pub(crate) mod tests {
     /// A hand-written document in the source's shape (the real file can't be committed, see the
     /// module docs). Positions are `[lon, lat]`, as in GeoJSON. Four features the table stores, one
     /// per tier: a ZDC High Polygon, a ZNY Approach MultiPolygon of two parts, and two ZAU volumes,
-    /// Low and Ultra High. Four it must skip: ZTL `07007` (floor above ceiling, as in the real
-    /// source), a ZOA unknown tier, a ZOA polygon with a hole, and a ZOA position with one number.
+    /// Low and Ultra High. Six it must skip: ZTL `07007` (floor above ceiling, as in the real
+    /// source), and ZOA features with an unknown tier, a hole, a position with one number, no ring
+    /// at all, and a bridged ring (two lobes joined at a revisited vertex, #481).
     pub(crate) const FIXTURE: &str = r#"{
       "type": "FeatureCollection",
       "features": [
@@ -197,7 +202,18 @@ pub(crate) mod tests {
          "properties": {"artcc": "ZOA", "sector": "99", "tier": "High", "base_alt": 24000,
                         "max_alt": 60000, "full_id": "99003"},
          "geometry": {"type": "Polygon",
-                      "coordinates": [[[-123, 37], [-122], [-122, 38], [-123, 37]]]}}
+                      "coordinates": [[[-123, 37], [-122], [-122, 38], [-123, 37]]]}},
+        {"type": "Feature",
+         "properties": {"artcc": "ZOA", "sector": "99", "tier": "High", "base_alt": 24000,
+                        "max_alt": 60000, "full_id": "99004"},
+         "geometry": {"type": "Polygon", "coordinates": []}},
+        {"type": "Feature",
+         "properties": {"artcc": "ZOA", "sector": "99", "tier": "High", "base_alt": 24000,
+                        "max_alt": 60000, "full_id": "99005"},
+         "geometry": {"type": "Polygon",
+                      "coordinates": [[[-77, 38], [-76, 38], [-76, 39], [-77, 39], [-77, 38],
+                                       [-77, 37], [-78, 37], [-78, 36], [-77, 36], [-77, 37],
+                                       [-77, 38]]]}}
       ]
     }"#;
 
@@ -236,8 +252,10 @@ pub(crate) mod tests {
             [
                 "ZTL 07007: altitudes 30000..20000 ft are not a positive band",
                 "ZOA 99001: unknown tier \"Oceanic\"",
-                "ZOA 99002: polygon has 2 rings; holes aren't supported",
+                "ZOA 99002: polygon has 2 rings; only a single outer ring is supported",
                 "ZOA 99003: position has fewer than two numbers",
+                "ZOA 99004: polygon has 0 rings; only a single outer ring is supported",
+                "ZOA 99005: ring revisits [38, -77] (bridged)",
             ]
         );
     }

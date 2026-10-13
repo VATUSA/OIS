@@ -35,8 +35,6 @@ vi.mock("@/components/map/hooks/useWebglAvailable", () => ({
 }));
 vi.mock("@/components/map/lib/aeroway", () => ({ensureAeroway: () => {}}));
 vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => {}}));
-// Toggling a stratum saves the setting; nothing reaches the network.
-vi.mock("@/lib/api", () => ({ois: {GET: vi.fn(), PUT: vi.fn(async () => ({error: undefined}))}}));
 
 import {SectorsPage} from "./sectors";
 
@@ -120,10 +118,12 @@ function drawn(): string[] {
   return sectors!.props.data.map((d) => `${d.volume.artcc} ${d.volume.volume_id}`).sort();
 }
 
+/** Click a stratum toggle. Its setting is written to the query cache at once, and TanStack
+ * notifies outside React's scheduler, so the act flushes a macrotask before the layers are read.
+ * The save behind it fails against the test's disabled network and writes nothing back. */
 async function toggle(host: HTMLElement, label: string) {
   const button = [...host.querySelectorAll("button")].find((b) => b.textContent === label);
   expect(button, `no ${label} toggle`).toBeDefined();
-  // Let the setting's save settle, so its success write can't land on top of the next toggle.
   await act(async () => {
     button!.click();
     await new Promise((r) => setTimeout(r, 0));

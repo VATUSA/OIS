@@ -15,10 +15,7 @@
 //! read as current, and the backend would never load the rest. A database loaded that way with the
 //! old `--artcc` flag needs one run of this binary to load every ARTCC.
 
-use ois_backend::{
-    feed::sector_source,
-    repos::airspace_sector_seed::{self, SeedOutcome},
-};
+use ois_backend::{feed::sector_source, repos::airspace_sector_seed};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -34,12 +31,8 @@ async fn main() -> Result<(), String> {
     let pool = sqlx::PgPool::connect(&database_url)
         .await
         .map_err(|e| format!("connecting: {e}"))?;
+    // The outcome lists every skipped feature with its reason.
     let outcome = airspace_sector_seed::seed(&pool, true, sector_source::fetch).await?;
-    if let SeedOutcome::Seeded { skipped, .. } = &outcome {
-        for s in skipped {
-            tracing::warn!("skipped {s}");
-        }
-    }
     tracing::info!("{outcome}");
     Ok(())
 }
