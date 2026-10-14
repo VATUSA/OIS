@@ -199,5 +199,7 @@ describe("path lookup", () => {
     expect(groupForPath("/admin/access")).toBeUndefined();
     expect(itemForPath("/admin/flow/sectors")).toMatchObject({ group: { label: "Admin" }, item: { label: "Sectors" } });
     expect(groupForPath("/admin/flow/sectors")).toBeUndefined();
+    expect(canOpenPath(holding("flow.sectors.read"), "/admin/flow/sectors")).toBe(true);
+    expect(canOpenPath(holding("discord.config.read"), "/admin/flow/sectors")).toBe(false);
   });
 });
