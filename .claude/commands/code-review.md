@@ -120,6 +120,8 @@ Only when no lens returned CHANGES REQUESTED (Phase 3) and every blocking findin
 bash bin/review-marker.sh code-review <the full 40-character SHA pinned in Phase 0>
 ```
 
+From a session outside the worktree (a subagent), run it as exactly `cd <absolute worktree root> && bash bin/review-marker.sh code-review <sha>`; any other wrapper and the marker audit deletes the marker (`review-before-shipping.md` → Phase 9).
+
 Write the SHA in literally. The script refuses (`BLOCKER:`) when HEAD moved, the checkout is dirty, or the attestation for that SHA is incomplete, and otherwise writes `.claude/markers/code-review/<sha>`. The filename IS the commit SHA, so any new commit invalidates the marker and forces another round; its attestations are carried only as "Repeat rounds" says. The marker means the review passed, not merely that it ran.
 
 ## Phase 10: Verify-the-fix loop (only if fixes are later applied)

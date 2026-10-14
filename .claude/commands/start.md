@@ -107,8 +107,8 @@ Nothing else in this project creates a branch.
    Reuse the existing name when resuming.
 
 3. **Create the worktree** with `EnterWorktree`, `name:` set to that branch name with `/` encoded
-   as `+`. It creates `.claude/worktrees/{type}+<n>+{desc}` on a branch called
-   `worktree-{type}+<n>+{desc}`, cut from `origin/main` (the repo's default branch), which is
+   as `-` (it refuses `+`). It creates `.claude/worktrees/{type}-<n>-{desc}` on a branch called
+   `worktree-{type}-<n>-{desc}`, cut from `origin/main` (the repo's default branch), which is
    neither the right name nor the right base. `bin/pre-push` rejects the name, so fix both
    immediately, from inside the worktree:
 
@@ -131,7 +131,18 @@ Nothing else in this project creates a branch.
      worktree; that is the listed-worktree case from sub-step 1.
    - It does not → `git checkout -b "{type}/<n>/{desc}" "origin/{type}/<n>/{desc}"`.
 
-   Then drop the harness branch: `git branch -D "worktree-{type}+<n>+{desc}"`.
+   Then drop the harness branch: `git branch -D "worktree-{type}-<n>-{desc}"`.
+
+   **A subagent cannot do this step.** Its `EnterWorktree` refuses both forms ("cannot create a
+   worktree from a subagent with a cwd override"; "working directory is the repository root"), so
+   its session stays in the primary checkout. Create the worktree with
+   `git worktree add --no-track -b "{type}/<n>/{desc}" <primary-checkout>/.claude/worktrees/{type}-<n>-{desc} origin/next`,
+   or to resume, `git worktree add <path> "{type}/<n>/{desc}"` for an existing branch; a worktree
+   `git worktree list` already shows needs nothing created. Then run every git, gh and stamper
+   command as exactly
+   `cd <absolute worktree path> && <command>`. The gates accept that form for `just test`,
+   `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`. Never wrap a
+   push or a stamp in a script to get past a gate: the gates cannot see inside it.
 
 4. **Provision it — run the PRIMARY checkout's copy of setup**, never the worktree's: a resumed
    branch carries whatever copy of the script it was cut with.
@@ -141,7 +152,7 @@ Nothing else in this project creates a branch.
 
    ```bash
    git rev-parse --path-format=absolute --git-common-dir    # prints <primary-checkout>/.git
-   bash <primary-checkout>/bin/setup-worktree.sh {type}+<n>+{desc}
+   bash <primary-checkout>/bin/setup-worktree.sh {type}-<n>-{desc}
    ```
 
    Redirect its output to a scratchpad file and read it afterwards. It provisions what a fresh

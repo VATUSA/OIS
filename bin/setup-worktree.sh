@@ -18,7 +18,7 @@ set -uo pipefail
 # worktree_db_name), so bin/teardown-worktree.sh can drop it.
 #
 # Usage:
-#   bash bin/setup-worktree.sh feat+47+save-event-replays            # .claude/worktrees/<NAME>
+#   bash bin/setup-worktree.sh feat-47-save-event-replays            # .claude/worktrees/<NAME>
 #   bash bin/setup-worktree.sh ../ois-wt/feat/47/save-event-replays  # any worktree, by path
 #   bash bin/setup-worktree.sh                                       # the checkout you are in
 # ==============================================================================
@@ -39,8 +39,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/portable.sh"
 
 TARGET="${1:-.}"
-# A bare name is EnterWorktree's: .claude/worktrees/<NAME> in the main checkout, `+` standing
-# for the branch's `/`. `[[ =~ ]]`, not `echo | grep`, which matches per line.
+# A bare name is EnterWorktree's: .claude/worktrees/<NAME> in the main checkout, `-` (or `+` in older
+# worktrees) standing for the branch's `/`. `[[ =~ ]]`, not `echo | grep`, which matches per line.
 if [[ "$TARGET" =~ ^[A-Za-z0-9_+-]+$ ]] && MAIN_ROOT="$(main_repo_root)" && [[ -d "$MAIN_ROOT/.claude/worktrees/$TARGET" ]]; then
     TARGET="$MAIN_ROOT/.claude/worktrees/$TARGET"
 fi
