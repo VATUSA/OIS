@@ -15,9 +15,9 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 import type {Me} from "@/lib/auth";
 
 /**
- * The Admin area's sidebar after the one-item "Flow" group was folded into "Admin" (#822). The real
- * sidebar renders under a real TanStack router at `/admin/flow/sectors`, so the active highlight is
- * the one the router's `Link` sets, not a value this test computes.
+ * The Admin area's sidebar at the Sectors page (#822). The real sidebar renders under a real
+ * TanStack router at `/admin/flow/sectors`, so the active highlight is the one the router's `Link`
+ * sets, not a value this test computes.
  */
 const auth = vi.hoisted(() => ({me: null as Me | null}));
 vi.mock("@/lib/auth", () => ({
@@ -34,7 +34,7 @@ declare global {
 }
 beforeAll(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  // The theme toggle reads the OS colour scheme, and jsdom has no `matchMedia`.
+  // ThemeProvider reads the OS color scheme, and jsdom has no `matchMedia`.
   window.matchMedia ??= ((query: string) =>
     ({matches: false, media: query, addEventListener() {}, removeEventListener() {}}) as unknown as MediaQueryList);
 });
