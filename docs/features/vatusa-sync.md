@@ -164,7 +164,7 @@ controller also gets **`CONTROLLER`**, the baseline operational group (migration
   Every write among them is ARTCC-scoped in its handler. Runway writes became so with this change:
   they're checked against the airport's ARTCC, so a ZDC grant writes only ZDC's airports. A read gate
   is met by a grant at any scope, so `flow.sectors.read` at ZDC reads every ARTCC's sector demand (the
-  page's view-only neighbour tables) and also opens the admin sector viewer (Admin → Flow → Sectors);
+  page's view-only neighbour tables) and also opens the admin sector viewer (Admin → Sectors);
   it edits no limit or consolidation, which have their own scoped permissions. There's no Planning
   (`events.plan.*`), Historical (`stats.*`) or `*.publish` permission, and no admin permission beyond
   that one read. `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.

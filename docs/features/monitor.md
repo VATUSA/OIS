@@ -299,6 +299,6 @@ vNAS source gives altitude-bounded ATC sector volumes.**
 
 ## Viewer and permission
 
-The admin sector viewer (**Admin → Flow → Sectors**, `web/src/pages/flow/sectors.tsx`) draws the volumes
+The admin sector viewer (**Admin → Sectors**, `web/src/pages/flow/sectors.tsx`) draws the volumes
 from `GET /api/v1/flow/airspace/sectors` (`backend/src/handlers/airspace_sectors.rs`). It is gated by
 `flow.sectors.read` (migration 0120), and is how anyone checks an import.
