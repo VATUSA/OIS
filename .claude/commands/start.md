@@ -48,9 +48,8 @@ Do this **before** anything else so the board reflects reality immediately.
    `gh` gives you a URL and not the bytes; ask the user to paste the image into the chat rather
    than burning attempts fetching it.
 
-2. **Confirm it is yours.** It must be assigned to the user and sit in `To Do` or `Returned`
-   (or `In build` when the user says it is parked). Don't self-assign: if it isn't assigned to the
-   user, stop. If it is `Returned`, understand *why* from the comments first.
+2. **Confirm it is yours.** It must be assigned to the user and sit in `To Do` or `Returned`.
+   Don't self-assign: if it isn't assigned to the user, stop. If it is `Returned`, understand *why* from the comments first.
 
 3. **Check nobody else holds it** (`ticket-lifecycle.md`). Parallel sessions claim within
    minutes, sometimes before any branch is pushed:
@@ -67,7 +66,8 @@ Do this **before** anything else so the board reflects reality immediately.
    `…/<n>/…` branch with no PR, a local branch or a worktree for the number is someone
    mid-cycle: stop and say so. Not holders: the ticket-reviewer's `chore/<n>/review-*` branches,
    a `chore/*/session-learnings` branch, and, on a `Returned` card, the issue's own open PR and its
-   head branch, which are the work to recover.
+   head branch, which are the work to recover. On a `To Do` card, a branch or worktree left when
+   the work was parked is also the work to recover, but only once the user confirms it is parked.
 
 4. **Move the board item to `In build`.**
 

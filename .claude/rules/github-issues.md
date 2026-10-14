@@ -416,18 +416,19 @@ verbatim in a comment or a report; do not invent shorter ones.
 |---|---|---|
 | `Blocked` | cannot continue: waiting on a dependency or a decision | you, and say why, with a real ask |
 | `Triaging` | being classified, scoped, sized and prioritized; new issues start here | **you, when you file it** |
-| `To Do` | triaged and cleared to start | the user |
-| `Returned` | kicked back for rework from review or test | the user; `ticket-reviewer` on a relayed decision |
-| `In build` | being implemented | **you, at Moment 1** |
-| `Post build` | built and self-reviewed, pending verification | **you, at Phase 5 hand-back and at Moment 3** |
-| `Testing Queue` | selected for human testing | the user |
-| `In Test` | under test by a human or an agent | the user; `ticket-reviewer` when it claims the card |
-| `Code Review` | tested, final approval before shipping | the user; `ticket-reviewer` on a relayed decision |
-| `Shippable` | approved and ready to ship | the user |
+| `To Do` | triaged and cleared to start; also parked work, its branch kept | the user; **you, when you stop mid-build** |
+| `Returned` | failed the review agent or manual testing | the user; `ticket-reviewer` on a relayed decision |
+| `In build` | actively running in an agent worker | **you, at Moment 1** |
+| `Post build` | worker agent complete, pending the review agent | **you, at Phase 5 hand-back and at Moment 3** |
+| `Testing Queue` | picked for manual testing | the user |
+| `In Test` | in manual test, or in test by the review agent | the user; `ticket-reviewer` when it claims the card |
+| `Code Review` | waiting on the user's review | the user; `ticket-reviewer` on a relayed decision |
+| `Shippable` | the user signed off; deployment pending | the user |
 | `Done` | merged and deployed | the user |
 
-You set three of these and only three: `Triaging` on any issue you file, `In build` at Moment 1,
-and `Post build` when you hand back for sign-off and again at Moment 3 after `/ship`.
+You set four of these and only four: `Triaging` on any issue you file, `In build` at Moment 1,
+`Post build` when you hand back for sign-off and again at Moment 3 after `/ship`, and `To Do`
+when you stop with work in flight (commit it, keep the worktree, never `Returned`).
 `Testing Queue`, `In Test`, `Code Review`, `Returned`, `Shippable` and `Done` are the user's, and
 so is every transition *out of* `Triaging`: you put an issue there, you never take it further.
 
