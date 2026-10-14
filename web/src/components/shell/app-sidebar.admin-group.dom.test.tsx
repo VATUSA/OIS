@@ -9,15 +9,16 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
 import {ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 import type {Me} from "@/lib/auth";
 
 /**
- * The Admin area's sidebar at the Sectors page (#822). The real sidebar renders under a real
- * TanStack router at `/admin/flow/sectors`, so the active highlight is the one the router's `Link`
- * sets, not a value this test computes.
+ * The Admin area's sidebar and breadcrumb at the Sectors page, and at `/admin` for contrast. The real
+ * sidebar and shell render under a real TanStack router, so the active highlight is the one the
+ * router's `Link` sets, not a value this test computes.
  */
 const auth = vi.hoisted(() => ({me: null as Me | null}));
 vi.mock("@/lib/auth", () => ({
@@ -27,6 +28,7 @@ vi.mock("@/lib/auth", () => ({
   useSignInPending: () => false,
 }));
 
+import {AppShell} from "./app-shell";
 import {AppSidebar} from "./app-sidebar";
 
 declare global {
@@ -59,17 +61,20 @@ function user(permissions: Record<string, unknown>, server_admin = false): Me {
   } as Me;
 }
 
-async function renderAt(path: string, me: Me): Promise<HTMLElement> {
+async function renderAt(path: string, me: Me, shell = false): Promise<HTMLElement> {
   auth.me = me;
+  const qc = new QueryClient({defaultOptions: {queries: {retry: false, enabled: false}}});
   const rootRoute = createRootRoute({
     component: () => (
-      <ThemeProvider>
-        <ToastProvider>
-          <TooltipProvider>
-            <AppSidebar collapsed={false} onToggle={() => undefined} />
-          </TooltipProvider>
-        </ToastProvider>
-      </ThemeProvider>
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <ToastProvider>
+            <TooltipProvider>
+              {shell ? <AppShell>{null}</AppShell> : <AppSidebar collapsed={false} onToggle={() => undefined} />}
+            </TooltipProvider>
+          </ToastProvider>
+        </ThemeProvider>
+      </QueryClientProvider>
     ),
   });
   const splat = createRoute({getParentRoute: () => rootRoute, path: "$"});
@@ -121,5 +126,11 @@ describe("the Admin area's sidebar at /admin/flow/sectors (#822)", () => {
   it("highlights Overview, not Sectors, on /admin", async () => {
     const host = await renderAt("/admin", user({flow: {sectors: ["read"]}}));
     expect(active(host)).toEqual(["Overview"]);
+  });
+
+  it("reads Admin › Sectors in the breadcrumb on the Sectors page", async () => {
+    const host = await renderAt("/admin/flow/sectors", user({flow: {sectors: ["read"]}}), true);
+    const crumbs = [...host.querySelectorAll('nav[aria-label="Breadcrumb"] span.truncate')].map((c) => c.textContent);
+    expect(crumbs).toEqual(["Admin", "Sectors"]);
   });
 });
