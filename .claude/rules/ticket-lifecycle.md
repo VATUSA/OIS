@@ -55,7 +55,8 @@ before any branch is pushed. Before claiming, and again right before pushing:
 - `git fetch origin` and `git branch -r --list "*<n>*"`: a pushed `…/<n>/…` branch with no PR is
   someone mid-cycle (#411). Not holders: a ticket-reviewer's `chore/<n>/review-*` branch, a
   `chore/*/session-learnings` branch, and, on a `Returned` card, the issue's own open PR and its
-  head branch, which are the work to recover.
+  head branch, which are the work to recover. On a `To Do` card, the branch and worktree of parked
+  work are the work to recover once the user confirms it was parked.
 - `git branch --list "*/<n>/*"` and `git worktree list` in the primary checkout: a local branch or
   worktree means someone owns it, even with no remote branch and no card move (#688).
 - `gh pr list --repo VATUSA/OIS --state all --search "<n> in:body"`: a combined branch can carry
