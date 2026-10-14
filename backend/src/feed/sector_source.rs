@@ -266,6 +266,38 @@ pub(crate) mod tests {
         assert!(err.starts_with("parsing vtsd sectors.json: "), "{err}");
     }
 
+    /// A document of one feature, with `props` and `geometry` as raw JSON.
+    fn one_feature(props: &str, geometry: &str) -> String {
+        format!(r#"{{"features": [{{"properties": {props}, "geometry": {geometry}}}]}}"#)
+    }
+
+    const PROPS: &str = r#"{"artcc": "ZDC", "sector": "01", "tier": "High", "base_alt": 24000,
+                            "max_alt": 60000, "full_id": "01001"}"#;
+    const SQUARE: &str = r#"{"type": "Polygon", "coordinates": [[[-77, 38], [-76, 38], [-76, 39], [-77, 39], [-77, 38]]]}"#;
+
+    /// A feature outside the expected shape fails the whole document rather than being skipped: a
+    /// geometry type other than Polygon or MultiPolygon, a missing property, a non-integer altitude.
+    #[test]
+    fn parse_refuses_a_document_with_a_feature_outside_the_expected_shape() {
+        // Control: the same feature in the expected shape parses.
+        let ok = parse(one_feature(PROPS, SQUARE).as_bytes()).unwrap();
+        assert_eq!((ok.volumes.len(), ok.skipped.len()), (1, 0));
+
+        let collection = r#"{"type": "GeometryCollection", "geometries": []}"#;
+        let no_top = PROPS.replace(r#""max_alt": 60000, "#, "");
+        let fractional = PROPS.replace(r#""base_alt": 24000"#, r#""base_alt": 1.5"#);
+        assert_ne!(no_top, PROPS);
+        assert_ne!(fractional, PROPS);
+        for doc in [
+            one_feature(PROPS, collection),
+            one_feature(&no_top, SQUARE),
+            one_feature(&fractional, SQUARE),
+        ] {
+            let err = parse(doc.as_bytes()).err().unwrap();
+            assert!(err.starts_with("parsing vtsd sectors.json: "), "{err}");
+        }
+    }
+
     /// The source URL is the pinned commit, never a branch, so a deploy can't pick up new data
     /// nobody reviewed.
     #[test]
