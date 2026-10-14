@@ -255,8 +255,8 @@ through `CONTROLLER` (migration 0129); a grant at their facility reads every ART
 ### Where it comes from
 
 The backend loads it itself (#821). The `airspace_sector_seed` job (`backend/src/jobs.rs`; the fetch and parse are in
-`backend/src/feed/sector_source.rs`, the write in `backend/src/repos/airspace_sector_seed.rs`) runs at start and then every 24 hours. When every row
-already carries the pinned commit it stops there, with no network call. Otherwise it fetches the file,
+`backend/src/feed/sector_source.rs`, the write in `backend/src/repos/airspace_sector_seed.rs`) runs at start and then every 24 hours. When the table
+holds rows and every one carries the pinned commit, it stops there, with no network call. Otherwise it fetches the file,
 replaces the whole table in one transaction under an advisory lock (so replicas starting together
 write once), and triggers `airspace_sectors_refresh`. A failed fetch or write fails the job on
 Admin → Jobs and leaves the table as it was. `docs/deploy.md` covers what this needs from a host.
@@ -291,8 +291,10 @@ The source repository is **CC BY-NC-SA 4.0**; OIS is **MIT**.
   not merely a reference consulted.
 - Neither the file nor any of its code is committed to this repository. The seed fetches it at run
   time.
-- If OIS ever **serves** this geometry (the sector map layer, #602, or a containment endpoint), re-check
-  the share-alike and attribution terms at that point.
+- OIS **serves** this geometry: `GET /api/v1/flow/airspace/sectors` and the admin sector map
+  (`/admin/flow/sectors`, #602) return every volume to any `flow.sectors.read` holder, rostered
+  controllers included (migration 0129). The operator confirmed on 2026-10-13, asked directly during
+  the #821 review, that the authors' permission covers serving it this way.
 
 ### Where altitude-bounded sector geometry does not come from
 

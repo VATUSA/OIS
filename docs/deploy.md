@@ -72,6 +72,10 @@ hours (#821):
   `raw.githubusercontent.com` and replaces the table in one transaction. The host needs outbound
   HTTPS to GitHub for that, as it already does for the airport and facility data.
 - Replicas starting together take an advisory lock, so only one writes.
+- A rolling deploy that moves `SOURCE_REF` can be undone briefly: while an old replica still runs,
+  its daily tick, or a **Run now** that lands on it, reloads the old commit. A new replica's next
+  daily tick or restart puts the new commit back, so after such a deploy, press **Run now** once the
+  old replicas are gone.
 - A failed fetch shows as a failed `airspace_sector_seed` on Admin → Jobs and as
   `ois_job_last_success{task="airspace_sector_seed"} 0` on `/metrics`, and leaves the existing rows
   alone. On a fresh database that means both pages stay empty until the next attempt; use **Run now**
