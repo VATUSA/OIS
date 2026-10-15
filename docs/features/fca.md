@@ -117,9 +117,10 @@ destinations are tested). The `airspace.is_empty()` short-circuit. `dir`.
   point, and the dogleg case it cites keeps its fix, because the fix is ahead of the nose. The skip
   can drop the fix of an aircraft outbound in a hold. The path then runs straight to the next fix,
   and a line drawn across the skipped leg is missed. That is a narrow case, and no report shows it.
-- *Checked, not filed.* The flat frame is centered on the path's first point, so a crossing far from
-  it is placed with some distortion. The crossing still happens or not on the same geometry, so this
-  moves `along_nm` slightly but does not change inclusion.
+- *Checked, not filed.* `local` and `unlocal` (`feed/fca.rs:468-478`) are affine, so the frame
+  itself moves neither inclusion nor `along_nm`. The approximation is that each FCA segment is a
+  straight line in latitude and longitude, not a great circle, because FCA segments are not
+  densified. On a long diagonal segment the crossing point sits a little off the drawn line.
 
 ## 2. Candidates
 
@@ -251,8 +252,9 @@ follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
   (case 4).
 - **A manual order is stored verbatim, duplicates included.** `ReorderRequest.order`
   (`models/mod.rs:2717`) is saved as sent (`repos/flow.rs:435`), and `manual_order` matches it by
-  exact string (`handlers/flow.rs:2086`). A repeated callsign is chained twice: its second pass
-  moves it a separation behind itself and leaves a gap in the sequence numbers. A lowercase entry
+  exact string (`handlers/flow.rs:2086`). A repeated callsign is scheduled at every occurrence, and its
+  last one wins: it is re-chained behind whatever precedes that occurrence, and the rank of its
+  earlier occurrence is left empty in the sequence numbers. A lowercase entry
   matches nothing, and the flight falls to the tail. The tail append itself is **#819**, and this was
   added there.
 - *Checked, not filed.* The separation formula exists twice (`feed/fca.rs:355-364`,
@@ -388,12 +390,15 @@ invalidates the traffic, IDST and departures queries by prefix (`web/src/lib/rea
 
 ### Findings, area 6
 
-- **The release and reorder mutations write a cache entry the panel never reads.**
+- **The release and reorder mutations write a cache entry the detail panel never reads.**
   `useMarkRelease`, `useClearRelease` and `useReorderFca` call `setQueryData(["fca-traffic", fcaId])`
   (`web/src/lib/fca.ts:506`, `:531`, `:586`). The panel's key carries a third element, `debug`
-  (`:414`), and `setQueryData` matches exactly. The optimistic reorder therefore never shows: a
-  dragged strip snaps back until the server answers and the prefix invalidation refetches. Filed
-  as #850.
+  (`:414`), and `setQueryData` matches exactly. The two-element key belongs to the ARTCC overview's
+  `useFcaTrafficMany` (`:440`), whose comment at `:434-435` wrongly says it shares the panel's key.
+  So the release writes land in the overview's cache, and the reorder updates nothing unless the
+  overview has that FCA cached (`:600`). In the panel, a dragged strip snaps back until the server
+  answers and the prefix invalidation refetches. A fix that only adds `debug` to the mutations'
+  key would break the overview, so it has to update both keys. Filed as #850.
 - **Release and reorder controls ignore the FCA's ARTCC.** `canOperate` checks only that the user
   holds `flow.fca.update` somewhere (`web/src/pages/fca/detail.tsx:237`). Exclusions already ask
   the server (`:229-232`). A controller viewing another facility's FCA is offered RDY, SET, clear
