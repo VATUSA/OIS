@@ -299,6 +299,11 @@ release authority, scope and provenance; `mod release_swap_tests` (`handlers/flo
 
 ### Findings, area 4
 
+- **The event FCA writes check no ARTCC scope.** All six event routes take
+  `RequirePermission<EventsPlanUpdate>`, which passes when the caller holds the permission at any
+  facility, and `owned_event_fca` (`handlers/events.rs:1589`) checks only the event id. The plain
+  routes check the stored and new ARTCC (`handlers/flow.rs:404-410`, #636). A planner scoped to one
+  facility can therefore edit, delete or publish another facility's event FCA. Filed as #854.
 - **`flow.fca_release` is never pruned, and the release map is keyed by callsign.** The only
   `DELETE` is `delete_release` (`repos/flow.rs:686`), and the cascade needs a hard delete that never
   happens. The comment at `jobs.rs:106-109` says these rows "vanish with their initiative", which
@@ -419,7 +424,8 @@ any of them, and two changes of scope.
 | #834 IDST duplicates | Go ahead as written | Path 1 is confirmed: neither loop of `build_candidates` checks the other. |
 | #836 winds | Go ahead as written | Not touched by this audit. |
 
-Findings filed from this audit: #844, #845, #846, #847, #848, #849, #850, #851, #852, #853.
+Findings filed from this audit: #844, #845, #846, #847, #848, #849, #850, #851, #852, #853,
+#854.
 Added to existing issues: #813 (filed-altitude parsers), #817 (the test that pins case 3), and
 #819 (duplicate and wrong-case callsigns in the stored order). Four findings are recorded here
 only, by the operator's decision: the field-elevation band case and `dir` (area 1), the advisory
