@@ -117,6 +117,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p ois-desktop --all-targets
 
+  windows-hooks:
+    # The marker hooks run in Windows sessions too (#843): every Bash, Write and Edit call goes through
+    # marker-write-gate.sh. This proves the lock helper excludes a second holder on Windows and that the
+    # gate passes a call that writes no marker. The hooks call `python3`, which the image may only
+    # provide as `python`.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          if ! command -v python3 >/dev/null; then
+            mkdir -p "$HOME/bin" && printf '#!/bin/bash\nexec python "$@"\n' > "$HOME/bin/python3"
+            cygpath -w "$HOME/bin" >> "$GITHUB_PATH"
+          fi
+      - run: python3 --version && bash bin/lib/file-lock.test.sh
+
   deny:
     runs-on: ubuntu-latest
     # Advisories (RUSTSEC vulnerabilities) + license policy for the whole Cargo workspace, in one

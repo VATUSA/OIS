@@ -43,7 +43,7 @@ ROOT="$(git rev-parse --show-toplevel)" && cd "$ROOT" || exit 1
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { echo "run-tests: no tests marker written (working tree was not clean at start)."; exit 0; }
 python3 -I bin/lib/marker_manifest.py stamp "$ROOT" tests "$(git rev-parse HEAD)"
 STUB
-cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/review-attestation.sh" "$REPO/bin/lib/"
+cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/review-attestation.sh" "$REPO/bin/lib/"
 printf 'code\trules/a.md\n' > "$REPO/.claude/review-lenses.tsv"
 printf '## Alpha\n' > "$REPO/rules/a.md"
 printf '.claude/markers/\n__pycache__/\n' > "$REPO/.gitignore"
@@ -364,9 +364,10 @@ echo "The manifest is read and rewritten under one hold of the stamp lock:"
 pre toolu_lock "just test"
 OTHER_SHA="$(printf '%040d' 7)"
 mkdir -p "$M/tests" && printf 'code-review %s %064d\n' "$OTHER_SHA" 7 > "$M/manifest" # a line the audit must drop, so it rewrites
-python3 -c 'import fcntl, sys, time
-handle = open(sys.argv[1], "a"); fcntl.flock(handle, fcntl.LOCK_EX)
-open(sys.argv[2], "w").close(); time.sleep(3)' "$M/.manifest.lock" "$WORK/locked" &
+python3 -I -c 'import sys, time
+sys.path.insert(0, sys.argv[3]); import file_lock
+handle = open(sys.argv[1], "a+"); file_lock.lock(handle)
+open(sys.argv[2], "w").close(); time.sleep(3)' "$M/.manifest.lock" "$WORK/locked" "$REPO/bin/lib" &
 HOLDER=$!
 while [[ ! -e "$WORK/locked" ]]; do sleep 0.1; done
 (payload toolu_lock "just test" 0 | (cd "$REPO" && bash .claude/hooks/marker-audit.sh > "$WORK/lock.out" 2>&1)) &
@@ -445,6 +446,10 @@ if [[ $RC -eq 2 && "$OUT" == *"could not run"* ]]; then ok "the audit exits 2 wi
 payload toolu_y ls 0 | (cd "$REPO" && bash .claude/hooks/marker-write-gate.sh >/dev/null 2>&1)
 [[ $? -eq 2 ]] && ok "the gate blocks when it cannot record the call" || bad "gate passed without the ledger"
 mv "$WORK/mm.py" "$REPO/bin/lib/marker_manifest.py"
+mv "$REPO/bin/lib/file_lock.py" "$WORK/fl.py"
+payload toolu_z ls 0 | (cd "$REPO" && bash .claude/hooks/marker-write-gate.sh >/dev/null 2>&1)
+[[ $? -eq 2 ]] && ok "the gate blocks when the lock helper is missing" || bad "gate passed without the lock helper"
+mv "$WORK/fl.py" "$REPO/bin/lib/file_lock.py"
 
 echo ""
 echo "marker-audit: $PASS passed, $FAIL failed"
