@@ -90,9 +90,12 @@ of `build_candidates` (`:1871`, `:1990`).
 filed_altitude_tests` (`:2864`), `mod manual_exclusion_tests` (`:4435`), `mod fca_inclusion_tests`
 (`:4496`).
 
-**Untested branches.** The heading skip in `remaining_anchors`. The 3 nm advance. A route that
-crosses the line twice. Any FCA with more than 2 points. The origin and fix filters (only
-destinations are tested). The `airspace.is_empty()` short-circuit. `dir`.
+The heading skip in `remaining_anchors` is pinned by `airborne_past_the_line_does_not_match`
+(`feed/fca.rs:1174`): without the skip, that test's path crosses the line.
+
+**Untested branches.** The 3 nm advance. A route that crosses the line twice. Any FCA with more than
+2 points. The origin and fix filters (only destinations are tested). The `airspace.is_empty()`
+short-circuit. `dir`.
 
 ### Findings, area 1
 
@@ -168,8 +171,10 @@ and carry status `proposed`.
 `mod mit_cross_speed_wiring_tests` (`:4072`), which covers both loops. `mod fca_inclusion_tests`
 (`:4496`) pins the board to the shared decision.
 
-**Untested branches.** A non-empty release map reaching `frozen_ms`. A non-empty `assigned` map. A
-pilot with no flight plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
+**Untested branches.** The pinned time a release gives: router tests send a non-empty release map
+and assert `released`, but none checks `cross_time`, so `frozen_ms` (`handlers/flow.rs:1933`,
+`:2038`) could be dropped with the suite green. A non-empty `assigned` map. A pilot with no flight
+plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ### Findings, area 2
 
@@ -276,7 +281,8 @@ follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
 Event FCAs are written through `/api/v1/events/{id}/fcas/...` (`handlers/events.rs:1611-1769`),
 gated on `events.plan.read` for the list and `events.plan.update` for every write. Create, update,
 delete and the auto-publish toggle publish no topic. Publish and archive publish `flow.fca`
-(`handlers/events.rs:1717`, `:1743`). The `event_fca_lifecycle` job (`jobs.rs:1501`, every minute)
+(`handlers/events.rs:1717`, `:1743`). The `event_fca_lifecycle` job (`jobs.rs:1501`, every
+`EVENT_FCA_INTERVAL` = 60 s at `jobs.rs:62`)
 publishes planned FCAs flagged `auto_publish` 30 minutes before their event starts, archives live
 ones at its end (`repos/flow.rs:295-316`), and publishes `flow.fca` only when a row changed
 (`jobs.rs:1511-1513`).
@@ -326,6 +332,11 @@ release authority, scope and provenance; `mod release_swap_tests` (`handlers/flo
 - **Writes go through on a soft-deleted FCA.** `get_fca` has no `deleted_at` filter
   (`repos/flow.rs:70-76`), and no write path checks it. Edit, reorder, RDY, clear, swap and exclude
   on a deleted id succeed and publish. Filed as #848.
+- **RDY, SET and clear run the metering pass on an async worker.** `mark_release` and
+  `clear_release` call `build_candidates` inline (`handlers/flow.rs:2563-2582`, `:2679-2696`).
+  `metered_flights`, `list_idst` and `fca_counts` run the same work in `spawn_blocking`
+  (`:2227`, `:2419`, `:679`), and `metered_flights`'s comment (`:2199-2204`) records that the
+  inline form can starve the runtime. Filed as #855.
 - **The exclusion gate does not normalize an empty ARTCC** the way the FCA write gate does
   (`handlers/flight_exclusions.rs:110` against `handlers/flow.rs:261`). For an FCA with no ARTCC, a
   national holder with an exception list passes one gate and fails the other.
@@ -340,7 +351,7 @@ release authority, scope and provenance; `mod release_swap_tests` (`handlers/flo
 | `GET /api/v1/flow/counts` | `handlers/flow.rs:662` | public | per enabled FCA, pilots and prefiles through `fca_crossing_for`. No ETA, no metering |
 | `GET /api/v1/flow/fcas/{id}/traffic` | `handlers/flow.rs:2276` | public for listed FCAs; unpublished event FCA needs `events.plan.read`; a deleted one needs a sign-in | `metered_flights`: full board, with releases and their versions |
 | `GET /api/v1/flow/idst` | `handlers/flow.rs:2345` | `flow.fca.read` | every enabled FCA metered with the runway map, then ground and proposed rows at airports in scope (`:2442-2445`), with an advisory EDCT for unreleased rows (`:2450-2457`) |
-| `GET /api/v1/stats/hist/fcas` | `handlers/stats.rs:871` | `stats.read` | `list_fcas_at` (`repos/flow.rs:35`): FCA definitions only, no crossings |
+| `GET /api/v1/stats/hist/fcas` | `handlers/stats.rs:871` | `stats.data.read` | `list_fcas_at` (`repos/flow.rs:35`): FCA definitions only, no crossings |
 
 All of them share one inclusion rule. They do not share one ETA: see the runway map in area 2.
 
@@ -350,7 +361,7 @@ All of them share one inclusion rule. They do not share one ETA: see the runway 
 planner, because both read `list_fcas`. This matches #586 and #746 as built.
 
 **Tests.** `mod fca_traffic_visibility_tests` (`handlers/flow.rs:5939`). IDST has router tests
-for provenance only (`handlers/machine_actor_tests.rs:1060`, `:1103`). No test covers the
+for provenance only (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`). No test covers the
 `fca_counts` handler, `hist_fcas`, or IDST's advisory EDCT.
 
 ### Findings, area 5
@@ -377,7 +388,8 @@ loads the selected FCA's traffic (`useFcaTraffic`, `web/src/lib/fca.ts:407`, key
   listed callsigns (`:249-257`).
 - **`ladder.tsx`** drops `proposed` rows and rows without a crossing time, and places each strip at
   `cross_time − now` (`web/src/pages/fca/ladder.tsx:27-47`).
-- **`overview-panel.tsx`** is read-only and also drops `proposed` rows.
+- **`overview-panel.tsx`** is read-only and also drops `proposed` rows
+  (`web/src/pages/fca/overview-panel.tsx:164`).
 
 The page recomputes no crossing time or ETA. It only positions strips by time and renumbers them
 during an optimistic reorder (`web/src/lib/fca.ts:598-611`). Realtime: `flow.release`
@@ -385,8 +397,13 @@ invalidates the traffic, IDST and departures queries by prefix (`web/src/lib/rea
 `flow.fca` invalidates the FCA list, traffic, counts, IDST and event FCAs (`:48`).
 
 **Tests.** `web/src/pages/fca/detail.dom.test.tsx` (#746 controls),
-`web/src/pages/fca/index.dom.test.tsx`, `web/src/pages/fca/ladder.test.ts`. Nothing covers
-`overview-panel.tsx`, the mutation cache keys, or historical mode.
+`web/src/pages/fca/index.dom.test.tsx`, `web/src/pages/fca/ladder.test.ts`,
+`web/src/lib/fca.dom.test.tsx` (the release, clear and reorder hooks), and
+`web/src/lib/realtime.dom.test.ts:166-169` (the two topics' keys).
+`web/src/components/map/FcaMapView.artcc.dom.test.tsx` mocks the overview panel. Nothing covers
+`overview-panel.tsx` or historical mode. `fca.dom.test.tsx` seeds and asserts the two-element
+key `["fca-traffic", ID]` (`web/src/lib/fca.dom.test.tsx:44`, `:59`, `:123`), so it passes with the
+defect below and has to change with its fix.
 
 ### Findings, area 6
 
@@ -399,14 +416,15 @@ invalidates the traffic, IDST and departures queries by prefix (`web/src/lib/rea
   overview has that FCA cached (`:600`). In the panel, a dragged strip snaps back until the server
   answers and the prefix invalidation refetches. A fix that only adds `debug` to the mutations'
   key would break the overview, so it has to update both keys. Filed as #850.
-- **Release and reorder controls ignore the FCA's ARTCC.** `canOperate` checks only that the user
-  holds `flow.fca.update` somewhere (`web/src/pages/fca/detail.tsx:237`). Exclusions already ask
+- **Release and reorder controls ignore the FCA's ARTCC.** `canOperate`
+  (`web/src/pages/fca/detail.tsx:237`) checks that the user holds `flow.fca.update` somewhere and
+  that the FCA is live or the user is a planner, but never the FCA's ARTCC. Exclusions already ask
   the server (`:229-232`). A controller viewing another facility's FCA is offered RDY, SET, clear
   and drag, and gets a 403. Filed as #851.
-- **Historical mode mixes a past FCA list with live counts and traffic.** `useFcas` switches to
-  `/stats/hist/fcas` when given an instant (`web/src/lib/fca.ts:169-175`). `useFcaCounts` and
-  `useFcaTraffic` take no instant. The dashboard FCA widget joins the two
-  (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
+- **Historical mode mixes a past FCA list with live counts and traffic.** Inside a
+  `HistoricalProvider`, `useFcas` reads the instant (`web/src/lib/fca.ts:158`) and switches to
+  `/stats/hist/fcas` (`:169-175`). `useFcaCounts` and `useFcaTraffic` ignore it. The dashboard FCA
+  widget joins the two (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
 - Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2).
 
 ## Determination for #812 (recommendation, for the operator to confirm)
@@ -430,8 +448,9 @@ any of them, and two changes of scope.
 | #836 winds | Go ahead as written | Not touched by this audit. |
 
 Findings filed from this audit: #844, #845, #846, #847, #848, #849, #850, #851, #852, #853,
-#854.
+#854, #855.
 Added to existing issues: #813 (filed-altitude parsers), #817 (the test that pins case 3), and
 #819 (duplicate and wrong-case callsigns in the stored order). Four findings are recorded here
 only, by the operator's decision: the field-elevation band case and `dir` (area 1), the advisory
-ignoring prefiles (area 2), and the exclusion gate's empty ARTCC (area 4).
+ignoring prefiles (area 2), and the exclusion gate's empty ARTCC (area 4). The untested branches
+listed in each area are recorded here and not filed, also by the operator's decision.
