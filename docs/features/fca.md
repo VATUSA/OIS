@@ -378,9 +378,9 @@ loads the selected FCA's traffic (`useFcaTraffic`, `web/src/lib/fca.ts:407`, key
 - **`overview-panel.tsx`** is read-only and also drops `proposed` rows.
 
 The page recomputes no crossing time or ETA. It only positions strips by time and renumbers them
-during an optimistic reorder (`web/src/lib/fca.ts:598-611`). Realtime: `flow.release` and
-`flow.fca` invalidate the traffic, counts and IDST queries by prefix
-(`web/src/lib/realtime.ts:46`, `:48`).
+during an optimistic reorder (`web/src/lib/fca.ts:598-611`). Realtime: `flow.release`
+invalidates the traffic, IDST and departures queries by prefix (`web/src/lib/realtime.ts:46`), and
+`flow.fca` invalidates the FCA list, traffic, counts, IDST and event FCAs (`:48`).
 
 **Tests.** `web/src/pages/fca/detail.dom.test.tsx` (#746 controls),
 `web/src/pages/fca/index.dom.test.tsx`, `web/src/pages/fca/ladder.test.ts`. Nothing covers
