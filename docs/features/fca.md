@@ -430,7 +430,7 @@ defect below and has to change with its fix.
 ## Determination for #812 (recommendation, for the operator to confirm)
 
 The audit confirms each sub-issue's premise in code. It found nothing that removes the need for
-any of them, and two changes of scope.
+any of them, and three changes of scope.
 
 | Issue | Recommendation | Basis |
 | --- | --- | --- |
@@ -439,7 +439,7 @@ any of them, and two changes of scope.
 | #813 single prediction entry point | Go ahead, with one change: add the filed-altitude parser split (area 1) to its list of disagreeing inputs | Input 5 (runway map) is confirmed at `handlers/flow.rs:2241`, `:2437`, `:2577`, `:2693`. |
 | #816 IDST Set | Go ahead as written | `handlers/flow.rs:2596` pins the typed time with no slot search. |
 | #814 prediction design | Go ahead as written | Out of this audit's reach beyond the link above. |
-| #817 scheduler re-check | Go ahead as written | Cases 1-4 are confirmed at `feed/fca.rs:385-393`, `:410-424`, `:437`, `:454`. It should also update `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1055`), which pins today's behavior as correct. |
+| #817 scheduler re-check | Go ahead, with one change: update the test that pins case 3 | Cases 1-4 are confirmed at `feed/fca.rs:385-393`, `:410-424`, `:437`, `:454`. It should also update `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1055`), which pins today's behavior as correct. |
 | #819 manual order | Go ahead, with one change: reject or dedupe repeated and wrong-case callsigns in the stored order (area 3) | It already owns the tail append and prefiles in the order. |
 | #828 profile builder | Go ahead as written | Not touched by this audit. |
 | #818 per-type profiles | Go ahead as written | Not touched by this audit. |
