@@ -179,8 +179,8 @@ repeated interior vertex, coordinates in range, outer rings wound consistently (
 clockwise throughout), `properties.id` unique, and **the two copies byte-identical**. There is no
 regeneration script and no owner for this data (`source: "squawk-airspace-data"`), so that last
 assertion is the only thing stopping the copies drifting. (This is the ARTCC/TRACON *boundary* asset only.
-The altitude-bounded *sector* volumes are a different dataset, with an owner and an importer:
-`airspace-sector-importer`, see [`monitor.md`](monitor.md#the-sector-dataset).)
+The altitude-bounded *sector* volumes are a different dataset, with an owner, loaded by the
+backend's `airspace_sector_seed` job, see [`monitor.md`](monitor.md#the-sector-dataset).)
 
 `ZAN` is one feature with two parts because its airspace crosses the antimeridian — that split is
 correct GeoJSON and must not be "fixed". `ZAK` (Oakland Oceanic) and `ZSU` (San Juan) have **no

@@ -3,7 +3,7 @@
 //! Every test reads the rows `sector_loads` returns, never `SectorTable::counting` directly, so it
 //! pins what an occupancy cell shows. The synthetic tests stack volumes on the fixture square
 //! (38–39N, 76–77W). The `#[ignore]`d one runs the rule over the real vTSD table, fetched at the
-//! importer's pinned commit and never committed (the source is CC BY-NC-SA, OIS is MIT).
+//! seed's pinned commit and never committed (the source is CC BY-NC-SA, OIS is MIT).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -262,114 +262,32 @@ fn a_facility_without_tracon_data_is_distinct_from_a_quiet_tracon() {
     );
 }
 
-/// The real vTSD table, parsed as the importer does.
+/// The real vTSD table, fetched and parsed by the seed's own code (`feed::sector_source`),
+/// so this test checks the data production loads, at the same `SOURCE_REF`.
 mod real {
-    use serde::Deserialize;
+    use crate::feed::{sector_source, sectors::SectorTable};
 
-    use crate::feed::sectors::{SectorTable, SectorVolume, validate_volume};
-
-    /// Must equal `SOURCE_REF` in `bin/airspace_sector_importer.rs`, so this test checks the data
-    /// production actually imports. Move them together.
-    const SOURCE_REF: &str = "f33ef73f21091e71456e45cfe9019ddf3ba76247";
-
-    #[derive(Deserialize)]
-    struct Collection {
-        features: Vec<Feature>,
-    }
-
-    #[derive(Deserialize)]
-    struct Feature {
-        properties: Props,
-        geometry: Geometry,
-    }
-
-    #[derive(Deserialize)]
-    struct Props {
-        artcc: String,
-        sector: String,
-        tier: String,
-        base_alt: i32,
-        max_alt: i32,
-        full_id: String,
-    }
-
-    /// GeoJSON positions are `[lon, lat, ...]`.
-    #[derive(Deserialize)]
-    #[serde(tag = "type", content = "coordinates")]
-    enum Geometry {
-        Polygon(Vec<Vec<Vec<f64>>>),
-        MultiPolygon(Vec<Vec<Vec<Vec<f64>>>>),
-    }
-
-    /// A test-local mirror of the importer's `to_volume`: tier mapped, positions flipped to
-    /// `[lat, lon]`, one ring per polygon part, holes refused.
-    fn to_volume(f: Feature) -> Result<SectorVolume, String> {
-        let p = f.properties;
-        let tier = match p.tier.as_str() {
-            "Low" => "low",
-            "High" => "high",
-            "Ultra High" => "ultra_high",
-            "Approach Control" => "approach",
-            other => return Err(format!("unknown tier {other:?}")),
-        };
-        let polygons = match f.geometry {
-            Geometry::Polygon(rings) => vec![rings],
-            Geometry::MultiPolygon(polys) => polys,
-        };
-        let rings = polygons
-            .into_iter()
-            .map(|poly| match poly.as_slice() {
-                [ring] => ring
-                    .iter()
-                    .map(|pos| match pos.as_slice() {
-                        [lon, lat, ..] => Ok([*lat, *lon]),
-                        _ => Err("position has fewer than two numbers".to_string()),
-                    })
-                    .collect(),
-                _ => Err(format!("polygon has {} rings", poly.len())),
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(SectorVolume {
-            artcc: p.artcc.to_ascii_uppercase(),
-            sector_id: p.sector,
-            volume_id: p.full_id,
-            name: None,
-            tier: tier.into(),
-            base_alt_ft: p.base_alt,
-            top_alt_ft: p.max_alt,
-            rings,
-        })
-    }
-
-    /// The table the importer would store, and the `ARTCC full_id` of every feature it would skip.
+    /// The table the seed would store, and the `ARTCC full_id` of every feature it would skip.
     pub(super) async fn table() -> (SectorTable, Vec<String>) {
-        let url = format!(
-            "https://raw.githubusercontent.com/Virtual-Traffic-Situation-Display/vtsd/{SOURCE_REF}/Data/sectors.json"
-        );
-        let collection: Collection = reqwest::Client::builder()
-            .user_agent("ois-airspace-sector-importer/0.1 (+https://vatusa.net)")
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap()
-            .get(&url)
-            .send()
+        let bytes = sector_source::fetch()
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .unwrap_or_else(|e| panic!("fetching {url}: {e}"))
-            .json()
-            .await
-            .unwrap_or_else(|e| panic!("parsing {url}: {e}"));
-
-        let mut volumes = Vec::new();
-        let mut skipped = Vec::new();
-        for f in collection.features {
-            let id = format!("{} {}", f.properties.artcc, f.properties.full_id);
-            match to_volume(f).and_then(|v| validate_volume(&v).map(|()| v)) {
-                Ok(v) => volumes.push(v),
-                Err(_) => skipped.push(id),
-            }
-        }
-        (SectorTable { volumes }, skipped)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let parsed = sector_source::parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let skipped = parsed
+            .skipped
+            .iter()
+            .map(|s| {
+                s.split_once(':')
+                    .map_or(s.as_str(), |(id, _)| id)
+                    .to_string()
+            })
+            .collect();
+        (
+            SectorTable {
+                volumes: parsed.volumes,
+            },
+            skipped,
+        )
     }
 }
 
