@@ -121,12 +121,15 @@ jobs:
     # The marker hooks run in Windows sessions too (#843): every Bash, Write and Edit call goes through
     # marker-write-gate.sh. This proves the lock helper excludes a second holder on Windows and that the
     # gate passes a call that writes no marker. The hooks call `python3`, which the image may only
-    # provide as `python`.
+    # provide as `python`. autocrlf is off so the shell scripts keep their LF endings: bash reads a
+    # trailing CR as part of the line (`set -uo pipefail\r` is an invalid option).
     runs-on: windows-latest
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
       - run: |
           if ! command -v python3 >/dev/null; then

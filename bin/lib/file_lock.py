@@ -7,13 +7,15 @@
   file_lock.unlock(handle)
 
 POSIX uses fcntl.flock. Windows has no fcntl, so it locks one byte at offset 0 with
-msvcrt.locking. LK_NBLCK fails at once when another process holds the byte, and lock() retries
-until it is held; LK_LOCK would wait a second between its own ten tries and then give up.
+msvcrt.locking. LK_NBLCK fails at once with EACCES when another process holds the byte, and lock()
+retries until it is held; LK_LOCK would wait a second between its own ten tries and then give up.
+Any other error is raised, so a broken handle fails the hook instead of hanging it.
 Python 3.8-compatible.
 
 Tests: bin/lib/file-lock.test.sh
 """
 
+import errno
 import time
 
 try:
@@ -35,7 +37,9 @@ def lock(handle):
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             return
-        except OSError:
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EDEADLK):  # held elsewhere: EACCES, or EDEADLK (36, the CRT's EDEADLOCK)
+                raise
             time.sleep(RETRY_SECONDS)
 
 
