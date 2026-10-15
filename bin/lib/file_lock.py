@@ -8,8 +8,9 @@
 
 POSIX uses fcntl.flock. Windows has no fcntl, so it locks one byte at offset 0 with
 msvcrt.locking. LK_NBLCK fails at once with EACCES when another process holds the byte, and lock()
-retries until it is held; LK_LOCK would wait a second between its own ten tries and then give up.
-Any other error is raised, so a broken handle fails the hook instead of hanging it.
+retries until it is held; LK_LOCK would wait a second between its own ten tries and then give up
+with EDEADLOCK, which lock() also treats as contention. Any other error is raised, so a broken
+handle fails the hook instead of hanging it.
 Python 3.8-compatible.
 
 Tests: bin/lib/file-lock.test.sh
@@ -38,7 +39,8 @@ def lock(handle):
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             return
         except OSError as error:
-            if error.errno not in (errno.EACCES, errno.EDEADLK):  # held elsewhere: EACCES, or EDEADLK (36, the CRT's EDEADLOCK)
+            # EACCES is LK_NBLCK's "held elsewhere"; EDEADLK (36, the CRT's EDEADLOCK) is the blocking modes'.
+            if error.errno not in (errno.EACCES, errno.EDEADLK):
                 raise
             time.sleep(RETRY_SECONDS)
 

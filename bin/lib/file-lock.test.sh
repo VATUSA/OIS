@@ -100,7 +100,8 @@ except OSError as error:
 sys.stdout.flush()
 os._exit(0)  # past the timer
 PY
-OUT="$(python3 -I "$WORK/win.py" "$LIB" "$WORK/win.lock")"
+# tr: Python on Windows ends each printed line with CR LF.
+OUT="$(python3 -I "$WORK/win.py" "$LIB" "$WORK/win.lock" | tr -d '\r')"
 LK="$(grep '^lock ' <<<"$OUT")"; UN="$(grep '^unlock ' <<<"$OUT")"
 [[ "$LK" == "lock [(0, 2, 1), (0, 2, 1), (0, 2, 1)]" ]] \
     && ok "lock() seeks to 0 and locks one byte with LK_NBLCK, retrying after EACCES and EDEADLK until it holds" \
@@ -120,11 +121,11 @@ for path in sys.argv[1:]:
     names = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
     names += [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     print("%s fcntl=%d file_lock=%d" % (path.rsplit("/", 1)[-1], "fcntl" in names, "file_lock" in names))'
-OUT="$(python3 -I -c "$SCAN" "$ROOT/.claude/hooks/lib/marker_ledger.py" "$LIB/marker_manifest.py")"
+OUT="$(python3 -I -c "$SCAN" "$ROOT/.claude/hooks/lib/marker_ledger.py" "$LIB/marker_manifest.py" | tr -d '\r')"
 [[ "$OUT" == $'marker_ledger.py fcntl=0 file_lock=1\nmarker_manifest.py fcntl=0 file_lock=1' ]] \
     && ok "neither module imports fcntl, and both import file_lock" || bad "import scan: $OUT"
 printf 'def f():\n    import fcntl\n' > "$WORK/a.py"; printf 'try:\n    from fcntl import flock\nexcept ImportError:\n    pass\n' > "$WORK/b.py"
-OUT="$(python3 -I -c "$SCAN" "$WORK/a.py" "$WORK/b.py")"
+OUT="$(python3 -I -c "$SCAN" "$WORK/a.py" "$WORK/b.py" | tr -d '\r')"
 [[ "$OUT" == $'a.py fcntl=1 file_lock=0\nb.py fcntl=1 file_lock=0' ]] \
     && ok "the scan finds an fcntl import inside a function and a from-import inside a try" || bad "scan control: $OUT"
 
@@ -155,14 +156,19 @@ blocked_while_held() {
 open_ledger() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import marker_ledger
 marker_ledger.Ledger(sys.argv[2]).close()' "$REPO/.claude/hooks/lib" "$REPO"; }
 mkdir -p "$REPO/.git/ois-marker-ledger"
-if blocked_while_held "$LEDGER_LOCK" open_ledger; then ok "the ledger waits for its lock under python3 -I, then opens and saves"
-else bad "the ledger did not wait for its lock, or failed once it was free"; fi
+rm -f "$REPO/.git/ois-marker-ledger/ledger.json"
+sealed() { python3 -I -c 'import json, sys; sys.path.insert(0, sys.argv[1]); import marker_ledger
+stored = json.load(open(sys.argv[2])); sys.exit(stored["seal"] != marker_ledger.seal(stored["state"]))' \
+    "$REPO/.claude/hooks/lib" "$REPO/.git/ois-marker-ledger/ledger.json"; }
+if blocked_while_held "$LEDGER_LOCK" open_ledger && sealed; then ok "the ledger waits for its lock under python3 -I, then opens and saves a sealed state"
+else bad "the ledger did not wait for its lock, failed once it was free, or saved no sealed state"; fi
 stamp() { (cd "$WORK" && python3 -I "$REPO/bin/lib/marker_manifest.py" stamp "$REPO" tests "$SHA"); }
 mkdir -p "$REPO/.claude/markers"
 if blocked_while_held "$REPO/.claude/markers/.manifest.lock" stamp \
     && python3 -I "$REPO/bin/lib/marker_manifest.py" vouched "$REPO" tests "$SHA"
 then ok "stamp, run under python3 -I from another directory, waits for the manifest lock and writes its line"
 else bad "stamp did not wait for the manifest lock, or wrote no vouched line"; fi
+# Only where Python writes bytecode beside the module can this fail: macOS's system Python sets a pycache_prefix.
 [[ ! -e "$REPO/bin/lib/__pycache__" ]] && ok "importing the helper leaves no __pycache__ beside it" || bad "bin/lib/__pycache__ was written"
 
 echo "The marker modules unlock before they close, so the lock is free even while a handle lingers:"
@@ -224,7 +230,7 @@ print(json.dumps({"tool_name": tool, "tool_use_id": sys.argv[1], "tool_input": {
 }
 recorded() {
     (cd "$REPO" && python3 -I -c 'import json, sys
-print(" ".join(sorted(json.load(open(sys.argv[1]))["state"]["snapshots"])))' "$(git rev-parse --path-format=absolute --git-common-dir)/ois-marker-ledger/ledger.json")
+print(" ".join(sorted(json.load(open(sys.argv[1]))["state"]["snapshots"])))' "$(git rev-parse --path-format=absolute --git-common-dir)/ois-marker-ledger/ledger.json" | tr -d '\r')
 }
 for call in "toolu_bash Bash command ls" "toolu_write Write file_path notes.txt" "toolu_edit Edit file_path README"; do
     read -r ID TOOL FIELD VALUE <<<"$call"
