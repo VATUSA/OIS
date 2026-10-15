@@ -280,6 +280,7 @@ done
 for line in "just test > .claude/x.log" "just test > $REPO/.claude/markers/manifest" "just test > $REPO/.claude/x.log"; do
     [[ "$(count_in_wt "$line")" == 0 ]] && ok "stamps '' in a worktree: $line" || bad "stamps in a worktree: $line"
 done
+expect_stamps "" "cd $WT && just test > ../../markers/x.log"
 git -C "$REPO" worktree remove --force "$WT" && git -C "$REPO" branch -q -D wt-branch
 expect_stamps "" "echo \$X; just test"
 expect_stamps "" "echo \"\${X:=y}\"; just test"
