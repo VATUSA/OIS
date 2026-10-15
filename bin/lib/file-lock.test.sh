@@ -61,6 +61,26 @@ else bad "the second holder: asked at ${START:-?}, got it at ${GOT:-?}, first un
 if [[ -n "$UNLOCKED" ]] && python3 -c 'import sys; sys.exit(not float(sys.argv[2]) - float(sys.argv[1]) < 1.5)' "$UNLOCKED" "$GOT"
 then ok "unlock() lets the waiter in while the first holder is still running"
 else bad "the waiter got in at ${GOT:-?}, not soon after the unlock at ${UNLOCKED:-never}: only the holder's exit freed it"; fi
+# A worktree on an older branch stamps with raw fcntl.flock, so on POSIX the helper must wait on that holder too.
+# On Linux an fcntl/lockf lock ignores a flock one, so a helper that switched primitive would let a stamp through.
+if python3 -I -c 'import fcntl' 2>/dev/null; then
+    mkdir -p "$WORK/raw"
+    python3 -I -c 'import fcntl, os, sys, time
+handle = open(sys.argv[1], "a+"); fcntl.flock(handle, fcntl.LOCK_EX)
+open(os.path.join(sys.argv[2], "held"), "w").close(); time.sleep(1.5)
+open(os.path.join(sys.argv[2], "unlocked"), "w").write(repr(time.time())); fcntl.flock(handle, fcntl.LOCK_UN); time.sleep(2)' \
+        "$WORK/raw.lock" "$WORK/raw" &
+    RAW=$!
+    for _ in $(seq 100); do [[ -e "$WORK/raw/held" ]] && break; sleep 0.1; done
+    read -r START GOT <<<"$(contender "$WORK/raw.lock")"
+    wait "$RAW"
+    UNLOCKED="$(cat "$WORK/raw/unlocked" 2>/dev/null)"
+    if [[ -e "$WORK/raw/held" && -n "$UNLOCKED" ]] && python3 -c 'import sys; start, got, unlocked = map(float, sys.argv[1:4]); sys.exit(not start < unlocked <= got)' "$START" "$GOT" "$UNLOCKED"
+    then ok "on POSIX, lock() waits on a holder that took a raw fcntl.flock"
+    else bad "a raw fcntl.flock holder: lock() asked at ${START:-?}, got it at ${GOT:-?}, holder unlocked at ${UNLOCKED:-never}"; fi
+else
+    echo "  SKIP: no fcntl here, so no older-branch flock holder to exclude"
+fi
 
 echo "The Windows branch (fcntl unimportable, a fake msvcrt):"
 # The script goes through a file: bash 3.2 (macOS) misparses a heredoc inside $(...).
