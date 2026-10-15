@@ -64,7 +64,8 @@ else bad "the waiter got in only after the first holder exited, so unlock() rele
 echo "The Windows branch (fcntl unimportable, a fake msvcrt):"
 # The script goes through a file: bash 3.2 (macOS) misparses a heredoc inside $(...).
 cat > "$WORK/win.py" <<'PY'
-import os, sys, types
+import os, sys, threading, types
+threading.Timer(10, lambda: (print("lock() never returned"), sys.stdout.flush(), os._exit(3))).start()  # a loop that never ends fails
 sys.modules["fcntl"] = None  # `import fcntl` now raises ImportError, as on Windows
 calls, failures = [], [2]
 fake = types.ModuleType("msvcrt")
@@ -88,6 +89,8 @@ del calls[:]
 handle.seek(3)
 file_lock.unlock(handle)
 print("unlock", calls)
+sys.stdout.flush()
+os._exit(0)  # past the timer
 PY
 OUT="$(python3 -I "$WORK/win.py" "$LIB" "$WORK/win.lock")"
 LK="$(grep '^lock ' <<<"$OUT")"; UN="$(grep '^unlock ' <<<"$OUT")"

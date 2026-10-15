@@ -373,10 +373,11 @@ while [[ ! -e "$WORK/locked" ]]; do sleep 0.1; done
 (payload toolu_lock "just test" 0 | (cd "$REPO" && bash .claude/hooks/marker-audit.sh > "$WORK/lock.out" 2>&1)) &
 AUDIT=$!
 sleep 1.5 # the audit is now waiting on the lock; a stamp finishing meanwhile appends its line
+WAITING=0; kill -0 "$AUDIT" 2>/dev/null && WAITING=1
 date +%s > "$M/tests/$SHA" && printf 'tests %s %s\n' "$SHA" "$(sha256sum < "$M/tests/$SHA" | cut -d' ' -f1)" >> "$M/manifest"
 wait "$HOLDER" "$AUDIT"
-if vouched "$REPO" tests "$SHA" && grep -q "dropped: code-review $OTHER_SHA" "$WORK/lock.out" && [[ "$(lines)" == 1 ]] && passes tests
-then ok "a stamp that lands while the audit waits is kept, the forged line beside it dropped"; else bad "stamp during an audit, $(lines) line(s): $(head -c 240 "$WORK/lock.out")"; fi
+if [[ $WAITING -eq 1 ]] && vouched "$REPO" tests "$SHA" && grep -q "dropped: code-review $OTHER_SHA" "$WORK/lock.out" && [[ "$(lines)" == 1 ]] && passes tests
+then ok "a stamp that lands while the audit waits is kept, the forged line beside it dropped"; else bad "stamp during an audit (audit still waiting: $WAITING), $(lines) line(s): $(head -c 240 "$WORK/lock.out")"; fi
 rm -rf "$M" "$WORK/locked" && call "ls"
 
 echo "The ledger's own state is sealed:"
