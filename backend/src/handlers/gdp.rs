@@ -890,6 +890,88 @@ mod tests {
         .unwrap()
     }
 
+    /// #815: a ground flight's ETD is its estimated wheels-up, so the `max_enroute_min` tier counts
+    /// its airborne minutes, not its ground allowance on top. A tier between the airborne time and the
+    /// gate-to-arrival time (airborne + 11 min) controls the flight; one below the airborne time
+    /// exempts it.
+    #[sqlx::test]
+    async fn the_enroute_tier_counts_airborne_minutes_not_the_ground_allowance(pool: PgPool) {
+        use crate::feed::airports::Airport;
+        use crate::feed::taxi_estimate::TaxiSample;
+        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+        use std::sync::Arc;
+
+        let state = test_state(pool, HashMap::new());
+        {
+            let mut feed = state.feed.write().await;
+            feed.airports = Arc::new(HashMap::from([
+                ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
+                ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ]));
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: vec![Pilot {
+                    callsign: "GRD1".into(),
+                    latitude: 42.3656,
+                    longitude: -71.0096,
+                    flight_plan: Some(FlightPlan {
+                        departure: "KBOS".into(),
+                        arrival: "KJFK".into(),
+                        route: "DCT".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })));
+        }
+        // Five samples at KBOS's airport tier: 50 + 40 + 570 = 660 s.
+        let sample = || TaxiSample {
+            gate_id: None,
+            aircraft: None,
+            runway: None,
+            pushback_sec: Some(50),
+            startup_sec: Some(40),
+            taxi_sec: 570,
+        };
+        state.taxi_estimate_samples.store(Arc::new(HashMap::from([(
+            "KBOS".to_string(),
+            (0..5).map(|_| sample()).collect::<Vec<_>>(),
+        )])));
+
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let inbounds = live_inbounds(&state, "KJFK", now).await;
+        let grd = inbounds
+            .iter()
+            .find(|f| f.cs == "GRD1")
+            .expect("GRD1 inbound");
+        assert_eq!(
+            grd.etd_ms,
+            Some(now_ms + 660_000),
+            "wheels-up is now + 660 s"
+        );
+        let airborne_min = (grd.eta_ms - grd.etd_ms.unwrap()) / 60_000;
+
+        let ration = |tier: i64| {
+            gdp::ration_by_schedule(
+                inbounds.clone(),
+                &gdp::RateSchedule::flat(60, now_ms),
+                now_ms,
+                now_ms + 6 * 3_600_000,
+                true,
+                &[],
+                Some(tier as i32),
+            )
+            .into_iter()
+            .find(|a| a.cs == "GRD1")
+            .unwrap()
+        };
+        let inside = ration(airborne_min + 5);
+        assert!(inside.controlled, "{:?}", inside.exempt_reason);
+        let beyond = ration(airborne_min - 1);
+        assert_eq!(beyond.exempt_reason.as_deref(), Some(gdp::EXEMPT_TIER));
+    }
+
     /// AC1 — publishing a GDP produces its advisory, in the same transaction as the publish.
     #[sqlx::test]
     async fn publishing_a_gdp_generates_its_advisory(pool: PgPool) {

@@ -174,7 +174,7 @@ HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
 stampers() { (cd "$REPO" && python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import marker_write as m
 print(" ".join("%s:%s" % (kind, sha[:7]) for _root, kind, sha in m.stampers(sys.argv[2], sys.argv[3])))' \
     "$ROOT/.claude/hooks/lib" "$1" "$REPO"); }
-expect_stamps() { local got; got="$(stampers "$2")"; [[ "$got" == "$1" ]] && ok "stamps '$1': $2" || bad "$2 (want '$1', got '$got')"; }
+expect_stamps() { local got; got="$(stampers "$2" 2>/dev/null)" || got="crashed"; [[ "$got" == "$1" ]] && ok "stamps '$1': $2" || bad "$2 (want '$1', got '$got')"; }
 expect_stamps "tests:${HEAD_SHA:0:7}" "just test"
 expect_stamps "tests:${HEAD_SHA:0:7}" "just test 2>&1 | tail -20"
 expect_stamps "tests:${HEAD_SHA:0:7}" "just test > /tmp/out.txt 2>&1"
@@ -213,6 +213,20 @@ expect_stamps "" "cd $REPO && bash bin/run-tests.sh"
 expect_stamps "" "cd $REPO && just test rust -p ois-backend"
 expect_stamps "" "pushd $REPO && just test"
 expect_stamps "" "timeout 600 just test"
+echo "...and exactly \`cd ABSDIR && bash bin/review-marker.sh KIND SHA\`, with ABSDIR's own script:"
+expect_stamps "code-review:${SHA:0:7} review-shipping:${SHA:0:7}" "cd $REPO && bash bin/review-marker.sh shipping $SHA"
+expect_stamps "code-review:${SHA:0:7}" "cd $REPO && sh bin/review-marker.sh code-review $SHA"
+expect_stamps "code-review:${SHA:0:7}" "cd $REPO && bin/review-marker.sh code-review $SHA"
+expect_stamps "" "cd $REPO && bash $WORK/elsewhere/bin/review-marker.sh shipping $SHA"
+expect_stamps "" "bash $WORK/elsewhere/bin/review-marker.sh shipping $SHA"
+expect_stamps "" "cd $REPO && bash bin/review-marker.sh bogus $SHA"
+expect_stamps "" "cd $REPO && bash bin/review-marker.sh shipping ${SHA:0:12}"
+expect_stamps "" "cd $REPO/bin && bash $REPO/bin/review-marker.sh code-review $SHA"
+expect_stamps "code-review:${SHA:0:7}" "cd $REPO && bash $REPO/bin/review-marker.sh code-review $SHA"
+expect_stamps "code-review:${SHA:0:7}" "cd $REPO && bash bin/review-marker.sh code-review $SHA > /tmp/out.txt 2>&1"
+expect_stamps "" "cd $REPO && bash bin/review-marker.sh code-review $SHA > .claude/out.txt"
+expect_stamps "" "cd $REPO && bash bin/review-marker.sh code-review $SHA | tail -5"
+expect_stamps "" "cd $REPO && bash"
 expect_stamps "" "X=1 just test"
 expect_stamps "" "just test \$(touch x)"
 expect_stamps "" "echo \`touch x\` && just test"
@@ -266,6 +280,7 @@ done
 for line in "just test > .claude/x.log" "just test > $REPO/.claude/markers/manifest" "just test > $REPO/.claude/x.log"; do
     [[ "$(count_in_wt "$line")" == 0 ]] && ok "stamps '' in a worktree: $line" || bad "stamps in a worktree: $line"
 done
+expect_stamps "" "cd $WT && just test > ../../markers/x.log"
 git -C "$REPO" worktree remove --force "$WT" && git -C "$REPO" branch -q -D wt-branch
 expect_stamps "" "echo \$X; just test"
 expect_stamps "" "echo \"\${X:=y}\"; just test"

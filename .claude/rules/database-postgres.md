@@ -240,3 +240,7 @@ DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois_wt_<id> BIND_ADDR=127.0.0.1:3
 
 Migrations apply on startup. Don't set `DATABASE_URL` to an empty string: only an unset variable runs
 the backend without a database; a blank one fails the boot.
+
+Stop what you started by the PID you recorded when you started it (`$!`, or a pidfile in your
+scratchpad). Never `pkill -f target/debug/ois-backend` or another path pattern: it matches every
+worktree's backend and kills other sessions' stacks.

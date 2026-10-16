@@ -1930,6 +1930,7 @@ fn build_candidates(
             airborne,
             cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
+            ground_allowance_ms: (allowance * 1000.0) as i64,
         });
         let mut flight = fca_flight(
             &p.callsign,
@@ -2017,6 +2018,15 @@ fn separation_ms(fca: &FcaBody, cross_speed: f64) -> i64 {
     }
 }
 
+/// The release (wheels-up, epoch ms) that crosses the FCA at `cta_ms`: the CTA less the airborne ETE.
+///
+/// A ground flight's `eta_ms` carries its ground allowance (pushback, start-up and taxi), so
+/// `eta − now` runs from the gate. Every reader treats the stored release as wheels-up, so only the
+/// airborne part is backed out (#815).
+fn release_ms(cta_ms: i64, eta_ms: i64, now_ms: i64, ground_allowance_ms: i64) -> i64 {
+    cta_ms - (eta_ms - now_ms - ground_allowance_ms)
+}
+
 /// The crossing time to pin when a controller marks an aircraft ready (#356).
 ///
 /// This is the whole of the RDY decision — `mark_release` only chooses between it and an explicit
@@ -2056,7 +2066,15 @@ fn finalize(
     mut flights: Vec<FcaFlight>,
     metas: &[fca::MeterInput],
 ) -> Vec<FcaFlight> {
-    let order = manual_order(fca, &flights);
+    meter_in_place(fca, &mut flights, metas);
+    flights.sort_by_key(|f| f.seq);
+    flights
+}
+
+/// [`finalize`]'s metering without its sort: `flights` stays aligned with `metas`, so a caller can
+/// read each flight's own input by position.
+fn meter_in_place(fca: &FcaBody, flights: &mut [FcaFlight], metas: &[fca::MeterInput]) {
+    let order = manual_order(fca, flights);
     let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
     for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
@@ -2067,8 +2085,6 @@ fn finalize(
         f.delay_nm = (m.delay_sec as f64 / 3600.0 * input.cross_speed).round() as i64;
         f.seq = m.seq;
     }
-    flights.sort_by_key(|f| f.seq);
-    flights
 }
 
 /// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
@@ -2315,7 +2331,7 @@ pub async fn list_idst(
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
         for (fca, releases, holders) in &fca_releases {
-            let (flights, metas) = build_candidates(
+            let (mut flights, metas) = build_candidates(
                 fca,
                 &snap.data,
                 ap.as_ref(),
@@ -2332,18 +2348,30 @@ pub async fn list_idst(
                 now,
                 false,
             );
-            for f in finalize(fca, flights, &metas) {
+            // Pair each flight with its own ground allowance before `meter_in_place`'s order is
+            // sorted: `metas` lines up with `flights` by position only.
+            meter_in_place(fca, &mut flights, &metas);
+            let mut rows: Vec<(FcaFlight, i64)> = flights
+                .into_iter()
+                .zip(metas.iter().map(|m| m.ground_allowance_ms))
+                .collect();
+            rows.sort_by_key(|(f, _)| f.seq);
+            for (f, allowance_ms) in rows {
                 if f.status != "ground" || !airports.contains(&f.dep.to_ascii_uppercase()) {
                     continue;
                 }
                 // For released flights the frozen wheels-up; otherwise an *advisory* EDCT — the
-                // wheels-up that would hit the metered crossing, backing out the modeled transit
-                // (eta − now) from the metered CTA. Lets the controller see the proposed release.
+                // wheels-up that would hit the metered crossing, the same `release_ms` a release
+                // stores. Lets the controller see the proposed release.
                 let edct = if f.released {
                     f.edct
                 } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {
-                    let transit_ms = eta.timestamp_millis() - now.timestamp_millis();
-                    DateTime::from_timestamp_millis(cta.timestamp_millis() - transit_ms)
+                    DateTime::from_timestamp_millis(release_ms(
+                        cta.timestamp_millis(),
+                        eta.timestamp_millis(),
+                        now.timestamp_millis(),
+                        allowance_ms,
+                    ))
                 } else {
                     None
                 };
@@ -2479,17 +2507,22 @@ pub async fn mark_release(
         .position(|f| f.callsign == callsign)
         .ok_or(ApiError::NotFound)?; // not currently crossing
     let eta_ms = metas[ti].eta_ms;
+    let allowance_ms = metas[ti].ground_allowance_ms;
 
     let order = manual_order(&fca, &flights);
     let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
 
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
-        // SET: pin the crossing so wheels-up lands on the requested time.
-        Some(ready) => parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)? + (eta_ms - now_ms),
+        // SET: pin the crossing so wheels-up lands on the requested time: the typed time is a
+        // runway time, so the crossing is that plus the airborne ETE alone (#815).
+        Some(ready) => {
+            let ready_ms = parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)?;
+            ready_ms + (eta_ms - now_ms - allowance_ms)
+        }
         // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
     };
-    let edct = cta - (eta_ms - now_ms);
+    let edct = release_ms(cta, eta_ms, now_ms, allowance_ms);
     let Some(version) =
         flow_repo::upsert_release(pool, &id, &callsign, cta, edct, &by, expect).await?
     else {
@@ -3769,7 +3802,7 @@ mod data_refresh_claim_tests {
 
 #[cfg(test)]
 mod release_spacing_tests {
-    use super::{RELEASE_MARGIN_MS, committed_crossings, rdy_slot, separation_ms};
+    use super::{RELEASE_MARGIN_MS, committed_crossings, rdy_slot, release_ms, separation_ms};
     use crate::feed::fca::{self, MeterInput};
     use crate::models::FcaBody;
     use chrono::Utc;
@@ -3782,6 +3815,7 @@ mod release_spacing_tests {
             airborne,
             cross_speed: 300.0,
             frozen_ms,
+            ground_allowance_ms: 0,
         }
     }
 
@@ -4011,6 +4045,26 @@ mod release_spacing_tests {
         fca.mode = "rate".into();
         fca.rate = 0;
         assert_eq!(separation_ms(&fca, 300.0), 0, "no rate set -> no spacing");
+    }
+
+    /// #815 AC1 (FCA path): a ground flight's release is its CTA less the airborne ETE, not less the
+    /// whole ground ETA (allowance + flight).
+    #[test]
+    fn release_is_the_cta_less_the_airborne_ete() {
+        use chrono::TimeZone;
+        let at = |h, m| {
+            Utc.with_ymd_and_hms(2026, 10, 10, h, m, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        // Now 13:00; an 11 min allowance and a 30 min airborne ETE put the ETA at 13:41.
+        assert_eq!(
+            release_ms(at(14, 0), at(13, 41), at(13, 0), 660_000),
+            at(13, 30),
+            "not 13:19, the gate time"
+        );
+        // Airborne: no allowance, so the whole ETA is airborne time.
+        assert_eq!(release_ms(at(14, 0), at(13, 30), at(13, 0), 0), at(13, 30));
     }
 }
 

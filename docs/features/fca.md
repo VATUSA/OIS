@@ -231,9 +231,10 @@ numbers are the order itself (`:399-401`).
   `RELEASE_MARGIN_MS` = 15 s (`:508`). In auto mode, `earliest_slot` against every other pinned
   flight at its **metered** time (`committed_crossings`, `:2099`, #356), with the margin added to
   the separation.
-- **SET**: the typed time plus the modeled transit (`handlers/flow.rs:2596`). **Owned by #816.**
-- The stored EDCT is `cta - (eta - now)` (`handlers/flow.rs:2600`). **Owned by #815** (PR #829,
-  not yet on `next`).
+- **SET**: the typed time plus the airborne ETE, `eta - now - ground_allowance`
+  (`handlers/flow.rs:2630`, #815). It runs no slot search; that is **owned by #816**.
+- The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
+  (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
 **Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, and four manual-order cases.
@@ -361,8 +362,11 @@ All of them share one inclusion rule. They do not share one ETA: see the runway 
 planner, because both read `list_fcas`. This matches #586 and #746 as built.
 
 **Tests.** `mod fca_traffic_visibility_tests` (`handlers/flow.rs:5939`). IDST has router tests
-for provenance only (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`). No test covers the
-`fca_counts` handler, `hist_fcas`, or IDST's advisory EDCT.
+for provenance (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`) and for its advisory
+EDCT: `idst_proposes_the_same_edct_a_release_stores` and
+`idst_gives_a_pilot_with_a_lingering_prefile_one_row_and_its_own_allowance`. The `fca_counts`
+handler is covered through the router by `handlers/flow_prefile_candidate_tests.rs` (#834). No test
+covers `hist_fcas`.
 
 ### Findings, area 5
 

@@ -20,6 +20,32 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404` for a callsign that
   is only prefiled. A caller that filtered `proposed` rows out needs do nothing; one that released
   prefiled flights must wait for the pilot to connect. (#834)
+- **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
+  `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
+  flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min
+  when none parses), plus the ground allowance. It was the same time with no allowance. Every time backed
+  out of it moves with it, so for a ground or prefiled flight each of these is one ground allowance later
+  than before: `FlowFlight.cfr`, the EDCTs a GDP assigns, the `edct` a release stores when
+  `POST /api/v1/flow/fcas/{id}/release/{callsign}` is sent without a `ready` time, and the advisory
+  `edct` on `GET /api/v1/flow/idst`. Each is now the CTA less the airborne flight time.
+  - `POST /api/v1/tmu/cfr` without a `ready_time` locks the flight's `FlowFlight.cfr`, else its
+    `FlowFlight.etd`, and now only when the flow has neither (the flight is not listed, or is airborne).
+    It locked `cfr` or now, so a ground flight bound for an airport with no program now gets its
+    wheels-up estimate instead of the current time.
+  - With a `ready_time` and an airport-flow program, `POST /api/v1/tmu/cfr` locks the later of that
+    time and now, pushed later only if the flight's arrival would conflict. It now projects the arrival
+    by the airborne flight time alone.
+  - A release sent with a `ready` time still stores that time as its `edct`, and now stores a CTA one
+    allowance earlier: the typed time plus the airborne flight time.
+  - For a flight holding an issued CFR, `FlowFlight.sta` and `delay_min` are one allowance earlier: the
+    locked wheels-up plus the airborne flight time.
+  - A GDP's `max_enroute_min` tier counts a ground flight's airborne minutes, without its ground
+    allowance, so the set of flights a GDP controls can change. That reaches
+    `GET /api/v1/tmu/gdp/{id}/board`, `POST /api/v1/tmu/gdp/{id}/publish`, `PUT /api/v1/tmu/gdp/{id}`,
+    `POST /api/v1/tmu/gdp/{id}/slots/{callsign}` and `POST /api/v1/tmu/gdp/{id}/compress`.
+
+  Releases and CFRs stored before the change keep their stored value. The shapes are unchanged; a tool
+  that read `etd` as an off-block time should read it as wheels-up.
 - **New:** `PUT /api/v1/flow/sector-consolidations/{artcc}` changes several of one ARTCC's sector
   consolidations in one request. The body is `{ "into": { "<sector_id>": "<target_sector_id>" | null } }`:
   each sector is worked at the target given, or given its own row back for `null`. It needs

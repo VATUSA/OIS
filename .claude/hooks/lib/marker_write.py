@@ -234,16 +234,24 @@ def stamps(words, cwd):
 
 
 def cd_stamper(groups):
-    """The checkout root DIR when the line is exactly `cd DIR && just test`, DIR an absolute literal path
-    that is itself a checkout's root (the form a shared working directory needs); else None."""
+    """(DIR, stamps) when the line is exactly `cd DIR && STAMPER`, DIR an absolute literal path that is
+    itself a checkout's root and STAMPER a bare stamper as `stamps` reads it from DIR (`just test`, or
+    `bash bin/review-marker.sh KIND SHA`): the form a session whose working directory is another
+    checkout needs. Else None."""
     if len(groups) != 2:
         return None
     (first, _, operator), (second, _, _) = groups
-    if first[:1] != ["cd"] or len(first) != 2 or operator != "&&" or second != ["just", "test"]:
+    if first[:1] != ["cd"] or len(first) != 2 or operator != "&&":
         return None
     directory = first[1]
     root = toplevel(directory) if absolute_literal(directory) and os.path.isdir(directory) else None
-    return root if root and os.path.realpath(root) == os.path.realpath(directory) else None
+    if not root or os.path.realpath(root) != os.path.realpath(directory):
+        return None
+    script = second[1:] if second[:1] in (["bash"], ["sh"]) else second
+    if second != ["just", "test"] and os.path.basename(script[0] if script else "") != "review-marker.sh":
+        return None
+    stamped = stamps(second, root)
+    return (root, stamped) if stamped is not None else None
 
 
 def stampers(command, cwd):
@@ -252,7 +260,7 @@ def stampers(command, cwd):
     command a stamper as stamps reads it or a plain_read, which a prefix (`X=1`, `timeout 5`) or a shell
     reading a heredoc is not; every write redirect to a literal path
     outside `.claude/` and the git directory (outside_guarded: `just test > /tmp/out.txt 2>&1`); and
-    no cd but the one form cd_stamper reads, which stamps tests for that checkout's HEAD."""
+    no cd but the one form cd_stamper reads, which stamps for that checkout."""
     try:
         text = join_and_strip(split_heredocs(drop_quoted_cat_blocks(command))[0])
         if substitutions(text):
@@ -262,12 +270,11 @@ def stampers(command, cwd):
     except Unparseable:
         return []
     elsewhere = cd_stamper(commands_found)
-    root = elsewhere or toplevel(cwd)
-    if not root or not all(outside_guarded(target, elsewhere or cwd) for target in targets):
+    root = elsewhere[0] if elsewhere else toplevel(cwd)
+    if not root or not all(outside_guarded(target, root if elsewhere else cwd) for target in targets):
         return []
     if elsewhere:
-        head = git_line(elsewhere, "rev-parse", "HEAD")
-        return [(elsewhere, "tests", head)] if head else []
+        return [(root, kind, sha) for kind, sha in elsewhere[1]]
     found = []
     for words, _here, _operator in commands_found:
         stamped = stamps(words, cwd)

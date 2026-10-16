@@ -38,6 +38,36 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-16-wheels-up-releases",
+    date: "2026-10-16",
+    title: "Sector data loads itself, and release times are wheels-up",
+    sections: [
+      {
+        heading: "Sector Monitor",
+        highlights: [
+          "The Sector Monitor and the admin Sectors page are no longer empty. The server now loads the sector volumes when it starts and checks for an update every 24 hours, instead of waiting for someone to run an import by hand.",
+          "The admin Sectors map draws its sector polygons again.",
+          "Sectors has moved from its own Flow heading into the Admin group of the sidebar, as the last item. Its address has not changed, so links and favorites still work.",
+        ],
+      },
+      {
+        heading: "Flow, TMU and FCAs",
+        highlights: [
+          "A release's EDCT is now a wheels-up time: the CTA less the flight's airborne time. It used to take the taxi time off as well, so a departure that took off on its EDCT reached the FCA one taxi time early.",
+          "Airport-flow CFRs, GDP EDCTs and the proposed EDCT on IDST follow the same rule, so each matches the release the flight would get.",
+          "A GDP's maximum-enroute tier now counts airborne minutes only, so a flight just over the limit before can now be controlled.",
+          "Issuing a CFR without a ready time now locks the flight's estimated wheels-up instead of the current time.",
+        ],
+      },
+      {
+        heading: "Security",
+        highlights: [
+          "Updates the TLS library behind every outbound connection, fixing four published security advisories.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-09-sector-monitor",
     date: "2026-10-09",
     title: "The Sector Monitor, controller access, and a reset to VATUSA",

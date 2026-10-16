@@ -9,7 +9,8 @@ for each marker they write (bin/lib/marker_manifest.py). Any process can append 
 records which lines the hooks accepted, per checkout. Before each call the snapshot notes what that call
 may stamp (marker_write.stampers): a line that is nothing but a stamper and reads, the stamper being
 `just test`, this checkout's bin/run-tests.sh (tests for HEAD) or bin/review-marker.sh KIND SHA, with
-no cd, or exactly `cd ABSDIR && just test` for the checkout at ABSDIR.
+no cd, or exactly `cd ABSDIR && just test` or `cd ABSDIR && [bash|sh] bin/review-marker.sh KIND SHA` for the
+checkout at ABSDIR (`cd ABSDIR && bash bin/run-tests.sh` does not stamp).
 
 A new line is accepted in two ways only: by the audit of the very call whose snapshot covers its kind and
 SHA, or by a grant. A run_in_background stamper leaves a one-shot grant for each line its own audit did

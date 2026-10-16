@@ -16,7 +16,7 @@ use sqlx::PgPool;
 
 use crate::auth::principal::Principal;
 use crate::feed::airports::Airport;
-use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
 use crate::repos::access::{PermissionScope, sha256_hex};
 use crate::scope_test_support::{artcc, grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
@@ -3689,5 +3689,379 @@ async fn a_session_first_handler_neither_accepts_nor_offers_an_api_key(pool: PgP
     assert_eq!(
         spec["paths"]["/api/v1/admin/groups"]["post"]["security"],
         json!([{ "session": ["access.groups.update"] }]),
+    );
+}
+
+// ==== VATUSA/OIS#815: a release is the CTA less the airborne ETE, not the gate time ================
+
+/// The ground allowance the #815 fixture seeds: medians 50 + 40 + 570 s at KJFK's airport tier. Not
+/// the 780 s default, so a test can tell the learned value was the one subtracted.
+const ALLOWANCE_815_MS: i64 = 660_000;
+
+/// Slack for the bracketed `now` the handlers read internally: calls are milliseconds apart, and the
+/// defect this guards against is a whole allowance (660 s).
+const SLACK_815_MS: i64 = 2_000;
+
+/// [`crossing_state`] plus [`fca`], with KJFK taxi samples for a 660 s allowance, a service account
+/// holding `flow.fca.update`, and TEST1's ETA read from the public traffic list.
+struct Fixture815 {
+    pool: PgPool,
+    state: AppState,
+    fca_id: String,
+    auth: String,
+    /// TEST1's ground ETA to the FCA line, and the window its `now` was taken in. A parked pilot's
+    /// `eta − now` is whole seconds and doesn't depend on `now`, so the airborne ETE lies in
+    /// `[eta − after, eta − before] − allowance`.
+    eta: i64,
+    before: i64,
+    after: i64,
+    /// Where TEST1's route crosses the FCA line.
+    cross: (f64, f64),
+}
+
+impl Fixture815 {
+    /// TEST1 parked at KJFK, from [`crossing_state`]: a connected ground pilot (a prefile is not an
+    /// FCA candidate, #834). No gates are seeded and it isn't rolling, so it takes the airport tier.
+    async fn new(pool: PgPool) -> Self {
+        let state = crossing_state(pool.clone()).await;
+        let sample = || crate::feed::taxi_estimate::TaxiSample {
+            gate_id: None,
+            aircraft: None,
+            runway: None,
+            pushback_sec: Some(50),
+            startup_sec: Some(40),
+            taxi_sec: 570,
+        };
+        state.taxi_estimate_samples.store(Arc::new(HashMap::from([(
+            "KJFK".to_string(),
+            (0..5).map(|_| sample()).collect::<Vec<_>>(),
+        )])));
+        let fca_id = fca(&pool).await;
+        let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+
+        let before = Utc::now().timestamp_millis();
+        let (status, _, traffic) = send_full(
+            &state,
+            http::Method::GET,
+            &format!("/api/v1/flow/fcas/{fca_id}/traffic?debug=true"),
+            &[],
+            None,
+        )
+        .await;
+        let after = Utc::now().timestamp_millis();
+        assert_eq!(status, http::StatusCode::OK, "{traffic}");
+        let flight = &traffic[0];
+        assert_eq!(flight["callsign"], "TEST1", "{traffic}");
+        assert_eq!(flight["status"], "ground", "{traffic}");
+        // Positive control: the seeded samples were read, not the 180/120/480 s default tier.
+        let taxi = &flight["debug"]["taxi_estimate"];
+        assert_eq!(
+            (
+                &taxi["pushback_sec"],
+                &taxi["startup_sec"],
+                &taxi["taxi_sec"]
+            ),
+            (&json!(50), &json!(40), &json!(570)),
+            "{taxi}"
+        );
+        Self {
+            pool,
+            state,
+            fca_id,
+            auth,
+            eta: at(&flight["eta"]),
+            before,
+            after,
+            cross: (
+                flight["cross_lat"].as_f64().unwrap(),
+                flight["cross_lon"].as_f64().unwrap(),
+            ),
+        }
+    }
+
+    /// Assert `ete` is TEST1's airborne ETE: its ground ETA to the line less the 660 s allowance.
+    fn assert_airborne_ete(&self, ete: i64, what: &str) {
+        let (lo, hi) = (
+            self.eta - self.after - ALLOWANCE_815_MS - SLACK_815_MS,
+            self.eta - self.before - ALLOWANCE_815_MS + SLACK_815_MS,
+        );
+        assert!(
+            (lo..=hi).contains(&ete),
+            "{what} must be the airborne ETE in [{lo}, {hi}] ms, got {ete} \
+             (one allowance more means the gate-to-line ETA was used)"
+        );
+    }
+
+    /// POST a release for TEST1 and return the window around it and the stored `(cta_ms, edct_ms)`.
+    async fn release(&self, body: Value) -> (i64, i64, (i64, i64)) {
+        let before = Utc::now().timestamp_millis();
+        let (status, _, response) = send_full(
+            &self.state,
+            http::Method::POST,
+            &format!("/api/v1/flow/fcas/{}/release/TEST1", self.fca_id),
+            &[&self.auth, "If-None-Match: *"],
+            Some(body),
+        )
+        .await;
+        let after = Utc::now().timestamp_millis();
+        assert_eq!(status, http::StatusCode::OK, "{response}");
+        let row =
+            sqlx::query_as("select cta_ms, edct_ms from flow.fca_release where callsign = 'TEST1'")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap();
+        (before, after, row)
+    }
+}
+
+fn at(v: &Value) -> i64 {
+    serde_json::from_value::<chrono::DateTime<Utc>>(v.clone())
+        .unwrap_or_else(|e| panic!("{v} is not a timestamp: {e}"))
+        .timestamp_millis()
+}
+
+/// #815 AC2: RDY through the real router stores a wheels-up `edct_ms`: the CTA less the airborne ETE,
+/// not less the gate-to-line ETA.
+#[sqlx::test]
+async fn mark_release_stores_a_wheels_up_edct(pool: PgPool) {
+    let fx = Fixture815::new(pool).await;
+    let (before, after, (cta, edct)) = fx.release(json!({})).await;
+
+    fx.assert_airborne_ete(cta - edct, "cta − edct");
+    // TEST1 is alone on the FCA, so RDY's slot is its ETA (the release margin only widens spacing
+    // against other crossings), and the release is one allowance after now: the earliest it can be
+    // wheels-up. The old gate time was now itself.
+    assert!(
+        (before + ALLOWANCE_815_MS - SLACK_815_MS..=after + ALLOWANCE_815_MS + SLACK_815_MS)
+            .contains(&edct),
+        "edct {edct} must be now + 660 s, now in [{before}, {after}]"
+    );
+}
+
+/// #815 AC2, the Set path: the typed time is stored as the wheels-up, and the crossing it pins is that
+/// time plus the airborne ETE, not plus the gate-to-line ETA.
+#[sqlx::test]
+async fn mark_release_set_keeps_the_typed_time_as_the_edct(pool: PgPool) {
+    use chrono::Timelike;
+
+    let fx = Fixture815::new(pool).await;
+    let typed = Utc::now() + Duration::hours(1);
+    let expected = typed
+        .with_second(0)
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap()
+        .timestamp_millis();
+    let (_, _, (cta, edct)) = fx
+        .release(json!({ "ready": typed.format("%H%M").to_string() }))
+        .await;
+
+    assert_eq!(edct, expected, "the typed time is the stored wheels-up");
+    fx.assert_airborne_ete(cta - edct, "cta − typed time");
+}
+
+/// #815 AC3: sector demand projects the released flight from its stored wheels-up, and it reaches the
+/// FCA line at the CTA, not one allowance early. It calls the demand handler's two inputs directly
+/// (`locked_wheels_up`, then `project_tracks`): the route bins at 15 min, too coarse to see 660 s.
+#[sqlx::test]
+async fn a_released_flight_reaches_the_fca_line_at_its_cta(pool: PgPool) {
+    use crate::feed::flow::gc_dist;
+
+    let fx = Fixture815::new(pool).await;
+    let (_, _, (cta, edct)) = fx.release(json!({})).await;
+
+    let wheels_up = crate::repos::flow::locked_wheels_up(&fx.pool, &["TEST1".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(wheels_up.get("TEST1"), Some(&edct));
+    let (snapshot, airports) = {
+        let feed = fx.state.feed.read().await;
+        (feed.snapshot.clone().unwrap(), feed.airports.clone())
+    };
+    let tracks = crate::feed::sector_tracks::project_tracks(
+        &snapshot.data,
+        &fx.state.nav.load_full(),
+        &airports,
+        &fx.state.aircraft_profiles.load_full(),
+        &fx.state.winds.load_full(),
+        &wheels_up,
+        &std::collections::HashSet::new(),
+        Utc::now().timestamp_millis(),
+        None,
+    );
+    let track = tracks
+        .iter()
+        .find(|t| t.id == "TEST1")
+        .expect("TEST1 holds a release, so it is projected");
+    let (lat, lon) = fx.cross;
+    let fix = track
+        .fixes
+        .iter()
+        .min_by(|a, b| gc_dist(a.lat, a.lon, lat, lon).total_cmp(&gc_dist(b.lat, b.lon, lat, lon)))
+        .unwrap();
+    // One fix a minute, so the nearest is within 30 s of the crossing; one allowance early is 660 s.
+    assert!(
+        (fix.t_ms - cta).abs() <= 60_000,
+        "reaches the line at {} vs CTA {cta} (Δ {} ms)",
+        fix.t_ms,
+        fix.t_ms - cta
+    );
+}
+
+/// #815: the proposed EDCT on the IDST board is the release RDY then stores, both wheels-up: one
+/// allowance after the handler's `now`, since TEST1 is alone and its slot is its ETA.
+async fn idst_and_rdy_agree(fx: Fixture815) {
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) \
+         values ($1, 'flow.fca.read') on conflict do nothing",
+    )
+    .bind(ROLE)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let (status, _, idst) = send_full(
+        &fx.state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&fx.auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{idst}");
+    let row = &idst["unscheduled"][0];
+    assert_eq!(row["callsign"], "TEST1", "{idst}");
+    let proposed = at(&row["edct"]);
+    fx.assert_airborne_ete(at(&row["cross_time"]) - proposed, "IDST cross_time − edct");
+    let as_of = at(&idst["as_of"]);
+    assert!(
+        (proposed - as_of - ALLOWANCE_815_MS).abs() <= SLACK_815_MS,
+        "IDST proposed {proposed}, as of {as_of}: not one allowance after"
+    );
+
+    let (before, after, (cta, edct)) = fx.release(json!({})).await;
+    fx.assert_airborne_ete(cta - edct, "cta − edct");
+    assert!(
+        (before + ALLOWANCE_815_MS - SLACK_815_MS..=after + ALLOWANCE_815_MS + SLACK_815_MS)
+            .contains(&edct),
+        "RDY stored {edct}, now in [{before}, {after}]: not one allowance after"
+    );
+}
+
+#[sqlx::test]
+async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
+    idst_and_rdy_agree(Fixture815::new(pool).await).await;
+}
+
+/// #815, #834: IDST pairs each row with its own ground allowance. TEST1 is a connected pilot rolling
+/// down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile still lingers (the airport
+/// tier would give 50 + 40 + 570 = 660 s). The prefile adds no row, and the pilot's proposed EDCT
+/// carries its own 990 s, not the 660 s.
+#[sqlx::test]
+async fn idst_gives_a_pilot_with_a_lingering_prefile_one_row_and_its_own_allowance(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let runway_04l = state
+        .runways
+        .ends_for("KJFK")
+        .into_iter()
+        .find(|e| e.id == "04L")
+        .expect("KJFK 04L is in the bundled runway data");
+    let plan = FlightPlan {
+        departure: "KJFK".into(),
+        arrival: "KDCA".into(),
+        route: "RBV WHITE SIE".into(),
+        ..Default::default()
+    };
+    {
+        let mut feed = state.feed.write().await;
+        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            pilots: vec![crate::feed::vatsim::Pilot {
+                callsign: "TEST1".into(),
+                latitude: 40.64,
+                longitude: -73.78,
+                heading: runway_04l.hdg as i64,
+                groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
+                flight_plan: Some(plan.clone()),
+                ..Default::default()
+            }],
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(plan),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })));
+    }
+    let sample = |runway: Option<&str>, taxi_sec| crate::feed::taxi_estimate::TaxiSample {
+        gate_id: None,
+        aircraft: None,
+        runway: runway.map(Into::into),
+        pushback_sec: Some(50),
+        startup_sec: Some(40),
+        taxi_sec,
+    };
+    let mut rows: Vec<_> = (0..5).map(|_| sample(Some("04L"), 900)).collect();
+    rows.extend((0..7).map(|_| sample(None, 570)));
+    state
+        .taxi_estimate_samples
+        .store(Arc::new(HashMap::from([("KJFK".to_string(), rows)])));
+    fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.read", None).await;
+
+    let (status, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{idst}");
+    let as_of = at(&idst["as_of"]);
+    let rows = idst["unscheduled"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one TEST1 row, no prefile row: {idst}");
+    let pilot = &rows[0];
+    assert_eq!(
+        (&pilot["callsign"], &pilot["status"]),
+        (&json!("TEST1"), &json!("ground")),
+        "{idst}"
+    );
+    // Alone on the FCA, so not delayed: the proposed EDCT is now plus the pilot's own allowance.
+    assert_eq!(pilot["delay_min"], 0, "{pilot}");
+    let proposed = at(&pilot["edct"]);
+    assert!(
+        (proposed - as_of - 990_000).abs() <= SLACK_815_MS,
+        "proposed {proposed}, as of {as_of}: not 990 000 ms after"
+    );
+}
+
+/// #815: with no `ready_time` and no airport-flow program (so no metered CFR), `POST /api/v1/tmu/cfr`
+/// locks the flight's own wheels-up estimate, now + its 660 s allowance, not now.
+#[sqlx::test]
+async fn a_cfr_without_a_ready_time_or_program_locks_the_flights_wheels_up(pool: PgPool) {
+    let fx = Fixture815::new(pool).await;
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) \
+         values ($1, 'tmu.cfr.assign') on conflict do nothing",
+    )
+    .bind(ROLE)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    let before = Utc::now().timestamp_millis();
+    let (status, body) = call_with(
+        &fx.state,
+        http::Method::POST,
+        "/api/v1/tmu/cfr",
+        &[&fx.auth, "If-None-Match: *"],
+        Some(json!({ "callsign": "TEST1", "airport": "KDCA" })),
+    )
+    .await;
+    let after = Utc::now().timestamp_millis();
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let wheels_up = at(&body["wheels_up"]);
+    assert!(
+        (before + ALLOWANCE_815_MS - SLACK_815_MS..=after + ALLOWANCE_815_MS + SLACK_815_MS)
+            .contains(&wheels_up),
+        "locked {wheels_up}, now in [{before}, {after}]: not now + 660 s"
     );
 }
