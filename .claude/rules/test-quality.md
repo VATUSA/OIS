@@ -77,7 +77,7 @@ failures with one boot error behind them is one environment problem, not thirty 
 
 **Say which tiers ran, in the report and on the PR.** "Tests pass" that silently means "the tiers I
 could run pass" is the claim this rule exists to stop. Name the tier you skipped and why: CI's
-cross-platform `desktop` matrix never runs locally, and the full gate reports a tool it cannot
+jobs on another operating system (the `desktop` matrix, any `windows-latest` job) never run locally, and the full gate reports a tool it cannot
 find (`cargo-nextest`) as MISSING. The audits are ADVISORY there: a missing `cargo-deny` shows as
 not run, and CI's `deny` job still runs it.
 
@@ -211,8 +211,9 @@ Around it:
   time, so a background run picks up your mutant (#699). Mutate first, or in a second worktree.
 - **One verification run per worktree.** To abandon a backgrounded script, stop the task itself,
   not its test binary: killing the child lets the shell run its next mutation (#585).
-- **Commit a WIP checkpoint before mutating by hand.** `git checkout -- <file>` restores HEAD, not
-  "before the mutation", and has deleted uncommitted tests mid-cycle (#472).
+- **Commit a WIP checkpoint before mutating by hand**, through the hooks, never `--no-verify`.
+  `git checkout -- <file>` restores HEAD, not "before the mutation", and has deleted uncommitted
+  tests mid-cycle (#472).
 - **Mutate `.claude/hooks/` only in a scratch copy**: every session runs the hooks from the primary
   checkout.
 
