@@ -200,6 +200,30 @@ call "cd $WT && just test" "just test"
 if [[ "$OUT" == *"$REPO dropped: tests $SHA"* ]] && ! vouched "$REPO" tests "$SHA"; then ok "...and for no other checkout"; else bad "cd WORKTREE authority: ${OUT:0:240}"; fi
 rm -rf "$M"
 
+echo "cd ABSDIR && bash bin/review-marker.sh, the form a subagent outside its worktree needs:"
+mkdir -p "$WT/.claude/markers/attest/$SHA" && printf '| rules/a.md | Alpha | Checked | x.rs:1 |\n' > "$WT/.claude/markers/attest/$SHA/code.md"
+call "cd $WT && bash bin/review-marker.sh shipping $SHA"
+if vouched "$WT" review-shipping "$SHA" && vouched "$WT" code-review "$SHA" && [[ -z "$OUT" ]]
+then ok "cd WORKTREE && review-marker.sh shipping: both kept silently for that worktree"; else bad "cd WT + review-marker: ${OUT:0:240}"; fi
+rm -rf "$WT/.claude/markers/code-review" "$WT/.claude/markers/review-shipping" "$WT/.claude/markers/manifest" && call "ls"
+mkdir -p "$M/attest/$SHA" && printf '| rules/a.md | Alpha | Checked | x.rs:1 |\n' > "$M/attest/$SHA/code.md"
+call "cd $REPO/bin && bash $REPO/bin/review-marker.sh code-review $SHA" "bash bin/review-marker.sh code-review $SHA"
+if [[ "$OUT" == *"dropped: code-review $SHA"* ]] && ! vouched "$REPO" code-review "$SHA"
+then ok "review-marker.sh after a cd below the checkout root is not a stamping call"; else bad "cd below root + review-marker: ${OUT:0:240}"; fi
+rm -rf "$M/code-review" && call "ls"
+call "cd $REPO && timeout 60 bash bin/review-marker.sh code-review $SHA" "bash bin/review-marker.sh code-review $SHA"
+if [[ "$OUT" == *"dropped: code-review $SHA"* ]]; then ok "a wrapped review-marker.sh after a cd is not a stamping call"; else bad "cd + wrapped review-marker: ${OUT:0:240}"; fi
+rm -rf "$M/code-review" && call "ls"
+call "cd $REPO && bash bin/review-marker.sh code-review $SHA; touch x" "bash bin/review-marker.sh code-review $SHA"
+if [[ "$OUT" == *"dropped: code-review $SHA"* ]]; then ok "cd + review-marker.sh with another command after it is not a stamping call"; else bad "cd + review-marker + other: ${OUT:0:240}"; fi
+rm -rf "$M" "$WT/.claude/markers" "$REPO/x" && call "ls"
+mkdir -p "$WT/.claude/markers/attest/$SHA" && printf '| rules/a.md | Alpha | Checked | x.rs:1 |\n' > "$WT/.claude/markers/attest/$SHA/code.md"
+mkdir -p "$WORK/elsewhere/bin" && cp "$REPO/bin/review-marker.sh" "$WORK/elsewhere/bin/"
+call "cd $WT && bash $WORK/elsewhere/bin/review-marker.sh shipping $SHA" "cd $WT && bash bin/review-marker.sh shipping $SHA"
+if [[ "$OUT" == *"dropped:"*"$SHA"* ]] && ! vouched "$WT" review-shipping "$SHA"
+then ok "cd WORKTREE && another checkout's review-marker.sh is not a stamping call"; else bad "cd WT + foreign review-marker: ${OUT:0:240}"; fi
+rm -rf "$WT/.claude/markers" && call "ls"
+
 echo "A backgrounded stamper's grant covers the line it writes after the call returns:"
 call "just test" "just test" 1
 if [[ -z "$OUT" ]]; then ok "positive control: the launch is silent"; else bad "background launch: ${OUT:0:240}"; fi

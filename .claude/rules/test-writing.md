@@ -354,7 +354,8 @@ own process, so a backgrounded or redirected run counts. It stamps only a full r
 step passed, on a tree that was clean at the start and whose HEAD and tree did not move during the
 run; `--no-stamp` (`just ci-full`) and any targeted argument never stamp. Writing the marker
 yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)"). Run it alone on
-the line, or as exactly `cd /absolute/checkout/root && just test` (a redirect to a literal path
+the line, or as exactly `cd /absolute/checkout/root && just test` (`bin/review-marker.sh KIND SHA`
+takes the same two forms; a redirect to a literal path
 outside `.claude/` and `.git` is fine on either; a `$VAR`, `~` or `tee` target does not stamp): the
 marker ledger keeps a manifest line only from a call that is nothing but a stamper and reads, or a
 backgrounded one's grant, and undoes any other (`.claude/hooks/lib/marker_ledger.py`). That guards
