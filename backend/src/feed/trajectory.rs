@@ -237,6 +237,17 @@ impl RouteWind {
     }
 }
 
+/// How far past a gap knot the profile takes its still-air sample.
+const GAP_EDGE_NM: f64 = 1e-3;
+
+/// The distances at which a profile samples one wind knot. The wind and temperature step at a gap
+/// knot (the covered value holds up to it, [`RouteWind::new`]), so a gap knot also gets a sample just
+/// past it; without it the samples would ramp the covered value across the next span. A distance
+/// exactly at a knot reads the span that ends there, so no sample is needed before it.
+fn knot_sample_distances(k: &WindKnot) -> impl Iterator<Item = f64> {
+    std::iter::once(k.d_nm).chain(k.levels.is_empty().then_some(k.d_nm + GAP_EDGE_NM))
+}
+
 /// `v0` to `v1` at fraction `t`; with one side missing, the other.
 fn between(v0: Option<f64>, v1: Option<f64>, t: f64) -> Option<f64> {
     match (v0, v1) {
@@ -477,8 +488,9 @@ impl VerticalProfile {
         } else {
             samples.extend(desc.iter().copied());
             // The cruise leg: its TAS changes along the route only through the air temperature
-            // under a cruise Mach, so a sample at each wind knot inside it carries that change.
-            for d in wind.knots.iter().map(|k| k.d_nm) {
+            // under a cruise Mach, so a sample at each wind knot inside it (and just past a gap,
+            // where the temperature steps) carries that change.
+            for d in wind.knots.iter().flat_map(knot_sample_distances) {
                 if d > desc_dist && d < toc_d {
                     samples.push((d, cruise_alt, speeds.cruise_at(d, cruise_alt)));
                 }
@@ -512,11 +524,10 @@ impl VerticalProfile {
     }
 
     /// Give every sample its headwind, adding a sample at each wind knot inside the profile so the
-    /// headwind between samples is linear, as the wind field is between knots. The wind steps to
-    /// still air at a gap knot, so a gap knot also gets a sample just either side of it: without
-    /// them the samples would ramp a covered wind across the next span too.
+    /// headwind between samples is linear, as the wind field is between knots. A sample the
+    /// cruise leg already holds keeps its TAS; one added here on the climb or descent interpolates
+    /// it.
     fn sample_headwinds(&mut self) {
-        const GAP_EDGE_NM: f64 = 1e-3;
         if self.wind.is_still() {
             return;
         }
@@ -525,14 +536,7 @@ impl VerticalProfile {
             .wind
             .knots
             .iter()
-            .flat_map(|k| {
-                let edges = if k.levels.is_empty() {
-                    vec![k.d_nm - GAP_EDGE_NM, k.d_nm, k.d_nm + GAP_EDGE_NM]
-                } else {
-                    vec![k.d_nm]
-                };
-                edges.into_iter()
-            })
+            .flat_map(knot_sample_distances)
             .filter(|&d| d > 0.0 && d < top)
             .map(|d| (d, self.alt_at(d), self.interp(d, |s| s.2), 0.0))
             .collect();
@@ -682,8 +686,9 @@ impl VerticalProfile {
     }
 
     /// The distance-weighted mean headwind (kt) the profile flies between `from_d` and `to_d`, each
-    /// step read at the profile's altitude there. A summary for the debug view; the timing itself
-    /// reads the wind point by point. None in still air.
+    /// step read at the profile's altitude there; a stretch the field does not cover counts as 0. A
+    /// summary for the debug view; the timing itself reads the wind point by point. None in still
+    /// air.
     pub fn mean_headwind(&self, from_d: f64, to_d: f64) -> Option<f64> {
         let (hi, lo) = (from_d.max(to_d), from_d.min(to_d));
         let n = ((hi - lo) / HORIZ_STEP_NM).ceil().max(1.0) as usize;
@@ -1728,21 +1733,29 @@ mod tests {
         assert!(RouteWind::new(vec![knot(10.0, vec![]), knot(20.0, vec![])]).is_still());
     }
 
-    // The profile flies the gap rule: a covered wind holds up to the first gap knot past the field
-    // edge and stops there, on the way out of the field and on the way in.
-    #[test]
-    fn the_profile_stops_a_covered_wind_at_the_first_gap_past_the_field() {
-        let p = AircraftProfile::default();
-        let mut knots = vec![
-            knot(500.0, vec![(0.0, 80.0, None)]),
-            knot(450.0, vec![(0.0, 80.0, None)]),
-        ];
+    /// A field covering only 450 and 500 nm out with these levels, every other knot (each 50 nm)
+    /// a gap: covered values hold from 400 to 550 nm, and the air is still beyond.
+    fn covered_450_to_500(levels: Vec<(f64, f64, Option<f64>)>) -> RouteWind {
+        let mut knots = vec![knot(500.0, levels.clone()), knot(450.0, levels)];
         for d in [
             0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 550.0, 600.0,
         ] {
             knots.push(knot(d, vec![]));
         }
-        let vp = cruise(600.0, 440.0, &p, RouteWind::new(knots));
+        RouteWind::new(knots)
+    }
+
+    // The profile flies the gap rule: a covered wind holds up to the first gap knot past the field
+    // edge and stops there, on the way out of the field and on the way in.
+    #[test]
+    fn the_profile_stops_a_covered_wind_at_the_first_gap_past_the_field() {
+        let p = AircraftProfile::default();
+        let vp = cruise(
+            600.0,
+            440.0,
+            &p,
+            covered_450_to_500(vec![(0.0, 80.0, None)]),
+        );
         let still = cruise(600.0, 440.0, &p, RouteWind::still());
         for d in [575.0, 375.0] {
             assert!(
@@ -1763,6 +1776,47 @@ mod tests {
             (gap_span - still.time_between(600.0, 550.0)).abs() < 0.5,
             "the span between two gaps is timed in still air: {gap_span}"
         );
+    }
+
+    // Under a cruise Mach the temperature steps at a gap as the wind does: past the first gap the
+    // TAS is ISA's, and up to it the covered warm air's.
+    #[test]
+    fn the_profile_stops_a_covered_temperature_at_the_first_gap_past_the_field() {
+        let warm = vec![(35_000.0, 0.0, Some(ISA_FL350_K + 15.0))];
+        let vp = cruise(600.0, 520.0, &b77w(), covered_450_to_500(warm.clone()));
+        let isa = cruise(600.0, 520.0, &b77w(), RouteWind::still());
+        let hot = cruise(600.0, 520.0, &b77w(), RouteWind::new(vec![knot(0.0, warm)]));
+        assert!(hot.ground_speed_at(525.0) > isa.ground_speed_at(525.0) + 10.0);
+        for d in [575.0, 375.0] {
+            assert!(
+                (vp.ground_speed_at(d) - isa.ground_speed_at(d)).abs() < 1e-6,
+                "{d} nm is past the first gap: ISA, got {}",
+                vp.ground_speed_at(d)
+            );
+        }
+        for d in [525.0, 475.0, 425.0] {
+            assert!(
+                (vp.ground_speed_at(d) - hot.ground_speed_at(d)).abs() < 1e-6,
+                "{d} nm holds the covered warm air, got {}",
+                vp.ground_speed_at(d)
+            );
+        }
+    }
+
+    // The debug mean counts a stretch the field does not cover as still air: 80 kt over the 150 nm
+    // the field covers (400 to 550 nm) and 0 over the other 100 nm of 600 to 350 nm.
+    #[test]
+    fn mean_headwind_counts_a_gap_as_still_air() {
+        let p = AircraftProfile::default();
+        let vp = cruise(
+            600.0,
+            440.0,
+            &p,
+            covered_450_to_500(vec![(0.0, 80.0, None)]),
+        );
+        let mean = vp.mean_headwind(600.0, 350.0).unwrap();
+        assert!((mean - 48.0).abs() < 0.5, "{mean}");
+        assert!((vp.mean_headwind(550.0, 400.0).unwrap() - 80.0).abs() < 0.5);
     }
 
     // Still air: no wind, no temperature.

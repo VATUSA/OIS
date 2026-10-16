@@ -1244,8 +1244,10 @@ impl Drop for DataRefreshClaim<'_> {
 }
 
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
-/// logged and leave the current data in place — the response still carries the resulting status, so
-/// the caller compares it (cycle age, `winds_refreshed`) to tell a real refresh from a fallback.
+/// logged and leave the current data in place, except that winds drop to still air once the last
+/// field loaded is more than 3 h old. The response still carries the resulting status, so the
+/// caller compares it (cycle age, `winds_refreshed`, `winds_source`) to tell a real refresh from a
+/// fallback.
 ///
 /// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
 /// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.

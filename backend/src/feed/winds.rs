@@ -715,6 +715,37 @@ mod tests {
         assert_eq!(w.column(41.0, -89.0), None);
     }
 
+    // Grid column: a corner missing only its v is left out too, not averaged in with u alone.
+    #[test]
+    fn a_grid_corner_missing_only_its_v_is_left_out() {
+        let w = Winds::test_grid(
+            (40.0, -90.0),
+            (2, 2),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, lat, lon| match (lat as i32, lon as i32) {
+                (40, -90) => (10, 0, -40),
+                (40, -89) => (20, 0, -40),
+                (41, -90) => (30, 0, -40),
+                _ => (50, GRID_MISSING, -40),
+            },
+        );
+        assert!((east_u(&w, 40.5, -89.5).unwrap() - 20.0).abs() < 1e-9);
+    }
+
+    // A replayed station with no levels is not blended, even when it sits on the point asked about.
+    #[test]
+    fn a_station_with_no_levels_is_skipped() {
+        let w = Winds {
+            stations: vec![
+                station(40.0, -90.0, vec![]),
+                station(41.0, -90.0, vec![(35000, wind(360.0, 10.0))]),
+            ],
+            ..Winds::default()
+        };
+        assert!((north_hw(&w, 40.0, -90.0, 35000.0) - 10.0).abs() < 1e-9);
+    }
+
     // Grid column: outside the grid there is no wind (still air), not a clamped edge value.
     #[test]
     fn a_point_outside_the_grid_has_no_column() {

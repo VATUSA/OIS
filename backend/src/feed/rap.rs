@@ -322,9 +322,7 @@ pub fn build_grid(messages: Vec<Vec<u8>>) -> Result<WindGrid, String> {
                 .dispatch()
                 .map_err(|e| e.to_string())?
                 .collect();
-            if values.len() != r.cell.len() {
-                return Err("decoded value count does not match the grid".into());
-            }
+            r.check_value_count(values.len())?;
             fields.push(Field { param, hpa, values });
         }
     }
@@ -337,63 +335,26 @@ impl Resampler {
         sub: &grib::SubMessage<'_, R>,
         grid: GridKey,
     ) -> Result<Self, String> {
-        let (ni, nj) = grid.shape;
-        let grid_relative = grid.grid_relative;
-        let latlons: Vec<(f64, f64)> = sub.latlons().map_err(|e| e.to_string())?.collect();
-        let ij: Vec<(usize, usize)> = sub.ij().map_err(|e| e.to_string())?.collect();
-        if latlons.len() != ni * nj || ij.len() != ni * nj {
-            return Err("grid point count does not match the grid shape".into());
-        }
-        let lon = |l: f64| if l > 180.0 { l - 360.0 } else { l };
-        let mut at = vec![usize::MAX; ni * nj];
-        for (k, &(i, j)) in ij.iter().enumerate() {
-            if i >= ni || j >= nj {
-                return Err("grid point index outside the grid".into());
-            }
-            at[j * ni + i] = k;
-        }
-        if at.contains(&usize::MAX) {
-            return Err("grid points do not cover the grid".into());
-        }
-        let up = grid.j_positive;
-        let turn = ij
-            .iter()
-            .map(|&(i, j)| {
-                if !grid_relative {
-                    return (0.0, 1.0);
-                }
-                // The +y axis's true bearing: toward the next point up the grid, or from the one
-                // below it on the top row.
-                let step = |jj: usize| latlons[at[jj * ni + i]];
-                let (here, j_up, j_down) = (step(j), j + 1 < nj, j > 0);
-                let (from, to) = match (up, j_up, j_down) {
-                    (true, true, _) => (here, step(j + 1)),
-                    (true, false, _) => (step(j - 1), here),
-                    (false, _, true) => (here, step(j - 1)),
-                    (false, _, false) => (step(j + 1), here),
-                };
-                let b = bearing_deg(from.0, lon(from.1), to.0, lon(to.1)).to_radians();
-                (b.sin(), b.cos())
-            })
+        let latlons: Vec<(f64, f64)> = sub
+            .latlons()
+            .map_err(|e| e.to_string())?
+            .map(|(la, lo)| (la, if lo > 180.0 { lo - 360.0 } else { lo }))
             .collect();
-        let (mut lat_min, mut lat_max, mut lon_min, mut lon_max) =
-            (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-        for &(la, lo) in &latlons {
-            let lo = lon(lo);
-            lat_min = lat_min.min(la);
-            lat_max = lat_max.max(la);
-            lon_min = lon_min.min(lo);
-            lon_max = lon_max.max(lo);
-        }
-        let snap = |v: f64| (v / GRID_STEP_DEG).round() * GRID_STEP_DEG;
-        let (lat0, lon0) = (snap(lat_min), snap(lon_min));
-        let nlat = ((snap(lat_max) - lat0) / GRID_STEP_DEG).round() as usize + 1;
-        let nlon = ((snap(lon_max) - lon0) / GRID_STEP_DEG).round() as usize + 1;
+        let ij: Vec<(usize, usize)> = sub.ij().map_err(|e| e.to_string())?.collect();
+        let at = point_order(&ij, grid.shape, latlons.len())?;
+        let turn = if grid.grid_relative {
+            ij.iter()
+                .map(|&(i, j)| grid_turn(&latlons, &at, (i, j), grid.shape, grid.j_positive))
+                .collect()
+        } else {
+            vec![(0.0, 1.0); ij.len()]
+        };
+        let (lat0, lon0, nlat, nlon) = lat_lon_box(&latlons);
         let cell = latlons
             .iter()
             .map(|&(la, lo)| {
                 let i = ((la - lat0) / GRID_STEP_DEG).round() as usize;
-                let j = ((lon(lo) - lon0) / GRID_STEP_DEG).round() as usize;
+                let j = ((lo - lon0) / GRID_STEP_DEG).round() as usize;
                 i.min(nlat - 1) * nlon + j.min(nlon - 1)
             })
             .collect();
@@ -406,6 +367,14 @@ impl Resampler {
             cell,
             turn,
         })
+    }
+
+    /// A decoded field holds one value per source point, or it is refused.
+    fn check_value_count(&self, n: usize) -> Result<(), String> {
+        if n != self.cell.len() {
+            return Err("decoded value count does not match the grid".into());
+        }
+        Ok(())
     }
 
     /// Average every level's points into the grid. Wind is turned to true north first and stored as
@@ -444,42 +413,110 @@ impl Resampler {
                 find(UGRD, hpa).ok_or("UGRD missing")?,
                 find(VGRD, hpa).ok_or_else(|| format!("VGRD missing at {hpa} hPa"))?,
             );
-            let (mut su, mut sv, mut st) = (vec![0.0; plane], vec![0.0; plane], vec![0.0; plane]);
-            let (mut nw, mut nt) = (vec![0u32; plane], vec![0u32; plane]);
-            for (k, &c) in self.cell.iter().enumerate() {
-                let (gu, gv) = (u.values[k] as f64, v.values[k] as f64);
-                if gu.is_finite() && gv.is_finite() {
-                    let (s, co) = self.turn[k];
-                    // Grid-relative to earth-relative "toward" components, then the "from" vector.
-                    su[c] -= (gu * co + gv * s) * MS_TO_KT;
-                    sv[c] -= (gv * co - gu * s) * MS_TO_KT;
-                    nw[c] += 1;
-                }
-            }
-            if let Some(t) = find(TMP, hpa) {
-                for (k, &c) in self.cell.iter().enumerate() {
-                    let tk = t.values[k] as f64;
-                    if tk.is_finite() {
-                        st[c] += tk - K_TO_C;
-                        nt[c] += 1;
-                    }
-                }
-            }
-            let mean = |sum: f64, n: u32| {
-                if n == 0 {
-                    GRID_MISSING
-                } else {
-                    (sum / n as f64).round() as i16
-                }
-            };
-            for c in 0..plane {
-                grid.u.push(mean(su[c], nw[c]));
-                grid.v.push(mean(sv[c], nw[c]));
-                grid.t.push(mean(st[c], nt[c]));
-            }
+            self.average_level(&mut grid, (u, v), find(TMP, hpa));
         }
         Ok(grid)
     }
+
+    /// Append one level's cell means to `grid`: the wind turned to true north and stored as the
+    /// "from" vector in kt, the temperature in °C, and [`GRID_MISSING`] for a cell no point fed.
+    fn average_level(&self, grid: &mut WindGrid, (u, v): (&Field, &Field), t: Option<&Field>) {
+        let plane = self.nlat * self.nlon;
+        let (mut su, mut sv, mut st) = (vec![0.0; plane], vec![0.0; plane], vec![0.0; plane]);
+        let (mut nw, mut nt) = (vec![0u32; plane], vec![0u32; plane]);
+        for (k, &c) in self.cell.iter().enumerate() {
+            let (gu, gv) = (u.values[k] as f64, v.values[k] as f64);
+            if gu.is_finite() && gv.is_finite() {
+                let (s, co) = self.turn[k];
+                // Grid-relative to earth-relative "toward" components, then the "from" vector.
+                su[c] -= (gu * co + gv * s) * MS_TO_KT;
+                sv[c] -= (gv * co - gu * s) * MS_TO_KT;
+                nw[c] += 1;
+            }
+        }
+        if let Some(t) = t {
+            for (k, &c) in self.cell.iter().enumerate() {
+                let tk = t.values[k] as f64;
+                if tk.is_finite() {
+                    st[c] += tk - K_TO_C;
+                    nt[c] += 1;
+                }
+            }
+        }
+        let mean = |sum: f64, n: u32| {
+            if n == 0 {
+                GRID_MISSING
+            } else {
+                (sum / n as f64).round() as i16
+            }
+        };
+        for c in 0..plane {
+            grid.u.push(mean(su[c], nw[c]));
+            grid.v.push(mean(sv[c], nw[c]));
+            grid.t.push(mean(st[c], nt[c]));
+        }
+    }
+}
+
+/// Where each grid point `(i, j)` sits in the decoder's value order, refused unless the decoder gave
+/// one lat/lon and one index per grid point and the indices cover the grid exactly once.
+fn point_order(
+    ij: &[(usize, usize)],
+    (ni, nj): (usize, usize),
+    n_latlons: usize,
+) -> Result<Vec<usize>, String> {
+    if n_latlons != ni * nj || ij.len() != ni * nj {
+        return Err("grid point count does not match the grid shape".into());
+    }
+    let mut at = vec![usize::MAX; ni * nj];
+    for (k, &(i, j)) in ij.iter().enumerate() {
+        if i >= ni || j >= nj {
+            return Err("grid point index outside the grid".into());
+        }
+        at[j * ni + i] = k;
+    }
+    if at.contains(&usize::MAX) {
+        return Err("grid points do not cover the grid".into());
+    }
+    Ok(at)
+}
+
+/// `(sin, cos)` of the true bearing of the grid's +y axis at point `(i, j)`: toward the next point
+/// up the grid, or from the one below it on the top row.
+fn grid_turn(
+    latlons: &[(f64, f64)],
+    at: &[usize],
+    (i, j): (usize, usize),
+    (ni, nj): (usize, usize),
+    up: bool,
+) -> (f64, f64) {
+    let step = |jj: usize| latlons[at[jj * ni + i]];
+    let (here, j_up, j_down) = (step(j), j + 1 < nj, j > 0);
+    let (from, to) = match (up, j_up, j_down) {
+        (true, true, _) => (here, step(j + 1)),
+        (true, false, _) => (step(j - 1), here),
+        (false, _, true) => (here, step(j - 1)),
+        (false, _, false) => (step(j + 1), here),
+    };
+    let b = bearing_deg(from.0, from.1, to.0, to.1).to_radians();
+    (b.sin(), b.cos())
+}
+
+/// The 1° box the points fall in: its south-west corner and its rows and columns.
+fn lat_lon_box(latlons: &[(f64, f64)]) -> (f64, f64, usize, usize) {
+    let (mut lat_min, mut lat_max, mut lon_min, mut lon_max) =
+        (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for &(la, lo) in latlons {
+        lat_min = lat_min.min(la);
+        lat_max = lat_max.max(la);
+        lon_min = lon_min.min(lo);
+        lon_max = lon_max.max(lo);
+    }
+    let snap = |v: f64| (v / GRID_STEP_DEG).round() * GRID_STEP_DEG;
+    let (lat0, lon0) = (snap(lat_min), snap(lon_min));
+    let nlat = ((snap(lat_max) - lat0) / GRID_STEP_DEG).round() as usize + 1;
+    let nlon = ((snap(lon_max) - lon0) / GRID_STEP_DEG).round() as usize + 1;
+    (lat0, lon0, nlat, nlon)
 }
 
 fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
@@ -964,6 +1001,56 @@ mod tests {
         assert!(err.contains("not a RAP grid"), "{err}");
         let err = build_grid(vec![with_u32(3, 31, 100_000)]).err().unwrap();
         assert!(err.contains("not a RAP grid"), "{err}");
+        let err = build_grid(vec![with_u32(3, 31, 1)]).err().unwrap();
+        assert!(err.contains("not a RAP grid"), "{err}");
+    }
+
+    // The fetch asks for 925 hPa, about 2,500 ft, so the lowest level sits under the climb and the
+    // final descent.
+    #[test]
+    fn the_lowest_level_fetched_is_925_hpa() {
+        assert_eq!(LEVELS_HPA.first(), Some(&925));
+        assert!((pressure_alt_ft(925.0) - 2_500.0).abs() < 50.0);
+    }
+
+    // The decoder's point list must be one index per grid point, inside the grid, covering it.
+    #[test]
+    fn point_order_refuses_a_point_list_that_does_not_cover_the_grid_once() {
+        let full = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        assert_eq!(point_order(&full, (2, 2), 4), Ok(vec![0, 1, 2, 3]));
+        let err = point_order(&full, (2, 2), 3).unwrap_err();
+        assert!(err.contains("point count"), "{err}");
+        let err = point_order(&full[..3], (2, 2), 4).unwrap_err();
+        assert!(err.contains("point count"), "{err}");
+        let err = point_order(&[(0, 0), (1, 0), (0, 1), (2, 1)], (2, 2), 4).unwrap_err();
+        assert!(err.contains("outside the grid"), "{err}");
+        let err = point_order(&[(0, 0), (1, 0), (0, 1), (0, 1)], (2, 2), 4).unwrap_err();
+        assert!(err.contains("do not cover"), "{err}");
+    }
+
+    // A decoded field must hold one value per source point.
+    #[test]
+    fn a_field_with_the_wrong_value_count_is_refused() {
+        let grid = GridKey {
+            shape: (2, 2),
+            first: (0, 0),
+            lov: 0,
+            spacing: (1, 1),
+            grid_relative: false,
+            j_positive: true,
+        };
+        let r = Resampler {
+            grid,
+            lat0: 40.0,
+            lon0: -90.0,
+            nlat: 1,
+            nlon: 1,
+            cell: vec![0; 4],
+            turn: vec![(0.0, 1.0); 4],
+        };
+        assert!(r.check_value_count(4).is_ok());
+        let err = r.check_value_count(3).unwrap_err();
+        assert!(err.contains("value count"), "{err}");
     }
 
     // Two messages on different grids are refused rather than averaged together.
