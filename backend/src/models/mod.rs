@@ -2872,14 +2872,12 @@ pub struct DataStatus {
     pub nav_cycles_behind: Option<u32>,
     /// Last healthy nav refresh — live FAA source at the current cycle (null = none since startup).
     pub nav_refreshed: Option<DateTime<Utc>>,
-    /// FB stations in the wind field; 0 when the field is RAP or still air.
-    pub winds_stations: usize,
-    /// When a wind field (RAP or FB) last loaded; null when none has since startup. Still air after
-    /// failed refreshes keeps the time of the last field: `winds_source` says what is in use.
+    /// When a RAP field last loaded; null when none has since startup. Still air after failed
+    /// refreshes keeps the time of the last field: `winds_source` says what is in use.
     pub winds_refreshed: Option<DateTime<Utc>>,
-    /// Where the wind field in use came from: NOAA RAP, the AWC FB fallback, or none (still air).
+    /// Where the wind field in use came from: NOAA RAP, or none (still air).
     pub winds_source: crate::feed::winds::WindsSource,
-    /// The time the RAP field is valid for (null for FB or still air).
+    /// The time the RAP field is valid for (null in still air).
     pub winds_valid_at: Option<DateTime<Utc>>,
 }
 

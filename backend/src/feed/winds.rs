@@ -1,22 +1,14 @@
-//! US winds aloft for enroute ETA correction. The primary field is NOAA's Rapid Refresh (RAP)
-//! model, decoded by [`crate::feed::rap`] onto a regular lat/lon grid; the Aviation Weather Center
-//! FB (winds/temps) station tables are the fallback, and an empty field is still air (#836). The FB
-//! table parsing is ported from vatflow's `winds-aloft.js`. Fetched at runtime and hot-swapped;
-//! fails safe to still air whenever data is missing.
-
-use std::collections::HashMap;
+//! US winds aloft for enroute ETA correction, from NOAA's Rapid Refresh (RAP) model decoded by
+//! [`crate::feed::rap`] onto a regular lat/lon grid (#836). An empty field is still air. Fields
+//! snapshotted before RAP hold AWC FB station winds; those still load and blend for historical
+//! replay. Fetched at runtime and hot-swapped; fails safe to still air whenever data is missing.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::airports::{Airport, AirportDb};
 use super::trajectory::{RouteWind, WindKnot};
 
 const R_NM: f64 = 3440.065;
-/// AWC FB tables cover the CONUS in these six regions.
-const REGIONS: [&str; 6] = ["bos", "mia", "chi", "dfw", "slc", "sfo"];
-/// FB table sets: `low` is 3,000–39,000 ft, `high` adds 45,000 and 53,000 ft.
-const TABLE_LEVELS: [&str; 2] = ["low", "high"];
 /// A station further than this from the query point contributes no wind (nm).
 const MAX_STATION_NM: f64 = 600.0;
 /// The wind at a point is an inverse-distance-squared blend of at most this many nearest stations.
@@ -31,15 +23,12 @@ const C_TO_K: f64 = 273.15;
 /// A grid value that is not defined (outside the source model's footprint).
 pub const GRID_MISSING: i16 = i16::MIN;
 
-/// Wind at one forecast level: direction (deg true, None when calm), speed (kt), and the FB
-/// table's temperature (°C) where the group carries one. Snapshots taken before temperatures were
-/// decoded have none.
+/// Wind at one FB forecast level, as snapshots taken before RAP store it: direction (deg true,
+/// None when calm) and speed (kt).
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct WindLevel {
     pub dir: Option<f64>,
     pub spd: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temp_c: Option<f64>,
 }
 
 impl WindLevel {
@@ -69,12 +58,6 @@ impl Station {
     /// (in any order); held at the nearest level outside the forecast range. None with no levels.
     fn uv_at(&self, alt_ft: f64) -> Option<(f64, f64)> {
         self.level_value(alt_ft, |w| Some(w.uv()))
-    }
-
-    /// The temperature (°C) at `alt_ft` from the levels that carry one, interpolated the same way.
-    fn temp_c_at(&self, alt_ft: f64) -> Option<f64> {
-        self.level_value(alt_ft, |w| w.temp_c.map(|t| (t, 0.0)))
-            .map(|(t, _)| t)
     }
 
     fn level_value(
@@ -188,14 +171,12 @@ impl WindGrid {
     }
 }
 
-/// Where the current wind field came from, for the data-status view.
+/// Where the live wind field came from, for the data-status view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WindsSource {
-    /// NOAA Rapid Refresh, the primary source.
+    /// NOAA Rapid Refresh.
     Rap,
-    /// AWC FB station tables, the fallback.
-    Fb,
     /// No field: every ETA flies still air.
     None,
 }
@@ -227,19 +208,15 @@ impl Winds {
         self.stations.is_empty() && self.grid.is_none()
     }
 
-    pub fn station_count(&self) -> usize {
-        self.stations.len()
-    }
-
     pub fn valid_at(&self) -> Option<DateTime<Utc>> {
         self.valid_at
     }
 
+    /// The source of a live field. Only replayed snapshots from before RAP hold stations, and
+    /// data-status never reports one of those.
     pub fn source(&self) -> WindsSource {
         if self.grid.is_some() {
             WindsSource::Rap
-        } else if !self.stations.is_empty() {
-            WindsSource::Fb
         } else {
             WindsSource::None
         }
@@ -253,7 +230,7 @@ impl Winds {
         }
     }
 
-    /// The FB column: each of the [`BLEND_STATIONS`] nearest stations within [`MAX_STATION_NM`],
+    /// A pre-RAP snapshot's column: each of the [`BLEND_STATIONS`] nearest FB stations within [`MAX_STATION_NM`],
     /// blended by inverse distance squared at every level any of them reports.
     fn station_column(&self, lat: f64, lon: f64) -> Option<Column> {
         let mut near: Vec<(f64, &Station)> = self
@@ -278,7 +255,7 @@ impl Winds {
             .into_iter()
             .map(|a| {
                 let alt = a as f64;
-                let (mut u, mut v, mut wsum, mut t, mut tsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                let (mut u, mut v, mut wsum) = (0.0, 0.0, 0.0);
                 for &(d, s) in &near {
                     let w = if single { 1.0 } else { 1.0 / (d * d) };
                     if let Some((su, sv)) = s.uv_at(alt) {
@@ -286,13 +263,8 @@ impl Winds {
                         v += w * sv;
                         wsum += w;
                     }
-                    if let Some(tc) = s.temp_c_at(alt) {
-                        t += w * tc;
-                        tsum += w;
-                    }
                 }
-                let temp_k = (tsum > 0.0).then(|| t / tsum + C_TO_K);
-                (alt, (u / wsum, v / wsum), temp_k)
+                (alt, (u / wsum, v / wsum), None)
             })
             .collect();
         (!col.is_empty()).then_some(col)
@@ -314,8 +286,9 @@ impl Winds {
     /// starts at; the path's own length is scaled onto it, so a padded ground route
     /// (`GROUND_ROUTE_FACTOR`) still spans the whole profile. Each sample carries the headwind along
     /// the route's course at that point; samples are at most [`KNOT_SPACING_NM`] apart, on the great
-    /// circle of each leg. Points the
-    /// field does not cover are left out, and a route it does not cover at all is still air.
+    /// circle of each leg. A point the field does not cover is a gap: the wind of the last covered
+    /// point holds up to it, at most one sample spacing, and is still air beyond. A route the field
+    /// does not cover at all is still air.
     pub fn along(&self, path: &[[f64; 2]], route_len_nm: f64) -> RouteWind {
         if self.is_empty() || path.len() < 2 {
             return RouteWind::still();
@@ -330,15 +303,17 @@ impl Winds {
         }
         let mut knots = Vec::new();
         let mut knot = |point: [f64; 2], flown: f64, course: f64| {
-            if let Some(col) = self.column(point[0], point[1]) {
-                knots.push(WindKnot {
-                    d_nm: route_len_nm * (1.0 - flown / total),
-                    levels: col
-                        .iter()
+            let levels = self
+                .column(point[0], point[1])
+                .map_or_else(Vec::new, |col| {
+                    col.iter()
                         .map(|&(a, uv, t)| (a, headwind_along(uv, course), t))
-                        .collect(),
+                        .collect()
                 });
-            }
+            knots.push(WindKnot {
+                d_nm: route_len_nm * (1.0 - flown / total),
+                levels,
+            });
         };
         let (mut flown, mut last_course) = (0.0, 0.0);
         for (seg, &len) in path.windows(2).zip(&legs) {
@@ -360,217 +335,6 @@ impl Winds {
         knot(path[path.len() - 1], total, last_course);
         RouteWind::new(knots)
     }
-}
-
-/// Fetch and assemble the AWC FB winds-aloft picture, the fallback field. Best-effort per region;
-/// an empty result means no table loaded.
-pub async fn fetch_fb(client: &reqwest::Client, airports: &AirportDb) -> Winds {
-    let mut merged: HashMap<String, Vec<(i32, WindLevel)>> = HashMap::new();
-    for level in TABLE_LEVELS {
-        for reg in REGIONS {
-            let url =
-                format!("https://aviationweather.gov/api/data/windtemp?region={reg}&level={level}");
-            let text = match client
-                .get(&url)
-                .send()
-                .await
-                .and_then(|r| r.error_for_status())
-            {
-                Ok(resp) => match resp.text().await {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                },
-                Err(e) => {
-                    tracing::debug!(region = reg, level, error = %e, "winds region fetch failed");
-                    continue;
-                }
-            };
-            if !text.contains("FT") {
-                continue;
-            }
-            merge_table(&mut merged, &text);
-        }
-    }
-
-    // Resolve each FB station id to airport coordinates (K.., P.., or bare).
-    let mut stations = Vec::new();
-    for (id, levels) in merged {
-        let coord = airports
-            .get(&format!("K{id}"))
-            .or_else(|| airports.get(&format!("P{id}")))
-            .or_else(|| airports.get(&id));
-        if let Some(&Airport { lat, lon, .. }) = coord {
-            stations.push(Station { lat, lon, levels });
-        }
-    }
-    Winds {
-        stations,
-        ..Winds::default()
-    }
-}
-
-/// Add a table's station levels to `merged`, extending (never replacing) a station already seen —
-/// the high table's FL450/FL530 join the same station's low levels.
-fn merge_table(merged: &mut HashMap<String, Vec<(i32, WindLevel)>>, text: &str) {
-    for (id, levels) in parse_windtemp(text) {
-        merged.entry(id).or_default().extend(levels);
-    }
-}
-
-/// Parse an AWC FB table into `(station_id, levels)`. Columns are matched to their nearest
-/// header altitude by character position, tolerating irregular spacing.
-pub fn parse_windtemp(text: &str) -> Vec<(String, Vec<(i32, WindLevel)>)> {
-    let mut levels: Option<Vec<(i32, f64)>> = None;
-    let mut out = Vec::new();
-
-    for raw in text.lines() {
-        let line = raw.replace('\t', " ");
-
-        // Header row: its first token is exactly `FT`, followed by the altitude columns.
-        // (Matching a bare `contains("FT")` would misread stations like `FTW`.)
-        if line.split_whitespace().next() == Some("FT") {
-            let cols = level_columns(&line);
-            if !cols.is_empty() {
-                levels = Some(cols);
-                continue;
-            }
-        }
-        let Some(cols) = &levels else { continue };
-
-        // Station row: three alphanumerics followed by whitespace.
-        let Some((id, scan_from)) = station_id(&line) else {
-            continue;
-        };
-        let mut lev: Vec<(i32, WindLevel)> = Vec::new();
-        for (center, tok) in tokens_with_centers(&line, scan_from) {
-            let Some(w) = decode_fb(tok) else { continue };
-            // Assign the token to the nearest altitude column.
-            if let Some((alt, _)) = cols
-                .iter()
-                .min_by(|(_, ca), (_, cb)| (ca - center).abs().total_cmp(&(cb - center).abs()))
-            {
-                lev.push((*alt, w));
-            }
-        }
-        if !lev.is_empty() {
-            out.push((id, lev));
-        }
-    }
-    out
-}
-
-/// Decode an FB group like `2427+21`, `9900`, or `274131` → wind. `9900` = light/variable.
-fn decode_fb(g: &str) -> Option<WindLevel> {
-    let b = g.as_bytes();
-    if b.len() < 4 || !b[..4].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let temp_c = decode_fb_temp(g);
-    if &g[..4] == "9900" {
-        return Some(WindLevel {
-            dir: None,
-            spd: 0.0,
-            temp_c,
-        });
-    }
-    let mut dd: i32 = g[0..2].parse().ok()?;
-    let mut ss: i32 = g[2..4].parse().ok()?;
-    if dd > 36 {
-        // Codes 51–86 encode ≥100 kt (subtract 50, add 100 kt); 37–50 are invalid.
-        if dd < 51 {
-            return None;
-        }
-        dd -= 50;
-        ss += 100;
-    }
-    Some(WindLevel {
-        dir: Some(((dd * 10) % 360) as f64),
-        spd: ss as f64,
-        temp_c,
-    })
-}
-
-/// The temperature (°C) in an FB group: a signed `±tt` after the wind (`2427+21`), or, above
-/// 24,000 ft where every temperature is negative, two unsigned digits (`274131` is -31 °C). A bare
-/// four-digit group (the 3,000 ft level) carries none.
-fn decode_fb_temp(g: &str) -> Option<f64> {
-    let tail = g.get(4..)?;
-    let b = tail.as_bytes();
-    match b {
-        [s @ (b'+' | b'-'), d0, d1] if d0.is_ascii_digit() && d1.is_ascii_digit() => {
-            let t: f64 = tail[1..].parse().ok()?;
-            Some(if *s == b'-' { -t } else { t })
-        }
-        [d0, d1] if d0.is_ascii_digit() && d1.is_ascii_digit() => Some(-tail.parse::<f64>().ok()?),
-        _ => None,
-    }
-}
-
-/// Altitude columns `(alt_ft, center_char)` from a header row's 4–5 digit runs.
-fn level_columns(line: &str) -> Vec<(i32, f64)> {
-    let b = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i].is_ascii_digit() {
-            let start = i;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-            }
-            let len = i - start;
-            if (4..=5).contains(&len)
-                && let Ok(alt) = line[start..i].parse::<i32>()
-            {
-                out.push((alt, start as f64 + len as f64 / 2.0));
-            }
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// A station id is exactly three alphanumerics at the line start followed by whitespace;
-/// returns `(id, byte_offset_after_id)`.
-fn station_id(line: &str) -> Option<(String, usize)> {
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    if i + 3 > b.len() || !line.is_char_boundary(i + 3) {
-        return None;
-    }
-    let id = &line[i..i + 3];
-    if !id.bytes().all(|c| c.is_ascii_alphanumeric())
-        || !id.bytes().any(|c| c.is_ascii_alphabetic())
-    {
-        return None;
-    }
-    if i + 3 < b.len() && !b[i + 3].is_ascii_whitespace() {
-        return None;
-    }
-    Some((id.to_string(), i + 3))
-}
-
-/// Whitespace-separated tokens with their center char position, from `from`.
-fn tokens_with_centers(s: &str, from: usize) -> Vec<(f64, &str)> {
-    let b = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = from;
-    while i < b.len() {
-        if b[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < b.len() && !b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let tok = &s[start..i];
-        out.push((start as f64 + tok.len() as f64 / 2.0, tok));
-    }
-    out
 }
 
 fn gc_dist(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
@@ -682,7 +446,6 @@ impl Winds {
                     WindLevel {
                         dir: Some(dir),
                         spd,
-                        temp_c: None,
                     },
                 )],
             }],
@@ -694,79 +457,6 @@ impl Winds {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const SAMPLE: &str = "\
-DATA BASED ON 131800Z
-VALID 140000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000
-
-FT  3000    6000    9000   12000   18000   24000  30000  34000  39000
-BRL 1817 2427+21 2727+14 2928+09 2933-05 2736-15 274131 264142 243352
-FWA 9900 2605+16 2708+12 2818+07 3025-05 2740-15 265031 265541 256053
-";
-
-    #[test]
-    fn decodes_fb_groups() {
-        // 2427 → from 240°, 27 kt.
-        let w = decode_fb("2427+21").unwrap();
-        assert_eq!(w.dir, Some(240.0));
-        assert_eq!(w.spd, 27.0);
-        // 9900 → calm / light-variable.
-        let calm = decode_fb("9900").unwrap();
-        assert_eq!(calm.dir, None);
-        assert_eq!(calm.spd, 0.0);
-        // dd>36 encodes speed ≥ 100 kt: 7420 → dir 240°, 120 kt.
-        let fast = decode_fb("7420").unwrap();
-        assert_eq!(fast.dir, Some(240.0));
-        assert_eq!(fast.spd, 120.0);
-        assert!(decode_fb("+21").is_none());
-    }
-
-    #[test]
-    fn parses_a_windtemp_table() {
-        let stations = parse_windtemp(SAMPLE);
-        let brl = stations
-            .iter()
-            .find(|(id, _)| id == "BRL")
-            .expect("BRL parsed");
-        // Nine levels, matching the nine header columns.
-        assert_eq!(brl.1.len(), 9);
-        // 3000 ft column: 1817 → 180°, 17 kt.
-        let (_, low) = brl.1.iter().find(|(a, _)| *a == 3000).unwrap();
-        assert_eq!(low.dir, Some(180.0));
-        assert_eq!(low.spd, 17.0);
-        // 39000 ft column: 2433 → 240°, 33+100 = ... actually 24 ≤ 36 so 240°, 33 kt.
-        let (_, high) = brl.1.iter().find(|(a, _)| *a == 39000).unwrap();
-        assert_eq!(high.dir, Some(240.0));
-        // FWA at 3000 is calm (9900).
-        let fwa = stations.iter().find(|(id, _)| id == "FWA").unwrap();
-        let (_, fwa_low) = fwa.1.iter().find(|(a, _)| *a == 3000).unwrap();
-        assert_eq!(fwa_low.spd, 0.0);
-    }
-
-    #[test]
-    fn station_id_containing_ft_is_not_a_header() {
-        // FTW (Fort Worth) contains "FT" — it must parse as a station, not a header, and
-        // must not corrupt the altitude columns for stations that follow it.
-        let sample = "\
-FT  3000    6000    9000
-FTW 1817 2427+21 2727+14
-BRL 2013 2110+18 2308+12
-";
-        let stations = parse_windtemp(sample);
-        let ftw = stations
-            .iter()
-            .find(|(id, _)| id == "FTW")
-            .expect("FTW parses as a station");
-        assert_eq!(
-            ftw.1.iter().find(|(a, _)| *a == 3000).map(|(_, w)| w.dir),
-            Some(Some(180.0)),
-            "FTW 3000ft = 180°/17kt"
-        );
-        assert!(
-            stations.iter().any(|(id, _)| id == "BRL"),
-            "the station after FTW must still parse"
-        );
-    }
 
     #[test]
     fn headwind_projection() {
@@ -781,7 +471,6 @@ BRL 2013 2110+18 2308+12
                     WindLevel {
                         dir: Some(90.0),
                         spd: 50.0,
-                        temp_c: None,
                     },
                 )],
             }],
@@ -810,7 +499,6 @@ BRL 2013 2110+18 2308+12
         WindLevel {
             dir: Some(dir),
             spd,
-            temp_c: None,
         }
     }
 
@@ -906,7 +594,6 @@ BRL 2013 2110+18 2308+12
                     WindLevel {
                         dir: None,
                         spd: 0.0,
-                        temp_c: None,
                     },
                 )],
             )],
@@ -918,35 +605,10 @@ BRL 2013 2110+18 2308+12
         assert_eq!(hw, Some(0.0));
     }
 
-    #[test]
-    fn high_table_extends_a_stations_low_levels() {
-        let high = "\
-FT   45000  53000
-BRL 264663 263369
-";
-        let mut merged = HashMap::new();
-        merge_table(&mut merged, SAMPLE);
-        merge_table(&mut merged, high);
-        let brl = &merged["BRL"];
-        assert_eq!(brl.len(), 11, "nine low levels + two high levels");
-        let at = |alt| {
-            brl.iter()
-                .find(|(a, _)| *a == alt)
-                .map(|(_, w)| (w.dir, w.spd))
-        };
-        assert_eq!(at(3000), Some((Some(180.0), 17.0)), "low levels kept");
-        assert_eq!(at(45000), Some((Some(260.0), 46.0)));
-        assert_eq!(at(53000), Some((Some(260.0), 33.0)));
-    }
-
     // ---- #836: snapshot compatibility, FB temperatures, the grid column and `along` ----
 
     fn at_time(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
-
-    fn level(dir: Option<f64>, spd: f64, temp_c: Option<f64>) -> WindLevel {
-        WindLevel { dir, spd, temp_c }
     }
 
     fn fb(stations: Vec<Station>) -> Winds {
@@ -981,15 +643,14 @@ BRL 264663 263369
             .map(|c| c.iter().find(|l| l.0 == 34_000.0).unwrap().1.0)
     }
 
-    // AC4: a `stats.winds` row written before #836 (no temp_c, no grid, no valid_at) still loads
+    // AC4: a `stats.winds` row written before #836 (FB stations, no grid, no valid_at) still loads
     // and reads the same headwind.
     #[test]
     fn a_pre_change_fb_snapshot_decodes_and_gives_the_same_headwind() {
         let json = r#"{"stations":[{"lat":40.0,"lon":-90.0,"levels":[[3000,{"dir":180.0,"spd":17.0}],[35000,{"dir":90.0,"spd":50.0}]]}]}"#;
         let w: Winds = serde_json::from_str(json).unwrap();
-        assert_eq!(w.source(), WindsSource::Fb);
         assert_eq!(w.valid_at(), None);
-        assert_eq!(w.station_count(), 1);
+        assert_eq!(w.stations.len(), 1);
         let east = w.point_headwind(40.0, -90.0, 90.0, 35_000.0).unwrap();
         assert!((east - 50.0).abs() < 1e-9, "{east}");
         let north = w.point_headwind(40.0, -90.0, 0.0, 3_000.0).unwrap();
@@ -1038,97 +699,11 @@ BRL 264663 263369
         assert_eq!(back.column(40.0, -75.0).unwrap()[1].2, None);
     }
 
-    // An FB snapshot written after #836 keeps the old shape, so an older binary (a rollback) can
-    // still read it.
-    #[test]
-    fn an_fb_snapshot_serializes_without_grid_or_valid_time_keys() {
-        let w = fb(vec![station(
-            40.0,
-            -90.0,
-            vec![
-                (6000, level(Some(240.0), 27.0, None)),
-                (30000, level(Some(270.0), 41.0, Some(-31.0))),
-            ],
-        )]);
-        let v = serde_json::to_value(&w).unwrap();
-        assert!(v.get("grid").is_none() && v.get("valid_at").is_none());
-        let levels = &v["stations"][0]["levels"];
-        assert!(levels[0][1].get("temp_c").is_none());
-        assert_eq!(levels[1][1]["temp_c"], -31.0);
-    }
-
     // data-status's `winds_source` comes from here.
     #[test]
-    fn the_source_is_rap_for_a_grid_fb_for_stations_and_none_when_empty() {
+    fn the_source_is_rap_for_a_grid_and_none_without_one() {
         assert_eq!(Winds::default().source(), WindsSource::None);
-        let stations = || vec![station(40.0, -90.0, vec![(30000, wind(270.0, 40.0))])];
-        assert_eq!(fb(stations()).source(), WindsSource::Fb);
         assert_eq!(square(false).source(), WindsSource::Rap);
-        let both = Winds {
-            stations: stations(),
-            ..square(false)
-        };
-        assert_eq!(both.source(), WindsSource::Rap);
-    }
-
-    // FB temperature decode, signed form (`2427+21`, `2933-05`).
-    #[test]
-    fn decode_fb_temp_reads_a_signed_temperature() {
-        assert_eq!(decode_fb_temp("2427+21"), Some(21.0));
-        assert_eq!(decode_fb_temp("2933-05"), Some(-5.0));
-        assert_eq!(decode_fb_temp("9900+15"), Some(15.0));
-    }
-
-    // FB temperature decode, unsigned above 24,000 ft (`274131` is -31 °C).
-    #[test]
-    fn decode_fb_temp_reads_two_unsigned_digits_as_negative() {
-        assert_eq!(decode_fb_temp("274131"), Some(-31.0));
-        assert_eq!(decode_fb_temp("243352"), Some(-52.0));
-        assert_eq!(decode_fb_temp("731960"), Some(-60.0));
-    }
-
-    // FB temperature decode: absent or malformed is None, never 0 °C.
-    #[test]
-    fn decode_fb_temp_is_none_without_a_well_formed_temperature() {
-        for g in [
-            "1817", "2427+2", "2427+2A", "27413", "2741311", "2427*21", "", "24",
-        ] {
-            assert_eq!(decode_fb_temp(g), None, "{g:?}");
-        }
-    }
-
-    // End to end through the table parser: each level keeps its own temperature.
-    #[test]
-    fn a_windtemp_table_carries_each_levels_temperature() {
-        let stations = parse_windtemp(SAMPLE);
-        let brl = &stations.iter().find(|(id, _)| id == "BRL").unwrap().1;
-        let temp = |alt| brl.iter().find(|(a, _)| *a == alt).unwrap().1.temp_c;
-        assert_eq!(temp(3000), None);
-        assert_eq!(temp(6000), Some(21.0));
-        assert_eq!(temp(24000), Some(-15.0));
-        assert_eq!(temp(30000), Some(-31.0));
-        assert_eq!(temp(39000), Some(-52.0));
-    }
-
-    // FB temperature between levels that carry one, skipping the temp-less 3,000 ft level.
-    #[test]
-    fn a_station_temperature_interpolates_between_levels_that_carry_one() {
-        let w = fb(vec![station(
-            40.0,
-            -90.0,
-            vec![
-                (3000, level(Some(180.0), 17.0, None)),
-                (30000, level(Some(270.0), 40.0, Some(-31.0))),
-                (34000, level(Some(270.0), 50.0, Some(-41.0))),
-            ],
-        )]);
-        let rw = w.along(&[[40.0, -90.0], [40.0, -89.9]], 5.0);
-        let t32 = rw.temp_k(2.5, 32_000.0).unwrap();
-        assert!((t32 - 237.15).abs() < 1e-9, "{t32}");
-        // Below the lowest level with a temperature, the nearest one holds; Mach does not govern
-        // that low, so the profile never reads it for a cruise speed.
-        let t3 = rw.temp_k(2.5, 3_000.0).unwrap();
-        assert!((t3 - 242.15).abs() < 1e-9, "{t3}");
     }
 
     // Grid column: bilinear between the four surrounding points.
@@ -1278,16 +853,16 @@ BRL 264663 263369
         let path = [[40.5, -89.5], [40.5, -85.0]];
         let len = gc_dist(40.5, -89.5, 40.5, -85.0);
         let rw = w.along(&path, len);
-        assert_eq!(
-            rw.knot_distances().len(),
-            1,
-            "only the start is inside the grid"
-        );
+        // Samples every 41 nm (205 nm in 5); only the first is inside the grid.
+        let ds = rw.knot_distances();
+        assert_eq!(ds.len(), 6, "{ds:?}");
         // An eastbound great circle runs a hair off 090°, so a 50 kt westerly reads just under 50.
         let start = rw.headwind(len, 34_000.0).unwrap();
         assert!((start + 50.0).abs() < 0.1, "{start}");
-        // Past the edge the last covered value holds rather than dropping to zero.
-        assert_eq!(rw.headwind(0.0, 34_000.0), Some(start));
+        // Up to the first uncovered sample the covered wind holds; past it, still air.
+        assert_eq!(rw.headwind(ds[4] + 1.0, 34_000.0), Some(start));
+        assert_eq!(rw.headwind(ds[3] + 1.0, 34_000.0), None);
+        assert_eq!(rw.headwind(0.0, 34_000.0), None);
     }
 
     // along: degenerate inputs.

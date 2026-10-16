@@ -34,8 +34,8 @@ relaxed so the whole network is recorded (see [Capture windows](#capture-windows
 - `stats.capture` — a saved/open time window (below).
 - `stats.winds` (0042) — one serialized wind field per hourly refresh, `jsonb` (Postgres TOASTs
   it), so historical ETAs are computed against the winds that actually applied. A RAP field is keyed
-  on its valid time, so replicas loading the same cycle write one row; an FB fallback field is keyed
-  on its load time. Snapshots from before RAP (FB stations only) still load (#836).
+  on its valid time, so replicas loading the same cycle write one row. Snapshots from before RAP
+  (FB stations only) still load and replay with their station winds (#836).
 - `stats.flight_plan` (0044) — flight-plan **revision history**, for temporally-faithful replay.
 
 ## Data compression

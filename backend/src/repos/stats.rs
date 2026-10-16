@@ -2745,7 +2745,6 @@ mod winds_snapshot_tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(w.source(), WindsSource::Fb);
         assert_eq!(w.point_headwind(40.0, -90.0, 90.0, 35_000.0), Some(50.0));
         let north = w.point_headwind(40.0, -90.0, 0.0, 3_000.0).unwrap();
         assert!((north + 17.0).abs() < 1e-9, "{north}");
@@ -2781,10 +2780,13 @@ mod winds_snapshot_tests {
         .unwrap();
         insert_raw(&pool, "2026-10-15T18:00:00Z", PRE_RAP).await;
         let source = |w: Option<Winds>| w.map(|w| w.source());
-        assert_eq!(
-            source(winds_at(&pool, at("2026-10-16T00:59:00Z")).await.unwrap()),
-            Some(WindsSource::Fb)
-        );
+        // The pre-RAP row: stations only, so no grid source, and its station wind reads.
+        let old = winds_at(&pool, at("2026-10-16T00:59:00Z"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.source(), WindsSource::None);
+        assert_eq!(old.point_headwind(40.0, -90.0, 90.0, 35_000.0), Some(50.0));
         assert_eq!(
             source(winds_at(&pool, at("2026-10-16T01:00:00Z")).await.unwrap()),
             Some(WindsSource::Rap)

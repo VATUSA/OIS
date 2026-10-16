@@ -11,10 +11,10 @@ use grib::{Grib2SubmessageDecoder, GridDefinitionTemplateValues, LatLons};
 
 use super::winds::{GRID_MISSING, WindGrid, Winds};
 
-/// Isobaric levels fetched (hPa), roughly 5,000 ft (850) to FL450 (150): every 25–50 hPa through
+/// Isobaric levels fetched (hPa), roughly 2,500 ft (925) to FL450 (150): every 25–50 hPa through
 /// the cruise band.
-pub const LEVELS_HPA: [u16; 14] = [
-    850, 700, 600, 500, 450, 400, 350, 300, 275, 250, 225, 200, 175, 150,
+pub const LEVELS_HPA: [u16; 15] = [
+    925, 850, 700, 600, 500, 450, 400, 350, 300, 275, 250, 225, 200, 175, 150,
 ];
 /// Where the files are published: the AWS Open Data bucket first, NOMADS as the mirror. Both use
 /// the same `rap.YYYYMMDD/rap.tHHz.awp130pgrbfFF.grib2` layout.

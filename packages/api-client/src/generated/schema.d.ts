@@ -4737,17 +4737,15 @@ export interface components {
             procedures: number;
             /**
              * Format: date-time
-             * @description When a wind field (RAP or FB) last loaded; null when none has since startup. Still air after
-             *     failed refreshes keeps the time of the last field: `winds_source` says what is in use.
+             * @description When a RAP field last loaded; null when none has since startup. Still air after failed
+             *     refreshes keeps the time of the last field: `winds_source` says what is in use.
              */
             winds_refreshed?: string | null;
-            /** @description Where the wind field in use came from: NOAA RAP, the AWC FB fallback, or none (still air). */
+            /** @description Where the wind field in use came from: NOAA RAP, or none (still air). */
             winds_source: components["schemas"]["WindsSource"];
-            /** @description FB stations in the wind field; 0 when the field is RAP or still air. */
-            winds_stations: number;
             /**
              * Format: date-time
-             * @description The time the RAP field is valid for (null for FB or still air).
+             * @description The time the RAP field is valid for (null in still air).
              */
             winds_valid_at?: string | null;
         };
@@ -7761,10 +7759,10 @@ export interface components {
             mappings: components["schemas"]["VatusaRoleMappingBody"][];
         };
         /**
-         * @description Where the current wind field came from, for the data-status view.
+         * @description Where the live wind field came from, for the data-status view.
          * @enum {string}
          */
-        WindsSource: "rap" | "fb" | "none";
+        WindsSource: "rap" | "none";
     };
     responses: never;
     parameters: never;

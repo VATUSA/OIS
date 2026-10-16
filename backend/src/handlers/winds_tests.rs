@@ -41,22 +41,11 @@ async fn data_status_reports_a_rap_field_and_its_valid_time(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["winds_source"], "rap");
     assert_eq!(body["winds_valid_at"], "2026-10-16T01:00:00Z");
-    assert_eq!(body["winds_stations"], 0);
     assert_eq!(body["winds_refreshed"], "2026-10-16T01:20:00Z");
-}
-
-// The FB fallback: source "fb", no valid time, its station count.
-#[sqlx::test]
-async fn data_status_reports_an_fb_field_with_no_valid_time(pool: PgPool) {
-    let state = test_state(pool, HashMap::new());
-    state.winds.store(Arc::new(Winds::test_station(
-        40.0, -90.0, 35000, 90.0, 50.0,
-    )));
-    let (status, body) = send_json(&state, Method::GET, STATUS, "").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["winds_source"], "fb");
-    assert!(body["winds_valid_at"].is_null());
-    assert_eq!(body["winds_stations"], 1);
+    assert!(
+        body.get("winds_stations").is_none(),
+        "the FB station count is gone"
+    );
 }
 
 // Still air: source "none".
@@ -68,7 +57,6 @@ async fn data_status_reports_no_source_for_still_air(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["winds_source"], "none");
     assert!(body["winds_valid_at"].is_null());
-    assert_eq!(body["winds_stations"], 0);
     assert!(body["winds_refreshed"].is_null());
 }
 

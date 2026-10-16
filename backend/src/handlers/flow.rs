@@ -903,7 +903,6 @@ fn build_data_status(state: &AppState) -> DataStatus {
         airways: nav.airway_count(),
         procedures: nav.procedure_count(),
         nav_refreshed: to_dt(state.nav_refreshed.load(Ordering::Relaxed)),
-        winds_stations: winds.station_count(),
         winds_refreshed: to_dt(state.winds_refreshed.load(Ordering::Relaxed)),
         winds_source: winds.source(),
         winds_valid_at: winds.valid_at(),
@@ -1273,11 +1272,11 @@ pub async fn data_refresh(
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .unwrap_or_default();
-    match jobs::refresh_winds_once(&state.feed, &state.winds, &state.winds_refreshed, &client).await
-    {
-        None => tracing::warn!("manual winds refresh: airport database not loaded yet"),
-        Some(run) if run.ok => tracing::info!(detail = %run.detail, "manual winds refresh"),
-        Some(run) => tracing::warn!(detail = %run.detail, "manual winds refresh fell back"),
+    let run = jobs::refresh_winds_once(&state.winds, &state.winds_refreshed, &client).await;
+    if run.ok {
+        tracing::info!(detail = %run.detail, "manual winds refresh");
+    } else {
+        tracing::warn!(detail = %run.detail, "manual winds refresh did not load RAP");
     }
     Ok(Json(build_data_status(&state)))
 }

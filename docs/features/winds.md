@@ -15,9 +15,10 @@ before (next at 2e8a5f8f):
 
 after:
   NOAA RAP awp130pgrb (AWS noaa-rap-pds, NOMADS mirror)
-     ─▶ .idx ─▶ byte ranges for UGRD+VGRD and TMP at 14 levels (850–150 hPa)
+     ─▶ .idx ─▶ byte ranges for UGRD+VGRD and TMP at 15 levels (925–150 hPa)
      ─▶ rap::build_grid: decode (grib, JPEG2000), turn to true north, average onto a 1° grid
-     ─▶ jobs.rs install_winds: RAP, else FB, else still air ─▶ AppState.winds + stats.winds
+     ─▶ jobs.rs install_winds: RAP, else the last field within 3 h, else still air
+     ─▶ AppState.winds + stats.winds
      ─▶ each caller: winds.along(path, route_len) ─▶ RouteWind (wind + temperature by distance and altitude)
      ─▶ VerticalProfile::build: every integration step and every query reads its own point
 ```
@@ -51,23 +52,26 @@ These are the four limits the issue named, checked against the code on `next` be
 
 - **RAP is the primary field.** `feed/rap.rs` asks for the forecast hour of the newest published
   cycle that is valid at the hour nearest now, reads only the wind and temperature messages it needs
-  by byte range (1.5 MB of a 17 MB file in the 2026-10-16 00Z analysis), and averages the 13 km points into 1° cells. Winds are
+  by byte range (1.6 MB of a 17 MB file in the 2026-10-16 00Z analysis), and averages the 13 km
+  points into 1° cells. Winds are
   grid-relative in RAP and are turned to true north by the bearing of the grid's y axis at each
   point. Coverage is RAP's 13 km North American grid (NCEP grid 130), from 16.3°N 126.1°W at its
   southwest corner to 55.5°N 57.4°W at its northeast corner.
-- **Fallback.** `jobs::install_winds` tries RAP, then FB, then still air. A RAP failure that FB covers
-  is still a failed run in the job registry. When neither answers, a field loaded within 3 h is kept
-  and an older one is dropped for still air.
+- **When RAP fails.** `jobs::install_winds` reports the failure to the job registry, keeps a field
+  loaded within 3 h, and drops an older one for still air. The FB tables are no longer fetched;
+  snapshots holding them still replay.
 - **Per segment, at the profile's altitude.** `Winds::along` samples the field at most every 50 nm
-  along the route the profile flies, each sample carrying the headwind on its leg's course at every
-  level. The profile reads that at each step's own distance and altitude, so the climb, cruise and
-  descent each see their own wind, and every caller uses the same rule.
+  along the great circle of each leg the profile flies, each sample carrying the headwind on the
+  course at that point at every level. The profile reads that at each step's own distance and
+  altitude, so the climb, cruise and descent each see their own wind, and every caller uses the same
+  rule. Where the route leaves the field the wind holds to the next sample (at most 50 nm) and is
+  still air beyond.
 - **Temperature.** A cruise, climb or descent Mach uses the field's temperature at that point; the IAS
   schedule and any point without a temperature stay on ISA.
 - **Snapshots.** `stats.winds` rows written before the change (stations only) still load. A RAP
   snapshot is keyed on its valid time, so replicas loading the same cycle write one row.
 - **What operators see.** `GET /api/v1/flow/data-status` reports `winds_source` and `winds_valid_at`,
-  and the FCA data summary names the source (RAP winds, FB winds with a station count, or no winds).
+  and the FCA data summary names the source ("RAP winds" or "no winds").
 
 ## Measured error on live flights
 
@@ -109,5 +113,5 @@ removes.
 
 - #813 [surfaces feed the trajectory model different inputs] (To Do) covers the other inputs callers
   pass differently. The wind-altitude part is resolved by sampling along each profile.
-- Points outside RAP's domain fly still air while RAP is the source; the FB stations there were
-  outside its coverage as well.
+- The lowest level is 925 hPa (about 2,500 ft); below it that level's wind and temperature hold
+  to the runway.

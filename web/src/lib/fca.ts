@@ -92,19 +92,9 @@ export function useDataStatus() {
   });
 }
 
-/**
- * Which wind field the ETAs are using (#836): NOAA RAP normally, the FB station tables when RAP
- * could not be loaded, or none (still air).
- */
+/** Which wind field the ETAs are using (#836): NOAA RAP, or none (still air). */
 export function windsLabel(data: DataStatus): string {
-  switch (data.winds_source) {
-    case "rap":
-      return "RAP winds";
-    case "fb":
-      return `FB winds, ${data.winds_stations} stations`;
-    default:
-      return "no winds";
-  }
+  return data.winds_source === "rap" ? "RAP winds" : "no winds";
 }
 
 /**

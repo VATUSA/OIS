@@ -148,9 +148,17 @@ pub struct WindKnot {
 /// route by [`crate::feed::winds::Winds::along`], so each point of the profile reads the wind at its
 /// own position and altitude rather than one mean for the whole flight. Between knots and levels
 /// the values interpolate linearly; outside them they hold the nearest. Empty is still air.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RouteWind {
     knots: Vec<WindKnot>,
+    /// No knot carries a level: still air everywhere. Kept so a query need not scan the knots.
+    still: bool,
+}
+
+impl Default for RouteWind {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 impl RouteWind {
@@ -159,14 +167,17 @@ impl RouteWind {
         Self::default()
     }
 
-    /// Knots in any order; ones with no levels are dropped.
+    /// Knots in any order. A knot with no levels is a gap: the field does not cover that point.
+    /// Next to a covered knot the covered value holds up to the gap; between two gaps the air is
+    /// still. With samples at most [`crate::feed::winds`]'s spacing apart, a covered wind reaches at
+    /// most one sample past the edge of the field.
     pub fn new(mut knots: Vec<WindKnot>) -> Self {
-        knots.retain(|k| !k.levels.is_empty());
         knots.sort_by(|a, b| a.d_nm.total_cmp(&b.d_nm));
         for k in &mut knots {
             k.levels.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
-        Self { knots }
+        let still = knots.iter().all(|k| k.levels.is_empty());
+        Self { knots, still }
     }
 
     /// The same headwind everywhere, at every altitude, with no temperature: one route-mean value,
@@ -180,7 +191,7 @@ impl RouteWind {
     }
 
     pub fn is_still(&self) -> bool {
-        self.knots.is_empty()
+        self.still
     }
 
     /// The knots' distances to destination, in increasing order: what a test of how a route was
@@ -192,59 +203,73 @@ impl RouteWind {
 
     /// Headwind (kt) at distance-to-destination `d_nm` and `alt_ft`; None in still air.
     pub fn headwind(&self, d_nm: f64, alt_ft: f64) -> Option<f64> {
-        self.sample(d_nm, alt_ft, |l| Some(l.1))
+        self.air(d_nm, alt_ft).0
     }
 
     /// Air temperature (K) at distance-to-destination `d_nm` and `alt_ft`; None where the field
     /// carries no temperature.
     pub fn temp_k(&self, d_nm: f64, alt_ft: f64) -> Option<f64> {
-        self.sample(d_nm, alt_ft, |l| l.2)
+        self.air(d_nm, alt_ft).1
     }
 
-    fn sample(
-        &self,
-        d_nm: f64,
-        alt_ft: f64,
-        field: impl Fn(&(f64, f64, Option<f64>)) -> Option<f64> + Copy,
-    ) -> Option<f64> {
+    /// Headwind and temperature at `(d, alt)` in one lookup: linear between the bracketing knots,
+    /// held at the nearest outside them, and a knot missing a field defers to the other knot.
+    pub fn air(&self, d_nm: f64, alt_ft: f64) -> (Option<f64>, Option<f64>) {
         let i = self.knots.partition_point(|k| k.d_nm < d_nm);
-        let at = |k: &WindKnot| by_altitude(&k.levels, alt_ft, field);
         match (i.checked_sub(1).map(|j| &self.knots[j]), self.knots.get(i)) {
-            (Some(k0), Some(k1)) => match (at(k0), at(k1)) {
-                (Some(v0), Some(v1)) => {
-                    let span = k1.d_nm - k0.d_nm;
-                    let t = if span > 1e-9 {
-                        (d_nm - k0.d_nm) / span
-                    } else {
-                        0.0
-                    };
-                    Some(v0 + t * (v1 - v0))
-                }
-                (v0, v1) => v0.or(v1),
-            },
-            (Some(k), None) | (None, Some(k)) => at(k),
-            (None, None) => None,
+            (Some(k0), Some(k1)) => {
+                let (a0, a1) = (
+                    by_altitude(&k0.levels, alt_ft),
+                    by_altitude(&k1.levels, alt_ft),
+                );
+                let span = k1.d_nm - k0.d_nm;
+                let t = if span > 1e-9 {
+                    (d_nm - k0.d_nm) / span
+                } else {
+                    0.0
+                };
+                (between(a0.0, a1.0, t), between(a0.1, a1.1, t))
+            }
+            (Some(k), None) | (None, Some(k)) => by_altitude(&k.levels, alt_ft),
+            (None, None) => (None, None),
         }
     }
 }
 
-/// A level field at `alt_ft`, linear between the bracketing levels that carry it and held at the
-/// nearest outside them. `levels` is in increasing altitude.
-fn by_altitude(
-    levels: &[(f64, f64, Option<f64>)],
-    alt_ft: f64,
-    field: impl Fn(&(f64, f64, Option<f64>)) -> Option<f64>,
-) -> Option<f64> {
-    let mut below = None;
-    let mut above = None;
-    for l in levels {
-        let Some(v) = field(l) else { continue };
-        if l.0 <= alt_ft {
-            below = Some((l.0, v));
-        } else if above.is_none() {
-            above = Some((l.0, v));
+/// `v0` to `v1` at fraction `t`; with one side missing, the other.
+fn between(v0: Option<f64>, v1: Option<f64>, t: f64) -> Option<f64> {
+    match (v0, v1) {
+        (Some(a), Some(b)) => Some(a + t * (b - a)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The headwind and the temperature of one knot at `alt_ft`, each linear between the bracketing
+/// levels that carry it and held at the nearest outside them. `levels` is in increasing altitude.
+fn by_altitude(levels: &[(f64, f64, Option<f64>)], alt_ft: f64) -> (Option<f64>, Option<f64>) {
+    let (mut hw_below, mut hw_above) = (None, None);
+    let (mut t_below, mut t_above) = (None, None);
+    for &(a, hw, t) in levels {
+        if a <= alt_ft {
+            hw_below = Some((a, hw));
+        } else if hw_above.is_none() {
+            hw_above = Some((a, hw));
+        }
+        if let Some(t) = t {
+            if a <= alt_ft {
+                t_below = Some((a, t));
+            } else if t_above.is_none() {
+                t_above = Some((a, t));
+            }
         }
     }
+    (
+        lerp_levels(hw_below, hw_above, alt_ft),
+        lerp_levels(t_below, t_above, alt_ft),
+    )
+}
+
+fn lerp_levels(below: Option<(f64, f64)>, above: Option<(f64, f64)>, alt_ft: f64) -> Option<f64> {
     match (below, above) {
         (Some((a0, v0)), Some((a1, v1))) => Some(v0 + (alt_ft - a0) / (a1 - a0) * (v1 - v0)),
         (Some((_, v)), None) | (None, Some((_, v))) => Some(v),
@@ -351,13 +376,6 @@ fn phase_tas(ias_lo: f64, ias_hi: f64, mach: Option<f64>, alt_ft: f64, temp_k: f
         Some(m) => tas_ias.min(mach_to_tas_at(m, temp_k)),
         None => tas_ias,
     }
-}
-
-/// The air temperature (K) the profile uses at `(d, alt)`: the wind field's where it has one, ISA
-/// otherwise.
-fn temp_at(wind: &RouteWind, d_nm: f64, alt_ft: f64) -> f64 {
-    wind.temp_k(d_nm, alt_ft)
-        .unwrap_or_else(|| isa_temp_k(alt_ft.max(0.0)))
 }
 
 /// Groundspeed floor so a stalled step can't divide by ~zero.
@@ -542,23 +560,30 @@ impl VerticalProfile {
     }
 
     /// The predicted groundspeed at `d`: interpolated TAS, corrected by the wind at `d` and the
-    /// profile's altitude there, anchoring bias applied, floored at [`GS_FLOOR_KT`].
+    /// profile's altitude there, anchoring bias applied, floored at [`GS_FLOOR_KT`]. One search
+    /// serves both the TAS and the headwind: this runs for every step of every timing query.
     fn gs_at(&self, d_nm: f64) -> f64 {
-        let hw = self.headwind_at(d_nm);
-        (effective_gs(self.interp(d_nm, |s| s.2), hw) * self.gs_bias).max(GS_FLOOR_KT)
+        let (i0, i1, t) = self.locate(d_nm);
+        let field = |f: fn(&(f64, f64, f64, f64)) -> f64| {
+            let (a, b) = (f(&self.samples[i0]), f(&self.samples[i1]));
+            a + t * (b - a)
+        };
+        let hw = (!self.wind.is_still()).then(|| field(|s| s.3));
+        (effective_gs(field(|s| s.2), hw) * self.gs_bias).max(GS_FLOOR_KT)
     }
 
-    /// Interpolate a sample field (`.1` altitude, `.2` TAS, `.3` headwind) at
-    /// distance-to-destination `d`.
-    fn interp(&self, d_nm: f64, field: impl Fn(&(f64, f64, f64, f64)) -> f64) -> f64 {
+    /// The samples bracketing distance-to-destination `d` and the fraction between them: equal
+    /// indices (and `t` 0) at a sample or outside the samples' span, which holds the end value.
+    fn locate(&self, d_nm: f64) -> (usize, usize, f64) {
         let d = d_nm.max(0.0);
+        let last = self.samples.len().saturating_sub(1);
         match self
             .samples
             .binary_search_by(|s| s.0.partial_cmp(&d).unwrap_or(std::cmp::Ordering::Equal))
         {
-            Ok(i) => field(&self.samples[i]),
-            Err(0) => self.samples.first().map(&field).unwrap_or(0.0),
-            Err(i) if i >= self.samples.len() => self.samples.last().map(&field).unwrap_or(0.0),
+            Ok(i) => (i, i, 0.0),
+            Err(0) => (0, 0, 0.0),
+            Err(i) if i > last => (last, last, 0.0),
             Err(i) => {
                 let (s0, s1) = (&self.samples[i - 1], &self.samples[i]);
                 let t = if (s1.0 - s0.0).abs() < 1e-9 {
@@ -566,9 +591,20 @@ impl VerticalProfile {
                 } else {
                     (d - s0.0) / (s1.0 - s0.0)
                 };
-                field(s0) + t * (field(s1) - field(s0))
+                (i - 1, i, t)
             }
         }
+    }
+
+    /// Interpolate a sample field (`.1` altitude, `.2` TAS, `.3` headwind) at
+    /// distance-to-destination `d`.
+    fn interp(&self, d_nm: f64, field: impl Fn(&(f64, f64, f64, f64)) -> f64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let (i0, i1, t) = self.locate(d_nm);
+        let (a, b) = (field(&self.samples[i0]), field(&self.samples[i1]));
+        a + t * (b - a)
     }
 
     /// Altitude (ft) at a distance-to-destination `d`.
@@ -662,46 +698,66 @@ struct Speeds<'a> {
 }
 
 impl Speeds<'_> {
-    /// Cruise TAS at `(d, alt)`, held down to the cruise Mach in the air temperature there when a
-    /// cruise Mach is set (Mach governs high up).
-    fn cruise_at(&self, d: f64, alt: f64) -> f64 {
+    /// The headwind and the air temperature (K) at `(d, alt)`: the field's temperature where it
+    /// has one, ISA otherwise.
+    fn air(&self, d: f64, alt: f64) -> (Option<f64>, f64) {
+        let (hw, temp) = self.wind.air(d, alt);
+        (hw, temp.unwrap_or_else(|| isa_temp_k(alt.max(0.0))))
+    }
+
+    /// Cruise TAS in air at `temp_k`, held down to the cruise Mach when one is set (Mach governs
+    /// high up).
+    fn cruise_in(&self, temp_k: f64) -> f64 {
         match self.profile.cruise_mach {
-            Some(m) => self
-                .cruise_tas
-                .min(mach_to_tas_at(m, temp_at(self.wind, d, alt))),
+            Some(m) => self.cruise_tas.min(mach_to_tas_at(m, temp_k)),
             None => self.cruise_tas,
         }
     }
 
-    /// The descent schedule at `(d, alt)`, never faster than the aircraft cruises there (#361).
+    /// The descent schedule at `alt` in air at `temp_k`, never faster than the aircraft cruises
+    /// there (#361).
     ///
     /// Without the cap, a profile with no `desc_mach` resolves its IAS schedule to a TAS well above
     /// cruise up high (the default profile's 290 KIAS is 521 kt TAS at FL350 against a 440 kt
     /// cruise). The descent curve's top sample then sits at cruise altitude carrying that number,
     /// and `interp` ramps the cruise leg between two speeds at the same altitude, so `time_between`
     /// integrated an aircraft accelerating through cruise.
-    fn descent_at(&self, d: f64, alt: f64) -> f64 {
+    fn descent_in(&self, alt: f64, temp_k: f64) -> f64 {
         let p = self.profile;
-        let temp = temp_at(self.wind, d, alt);
-        phase_tas(p.desc_ias_lo, p.desc_ias_hi, p.desc_mach, alt, temp).min(self.cruise_at(d, alt))
+        phase_tas(p.desc_ias_lo, p.desc_ias_hi, p.desc_mach, alt, temp_k)
+            .min(self.cruise_in(temp_k))
+    }
+
+    /// The climb schedule at `alt` in air at `temp_k`.
+    fn climb_in(&self, alt: f64, temp_k: f64) -> f64 {
+        let p = self.profile;
+        phase_tas(p.climb_ias_lo, p.climb_ias_hi, p.climb_mach, alt, temp_k)
+    }
+
+    /// Cruise TAS at `(d, alt)`.
+    fn cruise_at(&self, d: f64, alt: f64) -> f64 {
+        self.cruise_in(self.air(d, alt).1)
+    }
+
+    /// The descent schedule at `(d, alt)`.
+    fn descent_at(&self, d: f64, alt: f64) -> f64 {
+        self.descent_in(alt, self.air(d, alt).1)
     }
 
     /// The climb schedule at `(d, alt)`.
     fn climb_at(&self, d: f64, alt: f64) -> f64 {
-        let p = self.profile;
-        let temp = temp_at(self.wind, d, alt);
-        phase_tas(p.climb_ias_lo, p.climb_ias_hi, p.climb_mach, alt, temp)
+        self.climb_in(alt, self.air(d, alt).1)
     }
+}
 
-    /// Groundspeed for a step flown at `tas` at `(d, alt)`.
-    fn gs(&self, tas: f64, d: f64, alt: f64) -> f64 {
-        effective_gs(tas, self.wind.headwind(d, alt)).max(GS_FLOOR_KT)
-    }
+/// Groundspeed for a step flown at `tas` into `headwind`.
+fn step_gs(tas: f64, headwind: Option<f64>) -> f64 {
+    effective_gs(tas, headwind).max(GS_FLOOR_KT)
 }
 
 /// Integrate the descent from the field (`lo_alt`) up to `hi_alt` at the profile's descent rate,
 /// returning `(distance_to_destination, altitude, true_airspeed)` samples. Each step's groundspeed
-/// takes the wind at the step's own distance from the field and altitude.
+/// takes the wind and temperature at the step's own distance from the field and altitude.
 fn integrate_descent(lo_alt: f64, hi_alt: f64, speeds: &Speeds) -> Vec<(f64, f64, f64)> {
     let fpm = speeds.profile.desc_fpm;
     let mut out = vec![(0.0, lo_alt, speeds.descent_at(0.0, lo_alt))];
@@ -714,8 +770,8 @@ fn integrate_descent(lo_alt: f64, hi_alt: f64, speeds: &Speeds) -> Vec<(f64, f64
         let top = (alt + VERT_STEP_FT).min(hi_alt);
         let mid = (alt + top) / 2.0;
         let step_sec = (top - alt) / fpm * 60.0;
-        let tas = speeds.descent_at(dist, mid);
-        dist += speeds.gs(tas, dist, mid) * step_sec / 3600.0;
+        let (hw, temp) = speeds.air(dist, mid);
+        dist += step_gs(speeds.descent_in(mid, temp), hw) * step_sec / 3600.0;
         alt = top;
         out.push((dist, alt, speeds.descent_at(dist, alt)));
     }
@@ -724,8 +780,8 @@ fn integrate_descent(lo_alt: f64, hi_alt: f64, speeds: &Speeds) -> Vec<(f64, f64
 
 /// Integrate a climb from `lo_alt` to `hi_alt` with the profile's per-band climb rates
 /// (`climb_fpm_lo` below 10,000 ft, `climb_fpm_hi` above), starting `start_d` from the destination.
-/// Returns `(distance_flown_from_start, altitude, tas)`; each step reads the wind at
-/// `start_d − distance_flown` and its altitude.
+/// Returns `(distance_flown_from_start, altitude, tas)`; each step reads the wind and temperature
+/// at `start_d − distance_flown` and its altitude.
 fn integrate_climb(
     lo_alt: f64,
     hi_alt: f64,
@@ -749,9 +805,8 @@ fn integrate_climb(
         }
         .max(1.0);
         let step_sec = (top - alt) / fpm * 60.0;
-        let d = start_d - dist;
-        let tas = speeds.climb_at(d, mid);
-        dist += speeds.gs(tas, d, mid) * step_sec / 3600.0;
+        let (hw, temp) = speeds.air(start_d - dist, mid);
+        dist += step_gs(speeds.climb_in(mid, temp), hw) * step_sec / 3600.0;
         alt = top;
         out.push((dist, alt, speeds.climb_at(start_d - dist, alt)));
     }
@@ -1641,15 +1696,21 @@ mod tests {
 
     // RouteWind::new normalizes its input.
     #[test]
-    fn route_wind_new_sorts_knots_and_drops_empty_ones() {
+    fn route_wind_new_sorts_knots_and_reads_an_empty_knot_as_a_gap() {
         let w = RouteWind::new(vec![
             knot(300.0, vec![(0.0, 90.0, None)]),
             knot(0.0, vec![(0.0, 30.0, None)]),
-            knot(150.0, vec![]),
+            knot(100.0, vec![]),
+            knot(200.0, vec![]),
         ]);
-        assert_eq!(w.headwind(150.0, 0.0), Some(60.0));
+        // Sorted: 0 (30 kt), 100 (gap), 200 (gap), 300 (90 kt). Next to a covered knot its value
+        // holds up to the gap; between two gaps the air is still.
+        assert_eq!(w.headwind(50.0, 0.0), Some(30.0));
+        assert_eq!(w.headwind(150.0, 0.0), None);
+        assert_eq!(w.headwind(250.0, 0.0), Some(90.0));
+        assert!(!w.is_still());
         assert!(RouteWind::new(vec![]).is_still());
-        assert!(RouteWind::new(vec![knot(10.0, vec![])]).is_still());
+        assert!(RouteWind::new(vec![knot(10.0, vec![]), knot(20.0, vec![])]).is_still());
     }
 
     // Still air: no wind, no temperature.

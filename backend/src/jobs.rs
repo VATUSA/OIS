@@ -20,7 +20,7 @@ use crate::feed::sector_consolidations::SectorConsolidations;
 use crate::feed::sector_limits::SectorLimits;
 use crate::feed::sectors::SectorTable;
 use crate::feed::trajectory::ProfileTable;
-use crate::feed::winds::{self, Winds};
+use crate::feed::winds::Winds;
 use crate::job_registry::{JobRegistry, run_interval};
 use crate::models::AirportGateBody;
 use crate::realtime::{Events, topic};
@@ -135,10 +135,10 @@ const NAV_REFRESH_JOB: &str = "nav_refresh";
 
 /// How often to refresh winds aloft: RAP publishes a new cycle every hour.
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// The most one RAP fetch (an index and 28 range reads) may take before the pass falls back to FB.
+/// The most one RAP fetch (an index and 30 range reads) may take before the pass gives up on it.
 const RAP_FETCH_BUDGET: Duration = Duration::from_secs(120);
-/// When neither RAP nor FB answers, a field loaded this recently is kept; an older one is dropped
-/// for still air rather than timing flights on winds hours out of date (#836).
+/// When RAP does not answer, a field loaded this recently is kept; an older one is dropped for still
+/// air rather than timing flights on winds hours out of date (#836).
 const WINDS_MAX_AGE_SECS: i64 = 3 * 60 * 60;
 
 /// How often to reload aircraft performance profiles from the DB (staff edits are rare, and the
@@ -314,26 +314,21 @@ pub async fn refresh_airports_once(
 /// The outcome of one winds refresh, for the job registry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindsRefresh {
-    /// False whenever RAP did not load, including when FB covered for it (#836).
+    /// False whenever RAP did not load (#836).
     pub ok: bool,
     pub detail: String,
-    /// A new field (RAP or FB) was installed, so it is worth a `stats.winds` snapshot.
+    /// A new field was installed, so it is worth a `stats.winds` snapshot.
     pub loaded: bool,
 }
 
-/// Install the wind field from one RAP attempt, falling back to FB, then to still air (#836). FB is
-/// fetched only when RAP failed. With neither, a field loaded within [`WINDS_MAX_AGE_SECS`] is kept
-/// and an older one is replaced by still air.
-pub async fn install_winds<FbFut>(
+/// Install the wind field from one RAP attempt (#836). When RAP fails, a field loaded within
+/// [`WINDS_MAX_AGE_SECS`] is kept and an older one is replaced by still air.
+pub fn install_winds(
     winds: &ArcSwap<Winds>,
     refreshed: &AtomicI64,
     rap: Result<Winds, String>,
-    fb: impl FnOnce() -> FbFut,
     now: chrono::DateTime<Utc>,
-) -> WindsRefresh
-where
-    FbFut: std::future::Future<Output = Winds>,
-{
+) -> WindsRefresh {
     let rap = rap.and_then(|w| {
         if w.is_empty() {
             Err("empty field".to_string())
@@ -354,40 +349,29 @@ where
         }
         Err(e) => e,
     };
-    tracing::warn!(error = %rap_err, "RAP winds fetch failed; falling back to FB");
-    let fb = fb().await;
-    if !fb.is_empty() {
-        let n = fb.station_count();
-        winds.store(Arc::new(fb));
-        refreshed.store(now.timestamp_millis(), Ordering::Relaxed);
-        return WindsRefresh {
-            ok: false,
-            detail: format!("RAP failed ({rap_err}); using FB, {n} stations"),
-            loaded: true,
-        };
-    }
+    tracing::warn!(error = %rap_err, "RAP winds fetch failed");
     let age_secs = now.timestamp() - refreshed.load(Ordering::Relaxed) / 1000;
     if age_secs <= WINDS_MAX_AGE_SECS {
         return WindsRefresh {
             ok: false,
             detail: format!(
-                "RAP failed ({rap_err}); FB returned no stations; keeping the field loaded {} min ago",
+                "RAP failed ({rap_err}); keeping the field loaded {} min ago",
                 age_secs / 60
             ),
             loaded: false,
         };
     }
-    tracing::warn!("no winds source answered; flying still air");
+    tracing::warn!("no wind field within the last 3 h; flying still air");
     winds.store(Arc::new(Winds::default()));
     WindsRefresh {
         ok: false,
-        detail: format!("RAP failed ({rap_err}); FB returned no stations; still air"),
+        detail: format!("RAP failed ({rap_err}); still air"),
         loaded: false,
     }
 }
 
 /// Snapshot a newly loaded field to `stats.winds` for historical replay, keyed on its valid time
-/// (RAP), so every replica loading the same cycle writes one row, or on `now` for an FB field.
+/// so every replica loading the same cycle writes one row (`now` for a field without one).
 pub async fn snapshot_winds(
     pool: &PgPool,
     field: &Winds,
@@ -420,25 +404,18 @@ pub async fn record_winds_run(
     run
 }
 
-/// Fetch winds aloft once and hot-swap them in: RAP within [`RAP_FETCH_BUDGET`], else FB, else still
-/// air ([`install_winds`]). None while the airport database (which places the FB stations) has not
-/// loaded.
+/// Fetch winds aloft once and hot-swap them in: RAP within [`RAP_FETCH_BUDGET`], else the current
+/// field while it is recent, else still air ([`install_winds`]).
 pub async fn refresh_winds_once(
-    feed: &FeedState,
-    winds: &Arc<ArcSwap<Winds>>,
-    refreshed: &Arc<AtomicI64>,
+    winds: &ArcSwap<Winds>,
+    refreshed: &AtomicI64,
     client: &reqwest::Client,
-) -> Option<WindsRefresh> {
-    let airports = feed.read().await.airports.clone();
-    if airports.is_empty() {
-        return None;
-    }
+) -> WindsRefresh {
     let now = Utc::now();
     let rap = tokio::time::timeout(RAP_FETCH_BUDGET, rap::fetch(client, now))
         .await
         .unwrap_or_else(|_| Err(format!("timed out after {} s", RAP_FETCH_BUDGET.as_secs())));
-    let fb = || winds::fetch_fb(client, &airports);
-    Some(install_winds(winds, refreshed, rap, fb, now).await)
+    install_winds(winds, refreshed, rap, now)
 }
 
 /// Keep the in-memory nav database current: refresh at startup, every 24h, and as each new
@@ -506,24 +483,20 @@ pub fn spawn_airports_refresh(reg: Arc<JobRegistry>, feed: FeedState) {
     ));
 }
 
-/// Keep winds aloft current for ETA prediction: once the airport database is loaded, load RAP
-/// (falling back to FB, then still air) and hot-swap it in, then refresh hourly. When a DB pool is
-/// present, each newly loaded field is also snapshotted to `stats.winds`, keyed on its valid time
-/// (RAP) or the load time (FB), so historical replay can reconstruct past ETAs and replicas that
-/// load the same RAP field write one row.
+/// Keep winds aloft current for ETA prediction: load RAP and hot-swap it in, at startup and then
+/// hourly. When a DB pool is present, each newly loaded field is also snapshotted to `stats.winds`,
+/// keyed on its valid time, so historical replay can reconstruct past ETAs and replicas that load
+/// the same RAP field write one row.
 pub fn spawn_winds_refresh(
     reg: Arc<JobRegistry>,
-    feed: FeedState,
     winds: Arc<ArcSwap<Winds>>,
     refreshed: Arc<AtomicI64>,
     pool: Option<sqlx::PgPool>,
 ) {
     tokio::spawn(async move {
-        // Not run_interval: winds has a variable cadence (fast retry until the airport DB loads,
-        // then hourly), so it's observed but not manually triggerable.
         reg.register(
             "winds_refresh",
-            "Load winds aloft (NOAA RAP, falling back to AWC FB tables)",
+            "Load winds aloft (NOAA RAP)",
             Some(WINDS_REFRESH_INTERVAL.as_secs()),
             false,
         );
@@ -534,12 +507,7 @@ pub fn spawn_winds_refresh(
             .unwrap_or_default();
         loop {
             reg.begin("winds_refresh");
-            let Some(run) = refresh_winds_once(&feed, &winds, &refreshed, &client).await else {
-                // Airport DB not loaded yet — retry soon.
-                reg.finish("winds_refresh", false, "airport database not loaded yet");
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                continue;
-            };
+            let run = refresh_winds_once(&winds, &refreshed, &client).await;
             let run = record_winds_run(pool.as_ref(), &winds, run, Utc::now()).await;
             if run.ok {
                 tracing::info!(detail = %run.detail, "winds aloft refreshed");
@@ -2944,7 +2912,6 @@ mod departure_runway_derive_tests {
 
 #[cfg(test)]
 mod winds_refresh_tests {
-    use std::cell::Cell;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -2968,40 +2935,12 @@ mod winds_refresh_tests {
         )
     }
 
-    fn fb_field() -> Winds {
-        Winds::test_station(40.0, -90.0, 34000, 270.0, 40.0)
-    }
-
-    /// One `install_winds` run with RAP answering `rap` and FB answering `fb`; returns whether FB
-    /// was asked.
-    async fn run(
-        winds: &ArcSwap<Winds>,
-        refreshed: &AtomicI64,
-        rap: Result<Winds, String>,
-        fb: Winds,
-        now: DateTime<Utc>,
-    ) -> (WindsRefresh, bool) {
-        let asked = Cell::new(false);
-        let out = install_winds(
-            winds,
-            refreshed,
-            rap,
-            || {
-                asked.set(true);
-                std::future::ready(fb)
-            },
-            now,
-        )
-        .await;
-        (out, asked.get())
-    }
-
-    // AC2: a good RAP field is installed; FB is never fetched.
-    #[tokio::test]
-    async fn a_rap_field_is_installed_and_fb_is_not_fetched() {
+    // AC2: a good RAP field is installed and its load time stamped.
+    #[test]
+    fn a_rap_field_is_installed() {
         let now = at("2026-10-16T01:20:00Z");
         let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
-        let (out, asked) = run(&winds, &refreshed, Ok(rap_field()), fb_field(), now).await;
+        let out = install_winds(&winds, &refreshed, Ok(rap_field()), now);
         assert_eq!(
             out,
             WindsRefresh {
@@ -3013,95 +2952,59 @@ mod winds_refresh_tests {
         assert_eq!(winds.load().source(), WindsSource::Rap);
         assert_eq!(winds.load().valid_at(), Some(at("2026-10-16T01:00:00Z")));
         assert_eq!(refreshed.load(Ordering::Relaxed), now.timestamp_millis());
-        assert!(!asked, "FB is fetched only when RAP fails");
     }
 
-    // AC2: a RAP failure that FB covered is still reported to the job registry as a failure.
-    #[tokio::test]
-    async fn an_fb_field_covers_a_rap_failure_and_the_run_reports_failed() {
+    // AC2: a RAP fetch that decoded to nothing is a failure, not a field.
+    #[test]
+    fn an_empty_rap_field_is_treated_as_a_failure() {
         let now = at("2026-10-16T01:20:00Z");
         let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
-        let err = "https://noaa-rap-pds.s3.amazonaws.com/x: 404".to_string();
-        let (out, asked) = run(&winds, &refreshed, Err(err.clone()), fb_field(), now).await;
-        assert!(!out.ok && out.loaded);
-        assert!(
-            out.detail.contains(&format!("RAP failed ({err})")),
-            "{}",
-            out.detail
-        );
-        assert!(
-            out.detail.contains("using FB, 1 stations"),
-            "{}",
-            out.detail
-        );
-        assert_eq!(winds.load().source(), WindsSource::Fb);
-        assert_eq!(refreshed.load(Ordering::Relaxed), now.timestamp_millis());
-        assert!(asked);
+        let out = install_winds(&winds, &refreshed, Ok(Winds::default()), now);
+        assert!(!out.ok && !out.loaded);
+        assert_eq!(out.detail, "RAP failed (empty field); still air");
+        assert_eq!(refreshed.load(Ordering::Relaxed), 0);
     }
 
-    // AC2: a RAP fetch that decoded to nothing is not a field.
-    #[tokio::test]
-    async fn an_empty_rap_field_is_treated_as_a_failure() {
-        let now = at("2026-10-16T01:20:00Z");
-        let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
-        let (out, asked) = run(&winds, &refreshed, Ok(Winds::default()), fb_field(), now).await;
-        assert!(!out.ok);
-        assert!(
-            out.detail.contains("RAP failed (empty field)"),
-            "{}",
-            out.detail
-        );
-        assert_eq!(winds.load().source(), WindsSource::Fb);
-        assert!(asked);
-    }
-
-    // AC2: both sources fail, the current field is recent: keep it.
-    #[tokio::test]
-    async fn a_fresh_field_is_kept_when_neither_source_answers() {
+    // AC2: RAP fails and the current field is recent: keep it, and report the failure.
+    #[test]
+    fn a_fresh_field_is_kept_when_rap_fails() {
         let now = at("2026-10-16T03:00:00Z");
         let winds = ArcSwap::from_pointee(rap_field());
         let loaded = (now - Duration::hours(2)).timestamp_millis();
         let refreshed = AtomicI64::new(loaded);
         let before = winds.load_full();
-        let (out, _) = run(
-            &winds,
-            &refreshed,
-            Err("timed out after 120 s".into()),
-            Winds::default(),
-            now,
-        )
-        .await;
+        let err = "https://noaa-rap-pds.s3.amazonaws.com/x: 404";
+        let out = install_winds(&winds, &refreshed, Err(err.into()), now);
         assert!(!out.ok && !out.loaded);
-        assert!(
-            out.detail.contains("keeping the field loaded 120 min ago"),
-            "{}",
-            out.detail
+        assert_eq!(
+            out.detail,
+            format!("RAP failed ({err}); keeping the field loaded 120 min ago")
         );
         assert!(Arc::ptr_eq(&before, &winds.load_full()));
         assert_eq!(refreshed.load(Ordering::Relaxed), loaded);
     }
 
-    // AC2: both sources fail, the current field is old: fly still air rather than stale winds.
-    #[tokio::test]
-    async fn a_stale_field_is_dropped_for_still_air_when_neither_answers() {
+    // AC2: RAP fails and the current field is old: fly still air rather than stale winds.
+    #[test]
+    fn a_stale_field_is_dropped_for_still_air_when_rap_fails() {
         let now = at("2026-10-16T05:00:00Z");
         let winds = ArcSwap::from_pointee(rap_field());
         let refreshed = AtomicI64::new((now - Duration::hours(4)).timestamp_millis());
-        let (out, _) = run(&winds, &refreshed, Err("404".into()), Winds::default(), now).await;
+        let out = install_winds(&winds, &refreshed, Err("404".into()), now);
         assert!(!out.ok && !out.loaded);
-        assert!(out.detail.ends_with("still air"), "{}", out.detail);
+        assert_eq!(out.detail, "RAP failed (404); still air");
         assert_eq!(winds.load().source(), WindsSource::None);
     }
 
     // Boundary: absolute fixtures either side of the 3 h policy, and the constant between them.
-    #[tokio::test]
-    async fn the_keep_window_straddles_three_hours() {
+    #[test]
+    fn the_keep_window_straddles_three_hours() {
         assert!((10_740..10_860).contains(&WINDS_MAX_AGE_SECS));
         let now = at("2026-10-16T05:00:00Z");
         for (age_min, kept) in [(179, true), (180, true), (181, false)] {
             let winds = ArcSwap::from_pointee(rap_field());
             let refreshed = AtomicI64::new((now - Duration::minutes(age_min)).timestamp_millis());
-            run(&winds, &refreshed, Err("404".into()), Winds::default(), now).await;
+            install_winds(&winds, &refreshed, Err("404".into()), now);
             let source = winds.load().source();
             assert_eq!(
                 source == WindsSource::Rap,
@@ -3111,29 +3014,15 @@ mod winds_refresh_tests {
         }
     }
 
-    // Edge: nothing ever loaded (refreshed 0, empty field) and both fail.
-    #[tokio::test]
-    async fn with_no_field_ever_loaded_neither_source_leaves_still_air() {
+    // Edge: nothing ever loaded and RAP fails.
+    #[test]
+    fn with_no_field_ever_loaded_a_rap_failure_leaves_still_air() {
         let now = at("2026-10-16T05:00:00Z");
         let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
-        let (out, _) = run(&winds, &refreshed, Err("404".into()), Winds::default(), now).await;
+        let out = install_winds(&winds, &refreshed, Err("404".into()), now);
         assert!(!out.ok);
         assert_eq!(winds.load().source(), WindsSource::None);
         assert_eq!(refreshed.load(Ordering::Relaxed), 0);
-    }
-
-    // The pass waits for the airport database (FB stations are placed through it) and does no
-    // network I/O before then.
-    #[tokio::test]
-    async fn refresh_winds_once_waits_for_the_airport_database() {
-        let feed = crate::feed::new_state();
-        let winds = Arc::new(ArcSwap::from_pointee(rap_field()));
-        let refreshed = Arc::new(AtomicI64::new(7));
-        let before = winds.load_full();
-        let out = refresh_winds_once(&feed, &winds, &refreshed, &reqwest::Client::new()).await;
-        assert_eq!(out, None);
-        assert!(Arc::ptr_eq(&before, &winds.load_full()));
-        assert_eq!(refreshed.load(Ordering::Relaxed), 7);
     }
 
     async fn snapshot_times(pool: &sqlx::PgPool) -> Vec<DateTime<Utc>> {
@@ -3160,10 +3049,11 @@ mod winds_refresh_tests {
         );
     }
 
-    // AC4: an FB field has no valid time; its snapshot is keyed on when it loaded.
+    // A field with no valid time is keyed on when it loaded.
     #[sqlx::test]
-    async fn an_fb_snapshot_is_keyed_on_its_load_time(pool: sqlx::PgPool) {
-        snapshot_winds(&pool, &fb_field(), at("2026-10-16T01:20:00Z"))
+    async fn a_field_without_a_valid_time_is_keyed_on_its_load_time(pool: sqlx::PgPool) {
+        let field = Winds::test_station(40.0, -90.0, 34000, 270.0, 40.0);
+        snapshot_winds(&pool, &field, at("2026-10-16T01:20:00Z"))
             .await
             .unwrap();
         assert_eq!(
@@ -3177,7 +3067,7 @@ mod winds_refresh_tests {
     async fn a_failed_snapshot_store_marks_the_run_failed(pool: sqlx::PgPool) {
         let now = at("2026-10-16T01:20:00Z");
         let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
-        let (out, _) = run(&winds, &refreshed, Ok(rap_field()), fb_field(), now).await;
+        let out = install_winds(&winds, &refreshed, Ok(rap_field()), now);
         assert!(out.ok && out.loaded);
         // Positive control: with the table in place the same run records and stays ok.
         let fine = record_winds_run(Some(&pool), &winds, out.clone(), now).await;
@@ -3215,7 +3105,7 @@ mod winds_refresh_tests {
         let winds = ArcSwap::from_pointee(Winds::default());
         let kept = WindsRefresh {
             ok: false,
-            detail: "RAP failed (404); FB returned no stations; still air".into(),
+            detail: "RAP failed (404); still air".into(),
             loaded: false,
         };
         assert_eq!(
