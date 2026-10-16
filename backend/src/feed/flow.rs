@@ -1657,6 +1657,57 @@ mod tests {
         assert_eq!(flights[0].cfr, Some(wheels));
     }
 
+    /// #815 (Tier 2a): an issued CFR reserves its slot at the locked wheels-up plus the airborne
+    /// ETE. The ground flight's own wheels-up estimate is now + 11 min (the 660 s allowance), so a
+    /// wheels-up locked at now + 30 min lands it 19 min after its ETA. Backing out the gate time
+    /// (`eta − now`) would reserve it 30 min late instead.
+    #[test]
+    fn an_issued_cfr_reserves_its_wheels_up_plus_the_airborne_ete() {
+        let now = t0();
+        // Five samples at KBOS; no gate list and a parked pilot, so the airport tier: 50 + 40 + 570 s.
+        let samples = HashMap::from([(
+            "KBOS".to_string(),
+            (0..5)
+                .map(|_| taxi_sample("A1", "B738", "04L", 570))
+                .collect::<Vec<_>>(),
+        )]);
+        let data = VatsimData {
+            pilots: vec![pilot("GRD1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT"))],
+            ..Default::default()
+        };
+        let wheels = now + Duration::minutes(30);
+        let issued = HashMap::from([("GRD1".to_string(), wheels)]);
+        let flow = compute(
+            "KJFK",
+            Some(&base_program()),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &issued,
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            now,
+        );
+        let grd = &flow.flights[0];
+        assert_eq!(
+            grd.etd,
+            Some(now + Duration::seconds(660)),
+            "positive control"
+        );
+        assert!(grd.cfr_issued);
+        assert_eq!(grd.cfr, Some(wheels));
+        assert_eq!(
+            ms(grd.sta),
+            ms(grd.eta) + 19 * 60_000,
+            "not 30 min, the gate-time form"
+        );
+        assert_eq!(grd.delay_min, 19);
+    }
+
     #[test]
     fn ready_time_slot_never_before_ready_or_now() {
         let data = VatsimData {
@@ -1684,6 +1735,50 @@ mod tests {
         )
         .unwrap();
         assert!(slot >= ready, "slot {slot} should be >= ready {ready}");
+    }
+
+    /// #815: `ready_time_slot` returns a wheels-up, so the enroute time it slots with is the
+    /// airborne ETE alone (`sta − cfr`, no ground allowance). GRD2 flies the same plan from the same
+    /// spot with a wheels-up locked at now + 40 min; GRD1 ready at now + 39 min would arrive 1 min
+    /// behind it, inside the 2 min runway interval (AAR 30), so its wheels-up is pushed to
+    /// now + 42 min. With the 660 s allowance counted in the enroute time, the ready slot would read
+    /// as 11 min clear of GRD2 and come back unchanged at now + 39 min.
+    #[test]
+    fn ready_time_slot_pushes_a_conflicting_wheels_up_by_the_runway_interval() {
+        let now = t0();
+        // Five samples at KBOS; no gate list and parked pilots, so the airport tier: 50 + 40 + 570 s.
+        let samples = HashMap::from([(
+            "KBOS".to_string(),
+            (0..5)
+                .map(|_| taxi_sample("A1", "B738", "04L", 570))
+                .collect::<Vec<_>>(),
+        )]);
+        let data = VatsimData {
+            pilots: vec![
+                pilot("GRD1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT")),
+                pilot("GRD2", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT")),
+            ],
+            ..Default::default()
+        };
+        let issued = HashMap::from([("GRD2".to_string(), now + Duration::minutes(40))]);
+        let slot = ready_time_slot(
+            "KJFK",
+            &base_program(),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &issued,
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            "GRD1",
+            now + Duration::minutes(39),
+            now,
+        );
+        assert_eq!(slot, Some(now + Duration::minutes(42)));
     }
 
     /// #815 AC1 wiring (airport flow and GDP): `compute` puts a ground flight's ETD at its estimated
@@ -2422,5 +2517,59 @@ mod tests {
             "a 5431 ft field shortens the synthetic descent, so the flight time must come in below \
              a sea-level one — got {high_min:.2} min vs {sea_min:.2} min"
         );
+    }
+
+    /// #815: the synthetic 300 nm fallback returns the ground allowance it timed, so a departure
+    /// with no coordinates still has its wheels-up one allowance after now, not at the gate time.
+    #[test]
+    fn the_synthetic_ground_estimate_returns_its_ground_allowance() {
+        let now = t0();
+        // KXXX has no coordinates in `airports()`, so both calls take the fallback. Five samples
+        // there and a parked pilot: the airport tier, 50 + 40 + 570 s.
+        let samples = HashMap::from([(
+            "KXXX".to_string(),
+            (0..5)
+                .map(|_| taxi_sample("A1", "B738", "04L", 570))
+                .collect::<Vec<_>>(),
+        )]);
+        let plan = fp("KXXX", "KJFK", "DCT");
+        let (route_nm, _, allowance) = ground_estimate(
+            &NavData::default(),
+            "KXXX",
+            Some((40.6413, -73.7781)),
+            &plan,
+            &airports(),
+            &Winds::default(),
+            &trajectory::AircraftProfile::default(),
+            Some((42.36, -71.0, 0, 0)),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            now,
+        );
+        assert_eq!(route_nm, 300.0, "positive control: the fallback branch ran");
+        assert_eq!(allowance, 660.0);
+
+        let data = VatsimData {
+            pilots: vec![pilot("GRD1", 42.36, -71.0, 0, 0, plan)],
+            ..Default::default()
+        };
+        let flow = compute(
+            "KJFK",
+            None,
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            now,
+        );
+        assert_eq!(flow.flights[0].distance_nm, Some(300.0));
+        assert_eq!(flow.flights[0].etd, Some(now + Duration::seconds(660)));
     }
 }
