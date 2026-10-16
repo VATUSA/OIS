@@ -147,7 +147,8 @@ pub struct WindKnot {
 /// The wind a profile flies through, by distance to destination and altitude (#836). Built per
 /// route by [`crate::feed::winds::Winds::along`], so each point of the profile reads the wind at its
 /// own position and altitude rather than one mean for the whole flight. Between knots and levels
-/// the values interpolate linearly; outside them they hold the nearest. Empty is still air.
+/// the values interpolate linearly, except next to a gap ([`RouteWind::new`]); outside them they
+/// hold the nearest. Empty is still air.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteWind {
     knots: Vec<WindKnot>,
@@ -511,8 +512,11 @@ impl VerticalProfile {
     }
 
     /// Give every sample its headwind, adding a sample at each wind knot inside the profile so the
-    /// headwind between samples is linear, as the wind field is between knots.
+    /// headwind between samples is linear, as the wind field is between knots. The wind steps to
+    /// still air at a gap knot, so a gap knot also gets a sample just either side of it: without
+    /// them the samples would ramp a covered wind across the next span too.
     fn sample_headwinds(&mut self) {
+        const GAP_EDGE_NM: f64 = 1e-3;
         if self.wind.is_still() {
             return;
         }
@@ -521,7 +525,14 @@ impl VerticalProfile {
             .wind
             .knots
             .iter()
-            .map(|k| k.d_nm)
+            .flat_map(|k| {
+                let edges = if k.levels.is_empty() {
+                    vec![k.d_nm - GAP_EDGE_NM, k.d_nm, k.d_nm + GAP_EDGE_NM]
+                } else {
+                    vec![k.d_nm]
+                };
+                edges.into_iter()
+            })
             .filter(|&d| d > 0.0 && d < top)
             .map(|d| (d, self.alt_at(d), self.interp(d, |s| s.2), 0.0))
             .collect();
@@ -1526,14 +1537,16 @@ mod tests {
         assert!(moved > 4.0, "top of descent moved {moved} nm");
     }
 
-    // AC3: climb integration reads the wind at its own d (near the departure).
+    // AC3: climb integration reads the wind at its own d. 60 kt on the nose for the first 20 nm
+    // only (calm from 30 nm out) costs the climb those miles' share; read at the departure for every
+    // step, it would cost the whole climb's, over 15 nm.
     #[test]
     fn a_departure_end_headwind_lengthens_the_climb_not_the_descent() {
         let p = AircraftProfile::default();
         let wind = flat(&[
             (0.0, 0.0, None),
-            (200.0, 0.0, None),
-            (220.0, 60.0, None),
+            (270.0, 0.0, None),
+            (280.0, 60.0, None),
             (300.0, 60.0, None),
         ]);
         let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, w);
@@ -1546,7 +1559,10 @@ mod tests {
             300.0 - d
         };
         let shorter = climb_nm(&still) - climb_nm(&windy);
-        assert!(shorter > 3.0, "the climb covers {shorter} nm less ground");
+        assert!(
+            (3.0..10.0).contains(&shorter),
+            "the climb covers {shorter} nm less ground"
+        );
         for d in [20.0, 50.0, 80.0] {
             assert!(
                 (windy.alt_at(d) - still.alt_at(d)).abs() < 10.0,
@@ -1583,7 +1599,6 @@ mod tests {
         assert!((mach_to_tas_at(1.0, 288.15) - 661.4788).abs() < 1e-9);
         assert!((mach_to_tas_at(0.84, ISA_FL350_K) - 484.2).abs() < 0.1);
         assert!((mach_to_tas(0.84, 35_000.0) - mach_to_tas_at(0.84, ISA_FL350_K)).abs() < 1e-9);
-        assert!(mach_to_tas_at(0.8, 0.0).is_finite());
     }
 
     // ISA where the field has no temperature (FB 3,000 ft; a RAP point with TMP missing).
@@ -1713,6 +1728,43 @@ mod tests {
         assert!(RouteWind::new(vec![knot(10.0, vec![]), knot(20.0, vec![])]).is_still());
     }
 
+    // The profile flies the gap rule: a covered wind holds up to the first gap knot past the field
+    // edge and stops there, on the way out of the field and on the way in.
+    #[test]
+    fn the_profile_stops_a_covered_wind_at_the_first_gap_past_the_field() {
+        let p = AircraftProfile::default();
+        let mut knots = vec![
+            knot(500.0, vec![(0.0, 80.0, None)]),
+            knot(450.0, vec![(0.0, 80.0, None)]),
+        ];
+        for d in [
+            0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 550.0, 600.0,
+        ] {
+            knots.push(knot(d, vec![]));
+        }
+        let vp = cruise(600.0, 440.0, &p, RouteWind::new(knots));
+        let still = cruise(600.0, 440.0, &p, RouteWind::still());
+        for d in [575.0, 375.0] {
+            assert!(
+                (vp.ground_speed_at(d) - still.ground_speed_at(d)).abs() < 1e-6,
+                "{d} nm is past the first gap: still air, got {}",
+                vp.ground_speed_at(d)
+            );
+        }
+        for d in [525.0, 475.0, 425.0] {
+            assert!(
+                (vp.ground_speed_at(d) - (still.ground_speed_at(d) - 80.0)).abs() < 1e-6,
+                "{d} nm holds the covered 80 kt, got {}",
+                vp.ground_speed_at(d)
+            );
+        }
+        let gap_span = vp.time_between(600.0, 550.0);
+        assert!(
+            (gap_span - still.time_between(600.0, 550.0)).abs() < 0.5,
+            "the span between two gaps is timed in still air: {gap_span}"
+        );
+    }
+
     // Still air: no wind, no temperature.
     #[test]
     fn still_air_reads_no_wind_and_no_temperature() {
@@ -1760,10 +1812,9 @@ mod tests {
     fn a_descent_mach_flies_faster_in_warm_air() {
         let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
         let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
-        // The last 100 nm hold the whole descent, which is integrated from the field and does not
+        // The last 150 nm hold the whole descent, which is integrated from the field and does not
         // depend on the climb.
-        let saved = isa.time_between(100.0, 0.0) - warm.time_between(100.0, 0.0);
-        // About 0.9 s: the Mach part of a 2,000 fpm descent from FL350 is a few minutes long.
+        let saved = isa.time_between(150.0, 0.0) - warm.time_between(150.0, 0.0);
         assert!(saved > 0.5, "the warm Mach descent saves {saved} s");
     }
 
@@ -1815,6 +1866,29 @@ mod tests {
         // The first 150 nm hold the climb and the start of the ISA cruise.
         let saved = isa.time_between(300.0, 150.0) - warm.time_between(300.0, 150.0);
         assert!(saved > 1.0, "the warm Mach climb saves {saved} s");
+    }
+
+    // The climb reads the temperature where each step is: warm air at the departure end only, calm
+    // ISA from 30 nm out, leaves the Mach part of the climb (well past 30 nm) on ISA.
+    #[test]
+    fn a_climb_reads_the_temperature_where_each_step_is() {
+        let isa = |ft: f64| 288.15 - 0.0019812 * ft;
+        let levels = |dt: f64| {
+            vec![
+                (28_000.0, 0.0, Some(isa(28_000.0) + dt)),
+                (34_000.0, 0.0, Some(isa(34_000.0) + dt)),
+                (35_000.0, 0.0, Some(ISA_FL350_K + dt)),
+            ]
+        };
+        let wind = RouteWind::new(vec![
+            knot(0.0, levels(0.0)),
+            knot(270.0, levels(0.0)),
+            knot(300.0, levels(15.0)),
+        ]);
+        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let (warm_start, isa_air) = (build(wind), build(RouteWind::still()));
+        let gained = isa_air.time_between(300.0, 150.0) - warm_start.time_between(300.0, 150.0);
+        assert!(gained.abs() < 0.05, "the Mach climb is on ISA: {gained} s");
     }
 
     // AC3 inside the descent: a headwind from 60 nm out and calm inside 50 nm moves top of

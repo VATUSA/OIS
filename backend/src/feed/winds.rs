@@ -57,33 +57,23 @@ impl Station {
     /// The wind vector at `alt_ft`, linearly interpolated between the bracketing forecast levels
     /// (in any order); held at the nearest level outside the forecast range. None with no levels.
     fn uv_at(&self, alt_ft: f64) -> Option<(f64, f64)> {
-        self.level_value(alt_ft, |w| Some(w.uv()))
-    }
-
-    fn level_value(
-        &self,
-        alt_ft: f64,
-        field: impl Fn(WindLevel) -> Option<(f64, f64)>,
-    ) -> Option<(f64, f64)> {
-        let with = |&(a, w): &(i32, WindLevel)| field(w).map(|v| (a, v));
         let below = self
             .levels
             .iter()
-            .filter_map(with)
             .filter(|(a, _)| *a as f64 <= alt_ft)
             .max_by_key(|(a, _)| *a);
         let above = self
             .levels
             .iter()
-            .filter_map(with)
             .filter(|(a, _)| *a as f64 >= alt_ft)
             .min_by_key(|(a, _)| *a);
         match (below, above) {
-            (Some((a0, (u0, v0))), Some((a1, (u1, v1)))) if a1 > a0 => {
+            (Some(&(a0, w0)), Some(&(a1, w1))) if a1 > a0 => {
                 let t = (alt_ft - a0 as f64) / (a1 - a0) as f64;
+                let ((u0, v0), (u1, v1)) = (w0.uv(), w1.uv());
                 Some((u0 + t * (u1 - u0), v0 + t * (v1 - v0)))
             }
-            (Some((_, v)), _) | (None, Some((_, v))) => Some(v),
+            (Some(&(_, w)), _) | (None, Some(&(_, w))) => Some(w.uv()),
             (None, None) => None,
         }
     }
@@ -840,9 +830,10 @@ mod tests {
         );
     }
 
-    // along: points outside the field are dropped, the rest kept.
+    // along: a point outside the field is a gap knot, so the covered wind stops one sample past
+    // the edge.
     #[test]
-    fn along_keeps_only_the_points_the_field_covers() {
+    fn along_marks_the_points_outside_the_field_as_gaps() {
         let w = Winds::test_grid(
             (40.0, -90.0),
             (2, 2),

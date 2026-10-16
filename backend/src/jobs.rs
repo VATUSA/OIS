@@ -493,6 +493,8 @@ pub fn spawn_winds_refresh(
     refreshed: Arc<AtomicI64>,
     pool: Option<sqlx::PgPool>,
 ) {
+    // Not `run_interval`, which registers the pass as triggerable: the manual refresh is
+    // `POST /api/v1/flow/data-refresh`, which holds the single-flight claim a trigger would skip.
     tokio::spawn(async move {
         reg.register(
             "winds_refresh",

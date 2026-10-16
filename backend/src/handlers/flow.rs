@@ -1245,7 +1245,7 @@ impl Drop for DataRefreshClaim<'_> {
 
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
 /// logged and leave the current data in place — the response still carries the resulting status, so
-/// the caller compares it (cycle age, wind source) to tell a real refresh from a fallback.
+/// the caller compares it (cycle age, `winds_refreshed`) to tell a real refresh from a fallback.
 ///
 /// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
 /// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
@@ -1273,11 +1273,8 @@ pub async fn data_refresh(
         .build()
         .unwrap_or_default();
     let run = jobs::refresh_winds_once(&state.winds, &state.winds_refreshed, &client).await;
-    if run.ok {
-        tracing::info!(detail = %run.detail, "manual winds refresh");
-    } else {
-        tracing::warn!(detail = %run.detail, "manual winds refresh did not load RAP");
-    }
+    // A RAP failure is already logged by `install_winds`.
+    tracing::info!(ok = run.ok, detail = %run.detail, "manual winds refresh");
     Ok(Json(build_data_status(&state)))
 }
 

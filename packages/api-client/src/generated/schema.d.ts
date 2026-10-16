@@ -1801,7 +1801,7 @@ export interface paths {
         /**
          * Force an immediate nav + winds refresh, then return the updated status. Failures are
          *     logged and leave the current data in place — the response still carries the resulting status, so
-         *     the caller compares it (cycle age, wind source) to tell a real refresh from a fallback.
+         *     the caller compares it (cycle age, `winds_refreshed`) to tell a real refresh from a fallback.
          * @description One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
          *     to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
          */
