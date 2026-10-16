@@ -278,10 +278,10 @@ just setup         # git hooks from .githooks/ (core.hooksPath): pre-commit (bin
                    #   stamped the commit; cargo deny and pnpm audit as warnings)
 ```
 
-`just test` mirrors `.github/workflows/ci.yml` except the cross-platform `desktop` matrix, which needs
-the other operating systems. It runs every step and fails at the end if any failed; a step it cannot
-run (no `cargo-nextest`) shows as MISSING and blocks the stamp. `pnpm audit` and `cargo deny check`
-are ADVISORY: they run and print their result but never block the stamp, because a new advisory on
+`just test` mirrors `.github/workflows/ci.yml` except the cross-platform `desktop` matrix and any
+`windows-latest` job. It runs every step and fails at the end if any failed; a step it cannot run
+(no `cargo-nextest`) shows as MISSING and blocks the stamp. `pnpm audit` and `cargo deny check` are
+ADVISORY: they run and print their result but never block the stamp, because a new advisory on
 `next` itself or a dropped network would refuse it on every branch; CI's `js` and `deny` jobs remain
 the merge gate. Lint, typecheck and vitest run through `turbo run … --force`: turbo's cache is shared
 across worktrees and its key ignores root files the tests read (`DESIGN.md`,

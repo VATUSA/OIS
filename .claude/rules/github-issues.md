@@ -725,9 +725,8 @@ gate: the obligation is yours whether or not it fires.
 
 ## CI is the verdict
 
-OIS runs CI on every PR (`.github/workflows/ci.yml`: migrations, fmt, clippy, nextest, doc tests,
-pnpm lint/typecheck/test, `pnpm audit`, `cargo deny`, the desktop matrix, client drift). Two
-consequences:
+OIS runs CI on every PR (`.github/workflows/ci.yml`). Its job set changes; the check-runs on a SHA
+are the list, so never judge green against a list copied into a doc. Two consequences:
 
 - **A gate is green only when the check-runs say so.** Read them once per report, for the exact
   SHA:
