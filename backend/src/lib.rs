@@ -96,13 +96,16 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.aircraft_profiles.clone(),
         );
-        // ATC sector volumes (#594), imported offline; kept as a dataset when the Monitor went (#719).
+        // ATC sector volumes (#594); kept as a dataset when the Monitor went (#719).
         jobs::spawn_airspace_sectors_refresh(
             state.jobs.clone(),
             pool.clone(),
             state.airspace_sectors.clone(),
             state.airspace_sectors_loaded.clone(),
         );
+        // Load them from the pinned vtsd commit when the table isn't at it (#821). Once it writes it
+        // triggers the refresh; if the refresh isn't registered yet, its first tick reads the rows.
+        jobs::spawn_airspace_sector_seed(state.jobs.clone(), pool.clone());
         // Sector occupancy limit overrides (#722); the handler also force-reloads on write.
         jobs::spawn_sector_limits_refresh(
             state.jobs.clone(),

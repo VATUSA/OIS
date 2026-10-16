@@ -212,7 +212,10 @@ export function MapCanvas({
         onDrag={onDrag as never}
         onDragEnd={onDragEnd as never}
         onResize={onResize ?? NOOP}
-        getCursor={getCursor}
+        // Only when the caller set one: deck spreads its props over its defaults, so an explicit
+        // `getCursor={undefined}` replaces its default cursor function, deck throws calling it, and the
+        // overlay never draws (#821).
+        {...(getCursor ? { getCursor } : {})}
         style={{ position: "absolute", top: "0", left: "0", width: "100%", height: "100%" }}
       >
         <MapLibre

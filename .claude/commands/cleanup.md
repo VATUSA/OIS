@@ -1,94 +1,96 @@
 ---
-description: Remove a finished issue worktree and its local branch — refuses while anything in it is uncommitted or unpushed.
-argument-hint: "[worktree path or branch] (default: the worktree you are in)"
+description: Remove a finished issue worktree, its throwaway database and its local branch — refuses while anything in it is uncommitted or unpushed.
+argument-hint: "[worktree name] (default: the worktree you are in)"
 ---
 
-You are removing an issue worktree and its local branch. Use it after `/ship` once the worktree is no
-longer needed, or for one that was abandoned or left behind by an earlier session.
+You are running a **full local teardown** of a worktree: its throwaway database, the worktree directory, and the local branch. `/ship` does the same thing as its last step; `/cleanup` is for a worktree that never shipped, was abandoned, or was left behind by an earlier session.
 
-This is **destructive**. The checks below exist so it never deletes work that isn't already on
-`origin`: if any check fails, **stop and report it**. Never reach for `--force`, `git branch -D`
-before the checks pass, `rm -rf`, or a stash to get past one. The remote branch and any PR are never
-touched; this is local cleanup only.
+This is **destructive and irreversible**. The gates below exist so it never destroys work that is not already safe on `origin`. Follow every step in order.
 
-## Step 1 — Resolve the target
+`bin/teardown-worktree.sh` does the work. For a worktree the current session entered, `ExitWorktree` triggers it through its PreToolUse hook (`.claude/hooks/worktree-teardown.sh`); for any other worktree you run it directly from the primary checkout.
 
-```bash
-git worktree list --porcelain
-```
+---
 
-- `$ARGUMENTS` is a path → the worktree at that path.
-- `$ARGUMENTS` is a branch → the worktree whose `branch refs/heads/<branch>` line matches.
-- Empty → the worktree you are in (`git rev-parse --show-toplevel`).
+## Step 1: Determine the target worktree
 
-Record its absolute path `<WT>` and branch `<BR>`. **Refuse** when:
-
-- `<WT>` is the primary checkout: the first entry in the list, the one whose `.git` is a directory.
-  The primary checkout stays on `next` and is never removed.
-- `<BR>` is `main` or `next`: those are never removed here.
-- Another session is plainly using it (you didn't create it and it isn't yours to remove): ask.
-
-A **detached** worktree (a `detached` line, no `branch`), such as a reproduction worktree on
-`origin/main`, is allowed: there is no `<BR>`, so Step 3 skips the `ls-remote` line and Step 4 skips
-`git branch -d`.
-
-## Step 2 — Nothing uncommitted
+Worktrees live under `.claude/worktrees/<NAME>`. `/start` names them after the branch with `/` encoded as `+` (`fix+289+metering-descent-eta`). Parse the user's message for an explicit name; otherwise use the worktree the session is in.
 
 ```bash
-git -C <WT> status --porcelain
+pwd
+git worktree list
 ```
 
-It must print nothing. Any line, tracked or untracked, is work that exists only in that directory:
-refuse, and list the files. Ignored files (`.env`, `node_modules`, `target/`) don't show and are
-expected to go.
+- **Explicit name given** → use it.
+- **No name given** → the basename of the current `.claude/worktrees/<NAME>` directory. If the cwd is not under `.claude/worktrees/`, **STOP** and ask which worktree to tear down.
 
-## Step 3 — Nothing unpushed (ls-remote, not the local tracking ref)
+The name must match `^[A-Za-z0-9_+-]+$`, the same pattern `bin/setup-worktree.sh` and `bin/teardown-worktree.sh` enforce. The script derives the database name itself; do not hardcode it here.
 
-Ask the remote itself; `origin/<BR>` in the local repo is only as fresh as the last fetch:
+**Refuse** the primary checkout (the first entry in `git worktree list`, whose `.git` is a directory; it stays on `next` and is never removed), a worktree on `main` or `next`, and one another session is plainly using (you didn't create it and it isn't yours to remove): ask.
+
+A worktree made by hand with `git worktree add` outside `.claude/worktrees/` (an older session's `../ois-wt/<branch>`) gets the same Step 2 and Step 3 checks, then `git worktree remove <WT>` and `git branch -d <BR>` from the primary checkout, never `--force`.
+
+## Step 2: Safety — verify nothing unsaved is about to be destroyed
+
+From the primary checkout, with `<WT>` the absolute worktree path:
 
 ```bash
-git -C <WT> rev-parse HEAD
-git ls-remote origin refs/heads/<BR>
+git -C <WT> fetch --prune origin                 # fresh remote refs; a failure goes to Step 3
+git -C <WT> status --porcelain                   # a) uncommitted or untracked changes
+git -C <WT> rev-parse --abbrev-ref HEAD          # b) the branch ...
+git -C <WT> rev-parse HEAD                       #    ... its commit ...
+git ls-remote origin refs/heads/<branch>         #    ... and origin's (empty: never pushed)
+git -C <WT> log origin/next..HEAD --oneline      # c) commits not on origin/next
 ```
 
-- The remote SHA **equals** the local HEAD → every commit is on `origin`. Go to Step 4.
-- Otherwise (the branch was never pushed, was deleted after merge, differs, or the worktree is
-  detached) the commit is safe only if some branch on `origin` already contains it. Fetch first, so
-  the remote-tracking refs are the remote's state now:
-  ```bash
-  git fetch origin --prune
-  git -C <WT> branch -r --contains HEAD
-  ```
-  It lists a remote branch (`origin/next` after a merge, `origin/<pr-branch>` for a review worktree
-  checked out at a PR's head, `origin/main` for a reproduction worktree) → safe; name that branch in
-  the report. It lists nothing → **refuse**: those commits exist only here. Report HEAD, the remote
-  SHA if any, and the commits at risk (`git -C <WT> log --oneline HEAD --not --remotes=origin`).
+Inside a worktree session the harness refuses both `git -C` into another checkout and git nested in `$(...)`, so run the same commands plainly, without `-C`, from inside the target.
 
-On a refusal, offer the ways forward (push first, or keep the worktree) and stop. Discarding work is
-the user's decision, made explicitly, never this command's.
+- **(a) is clean AND either (b) `HEAD` equals origin's SHA or (c) prints nothing** → every commit is on `origin`. Proceed to Step 4; invoking `/cleanup` is the go-ahead for a safe teardown.
+- **(a) dirty**, the fetch failed, or commits exist that are on neither `origin/<branch>` nor `origin/next` → Step 3.
 
-## Step 4 — Remove
+Compare against `origin/...` and `git ls-remote`, never the local `next` ref. Ignored files (`.env`, `node_modules`) don't show in (a) and are expected to go.
 
-From the primary checkout or another worktree, never from inside `<WT>`:
+A ticket-reviewer `chore/<n>/review-<hash>` branch is never pushed under its own name, so an empty `ls-remote` is expected. Judge it against the PR's branch (`gh pr view <pr> --repo VATUSA/OIS --json headRefName`): with (a) clean, `git -C <WT> log origin/<pr-branch>..HEAD --not origin/next --no-merges --oneline` printing nothing means only the review's own `next` merge is local, and nothing is lost. `bin/teardown-worktree.sh` keeps that local branch, since origin has none of its name: once this check passed, delete it with `git branch -D <branch>` from the primary checkout.
+
+## Step 3: Confirmation gate (only when Step 2 found unsaved work)
+
+STOP and tell the user exactly what would be lost:
+- "Worktree `<NAME>` has uncommitted changes: `<list>`."
+- "Branch `<branch>` has N commit(s) not on origin: `<oneline list>`."
+- If `origin/<branch>` is gone after the fetch, first check `gh pr list --repo VATUSA/OIS --head <branch> --state merged`: a merged PR whose branch GitHub deleted is saved work, so say "PR #N merged and its branch was deleted; the work is on `next`" rather than calling them unpushed.
+
+Offer the alternatives (commit and push first, or `ExitWorktree` with `action: "keep"`). Continue only on explicit confirmation. `bin/teardown-worktree.sh` refuses a dirty worktree regardless, so discarding uncommitted changes means the user discarding them first; and it keeps a local branch whose commits are not on origin, which then needs a deliberate `git branch -D`. Never reach for `--force`, `rm -rf` or a stash to get past a check.
+
+## Step 4: Tear down
+
+**The session is inside the target worktree** → call `ExitWorktree` with `action: "remove"`. It refuses when the branch has commits not on the default branch; when Step 2 showed they are on `origin` (or Step 3 got confirmation), re-invoke with `discard_changes: true`. The hook runs the teardown script before the removal and blocks it if the script fails, so a blocked call means nothing was removed: read the message, fix, retry.
+
+**Any other case** (explicit name from the primary checkout, or a worktree from an earlier session, where `ExitWorktree` is a no-op) → from the primary checkout:
 
 ```bash
-git worktree remove <WT>
-git branch -d <BR>
+bash bin/teardown-worktree.sh <NAME>
 ```
 
-`git worktree remove` without `--force` refuses a worktree with modified or untracked files, a second
-line of defense after Step 2. `git branch -d` refuses a branch that isn't merged into its upstream or
-the current HEAD. If it refuses only that way, after Step 3 proved its HEAD is on `origin`,
-`git branch -D <BR>` is then safe; say that you used it and which remote branch holds the commit.
+Both paths drop the worktree's throwaway database (and read it back), remove the directory, and delete the local branch when origin holds its commits.
 
-## Step 5 — Verify and report
+## Step 5: Verify and report
+
+From the primary checkout:
 
 ```bash
-git worktree list            # <WT> is not listed
-git branch --list "<BR>"     # prints nothing
-ls -d <WT> 2>/dev/null && echo "DIR STILL PRESENT" || echo "dir removed"
-git worktree prune --dry-run # nothing stale left behind
+ls -d .claude/worktrees/<NAME> 2>/dev/null && echo "DIR STILL PRESENT" || echo "dir removed"
+git branch --list "<branch>"                     # empty, unless kept for unpushed commits
+git worktree list                                # target not listed
+git worktree prune --dry-run                     # nothing stale left behind
 ```
 
-Report what was removed, the SHA that is safe on `origin` (or in `next`), and that the remote branch
-and any open PR are untouched. This command touches no issue, board card or review marker.
+And the worktree's throwaway database is gone. Anything left over: re-run `bash bin/teardown-worktree.sh <NAME>` (idempotent) and check again. A worktree locked by a live session in another terminal is refused before anything is dropped; exit that session first.
+
+Report what was removed and that the session is back in the primary checkout on `next`. State that the **remote branch and any open PR are untouched**: `/cleanup` is local teardown only.
+
+---
+
+## Notes
+
+- After `/ship` there is normally nothing left to clean. `/cleanup <NAME>` is still safe to run then; every step is idempotent.
+- **Never point this at the shared dev database in `.env`'s `DATABASE_URL`.** The script only ever drops a name it derived for this worktree; if a derived name matches the shared database, STOP.
+- This command touches no issue, board or marker.

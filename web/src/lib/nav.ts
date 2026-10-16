@@ -111,13 +111,6 @@ export const AREAS: readonly NavArea[] = [
         ],
       },
       {
-        label: "Flow",
-        prefix: "/admin/flow",
-        items: [
-          { label: "Sectors", to: "/admin/flow/sectors", icon: Layers, permission: "flow.sectors.read" },
-        ],
-      },
-      {
         label: "Historical",
         prefix: "/admin/historical",
         items: [
@@ -149,13 +142,14 @@ export const AREAS: readonly NavArea[] = [
         permission: "service_accounts.read",
       },
           { label: "Discord", to: "/admin/discord", icon: MessageSquare, permission: "discord.config.read" },
+          { label: "Sectors", to: "/admin/flow/sectors", icon: Layers, permission: "flow.sectors.read" },
         ],
       },
     ],
   },
 ];
 
-/** The Admin area's landing — shown whenever any Admin-area link is. */
+/** The Admin area's landing, listed first in the "Admin" group whenever that group has a visible link. */
 export const ADMIN_HOME: NavItem = { label: "Overview", to: "/admin", icon: LayoutDashboard, exact: true };
 
 export function canSeeItem(me: Me | null | undefined, item: NavItem): boolean {

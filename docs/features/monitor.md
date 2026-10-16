@@ -1,7 +1,7 @@
 # Sector dataset — altitude-bounded ATC sector volumes
 
 > **Status: rebuilt (#720).** The old Airspace Monitor (#593, #594–#602) was removed in #719 (migration
-> 0125). The sector **dataset**, its importer and the admin sector viewer stayed, and the rebuild reads
+> 0125). The sector **dataset**, its loader and the admin sector viewer stayed, and the rebuild reads
 > them: occupancy (#721), limits (#722), consolidation (#723), TRACON strata (#726)
 > and the Operations page (#725), redrawn as vTBFM's monitor (#794). #724's `SectorGrid` was removed in #794. Known coverage gaps: #727, #728.
 
@@ -12,7 +12,7 @@ A sector can be several volumes.
 
 | Column | |
 | --- | --- |
-| `artcc`, `sector_id`, `volume_id` | `unique (artcc, volume_id)`; `name` is nullable (the importer leaves it null) |
+| `artcc`, `sector_id`, `volume_id` | `unique (artcc, volume_id)`; `name` is nullable (the seed leaves it null) |
 | `tier` | `low`, `high`, `ultra_high` or `approach` |
 | `base_alt_ft`, `top_alt_ft` | feet; `check (base_alt_ft < top_alt_ft)`, base ≥ 0 |
 | `rings` | jsonb: closed rings of `[lat, lon]`, one per polygon part, no holes |
@@ -20,12 +20,12 @@ A sector can be several volumes.
 
 Volumes are validated on the way in (`backend/src/feed/sectors.rs` `validate_volume` / `validate_ring`):
 a positive band, at least one ring, each closed with ≥ 4 points, in range, no revisited vertex, no
-crossing edges. The only writer is `repos::airspace_sectors::replace_artcc`, which replaces one ARTCC's
-volumes in a transaction.
+crossing edges. The writer is `repos::airspace_sector_seed::seed`, which replaces the whole table in one
+transaction (#821); `repos::airspace_sectors::replace_artcc`, which replaces one ARTCC, is used by tests.
 
 **Cache:** `AppState::airspace_sectors`, reloaded every 5 minutes by `airspace_sectors_refresh`
-(`backend/src/jobs.rs`). The importer is a separate process, so a new import shows on the next tick. A
-failed refresh keeps the current table.
+(`backend/src/jobs.rs`), and right away when the seed writes. Another replica's seed, or a manual
+importer run, shows on the next tick. A failed refresh keeps the current table.
 
 ## Containment
 
@@ -254,10 +254,19 @@ through `CONTROLLER` (migration 0129); a grant at their facility reads every ART
 
 ### Where it comes from
 
-`airspace-sector-importer` (`backend/src/bin/airspace_sector_importer.rs`) is run offline:
+The backend loads it itself (#821). The `airspace_sector_seed` job (`backend/src/jobs.rs`; the fetch and parse are in
+`backend/src/feed/sector_source.rs`, the write in `backend/src/repos/airspace_sector_seed.rs`) runs at start and then every 24 hours. When the table
+holds rows and every one carries the pinned commit, it stops there, with no network call. Otherwise it fetches the file,
+replaces the whole table in one transaction under an advisory lock (so replicas starting together
+write once), and triggers `airspace_sectors_refresh`. A failed fetch or write fails the job on
+Admin → Jobs and leaves the table as it was. `docs/deploy.md` covers what this needs from a host.
+
+`airspace-sector-importer` (`backend/src/bin/airspace_sector_importer.rs`) runs the same code by hand
+and always reloads, even a current table. It has no per-ARTCC mode: one ARTCC stored at the pinned
+commit would read as current, and the seed would never load the rest.
 
 ```
-RUST_LOG=info cargo run -p ois-backend --bin airspace-sector-importer [-- --artcc ZDC]
+RUST_LOG=info cargo run -p ois-backend --bin airspace-sector-importer
 ```
 
 - **What it does:** it fetches `Data/sectors.json` from the
@@ -265,11 +274,12 @@ RUST_LOG=info cargo run -p ois-backend --bin airspace-sector-importer [-- --artc
   repository at a **pinned commit**, `f33ef73f21091e71456e45cfe9019ddf3ba76247`, and loads it into
   `flow.airspace_sector`.
 - **What each row records:** `source = 'vtsd sectors.json'` and `source_cycle = <that commit>`. The
-  cycle is a git revision, not an AIRAC date. To move to a newer revision, change `SOURCE_REF` and
-  re-run.
+  cycle is a git revision, not an AIRAC date. To move to a newer revision, change `SOURCE_REF`
+  (`feed/sector_source.rs`) and deploy: the next start replaces every row.
 - **Mapping:** tiers map `Low`, `High`, `Ultra High` and `Approach Control` to the four tiers above.
   Positions flip from `[lon, lat]` to `[lat, lon]`.
-- **Invalid volumes:** a volume that fails validation is skipped and logged, never repaired.
+- **Invalid volumes:** a volume that fails validation is skipped, never repaired. The seed job's
+  detail on Admin → Jobs lists each one; the manual binary logs them.
 - **Last import:** 1,568 volumes across 19 ARTCCs, with ZTL `07007` skipped because its floor is above
   its ceiling (#594).
 
@@ -277,12 +287,14 @@ RUST_LOG=info cargo run -p ois-backend --bin airspace-sector-importer [-- --artc
 
 The source repository is **CC BY-NC-SA 4.0**; OIS is **MIT**.
 - Its authors gave permission to use it. The operator confirmed that the permission covers **loading the
-  data into OIS's database**, which is what the importer does (recorded on #594). It is the data loaded,
+  data into OIS's database**, which is what the seed does (recorded on #594). It is the data loaded,
   not merely a reference consulted.
-- Neither the file nor any of its code is committed to this repository. The importer fetches it at run
+- Neither the file nor any of its code is committed to this repository. The seed fetches it at run
   time.
-- If OIS ever **serves** this geometry (the sector map layer, #602, or a containment endpoint), re-check
-  the share-alike and attribution terms at that point.
+- OIS **serves** this geometry: `GET /api/v1/flow/airspace/sectors` and the admin sector map
+  (`/admin/flow/sectors`, #602) return every volume to any `flow.sectors.read` holder, rostered
+  controllers included (migration 0129). The operator confirmed on 2026-10-13, asked directly during
+  the #821 review, that the authors' permission covers serving it this way.
 
 ### Where altitude-bounded sector geometry does not come from
 
@@ -299,6 +311,6 @@ vNAS source gives altitude-bounded ATC sector volumes.**
 
 ## Viewer and permission
 
-The admin sector viewer (**Admin → Flow → Sectors**, `web/src/pages/flow/sectors.tsx`) draws the volumes
+The admin sector viewer (**Admin → Sectors**, `web/src/pages/flow/sectors.tsx`) draws the volumes
 from `GET /api/v1/flow/airspace/sectors` (`backend/src/handlers/airspace_sectors.rs`). It is gated by
 `flow.sectors.read` (migration 0120), and is how anyone checks an import.

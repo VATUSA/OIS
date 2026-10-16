@@ -40,8 +40,8 @@ pub struct AppState {
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
     /// ATC sector volumes (#594), the dataset kept when the Monitor was removed (#719). Starts empty and is reloaded from the DB
-    /// by `jobs::spawn_airspace_sectors_refresh`; its only writer is the offline importer, so a new
-    /// import appears on the next tick (see `feed::sectors`). Behind `ArcSwap` for lock-free reads
+    /// by `jobs::spawn_airspace_sectors_refresh`, which the `airspace_sector_seed` job triggers when it
+    /// writes the table (#821; see `feed::sectors`). Behind `ArcSwap` for lock-free reads
     /// from the DB-less feed subsystem.
     pub airspace_sectors: Arc<ArcSwap<SectorTable>>,
     /// Whether `airspace_sectors` has been loaded from the DB at least once. Until then the empty
