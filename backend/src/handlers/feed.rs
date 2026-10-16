@@ -765,11 +765,13 @@ pub async fn issue_cfr(
             }
         }
         None => {
+            // The metered CFR, else the flight's own wheels-up estimate (#815). `now` only when the
+            // flow has neither: the flight is not listed, or is already airborne.
             let flow = flow_for(&state, pool, &airport).await?;
             flow.flights
                 .iter()
                 .find(|f| f.callsign == callsign)
-                .and_then(|f| f.cfr)
+                .and_then(|f| f.cfr.or(f.etd))
                 .unwrap_or_else(Utc::now)
         }
     };

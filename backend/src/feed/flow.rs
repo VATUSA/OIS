@@ -70,9 +70,10 @@ pub struct FlowFlight {
     pub status: String,
     pub distance_nm: Option<f64>,
     pub eta: Option<DateTime<Utc>>,
-    /// Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time (never
-    /// earlier than now + 20 min), plus the ground allowance; null once airborne. Used to back out
-    /// enroute time for GDP EDCTs.
+    /// Estimated wheels-up for ground/proposed inbounds, plus the ground allowance in each case: now
+    /// for a ground flight; for a prefile, its filed departure time (never earlier than now + 20 min),
+    /// or now + 20 min when it filed none or one that does not parse. Null once airborne. Used to back
+    /// out enroute time for airport-flow CFRs and GDP EDCTs.
     pub etd: Option<DateTime<Utc>>,
     pub groundspeed: i64,
     /// True when a program excludes this aircraft from metering (still shown).
@@ -1740,7 +1741,7 @@ mod tests {
 
     /// #815: `ready_time_slot` returns a wheels-up, so the enroute time it slots with is the
     /// airborne ETE alone (`sta − cfr`), with no ground allowance in it. AIR is airborne, so its slot
-    /// does not depend on any ETD. GRD1 is ready one airborne ETE plus 1 min before AIR's slot, so it
+    /// does not depend on any ETD. GRD1 is ready one airborne ETE less 1 min before AIR's slot, so it
     /// would arrive 1 min behind AIR, inside the 2 min runway interval (AAR 30), and its wheels-up is
     /// pushed 1 min later. With the 660 s allowance counted in the enroute time, the ready time would
     /// read as 12 min clear of AIR and come back unchanged.

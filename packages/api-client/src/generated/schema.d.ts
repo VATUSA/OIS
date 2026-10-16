@@ -5665,9 +5665,10 @@ export interface components {
             eta?: string | null;
             /**
              * Format: date-time
-             * @description Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time (never
-             *     earlier than now + 20 min), plus the ground allowance; null once airborne. Used to back out
-             *     enroute time for GDP EDCTs.
+             * @description Estimated wheels-up for ground/proposed inbounds, plus the ground allowance in each case: now
+             *     for a ground flight; for a prefile, its filed departure time (never earlier than now + 20 min),
+             *     or now + 20 min when it filed none or one that does not parse. Null once airborne. Used to back
+             *     out enroute time for airport-flow CFRs and GDP EDCTs.
              */
             etd?: string | null;
             /** @description True when a program excludes this aircraft from metering (still shown). */
@@ -6111,7 +6112,8 @@ export interface components {
             callsign: string;
             /**
              * Format: date-time
-             * @description Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used.
+             * @description Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used, else its estimated
+             *     wheels-up (`FlowFlight.etd`).
              */
             ready_time?: string | null;
         };

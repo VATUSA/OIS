@@ -4067,3 +4067,36 @@ async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance
         );
     }
 }
+
+/// #815: with no `ready_time` and no airport-flow program (so no metered CFR), `POST /api/v1/tmu/cfr`
+/// locks the flight's own wheels-up estimate, now + its 660 s allowance, not now.
+#[sqlx::test]
+async fn a_cfr_without_a_ready_time_or_program_locks_the_flights_wheels_up(pool: PgPool) {
+    let fx = Fixture815::connected(pool).await;
+    sqlx::query(
+        "insert into access.role_permissions (role_name, permission_name) \
+         values ($1, 'tmu.cfr.assign') on conflict do nothing",
+    )
+    .bind(ROLE)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    let before = Utc::now().timestamp_millis();
+    let (status, body) = call_with(
+        &fx.state,
+        http::Method::POST,
+        "/api/v1/tmu/cfr",
+        &[&fx.auth, "If-None-Match: *"],
+        Some(json!({ "callsign": "TEST1", "airport": "KDCA" })),
+    )
+    .await;
+    let after = Utc::now().timestamp_millis();
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let wheels_up = at(&body["wheels_up"]);
+    assert!(
+        (before + ALLOWANCE_815_MS - SLACK_815_MS..=after + ALLOWANCE_815_MS + SLACK_815_MS)
+            .contains(&wheels_up),
+        "locked {wheels_up}, now in [{before}, {after}]: not now + 660 s"
+    );
+}
