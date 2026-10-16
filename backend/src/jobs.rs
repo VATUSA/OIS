@@ -367,7 +367,7 @@ where
         };
     }
     let age_secs = now.timestamp() - refreshed.load(Ordering::Relaxed) / 1000;
-    if !winds.load().is_empty() && age_secs <= WINDS_MAX_AGE_SECS {
+    if age_secs <= WINDS_MAX_AGE_SECS {
         return WindsRefresh {
             ok: false,
             detail: format!(

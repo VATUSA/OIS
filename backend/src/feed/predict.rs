@@ -936,11 +936,26 @@ mod tests {
     // AC5: the straight-line fallback site (no nav) uses the wind on the great circle.
     #[test]
     fn arrival_eta_times_an_unresolved_route_through_the_wind_on_the_great_circle() {
+        // KDCA is missing from the airport database, so the route cannot resolve at all and the
+        // caller's `arr_ll` is the only destination.
         let nav = NavData::default();
+        let ap: AirportDb = HashMap::from([("KJFK".to_string(), Airport::at(40.64, -73.78))]);
         let ac = coastal("");
+        assert!(fca::route_path(&nav, &ap, "KJFK", "KDCA", "", 40.2, -74.0, 220, 400).is_none());
         let shear = Winds::test_shear();
-        let windy = eta_in(&nav, &shear, &ac);
-        let still = eta_in(&nav, &Winds::default(), &ac);
+        let eta = |w: &Winds| {
+            arrival_eta(
+                &nav,
+                &ap,
+                w,
+                &AircraftProfile::default(),
+                &ac,
+                GROUND_TAXI_SEC,
+                now(),
+            )
+            .eta
+        };
+        let (windy, still) = (eta(&shear), eta(&Winds::default()));
         assert!(secs(windy, still) > 30, "{} s", secs(windy, still));
         let len = gc_dist(40.2, -74.0, 38.85, -77.04);
         let direct = eta_along_route(
@@ -951,7 +966,7 @@ mod tests {
             400.0,
             ac.cruise_ft,
             ac.cruise_tas,
-            &jfk_dca(),
+            &ap,
             "KDCA",
             &AircraftProfile::default(),
             shear.along(&[[40.2, -74.0], [38.85, -77.04]], len),

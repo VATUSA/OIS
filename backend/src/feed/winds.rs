@@ -38,7 +38,7 @@ pub const GRID_MISSING: i16 = i16::MIN;
 pub struct WindLevel {
     pub dir: Option<f64>,
     pub spd: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temp_c: Option<f64>,
 }
 
@@ -201,16 +201,15 @@ pub enum WindsSource {
 }
 
 /// The winds-aloft picture. Serializable so the stats collector can snapshot it for historical
-/// replay (`stats.winds`) and the reconstruction can load a past snapshot back; every field
-/// defaults, so a snapshot written before a field existed still loads.
+/// replay (`stats.winds`) and the reconstruction can load a past snapshot back. The fields added
+/// since are `Option`s, which serde reads as `None` when absent, so an older snapshot still loads.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Winds {
-    #[serde(default)]
     stations: Vec<Station>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     grid: Option<WindGrid>,
     /// The time the field is valid for (RAP); None for FB, whose tables carry a forecast window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     valid_at: Option<DateTime<Utc>>,
 }
 

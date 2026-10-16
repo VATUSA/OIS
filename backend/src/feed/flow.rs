@@ -2509,7 +2509,32 @@ mod tests {
         };
         let (nm, windy) = est(&Winds::test_shear());
         assert_eq!(nm, 300.0);
-        assert_eq!(windy, est(&Winds::default()).1);
+        // The same 300 nm climb from the surface in still air, plus the ground allowance.
+        let profile = trajectory::AircraftProfile::default();
+        let cruise = trajectory::parse_alt_ft(&plan.altitude);
+        let tas = trajectory::capped_cruise_tas(parse_tas(&plan.cruise_tas), cruise, &profile);
+        let vp = predict::profile_from_here(
+            false,
+            300.0,
+            0.0,
+            0.0,
+            cruise,
+            tas,
+            &jfk_dca(),
+            "KDCA",
+            &profile,
+            RouteWind::still(),
+        );
+        let allowance = resolve_ground_allowance_sec(
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            "KJFK",
+            Some("B738"),
+            None,
+            None,
+        );
+        assert_eq!(windy, vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0);
     }
 
     // AC5 cross-surface: ladder and runway ETE agree when the wind is not uniform.

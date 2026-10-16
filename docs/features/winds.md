@@ -82,7 +82,28 @@ The filed TAS is a plan value and pilots fly a Mach, and simulators run their ow
 every row carries a TAS error the wind sources share. The absolute numbers are therefore an upper
 bound on wind error; the comparison between rows is the result.
 
-MEASUREMENT_TABLE
+Rows: "FB route mean" is the pre-#836 rule, one mean of the FB headwind at the filed altitude,
+taken here every 50 nm on the great circle to the destination (OIS used the resolved route where it
+had one). "FB at the aircraft" and "RAP at the aircraft" read each field where the flight was.
+Error is observed groundspeed minus predicted, in knots.
+
+Two runs on 2026-10-16, against FB tables with 159 stations and the RAP field valid 05:00Z and
+07:00Z: 31 flights from 05:30-05:48Z and 29 more from 06:41-07:31Z. Each callsign counts once across
+both, giving 55 flights. Both runs fell in low US traffic; a busier hour would give a larger sample.
+
+| Wind source | Flights | Bias (kt) | Mean absolute error (kt) | RMS error (kt) |
+| --- | --- | --- | --- | --- |
+| Still air | 55 | +11.7 | 38.1 | 47.7 |
+| FB route mean (before) | 55 | +4.2 | 24.8 | 33.3 |
+| FB at the aircraft | 55 | +7.6 | 20.1 | 30.2 |
+| RAP at the aircraft (after) | 55 | +4.4 | 15.9 | 26.8 |
+
+Against the old model, RAP cut the mean absolute error by 8.9 kt (36 %) and the RMS error by
+6.5 kt, and it was closer on 36 of the 55 flights. The later run alone (29 flights, the RAP field
+within an hour of its valid time) went from 24.0 to 11.1 kt mean absolute error. Reading the wind
+where the flight is accounts for about half the gain (24.8 to 20.1 kt with FB alone); the RAP field
+accounts for the rest. The remaining error includes each flight's TAS error, which no wind source
+removes.
 
 ## Not done here
 

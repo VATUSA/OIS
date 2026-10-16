@@ -167,15 +167,21 @@ async fn get(
         .await
         .and_then(|r| r.error_for_status())
         .map_err(|e| e.without_url().to_string())?;
-    // A server that ignores Range answers 200 with the whole ~17 MB file; refuse it.
-    if range.is_some() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        return Err(format!("range request answered {}", resp.status()));
-    }
+    ranged_answer(range.is_some(), resp.status())?;
     let body = resp
         .bytes()
         .await
         .map_err(|e| e.without_url().to_string())?;
     Ok(body.to_vec())
+}
+
+/// A ranged request must come back `206 Partial Content`: a server that ignores `Range` answers
+/// 200 with the whole ~17 MB file, which is refused rather than downloaded.
+fn ranged_answer(ranged: bool, status: reqwest::StatusCode) -> Result<(), String> {
+    if ranged && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(format!("range request answered {status}"));
+    }
+    Ok(())
 }
 
 /// One decoded field: its parameter, its isobaric level (hPa), and its values in grid order.
@@ -444,6 +450,9 @@ mod tests {
     /// published grid definition, not from the decoder, so the rotation tests do not reuse the
     /// production geometry.
     const LATIN1_DEG: f64 = 25.0;
+    /// Knots per m/s (1 kt = 1,852 m / 3,600 s), written out so the tests do not reuse the
+    /// production constant.
+    const KT_PER_MS: f64 = 3_600.0 / 1_852.0;
     const LOV_DEG: f64 = -95.0;
 
     /// Every raw point of one field in a captured message, decoded here with the grib crate:
@@ -504,7 +513,7 @@ mod tests {
             sv += -pu.2 * a.sin() + pv.2 * a.cos();
             k += 1;
         }
-        let kt = MS_TO_KT / k as f64;
+        let kt = KT_PER_MS / k as f64;
         (-su * kt, -sv * kt, k)
     }
 
@@ -573,7 +582,9 @@ mod tests {
             assert!((-75..=-25).contains(&t), "cell {c}: {t} °C");
             fastest = fastest.max(u.hypot(v));
         }
-        assert!(fastest > 60.0, "fastest {fastest} kt");
+        // The 250 mb jet over North America runs well past 100 kt in mid-October; a field left in
+        // m/s would top out near 80.
+        assert!(fastest > 100.0, "fastest {fastest} kt");
         assert!(
             missing > 0,
             "the lat/lon box reaches outside the Lambert footprint"
@@ -600,7 +611,7 @@ mod tests {
         let n = u.len() as f64;
         let speed = (u.iter().map(|p| p.2).sum::<f64>() / n)
             .hypot(v.iter().map(|p| p.2).sum::<f64>() / n)
-            * MS_TO_KT;
+            * KT_PER_MS;
         let grid = build_grid(vec![UV.to_vec()]).unwrap();
         let got =
             (at(&grid, &grid.u, 40.0, -90.0) as f64).hypot(at(&grid, &grid.v, 40.0, -90.0) as f64);
@@ -629,8 +640,8 @@ mod tests {
                 in_cell(&raw(UV, VGRD), lat, lon),
             );
             let m = ru.len() as f64;
-            let un_u = -ru.iter().map(|p| p.2).sum::<f64>() / m * MS_TO_KT;
-            let un_v = -rv.iter().map(|p| p.2).sum::<f64>() / m * MS_TO_KT;
+            let un_u = -ru.iter().map(|p| p.2).sum::<f64>() / m * KT_PER_MS;
+            let un_v = -rv.iter().map(|p| p.2).sum::<f64>() / m * KT_PER_MS;
             turned |= (gu - un_u).abs() > 3.0 || (gv - un_v).abs() > 3.0;
         }
         assert!(turned, "the fixture must exercise the turn");
@@ -645,8 +656,8 @@ mod tests {
             in_cell(&raw(UV, VGRD), 40.0, -95.0),
         );
         let m = ru.len() as f64;
-        let un_u = -ru.iter().map(|p| p.2).sum::<f64>() / m * MS_TO_KT;
-        let un_v = -rv.iter().map(|p| p.2).sum::<f64>() / m * MS_TO_KT;
+        let un_u = -ru.iter().map(|p| p.2).sum::<f64>() / m * KT_PER_MS;
+        let un_v = -rv.iter().map(|p| p.2).sum::<f64>() / m * KT_PER_MS;
         let (gu, gv) = (
             at(&grid, &grid.u, 40.0, -95.0) as f64,
             at(&grid, &grid.v, 40.0, -95.0) as f64,
@@ -850,6 +861,19 @@ mod tests {
             urls[0].ends_with("rap.20261016/rap.t00z.awp130pgrbf02.grib2"),
             "{}",
             urls[0]
+        );
+    }
+
+    // A ranged read must come back 206; a 200 means the server sent the whole file.
+    #[test]
+    fn a_range_request_answered_with_the_whole_file_is_refused() {
+        use reqwest::StatusCode;
+        assert!(ranged_answer(true, StatusCode::PARTIAL_CONTENT).is_ok());
+        let err = ranged_answer(true, StatusCode::OK).unwrap_err();
+        assert!(err.contains("200"), "{err}");
+        assert!(
+            ranged_answer(false, StatusCode::OK).is_ok(),
+            "the index is fetched whole"
         );
     }
 
