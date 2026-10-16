@@ -13,7 +13,7 @@ This is **destructive and irreversible**. The gates below exist so it never dest
 
 ## Step 1: Determine the target worktree
 
-Worktrees live under `.claude/worktrees/<NAME>`. `/start` names them after the branch with `/` encoded as `+` (`fix+289+metering-descent-eta`). Parse the user's message for an explicit name; otherwise use the worktree the session is in.
+Worktrees live under `.claude/worktrees/<NAME>`. `/start` names them after the branch with `/` encoded as `-` (`fix-289-metering-descent-eta`; older worktrees used `+`). Parse the user's message for an explicit name; otherwise use the worktree the session is in.
 
 ```bash
 pwd

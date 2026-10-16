@@ -74,7 +74,7 @@ Once the issue is in `Code Review`, confirm the primary checkout is on `next` an
 
 Before the loop ends for any reason, read the learnings file. Empty: delete it. Otherwise put its entries to the operator through AskUserQuestion (apply all / choose / discard). Applying the approved entries is the one edit you make yourself, and the loop's sanctioned exception to the branch and commit rules for it:
 
-1. `EnterWorktree` with `name:` `chore+<short-hash>+session-learnings`, then from inside it `git checkout --no-track -b chore/<short-hash>/session-learnings origin/next` and `git branch -D worktree-chore+<short-hash>+session-learnings`, and run the primary checkout's `bin/setup-worktree.sh` and `bin/verify-worktree.sh`.
+1. `EnterWorktree` with `name:` `chore-<short-hash>-session-learnings` (`EnterWorktree` refuses `+`), then from inside it `git checkout --no-track -b chore/<short-hash>/session-learnings origin/next` and `git branch -D worktree-chore-<short-hash>-session-learnings`, and run the primary checkout's `bin/setup-worktree.sh` and `bin/verify-worktree.sh`.
 2. Apply each entry per `CLAUDE.md` → "Editing CLAUDE.md, rules, agents, commands and skills": search for the topic first, extend or replace the rule you find, and keep the always-loaded set within its budget.
 3. Commit only `CLAUDE.md` and `.claude/` paths, with explicit paths and no trailers, push through the pre-push hook in the background, and confirm `git ls-remote origin refs/heads/<branch>` equals `HEAD`.
 4. Open the PR against `next` (`gh pr create --repo VATUSA/OIS --base next`), read its number from the output, and give it to the operator: they merge it before the next loop. A branch touching a file `CLAUDE.md` lists as still gated needs `/review-before-shipping` first.

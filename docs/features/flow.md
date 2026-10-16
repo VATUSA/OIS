@@ -247,9 +247,9 @@ releases for FCA crossings (a native port of vatflow's idst view).
   (#585). The console shows it as "RLSD 1412z · via vTBFM".
 - **EDCTs** — for a released flight, `edct` is the frozen wheels-up from
   `flow.fca_release`. For an unreleased flight it is an **advisory** EDCT: the wheels-up
-  that would hit the metered crossing, computed by backing the modeled transit
-  (`eta − now`) out of the metered CTA — so the controller can preview a release before
-  issuing it.
+  that would hit the metered crossing, the metered CTA less the airborne ETE (the ground
+  allowance excluded), the same value RDY stores (#815), so the controller can preview a
+  release before issuing it.
 - Unscheduled flights sort by metered crossing (soonest first); released by frozen EDCT.
 
 ## FCA releases in the departures view

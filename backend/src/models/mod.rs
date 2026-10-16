@@ -1098,7 +1098,8 @@ pub struct IssueCfrRequest {
     pub callsign: String,
     /// The metered arrival airport this departure is bound for.
     pub airport: String,
-    /// Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used.
+    /// Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used, else its estimated
+    /// wheels-up (`FlowFlight.etd`).
     #[serde(default)]
     pub ready_time: Option<DateTime<Utc>>,
 }
