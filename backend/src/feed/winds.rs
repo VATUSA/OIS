@@ -1369,6 +1369,26 @@ BRL 264663 263369
         assert!((end + 20.4).abs() < 1.5, "end {end}");
     }
 
+    // Interior samples sit on the great circle and read the course there. Halfway along KJFK→KLAX
+    // (sample 21 of 43, 1,098 nm from LAX) the great circle is at 39.54°N on a 259.0° course; a
+    // straight lat/lon line would be at 37.37°N. A 50 kt northerly blowing only north of 39°N
+    // reads 50 × cos 259.0° = -9.5 kt there, and nothing on the straight line.
+    #[test]
+    fn along_samples_a_long_leg_on_the_great_circle_with_the_course_there() {
+        let w = Winds::test_grid(
+            (30.0, -120.0),
+            (15, 50),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, lat, _| (0, if lat >= 39.0 { 50 } else { 0 }, -45),
+        );
+        let (jfk, lax) = ([40.64, -73.78], [33.94, -118.41]);
+        let len = gc_dist(jfk[0], jfk[1], lax[0], lax[1]);
+        let rw = w.along(&[jfk, lax], len);
+        let mid = rw.headwind(1_097.95, 34_000.0).unwrap();
+        assert!((mid + 9.5).abs() < 1.0, "halfway reads {mid} kt");
+    }
+
     // A grid with no rows has no column rather than underflowing its index arithmetic.
     #[test]
     fn a_grid_with_no_rows_has_no_column() {

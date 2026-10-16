@@ -1706,6 +1706,46 @@ mod tests {
         assert!(saved > 0.5, "the warm Mach descent saves {saved} s");
     }
 
+    // The descent reads the temperature at each step's own distance: warm air only from 60 nm
+    // out (where the Mach part of the descent is) still speeds it up.
+    #[test]
+    fn a_descent_reads_the_temperature_where_each_step_is() {
+        let isa = |ft: f64| 288.15 - 0.0019812 * ft;
+        let band = |dt: f64| {
+            vec![
+                (28_000.0, 0.0, Some(isa(28_000.0) + dt)),
+                (34_000.0, 0.0, Some(isa(34_000.0) + dt)),
+                (35_000.0, 0.0, Some(ISA_FL350_K)),
+            ]
+        };
+        let far_warm = RouteWind::new(vec![
+            knot(0.0, band(0.0)),
+            knot(50.0, band(0.0)),
+            knot(60.0, band(15.0)),
+            knot(300.0, band(15.0)),
+        ]);
+        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let (warm, isa_p) = (build(far_warm), build(RouteWind::still()));
+        let saved = isa_p.time_between(100.0, 0.0) - warm.time_between(100.0, 0.0);
+        assert!(saved > 0.5, "warm upper descent saves {saved} s");
+        // The descent's shape too: flown faster through the warm Mach band, it covers more ground
+        // per foot, so top of descent sits further out.
+        let tod = |vp: &VerticalProfile| {
+            let (mut lo, mut hi) = (0.0, 299.0);
+            for _ in 0..40 {
+                let mid = (lo + hi) / 2.0;
+                if vp.alt_at(mid) < 34_999.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let further = tod(&warm) - tod(&isa_p);
+        assert!(further > 0.05, "top of descent moved out {further} nm");
+    }
+
     // The same on the climb: the Mach part of it is faster in warm air.
     #[test]
     fn a_climb_mach_flies_faster_in_warm_air() {
