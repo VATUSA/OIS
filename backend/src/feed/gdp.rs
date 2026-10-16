@@ -395,6 +395,44 @@ mod tests {
         assert_eq!(x.edct_ms, Some(10 * MIN - 30 * MIN)); // CTA − enroute
     }
 
+    /// #815 AC1 (GDP path): with the ETD at wheels-up, the EDCT is the slot less the airborne ETE.
+    /// `ration_by_schedule` itself is unchanged by #815; the guard against the gate-time ETD is
+    /// `feed::flow`'s `a_ground_flights_etd_is_its_wheels_up_estimate`.
+    #[test]
+    fn a_ground_flight_edct_is_its_slot_less_the_airborne_ete() {
+        use chrono::TimeZone;
+        let at = |h, m| {
+            Utc.with_ymd_and_hms(2026, 10, 10, h, m, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        // An exempt airborne arrival takes 13:40; AAR 3 is one slot per 20 min, so the next is 14:00.
+        let lead = Inbound {
+            cs: "LEAD".into(),
+            dep: "KZZZ".into(),
+            dep_artcc: None,
+            status: "airborne".into(),
+            eta_ms: at(13, 40),
+            etd_ms: None,
+        };
+        // Wheels-up 13:11 (now 13:00 plus an 11 min allowance), 30 min airborne: ETA 13:41.
+        let gnd = ground("GND", at(13, 41), at(13, 11));
+        let out = ration_by_schedule(
+            vec![lead, gnd],
+            &RateSchedule::flat(3, at(13, 0)),
+            at(13, 0),
+            at(15, 0),
+            true,
+            &[],
+            None,
+        );
+        let g = out.iter().find(|a| a.cs == "GND").unwrap();
+        assert!(g.controlled);
+        assert_eq!(g.cta_ms, at(14, 0));
+        assert_eq!(g.edct_ms, Some(at(13, 30)), "not 13:19, the gate time");
+        assert_eq!(g.delay_min, 19);
+    }
+
     #[test]
     fn airborne_is_exempt_no_edct() {
         let inbounds = vec![Inbound {
