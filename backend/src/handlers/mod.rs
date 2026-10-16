@@ -63,3 +63,5 @@ mod flow_event_fca_visibility_tests;
 mod machine_actor_tests;
 #[cfg(test)]
 mod service_account_grant_tests;
+#[cfg(test)]
+mod winds_tests;

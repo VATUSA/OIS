@@ -93,6 +93,21 @@ export function useDataStatus() {
 }
 
 /**
+ * Which wind field the ETAs are using (#836): NOAA RAP normally, the FB station tables when RAP
+ * could not be loaded, or none (still air).
+ */
+export function windsLabel(data: DataStatus): string {
+  switch (data.winds_source) {
+    case "rap":
+      return "RAP winds";
+    case "fb":
+      return `FB winds, ${data.winds_stations} stations`;
+    default:
+      return "no winds";
+  }
+}
+
+/**
  * The toast a completed data refresh should raise. The endpoint answers 200 even when the nav fetch
  * could only fall back to an older cycle — it keeps last-good rather than failing — so a stale or
  * unreadable cycle must not read as success (VATUSA/OIS#317). Pressed from the stale banner (#332),
@@ -103,7 +118,7 @@ export function refreshToast(data: DataStatus): {
   title: string;
   description?: string;
 } {
-  const summary = `Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`;
+  const summary = `Nav ${data.nav_cycle} · ${windsLabel(data)}`;
   const behind = data.nav_cycles_behind;
   if (behind == null)
     return {

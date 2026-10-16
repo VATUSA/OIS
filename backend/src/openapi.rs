@@ -492,6 +492,7 @@ impl Modify for CredentialSchemes {
         crate::models::ResolveRouteRequest,
         crate::models::ResolvedRoute,
         crate::models::DataStatus,
+        crate::feed::winds::WindsSource,
         crate::feed::coverage::CoverageReport,
         crate::feed::coverage::UnresolvedToken,
         crate::feed::runway::RunwayBoard,

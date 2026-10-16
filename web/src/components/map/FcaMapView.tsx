@@ -25,6 +25,7 @@ import {
   useRefreshData,
   useTraffic,
   useUpdateFca,
+  windsLabel,
   type Fca,
   type UpsertFca,
 } from "@/lib/fca";
@@ -885,7 +886,7 @@ export function FcaMapView({
                   )}
                 </div>
                 <div className="truncate text-ink-3">
-                  {dataStatus.data.winds_stations} winds · {traffic.data?.length ?? 0} traffic
+                  {windsLabel(dataStatus.data)} · {traffic.data?.length ?? 0} traffic
                 </div>
               </div>
             ) : (

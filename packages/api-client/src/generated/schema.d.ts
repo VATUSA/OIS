@@ -4740,7 +4740,15 @@ export interface components {
              * @description Last successful winds fetch (null = still air, not yet fetched).
              */
             winds_refreshed?: string | null;
+            /** @description Where the wind field in use came from: NOAA RAP, the AWC FB fallback, or none (still air). */
+            winds_source: components["schemas"]["WindsSource"];
+            /** @description FB stations in the wind field; 0 when the field is RAP or still air. */
             winds_stations: number;
+            /**
+             * Format: date-time
+             * @description The time the RAP field is valid for (null for FB or still air).
+             */
+            winds_valid_at?: string | null;
         };
         /** @description Whether an event needs national DCC support. */
         DccRequestBody: {
@@ -5397,7 +5405,8 @@ export interface components {
             cruise_tas: number;
             /**
              * Format: int64
-             * @description Mean route headwind (kt) applied (+ head / − tail); null = still air.
+             * @description Mean headwind (kt) over the remaining route, each point read at the profile's altitude there
+             *     (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
              */
             headwind?: number | null;
             /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
@@ -7750,6 +7759,11 @@ export interface components {
             known_vatusa_roles: string[];
             mappings: components["schemas"]["VatusaRoleMappingBody"][];
         };
+        /**
+         * @description Where the current wind field came from, for the data-status view.
+         * @enum {string}
+         */
+        WindsSource: "rap" | "fb" | "none";
     };
     responses: never;
     parameters: never;

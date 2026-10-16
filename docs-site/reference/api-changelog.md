@@ -14,6 +14,11 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
+  is the same `DataStatus`) gains `winds_source` (`rap`, `fb` or `none`) and `winds_valid_at` (the
+  time a RAP field is valid for; null otherwise). `winds_stations` now counts FB stations only and is
+  `0` while the field is RAP. `FcaFlightDebug.headwind` is the mean headwind over the remaining
+  route, each point read at the profile's altitude there. Additive; no existing caller changes. (#836)
 - **New:** `PUT /api/v1/flow/sector-consolidations/{artcc}` changes several of one ARTCC's sector
   consolidations in one request. The body is `{ "into": { "<sector_id>": "<target_sector_id>" | null } }`:
   each sector is worked at the target given, or given its own row back for `null`. It needs

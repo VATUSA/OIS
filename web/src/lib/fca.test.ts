@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, fcaIsLive, refreshToast} from "./fca";
+import {type DataStatus, fcaIsLive, refreshToast, windsLabel} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -13,6 +13,7 @@ function status(over: Partial<DataStatus>): DataStatus {
     navaids: 3,
     procedures: 4,
     winds_stations: 176,
+    winds_source: "fb",
     ...over,
   };
 }
@@ -21,7 +22,7 @@ describe("refreshToast", () => {
   it("reads as success only when the loaded cycle is current", () => {
     const toast = refreshToast(status({}));
     expect(toast.variant).toBe("success");
-    expect(toast.title).toBe("Nav 2026-09-03 · 176 wind stations");
+    expect(toast.title).toBe("Nav 2026-09-03 · FB winds, 176 stations");
     expect(toast.description).toBeUndefined();
   });
 
@@ -31,7 +32,7 @@ describe("refreshToast", () => {
     const toast = refreshToast(status({ nav_cycle: "2026-07-09", nav_cycles_behind: 2 }));
     expect(toast.variant).toBe("warning");
     expect(toast.title).toBe("NASR cycle 2026-07-09 is 2 cycles behind");
-    expect(toast.description).toBe("Nav 2026-07-09 · 176 wind stations · current 2026-09-03");
+    expect(toast.description).toBe("Nav 2026-07-09 · FB winds, 176 stations · current 2026-09-03");
   });
 
   it("says one cycle behind in the singular", () => {
@@ -48,6 +49,21 @@ describe("refreshToast", () => {
     const absent = refreshToast(status({ nav_cycle: "unknown", nav_cycles_behind: undefined }));
     expect(absent.variant).toBe("warning");
     expect(absent.title).toBe("NASR cycle unknown is unreadable");
+  });
+});
+
+// The summary names the wind source the ETAs use, so an FB fallback or still air is visible (#836).
+describe("windsLabel", () => {
+  it("names RAP without a station count", () => {
+    expect(windsLabel(status({ winds_source: "rap", winds_stations: 0 }))).toBe("RAP winds");
+  });
+
+  it("names the FB fallback with its station count", () => {
+    expect(windsLabel(status({ winds_source: "fb", winds_stations: 176 }))).toBe("FB winds, 176 stations");
+  });
+
+  it("says when there is no wind field", () => {
+    expect(windsLabel(status({ winds_source: "none", winds_stations: 0 }))).toBe("no winds");
   });
 });
 
