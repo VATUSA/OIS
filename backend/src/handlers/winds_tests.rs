@@ -21,7 +21,7 @@ fn at(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
 
-// Operator decision: data-status carries the source and the RAP valid time.
+// data-status carries the source and the RAP valid time.
 #[sqlx::test]
 async fn data_status_reports_a_rap_field_and_its_valid_time(pool: PgPool) {
     let state = test_state(pool, HashMap::new());

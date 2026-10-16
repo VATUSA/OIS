@@ -23,8 +23,8 @@ const MAX_STATION_NM: f64 = 600.0;
 const BLEND_STATIONS: usize = 4;
 /// A query point this close to a station (nm) takes that station's wind outright.
 const ON_STATION_NM: f64 = 0.1;
-/// Longest gap (nm) between wind samples along a route. A 1° grid cell is ~60 nm, so a sample every
-/// 50 nm reads each cell a route crosses.
+/// Longest gap (nm) between wind samples along a route: close to one 1° grid cell (60 nm north-south,
+/// 46 nm east-west at 40°N), so the samples follow the field at about its own resolution.
 const KNOT_SPACING_NM: f64 = 50.0;
 /// Celsius to kelvin.
 const C_TO_K: f64 = 273.15;
@@ -299,6 +299,7 @@ impl Winds {
     }
 
     /// Headwind (kt) at a single point along `course_deg`, interpolated to `alt_ft`.
+    #[cfg(test)]
     pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
         let col = self.column(lat, lon)?;
         let levels = col
@@ -312,7 +313,8 @@ impl Winds {
     /// own distance and altitude (#836). `route_len_nm` is the distance-to-destination the profile
     /// starts at; the path's own length is scaled onto it, so a padded ground route
     /// (`GROUND_ROUTE_FACTOR`) still spans the whole profile. Each sample carries the headwind along
-    /// the course of the leg it sits on; samples are at most [`KNOT_SPACING_NM`] apart. Points the
+    /// the route's course at that point; samples are at most [`KNOT_SPACING_NM`] apart, on the great
+    /// circle of each leg. Points the
     /// field does not cover are left out, and a route it does not cover at all is still air.
     pub fn along(&self, path: &[[f64; 2]], route_len_nm: f64) -> RouteWind {
         if self.is_empty() || path.len() < 2 {
@@ -341,15 +343,19 @@ impl Winds {
         let (mut flown, mut last_course) = (0.0, 0.0);
         for (seg, &len) in path.windows(2).zip(&legs) {
             let (a, b) = (seg[0], seg[1]);
-            let course = bearing_deg(a[0], a[1], b[0], b[1]);
             let n = (len / KNOT_SPACING_NM).ceil().max(1.0) as usize;
             for k in 0..n {
                 let f = k as f64 / n as f64;
-                let point = [a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1])];
-                knot(point, flown + f * len, course);
+                let point = great_circle_point(a, b, f);
+                knot(
+                    point,
+                    flown + f * len,
+                    bearing_deg(point[0], point[1], b[0], b[1]),
+                );
             }
             flown += len;
-            last_course = course;
+            // The course arriving at `b`: the reverse of the bearing from `b` back to `a`.
+            last_course = (bearing_deg(b[0], b[1], a[0], a[1]) + 180.0) % 360.0;
         }
         knot(path[path.len() - 1], total, last_course);
         RouteWind::new(knots)
@@ -573,6 +579,31 @@ fn gc_dist(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
     let dlo = (lo2 - lo1).to_radians();
     let a = (dla / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dlo / 2.0).sin().powi(2);
     2.0 * R_NM * a.sqrt().asin()
+}
+
+/// The point a fraction `f` of the way from `a` to `b` along the great circle between them.
+fn great_circle_point(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
+    let (p1, l1, p2, l2) = (
+        a[0].to_radians(),
+        a[1].to_radians(),
+        b[0].to_radians(),
+        b[1].to_radians(),
+    );
+    let delta = gc_dist(a[0], a[1], b[0], b[1]) / R_NM;
+    if delta < 1e-12 {
+        return a;
+    }
+    let (ka, kb) = (
+        ((1.0 - f) * delta).sin() / delta.sin(),
+        (f * delta).sin() / delta.sin(),
+    );
+    let x = ka * p1.cos() * l1.cos() + kb * p2.cos() * l2.cos();
+    let y = ka * p1.cos() * l1.sin() + kb * p2.cos() * l2.sin();
+    let z = ka * p1.sin() + kb * p2.sin();
+    [
+        z.atan2((x * x + y * y).sqrt()).to_degrees(),
+        y.atan2(x).to_degrees(),
+    ]
 }
 
 fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
@@ -1298,5 +1329,60 @@ BRL 264663 263369
         assert!((hw(26_000.0) - 50.0).abs() < 1e-6);
         assert!((hw(34_000.0) - 80.0).abs() < 1e-6);
         assert!((rw.temp_k(d, 34_000.0).unwrap() - 223.15).abs() < 1e-9);
+    }
+
+    // Long legs are sampled on the great circle, not a straight lat/lon line.
+    #[test]
+    fn great_circle_points_follow_the_great_circle() {
+        let mid = great_circle_point([0.0, 0.0], [0.0, 90.0], 0.5);
+        assert!(
+            mid[0].abs() < 1e-9 && (mid[1] - 45.0).abs() < 1e-9,
+            "{mid:?}"
+        );
+        // Halfway between two points on 45°N, 180° apart, the great circle crosses the pole.
+        let pole = great_circle_point([45.0, -90.0], [45.0, 90.0], 0.5);
+        assert!((pole[0] - 90.0).abs() < 1e-9, "{pole:?}");
+        assert_eq!(
+            great_circle_point([40.0, -90.0], [40.0, -90.0], 0.5),
+            [40.0, -90.0]
+        );
+    }
+
+    // Each sample reads the headwind on the route's course where it sits: on a KJFK→KLAX direct
+    // leg the course turns from 274° to 246°, so a 50 kt northerly goes from a crosswind to a
+    // 20 kt tailwind (50 kt × cos 246°).
+    #[test]
+    fn along_reads_the_course_at_each_point_of_a_long_leg() {
+        let w = Winds::test_grid(
+            (30.0, -120.0),
+            (15, 50),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, _, _| (0, 50, -45),
+        );
+        let (jfk, lax) = ([40.64, -73.78], [33.94, -118.41]);
+        let len = gc_dist(jfk[0], jfk[1], lax[0], lax[1]);
+        let rw = w.along(&[jfk, lax], len);
+        let start = rw.headwind(len, 34_000.0).unwrap();
+        let end = rw.headwind(0.0, 34_000.0).unwrap();
+        assert!((start - 3.3).abs() < 1.5, "start {start}");
+        assert!((end + 20.4).abs() < 1.5, "end {end}");
+    }
+
+    // A grid with no rows has no column rather than underflowing its index arithmetic.
+    #[test]
+    fn a_grid_with_no_rows_has_no_column() {
+        let grid = WindGrid {
+            lat0: 40.0,
+            lon0: -90.0,
+            step_deg: 1.0,
+            nlat: 0,
+            nlon: 2,
+            levels_ft: vec![34_000.0],
+            u: vec![],
+            v: vec![],
+            t: vec![],
+        };
+        assert_eq!(grid.column(40.0, -90.0), None);
     }
 }

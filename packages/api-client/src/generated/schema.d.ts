@@ -1801,7 +1801,7 @@ export interface paths {
         /**
          * Force an immediate nav + winds refresh, then return the updated status. Failures are
          *     logged and leave the current data in place — the response still carries the resulting status, so
-         *     the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+         *     the caller compares it (cycle age, wind source) to tell a real refresh from a fallback.
          * @description One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
          *     to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
          */
@@ -4737,7 +4737,8 @@ export interface components {
             procedures: number;
             /**
              * Format: date-time
-             * @description Last successful winds fetch (null = still air, not yet fetched).
+             * @description When a wind field (RAP or FB) last loaded; null when none has since startup. Still air after
+             *     failed refreshes keeps the time of the last field: `winds_source` says what is in use.
              */
             winds_refreshed?: string | null;
             /** @description Where the wind field in use came from: NOAA RAP, the AWC FB fallback, or none (still air). */

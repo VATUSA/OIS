@@ -1246,7 +1246,7 @@ impl Drop for DataRefreshClaim<'_> {
 
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
 /// logged and leave the current data in place — the response still carries the resulting status, so
-/// the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+/// the caller compares it (cycle age, wind source) to tell a real refresh from a fallback.
 ///
 /// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
 /// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
@@ -4771,7 +4771,7 @@ mod mit_cross_speed_wiring_tests {
         let windy = candidates(&gate, &cruise_headwind(), now);
         let still = candidates(&gate, &Winds::default(), now);
         for (site, cs) in [("live pilot", "AAL1"), ("prefile", "AAL2")] {
-            // The live pilot's anchoring (#313) takes back part of the headwind: 28 s here.
+            // The live pilot's anchoring (#313) takes back part of the headwind, so its move is smaller.
             let moved = (windy[cs].0 - still[cs].0).num_seconds().abs();
             assert!(moved > 10, "{site}: the wind moves the crossing {moved} s");
         }

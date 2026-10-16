@@ -858,7 +858,6 @@ mod tests {
     //
     // Every caller test seeds `Winds::test_shear()`: 80 kt from 225° (on the nose of a
     // south-west KJFK→KDCA course) at and above 30,000 ft east of 75.5°W, calm elsewhere.
-    // `Winds::test_uniform(-28, -28)` is ~40 kt everywhere: one route-mean value.
 
     fn jfk_dca() -> AirportDb {
         HashMap::from([
@@ -1067,7 +1066,7 @@ mod tests {
             now(),
         )
         .eta;
-        // 14 s on this ~200 nm leg: the descent flies through calmer air than the cruise mean.
+        // The descent flies through calmer air than the cruise mean, so the two differ.
         assert!(
             secs(shear, old).abs() > 5,
             "per segment vs the {mean_hw:.0} kt route mean: {} s",

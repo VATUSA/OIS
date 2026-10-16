@@ -37,6 +37,12 @@ const ISOBARIC: u8 = 100;
 /// Flag table 3.3 bit 5: u/v are relative to the grid's x/y axes rather than east/north.
 const GRID_RELATIVE_WINDS: u8 = 0b0000_1000;
 const MS_TO_KT: f64 = 1.943_844;
+/// The largest response read: an index is about 20 KB and one message under 200 KB, so anything
+/// bigger is not what was asked for.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// The largest grid decoded. RAP's 13 km grid has 151,987 points; a header claiming far more is
+/// refused before anything is allocated for it.
+const MAX_GRID_POINTS: usize = 1_000_000;
 const K_TO_C: f64 = 273.15;
 
 /// Pressure altitude (ft) of an isobaric level in the ICAO standard atmosphere: the troposphere
@@ -125,10 +131,25 @@ pub fn candidates(now: DateTime<Utc>) -> Result<(DateTime<Utc>, Vec<String>), St
 /// Fetch the newest published RAP field valid at the hour nearest `now`. Errors name every file
 /// tried.
 pub async fn fetch(client: &reqwest::Client, now: DateTime<Utc>) -> Result<Winds, String> {
+    fetch_with(
+        now,
+        |url, range| async move { get(client, &url, range).await },
+    )
+    .await
+}
+
+/// [`fetch`] with the byte getter passed in: `get(url, range)` returns the file (`range` None) or
+/// the inclusive byte range of it. The first file that loads wins; a file that fails moves on to
+/// the next candidate.
+async fn fetch_with<G, Fut>(now: DateTime<Utc>, get: G) -> Result<Winds, String>
+where
+    G: Fn(String, Option<(u64, Option<u64>)>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
     let (valid, urls) = candidates(now)?;
     let mut errors = Vec::new();
     for url in urls {
-        match fetch_file(client, &url).await {
+        match fetch_file(&get, &url).await {
             Ok(grid) => return Ok(Winds::from_grid(grid, valid)),
             Err(e) => errors.push(format!("{url}: {e}")),
         }
@@ -136,9 +157,14 @@ pub async fn fetch(client: &reqwest::Client, now: DateTime<Utc>) -> Result<Winds
     Err(errors.join("; "))
 }
 
-/// Read one file's index, range-fetch its wind and temperature messages, and build the grid.
-async fn fetch_file(client: &reqwest::Client, url: &str) -> Result<WindGrid, String> {
-    let idx = get(client, &format!("{url}.idx"), None).await?;
+/// Read one file's index, range-fetch its wind and temperature messages, and build the grid. The
+/// decode is CPU work, so it runs on the blocking pool rather than an async worker.
+async fn fetch_file<G, Fut>(get: &G, url: &str) -> Result<WindGrid, String>
+where
+    G: Fn(String, Option<(u64, Option<u64>)>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+{
+    let idx = get(format!("{url}.idx"), None).await?;
     let entries = parse_idx(&String::from_utf8_lossy(&idx))?;
     let mut messages = Vec::new();
     for hpa in LEVELS_HPA {
@@ -146,10 +172,12 @@ async fn fetch_file(client: &reqwest::Client, url: &str) -> Result<WindGrid, Str
         for var in ["UGRD", "TMP"] {
             let range = message_range(&entries, var, &level)
                 .ok_or_else(|| format!("{var} at {level} is not in the index"))?;
-            messages.push(get(client, url, Some(range)).await?);
+            messages.push(get(url.to_string(), Some(range)).await?);
         }
     }
-    build_grid(messages)
+    tokio::task::spawn_blocking(move || build_grid(messages))
+        .await
+        .map_err(|e| format!("decode task failed: {e}"))?
 }
 
 async fn get(
@@ -168,11 +196,25 @@ async fn get(
         .and_then(|r| r.error_for_status())
         .map_err(|e| e.without_url().to_string())?;
     ranged_answer(range.is_some(), resp.status())?;
-    let body = resp
-        .bytes()
+    let mut resp = resp;
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| e.without_url().to_string())?;
-    Ok(body.to_vec())
+        .map_err(|e| e.without_url().to_string())?
+    {
+        append_capped(&mut body, &chunk, MAX_BODY_BYTES)?;
+    }
+    Ok(body)
+}
+
+/// Add a chunk of a response to `body`, refusing once the response would pass `cap` bytes.
+fn append_capped(body: &mut Vec<u8>, chunk: &[u8], cap: usize) -> Result<(), String> {
+    if body.len() + chunk.len() > cap {
+        return Err(format!("response larger than {cap} bytes"));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// A ranged request must come back `206 Partial Content`: a server that ignores `Range` answers
@@ -191,10 +233,48 @@ struct Field {
     values: Vec<f32>,
 }
 
+/// What identifies a Lambert conformal grid (template 3.30): its shape, first point, central
+/// meridian, spacing and the flags that say how its winds and points are laid out.
+#[derive(Clone, PartialEq)]
+struct GridKey {
+    shape: (usize, usize),
+    first: (i32, u32),
+    lov: u32,
+    spacing: (u32, u32),
+    grid_relative: bool,
+    j_positive: bool,
+}
+
+impl GridKey {
+    /// The grid of one message, refused unless it is a Lambert conformal grid of a sane size.
+    fn of<R: grib::Grib2Read>(sub: &grib::SubMessage<'_, R>) -> Result<Self, String> {
+        let GridDefinitionTemplateValues::Template30(lambert) =
+            GridDefinitionTemplateValues::try_from(sub.grid_def()).map_err(|e| e.to_string())?
+        else {
+            return Err("RAP grid is not Lambert conformal (template 3.30)".into());
+        };
+        let shape = (lambert.ni as usize, lambert.nj as usize);
+        if shape.0 < 2 || shape.1 < 2 || shape.0.saturating_mul(shape.1) > MAX_GRID_POINTS {
+            return Err(format!(
+                "grid of {} x {} points is not a RAP grid",
+                shape.0, shape.1
+            ));
+        }
+        Ok(Self {
+            shape,
+            first: (lambert.first_point_lat, lambert.first_point_lon),
+            lov: lambert.lov,
+            spacing: (lambert.dx, lambert.dy),
+            grid_relative: lambert.resolution_and_component_flags.0 & GRID_RELATIVE_WINDS != 0,
+            j_positive: lambert.scanning_mode.scans_positively_for_j(),
+        })
+    }
+}
+
 /// Where each source point lands on the lat/lon grid, and the turn from grid-relative to
 /// true-north winds there.
 struct Resampler {
-    shape: (usize, usize),
+    grid: GridKey,
     lat0: f64,
     lon0: f64,
     nlat: usize,
@@ -214,11 +294,12 @@ pub fn build_grid(messages: Vec<Vec<u8>>) -> Result<WindGrid, String> {
     for bytes in messages {
         let grib = grib::from_bytes(bytes).map_err(|e| e.to_string())?;
         for (_, sub) in grib.iter() {
+            let grid = GridKey::of(&sub)?;
             let r = match &resampler {
                 Some(r) => r,
-                None => resampler.insert(Resampler::new(&sub)?),
+                None => resampler.insert(Resampler::new(&sub, grid.clone())?),
             };
-            if sub.grid_shape().map_err(|e| e.to_string())? != r.shape {
+            if grid != r.grid {
                 return Err("messages are on different grids".into());
             }
             let prod = sub.prod_def();
@@ -252,14 +333,12 @@ pub fn build_grid(messages: Vec<Vec<u8>>) -> Result<WindGrid, String> {
 }
 
 impl Resampler {
-    fn new<R: grib::Grib2Read>(sub: &grib::SubMessage<'_, R>) -> Result<Self, String> {
-        let GridDefinitionTemplateValues::Template30(lambert) =
-            GridDefinitionTemplateValues::try_from(sub.grid_def()).map_err(|e| e.to_string())?
-        else {
-            return Err("RAP grid is not Lambert conformal (template 3.30)".into());
-        };
-        let grid_relative = lambert.resolution_and_component_flags.0 & GRID_RELATIVE_WINDS != 0;
-        let (ni, nj) = sub.grid_shape().map_err(|e| e.to_string())?;
+    fn new<R: grib::Grib2Read>(
+        sub: &grib::SubMessage<'_, R>,
+        grid: GridKey,
+    ) -> Result<Self, String> {
+        let (ni, nj) = grid.shape;
+        let grid_relative = grid.grid_relative;
         let latlons: Vec<(f64, f64)> = sub.latlons().map_err(|e| e.to_string())?.collect();
         let ij: Vec<(usize, usize)> = sub.ij().map_err(|e| e.to_string())?.collect();
         if latlons.len() != ni * nj || ij.len() != ni * nj {
@@ -268,9 +347,15 @@ impl Resampler {
         let lon = |l: f64| if l > 180.0 { l - 360.0 } else { l };
         let mut at = vec![usize::MAX; ni * nj];
         for (k, &(i, j)) in ij.iter().enumerate() {
+            if i >= ni || j >= nj {
+                return Err("grid point index outside the grid".into());
+            }
             at[j * ni + i] = k;
         }
-        let up = lambert.scanning_mode.scans_positively_for_j();
+        if at.contains(&usize::MAX) {
+            return Err("grid points do not cover the grid".into());
+        }
+        let up = grid.j_positive;
         let turn = ij
             .iter()
             .map(|&(i, j)| {
@@ -313,7 +398,7 @@ impl Resampler {
             })
             .collect();
         Ok(Self {
-            shape: (ni, nj),
+            grid,
             lat0,
             lon0,
             nlat,
@@ -405,39 +490,9 @@ fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
     (y.atan2(x).to_degrees() + 360.0) % 360.0
 }
 
-// Coverage matrix (VATUSA/OIS#836): RAP decode, index parsing, rotation.
-//
-// The GRIB2 and `.idx` bytes are captured from NOMADS (`rap.t00z.awp130pgrbf00`, 2026-10-16 00Z),
-// never a live fetch (AC5): `fixtures/rap/uv250.grib2` is message 42 (UGRD+VGRD at 250 mb, idx
-// offset 2091693, 77,351 bytes), `fixtures/rap/tmp250.grib2` is message 39 (TMP at 250 mb, offset
-// 1978615, 29,869 bytes), `fixtures/rap/rap.t00z.awp130pgrbf00.grib2.idx` is the file's real index.
-//
-// Requirement                                  | Test                                                                       | Mutation that must turn it red
-// ---------------------------------------------|----------------------------------------------------------------------------|---------------------------------------------------------------
-// AC5 decode captured RAP: grid shape          | the_captured_250_mb_messages_decode_onto_a_one_degree_grid                 | `GRID_STEP_DEG` 1.0 -> 0.5; `snap` round -> floor
-// AC5 level altitude 250 hPa                   | the_250_mb_level_sits_at_its_standard_atmosphere_altitude                  | swap the `pressure_alt_ft` branches; 0.190284 -> 0.19
-// pressure_alt_ft both sides of 226.32 hPa     | pressure_altitude_matches_the_standard_atmosphere_table                    | `>= 226.32` -> `>= 200.0`; 20_805.8 -> 20_000.0
-// AC5 plausible kt / degC ranges               | decoded_winds_and_temperatures_are_in_plausible_upper_air_ranges           | drop `* MS_TO_KT`; drop `- K_TO_C`
-// AC5 cell value vs independent raw-grid calc  | a_cells_temperature_is_the_mean_of_the_raw_points_inside_it                | `st[c] +=` -> `st[c] =`; `cell` lat/lon index swapped
-// AC5 cell wind speed vs raw grid              | a_cells_wind_speed_matches_the_raw_points_inside_it                        | drop `* MS_TO_KT`; drop `nw[c] += 1`
-// rotation sign pinned far from LoV            | grid_relative_winds_are_turned_to_true_north_far_from_the_central_meridian | `(gu * co + gv * s)` -> `(gu * co - gv * s)`; `turn` forced (0, 1)
-// rotation positive control on LoV             | winds_on_the_central_meridian_are_left_unturned                            | `turn` from longitude instead of the grid's +y bearing
-// stored vector is the "from" wind             | the_grid_stores_the_wind_as_the_from_vector                                | `su[c] -=` -> `su[c] +=`
-// wind without temperature                     | a_level_with_wind_but_no_temperature_has_missing_temperatures              | `t.push(mean(st[c], nt[c]))` -> `t.push(0)`
-// fail closed: no messages                     | build_grid_refuses_an_empty_message_list                                   | `ok_or("no messages to decode")` -> an empty grid
-// fail closed: temperature only, no wind       | build_grid_refuses_messages_with_no_wind_field                             | delete the `levels.is_empty()` check
-// fail closed: non-isobaric surface            | build_grid_refuses_a_message_on_a_non_isobaric_surface                     | delete the `surface_type != ISOBARIC` check
-// fail closed: bytes that are not GRIB2        | build_grid_refuses_bytes_that_are_not_grib                                 | `from_bytes` error -> `continue`
-// parse_idx on the captured index              | parse_idx_reads_every_line_of_the_captured_index                           | `f.len() < 6` -> `f.len() < 7`; var/level fields swapped
-// N.1/N.2 share an offset                      | the_u_and_v_submessages_share_one_offset_and_one_byte_range                | `o > start` -> `o >= start`
-// range end = next distinct offset - 1         | message_ranges_match_the_captured_message_sizes                            | `next - 1` -> `next`; `min()` -> `max()`
-// last message has an open end                 | the_last_message_in_the_index_runs_to_the_end_of_the_file                  | `.map(|next| next - 1)` -> `.or(Some(start))`
-// absent var/level                             | message_range_is_none_for_a_field_the_index_does_not_list                  | `find` falls back to the first entry
-// fail closed: malformed idx lines             | parse_idx_refuses_a_line_without_the_expected_shape                        | delete the `f.len() < 6 || !starts_with("d=")` guard
-// fail closed: non-numeric offset              | parse_idx_refuses_a_non_numeric_offset                                     | parse error mapped to offset 0
-//
-// No seam (flagged): `fetch`'s valid-hour rounding and cycle/forecast-hour URL list, and `get`'s
-// refusal of a 200 answer to a Range request, live inside network code.
+// The test fixtures are captured from NOMADS (`rap.t00z.awp130pgrbf00`, 2026-10-16 00Z), never
+// fetched live: `fixtures/rap/uv250.grib2` is message 42 (UGRD+VGRD at 250 mb), `tmp250.grib2`
+// message 39 (TMP at 250 mb), and the `.idx` is that file's real index.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,5 +937,128 @@ mod tests {
     fn parse_idx_refuses_a_non_numeric_offset() {
         assert!(parse_idx("42:abc:d=2026101600:UGRD:250 mb:anl:").is_err());
         assert!(parse_idx("42:-5:d=2026101600:UGRD:250 mb:anl:").is_err());
+    }
+
+    /// The UV message with a 4-byte field of section `section` (1-based octet) set to `value`.
+    fn with_u32(section: u8, octet: usize, value: u32) -> Vec<u8> {
+        let mut b = UV.to_vec();
+        let mut at = 16;
+        loop {
+            let len = u32::from_be_bytes(b[at..at + 4].try_into().unwrap()) as usize;
+            if b[at + 4] == section {
+                b[at + octet - 1..at + octet + 3].copy_from_slice(&value.to_be_bytes());
+                return b;
+            }
+            at += len;
+        }
+    }
+
+    // A grid header with one row, or with far more points than RAP's grid, is refused before
+    // anything is allocated for it.
+    #[test]
+    fn build_grid_refuses_a_grid_that_is_not_rap_sized() {
+        // Template 3.30: Nx is octets 31-34 of section 3 and Ny octets 35-38.
+        assert_eq!(&with_u32(3, 31, 451)[..], UV, "the octets located hold Nx");
+        assert_eq!(&with_u32(3, 35, 337)[..], UV, "the octets located hold Ny");
+        let err = build_grid(vec![with_u32(3, 35, 1)]).err().unwrap();
+        assert!(err.contains("not a RAP grid"), "{err}");
+        let err = build_grid(vec![with_u32(3, 31, 100_000)]).err().unwrap();
+        assert!(err.contains("not a RAP grid"), "{err}");
+    }
+
+    // Two messages on different grids are refused rather than averaged together.
+    #[test]
+    fn build_grid_refuses_messages_on_different_grids() {
+        // Dx is octets 56-59 of section 3; one metre off is a different grid.
+        let other = with_u32(3, 56, 13_545_088);
+        let err = build_grid(vec![UV.to_vec(), other]).err().unwrap();
+        assert!(err.contains("different grids"), "{err}");
+    }
+
+    type Range = Option<(u64, Option<u64>)>;
+    type Bytes = std::future::Ready<Result<Vec<u8>, String>>;
+
+    /// A getter that serves the captured file only at `serving`, every other URL failing.
+    fn served_at(
+        serving: String,
+        asked: &std::cell::RefCell<Vec<String>>,
+    ) -> impl Fn(String, Range) -> Bytes + '_ {
+        let ugrd: Vec<u64> = parse_idx(IDX)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.var == "UGRD")
+            .map(|e| e.offset)
+            .collect();
+        move |url, range| {
+            asked.borrow_mut().push(url.clone());
+            std::future::ready(match (url.strip_suffix(".idx"), range) {
+                (Some(file), None) if file == serving => Ok(IDX.as_bytes().to_vec()),
+                (None, Some((start, _))) if url == serving => {
+                    Ok(if ugrd.contains(&start) { UV } else { TMP_250 }.to_vec())
+                }
+                _ => Err("404".into()),
+            })
+        }
+    }
+
+    // A response is read up to the cap and refused past it, before the oversized chunk is kept.
+    #[test]
+    fn a_response_past_the_cap_is_refused() {
+        let mut body = Vec::new();
+        assert!(append_capped(&mut body, &[1; 6], 10).is_ok());
+        assert!(
+            append_capped(&mut body, &[2; 4], 10).is_ok(),
+            "exactly the cap is fine"
+        );
+        let err = append_capped(&mut body, &[3], 10).unwrap_err();
+        assert!(err.contains("larger than 10 bytes"), "{err}");
+        assert_eq!(body.len(), 10);
+        const { assert!(MAX_BODY_BYTES >= 1024 * 1024, "a 200 KB message fits") };
+    }
+
+    // The fetch moves past files that are not published yet to the newest one that is.
+    #[tokio::test]
+    async fn fetch_falls_through_to_the_first_file_that_loads() {
+        let now = DateTime::parse_from_rfc3339("2026-10-16T01:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (valid, urls) = candidates(now).unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let winds = fetch_with(now, served_at(urls[2].clone(), &asked))
+            .await
+            .unwrap();
+        assert_eq!(winds.valid_at(), Some(valid));
+        let asked = asked.into_inner();
+        let first_three: Vec<String> = urls[..3].iter().map(|u| format!("{u}.idx")).collect();
+        assert_eq!(
+            asked[..3],
+            first_three[..],
+            "newest cycle first, AWS before NOMADS"
+        );
+        assert_eq!(
+            asked.len(),
+            3 + 2 * LEVELS_HPA.len(),
+            "nothing past the file that loaded"
+        );
+    }
+
+    // When nothing loads, the error names every file tried.
+    #[tokio::test]
+    async fn a_fetch_that_finds_nothing_names_every_file_tried() {
+        let now = DateTime::parse_from_rfc3339("2026-10-16T01:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (_, urls) = candidates(now).unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let err = fetch_with(now, served_at(String::new(), &asked))
+            .await
+            .err()
+            .unwrap();
+        for url in &urls {
+            assert!(
+                err.contains(&format!("{url}: 404")),
+                "{url} missing from {err}"
+            );
+        }
     }
 }

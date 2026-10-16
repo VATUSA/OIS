@@ -122,7 +122,8 @@ pub fn ias_to_tas(ias_kt: f64, alt_ft: f64) -> f64 {
 }
 
 /// True airspeed (kt) for a Mach number at altitude in the standard atmosphere: TAS = M · a,
-/// a = a₀·√(T/T₀).
+/// a = a₀·√(T/T₀). The model itself uses [`mach_to_tas_at`] with the field's temperature.
+#[cfg(test)]
 pub fn mach_to_tas(mach: f64, alt_ft: f64) -> f64 {
     mach_to_tas_at(mach, isa_temp_k(alt_ft.max(0.0)))
 }
@@ -168,8 +169,9 @@ impl RouteWind {
         Self { knots }
     }
 
-    /// The same headwind everywhere, at every altitude, with no temperature. For a leg with no
-    /// route geometry and for the model's own tests.
+    /// The same headwind everywhere, at every altitude, with no temperature: one route-mean value,
+    /// as the model applied before #836, for tests that compare against it.
+    #[cfg(test)]
     pub fn uniform(headwind_kt: f64) -> Self {
         Self::new(vec![WindKnot {
             d_nm: 0.0,
@@ -391,13 +393,14 @@ pub struct VerticalProfile {
     start_d: f64,
     cruise_alt: f64,
     cruise_tas: f64,
-    /// Samples of `(distance-to-destination, altitude, true-airspeed)` from the field (d=0) up the
-    /// descent, through cruise, and out the climb, in increasing `d`. Monotonic in `d`. The TAS is
-    /// the phase-appropriate speed (descent/cruise/climb schedule) at that point, its Mach part in
-    /// the air temperature there; wind is applied at query time from [`Self::wind`] as well as in
-    /// the climb and descent integration. Both altitude and TAS are linearly interpolated between
+    /// Samples of `(distance-to-destination, altitude, true-airspeed, headwind)` from the field
+    /// (d=0) up the descent, through cruise, and out the climb, in increasing `d`. Monotonic in `d`.
+    /// The TAS is the phase-appropriate speed (descent/cruise/climb schedule) at that point, its
+    /// Mach part in the air temperature there. The headwind is [`Self::wind`] at that point's
+    /// distance and altitude, with a sample at every wind knot, so a query interpolates it like the
+    /// TAS instead of reading the wind field again. All three are linearly interpolated between
     /// samples.
-    samples: Vec<(f64, f64, f64)>,
+    samples: Vec<(f64, f64, f64, f64)>,
 }
 
 impl VerticalProfile {
@@ -473,14 +476,43 @@ impl VerticalProfile {
         samples.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
 
         let cruise_tas = speeds.cruise_at(start_d_nm, cruise_alt);
-        Self {
+        let mut profile = Self {
             wind,
             gs_bias: 1.0,
             start_alt,
             start_d: start_d_nm,
             cruise_alt,
             cruise_tas,
-            samples,
+            samples: samples
+                .into_iter()
+                .map(|(d, a, t)| (d, a, t, 0.0))
+                .collect(),
+        };
+        profile.sample_headwinds();
+        profile
+    }
+
+    /// Give every sample its headwind, adding a sample at each wind knot inside the profile so the
+    /// headwind between samples is linear, as the wind field is between knots.
+    fn sample_headwinds(&mut self) {
+        if self.wind.is_still() {
+            return;
+        }
+        let top = self.samples.last().map_or(0.0, |s| s.0);
+        let extra: Vec<(f64, f64, f64, f64)> = self
+            .wind
+            .knots
+            .iter()
+            .map(|k| k.d_nm)
+            .filter(|&d| d > 0.0 && d < top)
+            .map(|d| (d, self.alt_at(d), self.interp(d, |s| s.2), 0.0))
+            .collect();
+        self.samples.extend(extra);
+        self.samples
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        self.samples.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+        for s in &mut self.samples {
+            s.3 = self.wind.headwind(s.0, s.1).unwrap_or(0.0);
         }
     }
 
@@ -504,15 +536,21 @@ impl VerticalProfile {
         self
     }
 
+    /// The headwind (kt) the profile flies at `d`, at its altitude there; None in still air.
+    fn headwind_at(&self, d_nm: f64) -> Option<f64> {
+        (!self.wind.is_still()).then(|| self.interp(d_nm, |s| s.3))
+    }
+
     /// The predicted groundspeed at `d`: interpolated TAS, corrected by the wind at `d` and the
     /// profile's altitude there, anchoring bias applied, floored at [`GS_FLOOR_KT`].
     fn gs_at(&self, d_nm: f64) -> f64 {
-        let hw = self.wind.headwind(d_nm, self.alt_at(d_nm));
+        let hw = self.headwind_at(d_nm);
         (effective_gs(self.interp(d_nm, |s| s.2), hw) * self.gs_bias).max(GS_FLOOR_KT)
     }
 
-    /// Interpolate a sample field (`.1` altitude or `.2` TAS) at distance-to-destination `d`.
-    fn interp(&self, d_nm: f64, field: impl Fn(&(f64, f64, f64)) -> f64) -> f64 {
+    /// Interpolate a sample field (`.1` altitude, `.2` TAS, `.3` headwind) at
+    /// distance-to-destination `d`.
+    fn interp(&self, d_nm: f64, field: impl Fn(&(f64, f64, f64, f64)) -> f64) -> f64 {
         let d = d_nm.max(0.0);
         match self
             .samples
@@ -606,7 +644,7 @@ impl VerticalProfile {
         let (mut sum, mut cnt) = (0.0, 0usize);
         for k in 0..n {
             let mid = hi - (k as f64 + 0.5) * step;
-            if let Some(hw) = self.wind.headwind(mid, self.alt_at(mid)) {
+            if let Some(hw) = self.headwind_at(mid) {
                 sum += hw;
                 cnt += 1;
             }
@@ -1396,7 +1434,7 @@ mod tests {
         assert!(near.abs() < 1.0, "{near}");
     }
 
-    // AC3: the per-segment answer is not the route-mean answer (the thing #836 replaced).
+    // AC3: the per-segment answer is not the route-mean answer.
     #[test]
     fn a_varying_wind_is_not_the_same_as_its_route_mean() {
         let p = AircraftProfile::default();
@@ -1462,7 +1500,7 @@ mod tests {
         }
     }
 
-    // Operator decision: RAP temperature drives Mach -> TAS.
+    // The field's temperature drives the Mach TAS.
     #[test]
     fn a_cruise_mach_flies_faster_in_warm_air_than_in_isa() {
         let warm = RouteWind::new(vec![knot(
@@ -1501,7 +1539,7 @@ mod tests {
         assert!((vp.ground_speed_at(350.0) - (484.2 - 40.0)).abs() < 0.3);
     }
 
-    // Operator decision: the Mach portion only. An IAS-only profile ignores temperature.
+    // Temperature reaches the Mach portion only: an IAS-only profile ignores it.
     #[test]
     fn warm_air_does_not_change_an_ias_only_profile() {
         let warm = flat(&[(0.0, 0.0, Some(ISA_FL350_K + 20.0))]);
@@ -1639,5 +1677,95 @@ mod tests {
             cruise(300.0, 440.0, &p, RouteWind::still()).mean_headwind(300.0, 0.0),
             None
         );
+    }
+
+    /// ISA at FL350, and 15 °C warmer than ISA from 28,000 to 34,000 ft: the Mach part of the
+    /// b77w's climb and descent (its 310/300 KIAS schedules cross M0.84 near FL300) sits in warm
+    /// air while its cruise at FL350 does not.
+    fn warm_below_cruise() -> RouteWind {
+        let isa = |ft: f64| 288.15 - 0.0019812 * ft;
+        RouteWind::new(vec![knot(
+            0.0,
+            vec![
+                (28_000.0, 0.0, Some(isa(28_000.0) + 15.0)),
+                (34_000.0, 0.0, Some(isa(34_000.0) + 15.0)),
+                (35_000.0, 0.0, Some(ISA_FL350_K)),
+            ],
+        )])
+    }
+
+    // The field's temperature drives the Mach part of the descent: warm air is faster there.
+    #[test]
+    fn a_descent_mach_flies_faster_in_warm_air() {
+        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
+        // The last 100 nm hold the whole descent, which is integrated from the field and does not
+        // depend on the climb.
+        let saved = isa.time_between(100.0, 0.0) - warm.time_between(100.0, 0.0);
+        // About 0.9 s: the Mach part of a 2,000 fpm descent from FL350 is a few minutes long.
+        assert!(saved > 0.5, "the warm Mach descent saves {saved} s");
+    }
+
+    // The same on the climb: the Mach part of it is faster in warm air.
+    #[test]
+    fn a_climb_mach_flies_faster_in_warm_air() {
+        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
+        // The first 150 nm hold the climb and the start of the ISA cruise.
+        let saved = isa.time_between(300.0, 150.0) - warm.time_between(300.0, 150.0);
+        assert!(saved > 1.0, "the warm Mach climb saves {saved} s");
+    }
+
+    // AC3 inside the descent: a headwind from 60 nm out and calm inside 50 nm moves top of
+    // descent in, because the descent is integrated through the wind at each step's own distance.
+    #[test]
+    fn a_headwind_on_the_upper_descent_moves_top_of_descent_in() {
+        let p = AircraftProfile::default();
+        let wind = flat(&[
+            (0.0, 0.0, None),
+            (50.0, 0.0, None),
+            (60.0, 80.0, None),
+            (300.0, 80.0, None),
+        ]);
+        let (windy, still) = (
+            cruise(300.0, 440.0, &p, wind),
+            cruise(300.0, 440.0, &p, RouteWind::still()),
+        );
+        let moved = top_of_descent(&still, 300.0) - top_of_descent(&windy, 300.0);
+        assert!(moved > 2.0, "top of descent moved in {moved} nm");
+        // Inside 50 nm both fly the same calm descent.
+        assert!((windy.alt_at(30.0) - still.alt_at(30.0)).abs() < 1.0);
+    }
+
+    // A wind knot inside the descent adds no cruise-altitude sample there.
+    #[test]
+    fn a_wind_knot_inside_the_descent_keeps_the_descent_shape() {
+        let p = AircraftProfile::default();
+        let wind = flat(&[(0.0, 10.0, None), (30.0, 10.0, None), (300.0, 10.0, None)]);
+        let vp = cruise(300.0, 440.0, &p, wind);
+        assert!(
+            vp.alt_at(30.0) < 20_000.0,
+            "30 nm out reads {} ft",
+            vp.alt_at(30.0)
+        );
+    }
+
+    // A temperature at or below absolute zero is clamped to 1 K rather than taking a square root
+    // of a negative number.
+    #[test]
+    fn mach_to_tas_at_clamps_a_non_physical_temperature() {
+        // 0.8 × 661.4788 × √(1 / 288.15)
+        let tas = mach_to_tas_at(0.8, -10.0);
+        assert!((tas - 31.17).abs() < 0.01, "{tas}");
+    }
+
+    // RouteWind: the first knot lacks the field; the second's is used.
+    #[test]
+    fn route_wind_falls_back_to_the_second_knot_when_the_first_lacks_the_field() {
+        let w = RouteWind::new(vec![
+            knot(100.0, vec![(35_000.0, 20.0, None)]),
+            knot(200.0, vec![(35_000.0, 60.0, Some(220.0))]),
+        ]);
+        assert_eq!(w.temp_k(150.0, 35_000.0), Some(220.0));
     }
 }
