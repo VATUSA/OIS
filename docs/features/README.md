@@ -19,6 +19,7 @@ surface, and its Discord touchpoints.
 | [discord-integration.md](discord-integration.md) | discord, integration | built |
 | [flow.md](flow.md)                               | flow                 | built (diverged from original spec) |
 | [aadc.md](aadc.md)                               | flow                 | built |
+| [fca.md](fca.md)                                 | flow                 | built: FCA logic audit (#838); data model, permissions and API are in flow.md |
 | [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
 | [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — the overlay has no data model, permissions, API or Discord of its own; sector data is in monitor.md) |
