@@ -1,0 +1,212 @@
+#!/bin/bash
+# ==============================================================================
+# Pre-Push Hook
+# ==============================================================================
+# Runs clippy and the test suites before allowing a push, and the security audits
+# as warnings: an advisory on next itself, or no network, must not refuse every
+# push, and CI's deny and js jobs still block the merge.
+# A guidance-only push (bin/lib/claude-only-change.sh) skips clippy and the suites;
+# so does a commit `just test` (bin/run-tests.sh) stamped green in this checkout,
+# because that gate ran both.
+# Installed for the whole clone by `just setup` (core.hooksPath=.githooks), whose
+# .githooks/pre-push execs this file.
+# Tests: bin/lib/pre-push.test.sh
+# ==============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+# The installed copy may be another checkout's, so the helpers are looked for beside
+# this file, then in the checkout being pushed, then in the main checkout.
+GIT_HOOKS_LIB=""
+for HOOK_BIN in \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
+    "$(git rev-parse --show-toplevel 2>/dev/null)/bin" \
+    "$(cd "$(git rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)/bin"; do
+    if [[ -f "$HOOK_BIN/lib/git-hooks.sh" ]]; then
+        GIT_HOOKS_LIB="$HOOK_BIN/lib/git-hooks.sh"
+        break
+    fi
+done
+if [[ -z "$GIT_HOOKS_LIB" ]]; then
+    echo "pre-push: bin/lib/git-hooks.sh not found in this checkout or the main one (git merge origin/next)." >&2
+    exit 1
+fi
+# shellcheck source=lib/git-hooks.sh
+. "$GIT_HOOKS_LIB"
+HOOK_BIN="$(dirname "$(dirname "$GIT_HOOKS_LIB")")"
+
+# Judge the branch being written on the remote, so `git push origin HEAD:<branch>`
+# from a review worktree is checked under the name it lands as. Git feeds the
+# updates on stdin; a terminal there means the hook was run by hand.
+PUSHED=""
+if [[ ! -t 0 ]]; then
+    PUSHED="$(pushed_ref)"
+    if [[ $? -eq 3 ]]; then
+        echo -e "${RED}pre-push: this push updates more than one branch, and the checks judge one commit. Push one branch at a time.${NC}"
+        exit 1
+    fi
+fi
+if [[ -n "$PUSHED" ]]; then
+    PUSH_SHA="${PUSHED%% *}"
+    BRANCH="${PUSHED#* }"
+else
+    PUSH_SHA=$(git rev-parse HEAD)
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+fi
+
+# Skip checks on main and next (direct pushes are bypasses; the Claude Code gates refuse them)
+if [[ "$BRANCH" == "main" || "$BRANCH" == "next" ]]; then
+    exit 0
+fi
+
+# Every check below reads HEAD and the working tree, so they only vouch for HEAD.
+if [[ "$PUSH_SHA" != "$(git rev-parse HEAD)" ]]; then
+    echo -e "${RED}pre-push: the checks judge HEAD, but this push sends ${PUSH_SHA:0:8}. Check that commit out and push HEAD (git push origin HEAD:${BRANCH}).${NC}"
+    exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# sccache (bin/lib/portable.sh); cargo builds into this checkout's own target/, so a
+# hook build reuses what the session already compiled here.
+if [[ -f "$HOOK_BIN/lib/portable.sh" ]]; then
+    # shellcheck source=lib/portable.sh
+    . "$HOOK_BIN/lib/portable.sh"
+    export_build_env
+fi
+
+# A push that changes only agent guidance carries no application code for clippy or
+# the suites to judge. Without the helper, or on any doubt, both run.
+GUIDANCE_ONLY=0
+CLAUDE_ONLY_LIB="$(dirname "$GIT_HOOKS_LIB")/claude-only-change.sh"
+if [[ -f "$CLAUDE_ONLY_LIB" ]]; then
+    # shellcheck source=lib/claude-only-change.sh
+    . "$CLAUDE_ONLY_LIB"
+    claude_only_change "$PUSH_SHA" && GUIDANCE_ONLY=1
+fi
+GUIDANCE_SKIP="skip (only CLAUDE.md, AGENTS.md and .claude guidance changed since origin/next)"
+
+# `just test` ran clippy and both suites green on this exact commit in this checkout.
+MARKED=0
+if tests_marker_for "$PUSH_SHA"; then
+    MARKED=1
+fi
+MARKER_SKIP="skip (just test passed on ${PUSH_SHA:0:8} in this checkout)"
+
+ERRORS=0
+
+echo ""
+echo -e "${YELLOW}Running pre-push checks on ${BRANCH}...${NC}"
+echo ""
+
+# -- 1. Branch naming --
+echo -n "  Branch naming... "
+if [[ "$BRANCH" =~ ^(feat|fix|chore)/[a-z0-9]+/[a-z0-9]+(-[a-z0-9]+){1,3}$ ]]; then
+    if [[ ${#BRANCH} -gt 50 ]]; then
+        echo -e "${RED}fail (${#BRANCH} chars, max 50)${NC}"
+        ERRORS=$((ERRORS + 1))
+    else
+        echo -e "${GREEN}pass${NC}"
+    fi
+elif [[ "$BRANCH" == worktree-* ]]; then
+    echo -e "${RED}fail (rename from worktree-* before pushing, as /start does)${NC}"
+    ERRORS=$((ERRORS + 1))
+else
+    echo -e "${RED}fail (must be feat|fix|chore/<issue-or-hash>/<description>, a 2-4 word description)${NC}"
+    echo "    Examples: feat/47/save-event-replays, fix/569/duplicate-migration-check, chore/a1b2c3/update-deps"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# -- 2. clippy (whole workspace) --
+# Warnings are errors, as CI's rust job runs it; bin/pre-commit checks formatting only.
+echo -n "  clippy (workspace, -D warnings)... "
+if [[ "$GUIDANCE_ONLY" -eq 1 ]]; then
+    echo -e "${GREEN}${GUIDANCE_SKIP}${NC}"
+elif [[ "$MARKED" -eq 1 ]]; then
+    echo -e "${GREEN}${MARKER_SKIP}${NC}"
+elif CLIPPY_OUTPUT=$(cargo clippy --workspace --all-targets -- -D warnings 2>&1); then
+    echo -e "${GREEN}pass${NC}"
+else
+    echo -e "${RED}fail${NC}"
+    echo "$CLIPPY_OUTPUT" | grep -E '^(error|warning)' | head -20
+    ERRORS=$((ERRORS + 1))
+fi
+
+# -- 3. Rust tests --
+# Every #[sqlx::test] needs DATABASE_URL, so .env is loaded first. The run queues on the
+# postgres lock (bin/with-lock.sh) behind any other worktree's full suite.
+echo -n "  Rust tests (nextest)... "
+if [[ "$GUIDANCE_ONLY" -eq 1 ]]; then
+    echo -e "${GREEN}${GUIDANCE_SKIP}${NC}"
+elif [[ "$MARKED" -eq 1 ]]; then
+    echo -e "${GREEN}${MARKER_SKIP}${NC}"
+else
+    # shellcheck disable=SC1091
+    [[ -f .env ]] && { set -a; . ./.env; set +a; }
+    if [[ -z "${DATABASE_URL:-}" ]]; then
+        echo -e "${RED}fail (no DATABASE_URL: copy the primary checkout's .env, or run bash bin/setup-worktree.sh)${NC}"
+        ERRORS=$((ERRORS + 1))
+    elif ! cargo nextest --version >/dev/null 2>&1; then
+        echo -e "${RED}fail (cargo-nextest is not installed: cargo install --locked cargo-nextest)${NC}"
+        ERRORS=$((ERRORS + 1))
+    elif NEXTEST_OUTPUT=$(bash "$HOOK_BIN/with-lock.sh" postgres -- cargo nextest run --workspace --all-targets --profile ci 2>&1); then
+        echo -e "${GREEN}pass${NC}"
+    else
+        echo -e "${RED}fail${NC}"
+        echo "$NEXTEST_OUTPUT" | grep -E '^[[:space:]]*(FAIL|SIGSEGV|SIGABRT|TIMEOUT|Summary)|^error' | tail -15
+        ERRORS=$((ERRORS + 1))
+    fi
+fi
+
+# -- 4. JS tests --
+echo -n "  JS tests (pnpm test)... "
+if [[ "$GUIDANCE_ONLY" -eq 1 ]]; then
+    echo -e "${GREEN}${GUIDANCE_SKIP}${NC}"
+elif [[ "$MARKED" -eq 1 ]]; then
+    echo -e "${GREEN}${MARKER_SKIP}${NC}"
+elif [[ ! -d node_modules ]]; then
+    echo -e "${RED}fail (no node_modules: pnpm install --frozen-lockfile)${NC}"
+    ERRORS=$((ERRORS + 1))
+# --force: turbo's cache key ignores root files the tests read (DESIGN.md,
+# tauri.conf.json, eslint.config.mjs) and its cache is shared across worktrees, so a
+# cached replay can pass a red suite.
+elif VITEST_OUTPUT=$(pnpm exec turbo run test --force 2>&1); then
+    echo -e "${GREEN}pass${NC}"
+else
+    echo -e "${RED}fail${NC}"
+    echo "$VITEST_OUTPUT" | sed $'s/\033\\[[0-9;]*m//g' | grep -E 'FAIL|Test Files|Tests |Errors|ERR_' | tail -15
+    ERRORS=$((ERRORS + 1))
+fi
+
+# -- 5. cargo deny (advisories, licenses, bans, sources), a warning --
+echo -n "  cargo deny... "
+if ! cargo deny --version >/dev/null 2>&1; then
+    echo -e "${YELLOW}skip (cargo-deny is not installed: cargo install --locked cargo-deny; CI still runs it)${NC}"
+elif DENY_OUTPUT=$(cargo deny check 2>&1); then
+    echo -e "${GREEN}pass${NC}"
+else
+    DENY_COUNT=$(grep -cE '^error\[' <<<"$DENY_OUTPUT")
+    echo -e "${YELLOW}warnings (${DENY_COUNT} error(s); non-blocking here, CI's deny job fails on them)${NC}"
+    grep -E '^error\[' <<<"$DENY_OUTPUT" | head -10 | sed 's/^/    /'
+fi
+
+# -- 6. pnpm security audit, a warning --
+echo -n "  pnpm audit... "
+if pnpm audit --audit-level=high > /dev/null 2>&1; then
+    echo -e "${GREEN}pass${NC}"
+else
+    echo -e "${YELLOW}warnings (non-blocking here; CI's js job fails on them)${NC}"
+fi
+
+# -- Result --
+echo ""
+if [[ $ERRORS -gt 0 ]]; then
+    echo -e "${RED}Pre-push checks failed ($ERRORS issue(s)). Fix before pushing.${NC}"
+    exit 1
+else
+    echo -e "${GREEN}All pre-push checks passed.${NC}"
+    exit 0
+fi

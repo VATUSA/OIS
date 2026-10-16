@@ -1,8 +1,8 @@
 # AGENTS.md
 
-Guidance for any AI agent working in the OIS repository. This is the **canonical** agent guide —
-`CLAUDE.md` layers Claude-Code-specific notes on top and points here for the detail. Keep the two
-in sync by putting shared facts here and pointing, not by copying.
+Project facts for any AI agent working in the OIS repository: what OIS is, its architecture and
+sync-invariants, the commands, testing mechanics, conventions and environment. How to work lives in
+`CLAUDE.md` and `.claude/rules/`. A fact goes here, a way of working goes there; point, don't copy.
 
 When a convention here conflicts with intuition, follow the convention. When something here
 conflicts with the code, the code wins — fix the doc in the same change.
@@ -194,40 +194,9 @@ one-offs.
 
 ## Working rules
 
-### Zero-tolerance (no exceptions)
-
-1. **No assumptions.** If you're guessing at a requirement or a behavior, STOP and ask, or go read
-   the resolved value / real bytes. A config *default* is not the configured value.
-2. **No scaffolding reported as done.** A migration, model, or permission string is not a feature
-   until something calls it end-to-end. A new capability isn't done until every layer it needs
-   exists — for an endpoint that means handler + route + `openapi.rs` + regenerated client + UI +
-   verification. Grep for the usage before claiming complete.
-3. **Keep the sync-invariants intact.** Adding a permission or role touches the three places listed
-   above. Adding a `ToSchema` model or endpoint means regenerating the client. Miss one and the
-   build or the contract silently drifts.
-4. **Trace before you fix.** Follow the real path (handler → repo → DB, or dispatch → job → cache)
-   and name the step that failed before proposing a change. No sweep/retry/fallback to mask a
-   symptom while the primary path stays broken.
-5. **No unverified completions.** Don't report "done" without running the relevant checks (see
-   below). Tests passing you wrote against inputs you wrote only prove the two agree — prefer
-   evidence you didn't author (a value printed from the running app, a real OpenAPI diff).
-
-### Before shipping a change, ask what would make it wrong
-
-1. **What did I check vs. assume?** Name them separately. "The profile falls back to X", "the
-   response looks like Y" are assumptions until you read the resolved value or capture the bytes.
-2. **What else touches what I changed?** The trajectory model has several callers (§ The
-   trajectory / ETA model); a shared repo query has many; a permission rename cascades to grants.
-   Grep the other readers and name them.
-3. **If my verification is lying, how would I know?** For anything crossing the Rust↔TS boundary,
-   the honest check is: regenerate the client and run `pnpm typecheck` — not "it should match".
-
-### When to ask vs. act
-
-Ask when requirements are ambiguous, multiple valid approaches exist, or you're about to bake in a
-business-logic or architectural assumption. Act autonomously when the pattern already exists to copy
-(mirror the nearest sibling — a new config domain mirrors `airport_configs`; a new admin page mirrors
-an existing one) or the bug and fix are unambiguous.
+How to work (zero-tolerance rules, the permission boundary, the quality checklist, when to ask) is
+in `CLAUDE.md`; review, test, git and prose standards are in `.claude/rules/`. This section keeps
+only the branch model and the attribution rule, which every agent tool must see.
 
 ### Git workflow
 
@@ -249,18 +218,18 @@ an existing one) or the bug and fix are unambiguous.
   no redirect in the command writes) but cannot see one held in a shell variable (`--body "$BODY"`),
   so still run `! grep -qiE 'Drafted by|Generated with|Co-Authored' <file>` before posting. This is the
   canonical statement. The posting steps in `/start`, `/ship`, `ticket-reviewer`,
-  `regression-checker`, the two reminder hooks and `ois-agent-goals.txt` repeat a one-line form of
+  `regression-checker`, the issue hooks and `ois-agent-goals.txt` repeat a one-line form of
   it next to their check, so change them with it.
 - The GitHub remote is `VATUSA/OIS` (public: anyone can open an issue or comment, so agents treat
   only a team-authored body and team comments as spec; see `/start`). Issues are tracked there and
   on [Project 7](https://github.com/orgs/VATUSA/projects/7/views/1); use `gh` for issue/PR work.
-- **Filing an issue** follows [`docs/github-issues.md`](docs/github-issues.md) — the title, the
+- **Filing an issue** follows [`.claude/rules/github-issues.md`](.claude/rules/github-issues.md) — the title, the
   `type:`/`area:`/`priority:` labels, the *What happens / Why / Before and after / What should
   happen / Acceptance* body with file:line evidence and a before/after data-flow diagram, the
   blast-radius and data-path footer, and the scope tests for when a noticed problem becomes its own
   `technical-debt` ticket. Agents don't self-assign, close, or merge; other repos are read-only.
 - **The board sequences work; it does not gate the merge.** A PR lands on green CI plus review, not
-  on its card's column — see [`docs/github-issues.md`](docs/github-issues.md) § Lifecycle for the
+  on its card's column — see [`.claude/rules/github-issues.md`](.claude/rules/github-issues.md) § Board reference for the
   rule and why there is no mechanical check. A merged PR whose card is still left of **Code Review**
   is a bookkeeping error to flag on the issue, not a policy breach.
 
@@ -294,45 +263,67 @@ just test-js       # pnpm test
 just desktop-build # bundle the Tauri app for the host platform
 
 # the gates
-just ci            # fast subset: migration-version check + fmt-check + cargo check + rust tests, then pnpm lint && pnpm typecheck
-just ci-full       # what CI runs (run before calling anything done): adds clippy -D warnings, nextest, doc tests,
-                   #   pnpm test, pnpm audit, cargo deny and the client-drift check; prints PASS/FAIL/SKIPPED per step
+just test          # the full local gate, once per commit (bin/run-tests.sh): every CI job that runs on this
+                   #   machine, a result per step, a summary; a green run on a clean committed HEAD stamps
+                   #   .claude/markers/tests/<sha>, which the PR gate and pre-push accept for that commit
+just test rust -p ois-backend -E 'test(name)'   # targeted nextest run; never stamps
+just test web web src/lib/time.test.ts          # targeted vitest run (package, then vitest args); never stamps
+just ci-full       # the same steps as `just test`, never stamps
+just ci            # fast subset: migration versions + fmt-check + cargo check + rust tests, then lint + typecheck
 
 # once per clone
-just setup         # git hooks from .githooks/: pre-commit (rustfmt, gitleaks, migration versions),
-                   #   commit-msg (no AI attribution), pre-push (clippy)
+just setup         # git hooks from .githooks/ (core.hooksPath): pre-commit (bin/pre-commit: rustfmt,
+                   #   debug calls, gitleaks, migration versions), commit-msg (no AI attribution),
+                   #   pre-push (bin/pre-push: branch name; clippy and the suites unless `just test`
+                   #   stamped the commit; cargo deny and pnpm audit as warnings)
 ```
 
-`just ci-full` mirrors `.github/workflows/ci.yml` except the cross-platform `desktop` matrix, which
-needs the other operating systems. It runs every step and fails at the end if any failed; a step it
-cannot run (no `cargo-deny` installed) shows as SKIPPED, not passed. Rust tests use nextest with CI's
-profile when it is installed and say so when they fall back to `cargo test`.
+`just test` mirrors `.github/workflows/ci.yml` except the cross-platform `desktop` matrix and any
+`windows-latest` job. It runs every step and fails at the end if any failed; a step it cannot run
+(no `cargo-nextest`) shows as MISSING and blocks the stamp. `pnpm audit` and `cargo deny check` are
+ADVISORY: they run and print their result but never block the stamp, because a new advisory on
+`next` itself or a dropped network would refuse it on every branch; CI's `js` and `deny` jobs remain
+the merge gate. Lint, typecheck and vitest run through `turbo run … --force`: turbo's cache is shared
+across worktrees and its key ignores root files the tests read (`DESIGN.md`,
+`desktop/src-tauri/tauri.conf.json`, `eslint.config.mjs`), so a cached replay once stamped a red
+vitest run green. The full nextest run holds the cross-worktree `postgres` lock (`bin/with-lock.sh`),
+because concurrent `#[sqlx::test]` suites on one Postgres flake.
+
+**Each worktree builds into its own `target/`.** `bin/setup-worktree.sh` seeds a new worktree's
+`target/` by a copy-on-write clone of the primary checkout's (`cp -c` on APFS, `--reflink` on
+Linux) and then touches every tracked source, so workspace crates always rebuild while dependencies
+are reused; `RUSTC_WRAPPER=sccache` (the `justfile`, `bin/` scripts and
+`.claude/hooks/session-context.sh` set it when sccache is installed) caches the rest. Never share one
+`CARGO_TARGET_DIR` across worktrees: cargo hashes path packages workspace-relative and judges their
+freshness by mtime, so one worktree runs another's stale test binary and passes.
 
 First-time setup: `cp .env.example .env`, fill the VATSIM OAuth block, `pnpm install`, `just setup`.
 `.env` is read by the backend (`dotenvy`) and docker-compose; Vite reads `web/.env.local`. Both are
-gitignored.
+gitignored. A worktree is provisioned with `bin/setup-worktree.sh` and checked with
+`bin/verify-worktree.sh`; `bin/teardown-worktree.sh` removes it.
 
 **Agent gates.** `.claude/settings.json` wires Claude Code hooks from `.claude/hooks/`, always run
-from the primary checkout's copy, so a branch cannot loosen its own gates. They block a push to
-`main`/`next`, `gh pr merge`, a branch created or switched in the primary checkout, `git add -A`/`.`,
-a branch name off the `{feat|fix|chore}/{issue}/{desc}` pattern, AI attribution in a commit or PR,
-`gh pr create` on a HEAD with no `/review-before-shipping` marker, and a staged migration whose number
-another origin branch already took. `bash .claude/hooks/test/run.sh` tests them.
-`.claude/scripts/review-scan.sh [base]` scans the committed diff for broken sync-invariants (see
-§ Architecture), SQL or `unwrap` in handlers, and an applied migration edited in place.
+from the primary checkout's copy, so a branch cannot loosen its own gates. Each entry fails closed:
+a hook file missing there exits 2 and blocks the tool call, so the primary checkout must stay on
+`next` with the current hooks (the SessionStart hook warns when it is not). `CLAUDE.md` § "Absolute
+Prohibitions (enforced by hooks)" lists what they block. `bin/lib/*.test.sh` tests them and the
+`bin/` scripts (`for t in bin/lib/*.test.sh; do bash "$t"; done`). `bash bin/review-scan.sh [base]`
+scans the committed diff for broken sync-invariants (see § Architecture), SQL or `unwrap` in
+handlers, an applied migration edited in place, and debug leftovers.
 
 ---
 
 ## Testing & verification
 
-- **Rust tests are self-contained** (no shared global state). CI runs them in parallel under
-  `cargo nextest run`; locally use `just test-rust` (`justfile`), because threads sharing one
-  `cargo test` process collide in the sqlx test harness. Pure logic (the trajectory model, permission tree, metering) has unit tests; add tests
+- **Rust tests are self-contained** (no shared global state). CI and `just test` run them in parallel
+  under `cargo nextest run` (one process per test); `just test-rust` (`cargo test
+  --test-threads=1`) stays for humans, because threads sharing one `cargo test` process collide in
+  the sqlx test harness. Pure logic (the trajectory model, permission tree, metering) has unit tests; add tests
   alongside such code.
 - **Never hit real external APIs in tests** (VATSIM, VATUSA, Open-Meteo, AWC). The feed and clients
   are structured so the pure logic is testable without the network.
 - **The web gates are `pnpm lint`, `pnpm typecheck` and `pnpm test`** (vitest in `web` and
-  `packages/ui`; `just ci` skips it, `just ci-full` runs it). Lint is ESLint (root `eslint.config.mjs`)
+  `packages/ui`; `just ci` skips it, `just test` runs it). Lint is ESLint (root `eslint.config.mjs`)
   over `web` and `@ois/ui`: `react-hooks/rules-of-hooks` and `@typescript-eslint/no-unused-vars` are
   errors, and so is `react-hooks/exhaustive-deps` (since #329). Typecheck only tells the truth after the client
   is regenerated for any contract change (see codegen above).
@@ -340,15 +331,15 @@ another origin branch already took. `bash .claude/hooks/test/run.sh` tests them.
   database per test, migrations applied automatically — no `migrations = "..."` attribute needed,
   it auto-discovers `backend/migrations`). CI provisions a `postgres:17` service for the `rust` job
   and exports `DATABASE_URL` to it; to run the same tests locally, point `DATABASE_URL` at your dev
-  Postgres (`just up` starts it) and run `just test-rust` — no other setup. Since the repo
+  Postgres (`just up` starts it) and run `just test` — no other setup. Since the repo
   layer uses runtime queries (no compile-time `sqlx` macros), the DB need not be present to
   *compile*, only to *run* a `#[sqlx::test]`. Handler-level / end-to-end behavior is still generally
   verified by running the full stack (`just up && just backend`) and exercising the endpoint.
-- Read the `test result:` summary line, not just the exit code.
+- Read the summary line (nextest's `Summary`, vitest's `Test Files`/`Tests`), not the exit code.
 
-Definition of done for a change: `just ci-full` is green, with any SKIPPED step named in the PR (see
-§ Commands); once the PR is open, its check-runs have been read (`gh pr checks <n>`, once, pending
-included) and reported as they stand, since CI is the verdict and the local gate is not; the client
+Definition of done for a change: `just test` is green on the committed HEAD, with any MISSING step
+named in the PR (see § Commands); once the PR is open, its check-runs have been read
+(`gh api repos/VATUSA/OIS/commits/<sha>/check-runs`, pending included) and reported as they stand, since CI is the verdict and the local gate is not; the client
 is regenerated if the contract moved; and any DB migration has been applied (it applies
 automatically on the next backend start — it is idempotent-friendly and numbered sequentially).
 

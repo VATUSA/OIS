@@ -1,0 +1,112 @@
+#!/bin/bash
+# ==============================================================================
+# Pre-Commit Hook
+# ==============================================================================
+# Runs code quality checks on the staged files before allowing a commit.
+# Installed for the whole clone by `just setup` (core.hooksPath=.githooks), whose
+# .githooks/pre-commit execs this file. Bypassing it (`--no-verify`) only defers the
+# failure to CI.
+# Tests: bin/lib/pre-commit.test.sh
+# ==============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+ERRORS=0
+
+echo ""
+echo -e "${YELLOW}Running pre-commit checks...${NC}"
+echo ""
+
+# --no-renames throughout: a moved-and-edited file is otherwise status R, which --diff-filter=ACM drops.
+staged() { git diff --cached --name-only --no-renames --diff-filter=ACM -- "$@"; }
+
+# -- 1. rustfmt (code style) --
+# The checked-out copies of the staged .rs files. rustfmt alone defaults to the 2015
+# edition; the workspace is 2024 (Cargo.toml [workspace.package]).
+echo -n "  rustfmt (code style)... "
+RUST_FILES=()
+while IFS= read -r f; do
+    [[ -f "$f" ]] && RUST_FILES[${#RUST_FILES[@]}]="$f"
+done < <(staged '*.rs')
+if [[ ${#RUST_FILES[@]} -gt 0 ]]; then
+    if rustfmt --edition 2024 --check -- "${RUST_FILES[@]}" >/dev/null 2>&1; then
+        echo -e "${GREEN}pass${NC}"
+    else
+        echo -e "${RED}fail${NC} (run \`just fmt\`, re-stage, commit)"
+        rustfmt --edition 2024 --check -l -- "${RUST_FILES[@]}" 2>/dev/null | sed 's/^/    /'
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo -e "${GREEN}skip (no Rust files)${NC}"
+fi
+
+# -- 2. Debug instrumentation check --
+# git diff -S tracks net occurrence count, so a swap (remove one call, add
+# another) slips through. Read the added lines instead, with a word boundary:
+# dbg!() in Rust, console.log() and a bare `debugger;` statement in TypeScript.
+# Test files are left out (*_tests.rs, tests/ directories, *.test.ts(x)).
+echo -n "  Debug instrumentation... "
+NOT_TESTS=(':(exclude)*_tests.rs' ':(exclude)*/tests/*' ':(exclude)tests/*' ':(exclude)*.test.ts' ':(exclude)*.test.tsx')
+DEBUG_FOUND=$( {
+    git diff --cached --no-renames --diff-filter=ACM -U0 -- '*.rs' "${NOT_TESTS[@]}" \
+        | grep -E '^\+[^\+]' \
+        | grep -E '\bdbg![[:space:]]*\('
+    git diff --cached --no-renames --diff-filter=ACM -U0 -- '*.ts' '*.tsx' "${NOT_TESTS[@]}" \
+        | grep -E '^\+[^\+]' \
+        | grep -E '\bconsole\.log[[:space:]]*\(|^\+[[:space:]]*debugger[[:space:]]*;?[[:space:]]*$'
+} || true)
+if [[ -n "$DEBUG_FOUND" ]]; then
+    echo -e "${RED}fail${NC}"
+    echo "    Debug calls introduced in staged diff:"
+    echo "$DEBUG_FOUND" | head -10 | while read -r line; do echo "    $line"; done
+    ERRORS=$((ERRORS + 1))
+else
+    echo -e "${GREEN}pass${NC}"
+fi
+
+# -- 3. Security check (secrets) --
+# gitleaks reads the staged changes itself, renames included.
+echo -n "  Sensitive data check... "
+if command -v gitleaks >/dev/null 2>&1; then
+    if gitleaks protect --staged --redact --no-banner >/dev/null 2>&1; then
+        echo -e "${GREEN}pass${NC}"
+    else
+        echo -e "${RED}fail${NC}"
+        echo "    gitleaks found a possible secret in the staged changes:"
+        gitleaks protect --staged --redact --no-banner -v 2>&1 | sed 's/^/    /'
+        echo "    Review these lines before committing."
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo -e "${YELLOW}skip (gitleaks is not installed, so staged changes were NOT scanned for secrets: brew install gitleaks)${NC}"
+fi
+
+# -- 4. Migration versions --
+# Two migrations sharing a version half-migrate the database at startup (#569).
+echo -n "  Migration versions... "
+if [[ -n "$(git diff --cached --name-only -- 'backend/migrations/*')" ]]; then
+    if MIGRATION_OUTPUT=$(.github/scripts/check-migration-versions.sh 2>&1); then
+        echo -e "${GREEN}pass${NC}"
+    else
+        echo -e "${RED}fail${NC}"
+        echo "$MIGRATION_OUTPUT" | sed 's/^/    /'
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo -e "${GREEN}skip (no migration staged)${NC}"
+fi
+
+# -- Result --
+echo ""
+if [[ $ERRORS -gt 0 ]]; then
+    echo -e "${RED}Pre-commit checks failed ($ERRORS issue(s)). Fix and re-stage.${NC}"
+    exit 1
+else
+    echo -e "${GREEN}All pre-commit checks passed.${NC}"
+    exit 0
+fi

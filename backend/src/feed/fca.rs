@@ -329,6 +329,10 @@ pub struct MeterInput {
     pub cross_speed: f64,
     /// A frozen (issued-CFR) metered crossing time; pins this aircraft like an airborne one.
     pub frozen_ms: Option<i64>,
+    /// The ground allowance (pushback + start-up + taxi) inside `eta_ms`, millis; 0 when airborne.
+    /// Metering ignores it. The release math needs it: a release is a wheels-up time, so it backs
+    /// out only the airborne part of the ETA (#815).
+    pub ground_allowance_ms: i64,
 }
 
 pub struct MeterOutput {
@@ -893,12 +897,14 @@ mod tests {
                     airborne: true,
                     cross_speed: gs,
                     frozen_ms: None,
+                    ground_allowance_ms: 0,
                 },
                 MeterInput {
                     eta_ms: 0, // same ETA → the follower is spaced by exactly one gap
                     airborne: false,
                     cross_speed: gs,
                     frozen_ms: None,
+                    ground_allowance_ms: 0,
                 },
             ]
         };
@@ -934,18 +940,21 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 60_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 200_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -966,12 +975,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000,
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -995,12 +1006,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 90_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: Some(100_000),
+                ground_allowance_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -1019,18 +1032,21 @@ mod tests {
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000, // within the 120s separation of #0
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 400_000, // well clear
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None); // 120s separation
@@ -1061,18 +1077,21 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000,
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 40_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: Some(50_000),
+                ground_allowance_ms: 0,
             },
         ];
         // rate 30 → 120s separation.
@@ -1098,6 +1117,7 @@ mod tests {
             airborne: true,
             cross_speed: 400.0,
             frozen_ms: None,
+            ground_allowance_ms: 0,
         };
         // Natural ETAs: A=200 B=400 C=600 D=900 (all airborne).
         let cands = vec![mk(200_000), mk(400_000), mk(600_000), mk(900_000)];
@@ -1128,6 +1148,7 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             })
             .collect::<Vec<_>>();
         let out = meter(&cands, "rate", 30, 15, Some(&[2, 1, 0]));
@@ -1149,12 +1170,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
             MeterInput {
                 eta_ms: 50_000, // airborne, earlier
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
+                ground_allowance_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, Some(&[0, 1]));

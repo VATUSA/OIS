@@ -60,6 +60,33 @@ through Postgres `LISTEN/NOTIFY` on the `ois_realtime` channel, so nothing beyon
 needed; each replica holds one extra Postgres connection for its listener. Delivery is best-effort — a
 nudge lost while a listener reconnects is picked up by the clients' 60-second fallback poll.
 
+## Sector volumes load on start
+
+The ATC sector volumes behind the Sector Monitor (`/ops/sectors`) and the admin Sectors page are not
+in a migration. The backend's `airspace_sector_seed` job loads them on every start, then every 24
+hours (#821):
+
+- If every row in `flow.airspace_sector` is already from the pinned source commit, it stops there and
+  makes no network call. A routine restart costs nothing.
+- Otherwise (a fresh database, or a deploy that moved `SOURCE_REF`) it fetches `sectors.json` from
+  `raw.githubusercontent.com` and replaces the table in one transaction. The host needs outbound
+  HTTPS to GitHub for that, as it already does for the airport and facility data.
+- Replicas starting together take an advisory lock, so only one writes.
+- A rolling deploy that moves `SOURCE_REF` can be undone briefly: while an old replica still runs,
+  its daily tick, or a **Run now** that lands on it, reloads the old commit. A new replica's next
+  daily tick or restart puts the new commit back, so after such a deploy, press **Run now** once the
+  old replicas are gone.
+- A failed fetch shows as a failed `airspace_sector_seed` on Admin → Jobs and as
+  `ois_job_last_success{task="airspace_sector_seed"} 0` on `/metrics`, and leaves the existing rows
+  alone. On a fresh database that means both pages stay empty until the next attempt; use **Run now**
+  on Admin → Jobs rather than waiting a day.
+- A database that was loaded one ARTCC at a time with the old importer's `--artcc` flag reads as
+  current while holding only those ARTCCs. The backend image ships only `ois-backend`, so load them
+  all from a checkout with `DATABASE_URL` pointing at that database:
+  `cargo run -p ois-backend --bin airspace-sector-importer`. It always replaces the whole table.
+
+The source, its license and the pin are in [`features/monitor.md`](features/monitor.md#the-sector-dataset).
+
 ## What `just deploy` does
 
 ```bash

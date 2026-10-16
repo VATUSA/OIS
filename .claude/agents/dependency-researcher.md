@@ -26,6 +26,10 @@ else that edits a manifest or lockfile. Never commit or push.
     on transitive Tauri dependencies. A new ignore needs the same justification.
   - **Sources**: unknown registries and git sources are denied. A git dependency is a blocker.
   - **Bans**: multiple versions and wildcards warn.
+- **Locally**, `just test` (`bin/run-tests.sh`) runs `cargo deny check` and
+  `pnpm audit --audit-level=high` with the rest of the gate as ADVISORY steps, and `bin/pre-push`
+  runs them on every push as warnings, printing why when a tool is absent. Neither blocks locally;
+  CI's `deny` and `js` jobs block the merge.
 - **npm** is checked by `pnpm audit --audit-level=high` in CI. Accepted advisories live in the root
   `package.json` under `pnpm.auditConfig`. Nothing checks npm licenses, so check them yourself
   against the same allow list.

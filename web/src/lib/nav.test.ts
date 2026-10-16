@@ -138,6 +138,13 @@ describe("nav gating", () => {
     expect(labels(me({ system: { jobs: ["read"] } }), "admin")).toEqual(["Jobs"]);
   });
 
+  it("lists Sectors last in the Admin group, with no Flow group", () => {
+    const groups = visibleGroups(me({}, true), areaById("admin"));
+    expect(groups.map((g) => g.label)).toEqual(["Planning", "Historical", "Admin"]);
+    expect(groups[2].items.at(-1)).toMatchObject({ label: "Sectors", to: "/admin/flow/sectors" });
+    expect(visibleGroups(holding("flow.sectors.read"), areaById("admin")).map((g) => g.label)).toEqual(["Admin"]);
+  });
+
   it("gives a server admin everything", () => {
     const admin = me({}, true);
     for (const area of AREAS) {
@@ -190,5 +197,9 @@ describe("path lookup", () => {
     expect(itemForPath("/advisories")?.item.label).toBe("Advisories");
     expect(groupForPath("/admin/historical/flights/abc")?.label).toBe("Historical");
     expect(groupForPath("/admin/access")).toBeUndefined();
+    expect(itemForPath("/admin/flow/sectors")).toMatchObject({ group: { label: "Admin" }, item: { label: "Sectors" } });
+    expect(groupForPath("/admin/flow/sectors")).toBeUndefined();
+    expect(canOpenPath(holding("flow.sectors.read"), "/admin/flow/sectors")).toBe(true);
+    expect(canOpenPath(holding("discord.config.read"), "/admin/flow/sectors")).toBe(false);
   });
 });
