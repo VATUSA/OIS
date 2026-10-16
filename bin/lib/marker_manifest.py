@@ -16,7 +16,6 @@ Python 3.8-compatible.
 """
 
 import contextlib
-import fcntl
 import hashlib
 import os
 import shutil
@@ -24,6 +23,11 @@ import subprocess
 import sys
 import tempfile
 import time
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)  # python3 -I leaves the script's own directory off sys.path; file_lock lives beside it
 
 KINDS = ("tests", "review-shipping", "code-review")
 
@@ -63,13 +67,15 @@ def vouched(root, kind, name, lines=None):
 
 @contextlib.contextmanager
 def manifest_lock(markers):
-    """An exclusive lock on MARKERS/.manifest.lock, held while the manifest is appended to or rewritten."""
-    with open(os.path.join(markers, ".manifest.lock"), "a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    """An exclusive lock on MARKERS/.manifest.lock, held while the manifest is appended to or rewritten.
+    file_lock is imported here, not at the top, so `vouched` needs no more than this file."""
+    import file_lock
+    with open(os.path.join(markers, ".manifest.lock"), "a+") as handle:
+        file_lock.lock(handle)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            file_lock.unlock(handle)
 
 
 def stamp(root, kind, sha):

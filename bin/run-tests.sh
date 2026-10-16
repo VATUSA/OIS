@@ -21,7 +21,8 @@
 # cargo deny and the client-drift check. Every step runs and prints its result, then a
 # summary. A step whose tool is missing is MISSING, never passed, and blocks the
 # marker: CI runs every one of them. Not covered: CI's macOS/Windows/Linux desktop
-# matrix (clippy compiles the Tauri shell for this host only).
+# matrix (clippy compiles the Tauri shell for this host only) and its windows-hooks job
+# (bin/lib/file-lock.test.sh on Windows; run it by hand here).
 #
 # pnpm audit and cargo deny are ADVISORY: they run and print their result, but neither a
 # failure nor a missing cargo-deny blocks the marker. Both judge the dependency tree

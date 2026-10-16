@@ -48,7 +48,7 @@ REAL_GIT="$(command -v git)"
 # Stubs. Each records its arguments in $STUB_LOG and answers per STUB_* variables:
 #   cargo nextest run  prints $STUB_NX (default NX_GREEN), runs $STUB_HOOK, exits $STUB_NX_RC
 #   cargo test --doc   prints $STUB_DOC (default DOC_OK), exits $STUB_DOC_RC
-#   pnpm exec turbo run test  prints $STUB_VT (default VT_GREEN), exits $STUB_VT_RC
+#   pnpm exec turbo run test  prints $STUB_VT (default VT_GREEN), then the file $STUB_VT_TAIL if set, exits $STUB_VT_RC
 #   cargo <fmt|clippy|deny check>, pnpm audit, pnpm exec turbo run <lint|typecheck>  exit $STUB_<STEP>_RC
 #   pnpm lint|typecheck|test (the scripts, which turbo may answer from its cache)  exit 98
 #   cargo nextest|deny --version  fail when $STUB_NO_NEXTEST / $STUB_NO_DENY is set
@@ -87,7 +87,7 @@ case "$1" in
         case "$2 $3 $4" in
             "turbo run lint") exit "${STUB_LINT_RC:-0}" ;;
             "turbo run typecheck") exit "${STUB_TYPECHECK_RC:-0}" ;;
-            "turbo run test") printf '%b\n' "${STUB_VT-$VT_GREEN}"; exit "${STUB_VT_RC:-0}" ;;
+            "turbo run test") printf '%b\n' "${STUB_VT-$VT_GREEN}"; [[ -n "${STUB_VT_TAIL:-}" ]] && cat "$STUB_VT_TAIL"; exit "${STUB_VT_RC:-0}" ;;
         esac ;;
     audit) exit "${STUB_AUDIT_RC:-0}" ;;
     --filter)
@@ -137,7 +137,7 @@ invoke() {
     shift
     OUTPUT="$(cd "$REPO" && PATH="$WORK/bin:$PATH" bash "$SCRIPT" "$@" 2>&1)"
     RC=$?
-    unset STUB_HOOK GIT_FAIL_STATUS STUB_NX STUB_NX_RC STUB_DOC STUB_DOC_RC STUB_VT STUB_VT_RC \
+    unset STUB_HOOK GIT_FAIL_STATUS STUB_NX STUB_NX_RC STUB_DOC STUB_DOC_RC STUB_VT STUB_VT_RC STUB_VT_TAIL \
         STUB_FMT_RC STUB_CLIPPY_RC STUB_DENY_RC STUB_LINT_RC STUB_TYPECHECK_RC STUB_AUDIT_RC \
         STUB_MIGRATIONS_RC STUB_NO_NEXTEST STUB_NO_DENY STUB_DRIFT
 }
@@ -257,9 +257,10 @@ export STUB_VT="$VT_GREEN\nweb:test:  Errors  1 error"
 run vitest-errors
 expect_none "a clean vitest summary contradicted by an Errors line" "failed: pnpm test"
 
-# More than a pipe buffer after the match: a `printf | grep -q` check SIGPIPEs and misses it.
-STUB_VT="web:test:  FAIL  src/a.test.ts > b\n$(head -c 300000 /dev/zero | tr '\0' 'x')\n$VT_GREEN"
-export STUB_VT
+# More than a pipe buffer after the match: a `printf | grep -q` check SIGPIPEs and misses it. The 300KB goes
+# through a file: Linux refuses to exec with any one environment string over 128KB (MAX_ARG_STRLEN).
+{ head -c 300000 /dev/zero | tr '\0' 'x'; printf '\n%b\n' "$VT_GREEN"; } > "$WORK/vt-tail"
+export STUB_VT="web:test:  FAIL  src/a.test.ts > b" STUB_VT_TAIL="$WORK/vt-tail"
 run vitest-long
 expect_none "a FAIL line followed by 300KB of output" "failed: pnpm test"
 
@@ -332,7 +333,7 @@ expect_none "no node_modules" "node_modules missing"
 echo "Subdirectory:"
 new_repo subdir
 mkdir -p "$REPO/bin/lib" "$REPO/sub"
-cp "$SCRIPT" "$ROOT/bin/with-lock.sh" "$REPO/bin/" && cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/portable.sh" "$ROOT/bin/lib/flock-run.pl" "$REPO/bin/lib/" && printf 'x\n' > "$REPO/sub/f"
+cp "$SCRIPT" "$ROOT/bin/with-lock.sh" "$REPO/bin/" && cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/portable.sh" "$ROOT/bin/lib/flock-run.pl" "$REPO/bin/lib/" && printf 'x\n' > "$REPO/sub/f"
 git -C "$REPO" add bin sub && git -C "$REPO" -c core.hooksPath=/dev/null commit -qm script
 SHA="$(git -C "$REPO" rev-parse HEAD)"
 export STUB_LOG="$WORK/log.subdir" WORK_ARGS="$WORK/args.subdir"
