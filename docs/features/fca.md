@@ -106,7 +106,7 @@ short-circuit. `dir`.
 - **The altitude band and the ETA parse the filed altitude differently.** `filed_altitude_ft` reads
   `"VFR"` as unknown, so the flight passes the band. `trajectory::parse_alt_ft`
   (`feed/trajectory.rs:19-29`) reads the same string as 35,000 ft, and `build_candidates` times the
-  flight at that cruise altitude (`handlers/flow.rs:1884`, `:1996`). Both parsers concatenate every
+  flight at that cruise altitude (`handlers/flow.rs:1884`; `:1996` was the prefile loop #834 removed). Both parsers concatenate every
   digit, so `"FL350/370"` reads as 350,370 ft, which is out of every band. Added to #813.
 - **A ground aircraft's field elevation counts as its current altitude in the band.** Live pilots
   pass `Some(p.altitude)` whatever their phase (`handlers/flow.rs:1877`), and only `0` is dropped
@@ -364,7 +364,7 @@ planner, because both read `list_fcas`. This matches #586 and #746 as built.
 **Tests.** `mod fca_traffic_visibility_tests` (`handlers/flow.rs:5939`). IDST has router tests
 for provenance (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`) and for its advisory
 EDCT: `idst_proposes_the_same_edct_a_release_stores` and
-`idst_gives_a_pilot_with_a_lingering_prefile_one_row_and_its_own_allowance`. The `fca_counts`
+`idst_gives_a_rolling_pilot_its_own_runway_tier_allowance`. The `fca_counts`
 handler is covered through the router by `handlers/flow_prefile_candidate_tests.rs` (#834). No test
 covers `hist_fcas`.
 
@@ -372,8 +372,9 @@ covers `hist_fcas`.
 
 - **The badge and the board disagree.** The count included prefiles, and the detail panel hid
   `proposed` rows (`web/src/pages/fca/detail.tsx:221`); #834 removed prefiles from both the count and
-  the board. Counts still skip a disabled FCA while traffic serves it (area 2). The comment at `handlers/flow.rs:710-711` ("a badge count can never disagree
-  with the board") holds for the backend list, not for what the page shows. Filed as #853.
+  the board. Counts still skip a disabled FCA while traffic serves it (area 2), so the comment at
+  `handlers/flow.rs:710-711` ("a badge count can never disagree with the board") holds for an enabled
+  FCA only. Filed as #853.
 - **Historical FCAs are filtered by their state now.** `list_fcas_at` applies the current
   `event_status` and the current `enabled` flag (`repos/flow.rs:33-38`). An event FCA that was
   live during the replayed window and is archived now is missing from the replay. One published

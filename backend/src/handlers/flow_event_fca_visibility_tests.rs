@@ -176,7 +176,7 @@ async fn seed(pool: &PgPool) -> AppState {
                 .map(|callsign| Pilot {
                     callsign: callsign.into(),
                     // Parked at KJFK: a connected ground departure. A prefile is not an FCA
-                    // candidate (#834), so mark and release need a connected pilot.
+                    // candidate (#834), so a release needs a connected pilot.
                     latitude: 40.64,
                     longitude: -73.78,
                     altitude: 13,

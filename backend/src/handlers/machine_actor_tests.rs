@@ -228,7 +228,7 @@ async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
                 .map(|callsign| Pilot {
                     callsign: (*callsign).into(),
                     // Parked at KJFK: a connected ground departure. A prefile is not an FCA
-                    // candidate (#834), so mark and release need a connected pilot.
+                    // candidate (#834), so a release needs a connected pilot.
                     latitude: 40.64,
                     longitude: -73.78,
                     altitude: 13,
@@ -3951,12 +3951,11 @@ async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
     idst_and_rdy_agree(Fixture815::new(pool).await).await;
 }
 
-/// #815, #834: IDST pairs each row with its own ground allowance. TEST1 is a connected pilot rolling
-/// down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile still lingers (the airport
-/// tier would give 50 + 40 + 570 = 660 s). The prefile adds no row, and the pilot's proposed EDCT
-/// carries its own 990 s, not the 660 s.
+/// #815: IDST pairs each row with its own ground allowance. TEST1 is a connected pilot rolling down
+/// KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile still lingers (the airport tier
+/// would give 50 + 40 + 570 = 660 s). The pilot's proposed EDCT carries its own 990 s, not the 660 s.
 #[sqlx::test]
-async fn idst_gives_a_pilot_with_a_lingering_prefile_one_row_and_its_own_allowance(pool: PgPool) {
+async fn idst_gives_a_rolling_pilot_its_own_runway_tier_allowance(pool: PgPool) {
     let state = crossing_state(pool.clone()).await;
     let runway_04l = state
         .runways

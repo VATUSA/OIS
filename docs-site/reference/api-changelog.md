@@ -14,15 +14,16 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
-- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and `GET /api/v1/flow/counts`**
-  list and count connected pilots with a flight plan only. A prefile is no longer an FCA candidate, so
-  `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always `ground`; neither
-  carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404` for a callsign that
-  is only prefiled. A release already stored for a prefiled callsign is kept but appears nowhere (not
-  in IDST `released`, not on the traffic list) until that pilot connects, and the FCA delays in
-  `GET /api/v1/public/flight/{callsign}` no longer count prefiles ahead. A caller that filtered
-  `proposed` rows out needs do nothing; one that released prefiled flights must wait for the pilot to
-  connect. (#834)
+- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and
+  `GET /api/v1/flow/counts`** list and count connected pilots with a flight plan only. A prefile is no
+  longer an FCA candidate, so `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always
+  `ground`; neither carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404`
+  for a callsign that is only prefiled. A release already stored for a prefiled callsign is kept but
+  appears on no FCA surface (IDST `released`, the traffic list, metering) until that pilot connects;
+  `GET /api/v1/tmu/departures/{dep}` and sector demand still read it as the flight's locked wheels-up
+  (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
+  count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
+  prefiled flights must wait for the pilot to connect. (#834)
 - **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
   `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
   flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min

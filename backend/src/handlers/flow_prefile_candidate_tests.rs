@@ -13,8 +13,10 @@ use axum::http::{self, Method, StatusCode};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+use crate::auth::principal::Attribution;
 use crate::feed::airports::Airport;
 use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+use crate::repos::flow as flow_repo;
 use crate::scope_test_support::{grant, seed_user, send_json, session_cookie, test_state};
 use crate::state::AppState;
 
@@ -212,17 +214,17 @@ fn airborne_out_of_jfk(callsign: &str) -> Pilot {
     }
 }
 
+/// A release stored through the production writer, as a prefile's was before #834.
 async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str) {
     let cta = chrono::Utc::now().timestamp_millis() + 3_600_000;
-    sqlx::query(
-        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, $2, $3, $3)",
-    )
-    .bind(fca_id)
-    .bind(callsign)
-    .bind(cta)
-    .execute(pool)
-    .await
-    .unwrap();
+    let by = Attribution {
+        user_id: Some(seed_user(pool).await),
+        actor_id: None,
+    };
+    flow_repo::upsert_release(pool, fca_id, callsign, cta, cta, &by, None)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 /// AC1: IDST and the FCA traffic route list connected pilots only. IDST lists ground departures at

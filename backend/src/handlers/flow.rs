@@ -1685,11 +1685,10 @@ fn fix_predictions(
     out
 }
 
-/// [`fix_predictions`] for a prefile: timed from its departure airport, exactly like
-/// `feed_flow::ground_estimate` and every other prefile caller (`prefile_position`, #213) — never a
-/// `(0.0, 0.0)` placeholder, which `route_path`'s ground trimming would project onto the route and
-/// prepend (thousands of nm of phantom distance, or a route collapsed to nothing). A prefile whose
-/// departure doesn't resolve gets no per-fix table, the same skip the other prefile callers apply.
+/// [`fix_predictions`] for a prefile: timed from its departure airport (`prefile_position`, #213),
+/// like `feed_flow::ground_estimate` — never a `(0.0, 0.0)` placeholder, which `route_path`'s ground
+/// trimming would project onto the route and prepend (thousands of nm of phantom distance, or a
+/// route collapsed to nothing). A prefile whose departure doesn't resolve gets no per-fix table.
 fn prefile_fix_predictions(
     state: &AppState,
     nav: &NavData,
@@ -4215,7 +4214,7 @@ mod mit_cross_speed_wiring_tests {
     fn cross_speed_at_a_low_arrival_fix_is_the_descent_speed_not_cruise() {
         // Gate ~17 nm from KDCA — deep in the descent.
         let (near, near_ground) = cross_speed_for(&mit_fca_at_lon(-76.75, 38.5, 39.5));
-        for (site, near) in [("live pilot", near), ("ground pilot", near_ground)] {
+        for (site, near) in [("airborne pilot", near), ("ground pilot", near_ground)] {
             assert!(
                 near < FILED_TAS * 0.8,
                 "{site}: crossing speed at a low arrival fix was {near:.0} kt — not well below the \
@@ -4250,7 +4249,7 @@ mod mit_cross_speed_wiring_tests {
 
         // #355 follow-up, both sites: never *above* cruise. The profile's cruise-band TAS ramp
         // used to read ~508 kt here, which under-provisions a 20 MIT fix to 17.3 real nm.
-        for (site, gs) in [("live pilot", far), ("ground pilot", far_ground)] {
+        for (site, gs) in [("airborne pilot", far), ("ground pilot", far_ground)] {
             assert!(
                 gs <= FILED_TAS + 1.0,
                 "{site}: must not read above the {FILED_TAS:.0} kt cruise groundspeed, got {gs:.0} kt"
@@ -4432,7 +4431,7 @@ mod mit_cross_speed_wiring_tests {
         let (high_live, high_ground) = etas(5431.0);
 
         for (site, high, sea) in [
-            ("live pilot", high_live, sea_live),
+            ("airborne pilot", high_live, sea_live),
             ("ground pilot", high_ground, sea_ground),
         ] {
             assert!(
