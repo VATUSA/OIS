@@ -16,7 +16,7 @@ use sqlx::PgPool;
 
 use crate::auth::principal::Principal;
 use crate::feed::airports::Airport;
-use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
+use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
 use crate::repos::access::{PermissionScope, sha256_hex};
 use crate::scope_test_support::{artcc, grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
@@ -207,13 +207,13 @@ async fn audited_actor(pool: &PgPool) -> Option<String> {
         .flatten()
 }
 
-/// A state whose feed holds one prefile, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
+/// A state whose feed holds one ground pilot, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
 /// [`fca`] — so `mark_release` has a real crossing to release.
 async fn crossing_state(pool: PgPool) -> AppState {
     crossing_state_of(pool, &["TEST1"]).await
 }
 
-/// [`crossing_state`] with one such prefile per callsign.
+/// [`crossing_state`] with one such pilot per callsign.
 async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
     let state = test_state(pool, HashMap::new());
     {
@@ -223,10 +223,17 @@ async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]));
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: callsigns
+            pilots: callsigns
                 .iter()
-                .map(|callsign| Prefile {
+                .map(|callsign| Pilot {
                     callsign: (*callsign).into(),
+                    // Parked at KJFK: a connected ground departure. A prefile is not an FCA
+                    // candidate (#834), so mark and release need a connected pilot.
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    altitude: 13,
+                    groundspeed: 0,
+                    heading: 310,
                     flight_plan: Some(FlightPlan {
                         departure: "KJFK".into(),
                         arrival: "KDCA".into(),

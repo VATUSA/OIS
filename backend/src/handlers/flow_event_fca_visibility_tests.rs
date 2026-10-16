@@ -20,7 +20,7 @@ use sqlx::PgPool;
 
 use crate::auth::principal::Attribution;
 use crate::feed::airports::Airport;
-use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
+use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
 use crate::repos::flow as flow_repo;
 use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
@@ -106,7 +106,7 @@ async fn call(state: &AppState, op: Op, id: &str, cookie: &str) -> (StatusCode, 
 /// four are the JFK→DCA corridor between WHITE and SIE (as `machine_actor_tests`), and each holds
 /// releases for AAL1 and AAL2, so "nothing changed" is non-vacuous for clear and swap.
 ///
-/// The returned state's feed holds AAL1–AAL3 as KJFK→KDCA prefiles, all crossing every FCA, with
+/// The returned state's feed holds AAL1–AAL3 as KJFK→KDCA ground pilots, all crossing every FCA, with
 /// AAL1 and AAL2 assigned runway 31L — so mark and swap can succeed, not just get past the guard.
 async fn seed(pool: &PgPool) -> AppState {
     sqlx::query(
@@ -171,10 +171,17 @@ async fn seed(pool: &PgPool) -> AppState {
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]));
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: ["AAL1", "AAL2", "AAL3"]
+            pilots: ["AAL1", "AAL2", "AAL3"]
                 .into_iter()
-                .map(|callsign| Prefile {
+                .map(|callsign| Pilot {
                     callsign: callsign.into(),
+                    // Parked at KJFK: a connected ground departure. A prefile is not an FCA
+                    // candidate (#834), so mark and release need a connected pilot.
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    altitude: 13,
+                    groundspeed: 0,
+                    heading: 310,
                     flight_plan: Some(FlightPlan {
                         departure: "KJFK".into(),
                         arrival: "KDCA".into(),

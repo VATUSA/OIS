@@ -14,6 +14,12 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and `GET /api/v1/flow/counts`**
+  list and count connected pilots with a flight plan only. A prefile is no longer an FCA candidate, so
+  `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always `ground`; neither
+  carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404` for a callsign that
+  is only prefiled. A caller that filtered `proposed` rows out needs do nothing; one that released
+  prefiled flights must wait for the pilot to connect. (#834)
 - **New:** `PUT /api/v1/flow/sector-consolidations/{artcc}` changes several of one ARTCC's sector
   consolidations in one request. The body is `{ "into": { "<sector_id>": "<target_sector_id>" | null } }`:
   each sector is worked at the target given, or given its own row back for `null`. It needs

@@ -2614,7 +2614,7 @@ pub struct FcaFlight {
     pub dep: String,
     pub arr: String,
     pub aircraft_type: String,
-    /// airborne | ground | proposed
+    /// `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834).
     pub status: String,
     pub lat: f64,
     pub lon: f64,
@@ -2747,7 +2747,7 @@ pub struct IdstFlight {
     pub dep: String,
     pub arr: String,
     pub aircraft_type: String,
-    /// `ground` | `proposed`.
+    /// Always `ground`: IDST lists connected pilots on the ground, never a prefile (#834).
     pub status: String,
     /// The FCA metering this flight (the "program").
     pub fca_id: String,

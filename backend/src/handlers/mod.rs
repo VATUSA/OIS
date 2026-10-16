@@ -60,6 +60,8 @@ mod auth_annotation_tests;
 #[cfg(test)]
 mod flow_event_fca_visibility_tests;
 #[cfg(test)]
+mod flow_prefile_candidate_tests;
+#[cfg(test)]
 mod machine_actor_tests;
 #[cfg(test)]
 mod service_account_grant_tests;
