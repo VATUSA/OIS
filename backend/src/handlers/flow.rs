@@ -2348,8 +2348,8 @@ pub async fn list_idst(
                 now,
                 false,
             );
-            // Pair each flight with its own ground allowance before `meter_in_place`'s order is
-            // sorted: `metas` lines up with `flights` by position only.
+            // Pair each flight with its own ground allowance before sorting by `seq`: `metas` lines
+            // up with `flights` by position only.
             meter_in_place(fca, &mut flights, &metas);
             let mut rows: Vec<(FcaFlight, i64)> = flights
                 .into_iter()
@@ -3479,7 +3479,7 @@ mod prefile_skip_integration_tests {
     }
 
     /// Measured effect (#834): on a 10/hr FCA, a flight out of KEWR crosses ahead of a pilot parked
-    /// at KJFK. Filed as a prefile it held the pilot 285 s (5 min) on `origin/next`; it now holds
+    /// at KJFK. Filed as a prefile it held the pilot 285 s (5 min) before #834; it now holds
     /// nothing. The same plan flown by a connected pilot is the control: it still crosses first and
     /// the KJFK pilot owes it the same 285 s.
     #[test]
@@ -4073,9 +4073,8 @@ mod release_spacing_tests {
 /// fix**, because `fca::meter` turns it into a frozen time gap (`MIT ÷ cross_speed`) that the
 /// aircraft then flies at its real crossing speed. `predict`'s own tests prove `gs_kt` is
 /// position-dependent and `fca`'s prove `meter` divides by whatever it is handed; only this one
-/// proves `build_candidates` hands it the right number. Reverting the candidate-build site
-/// to `trajectory::effective_gs(cruise_tas, headwind)` passes every other test in the repo. Both
-/// flight states that reach it are covered here: an airborne pilot, timed from its position, and a
+/// proves `build_candidates` hands it the right number. Both flight states that reach it are
+/// covered here: an airborne pilot, timed from its position, and a
 /// ground pilot, timed from its departure field. Prefiles are not candidates (#834).
 #[cfg(test)]
 mod mit_cross_speed_wiring_tests {

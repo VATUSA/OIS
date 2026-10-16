@@ -76,8 +76,8 @@ surface uses (#360). In order:
 4. **ARTCC scope** on the crossing point, `passes_scope` (`handlers/flow.rs:109`). An empty scope,
    or boundary data that failed to load, means no restriction (`:110`).
 
-Callers: `fca_counts` (`handlers/flow.rs:712`), `build_flight_advisory` (`:1085`), and both loops
-of `build_candidates` (`:1871`, `:1990`). Since #834, `build_candidates` has the pilot loop only.
+Callers: `fca_counts` (`handlers/flow.rs:712`), `build_flight_advisory` (`:1085`), and
+`build_candidates`, whose prefile loop (`:1990`) #834 removed, leaving the pilot loop (`:1871`).
 
 `FcaBody.dir` (any/N/S/E/W) is stored (`repos/flow.rs:154`) and read nowhere in the backend.
 
@@ -370,9 +370,9 @@ covers `hist_fcas`.
 
 ### Findings, area 5
 
-- **The badge and the board disagree.** The count included prefiles until #834, which removed them
-  from both the count and the board. The detail panel hides `proposed` rows (`web/src/pages/fca/detail.tsx:221`). Counts skip a disabled FCA while traffic
-  serves it (area 2). The comment at `handlers/flow.rs:710-711` ("a badge count can never disagree
+- **The badge and the board disagree.** The count included prefiles, and the detail panel hid
+  `proposed` rows (`web/src/pages/fca/detail.tsx:221`); #834 removed prefiles from both the count and
+  the board. Counts still skip a disabled FCA while traffic serves it (area 2). The comment at `handlers/flow.rs:710-711` ("a badge count can never disagree
   with the board") holds for the backend list, not for what the page shows. Filed as #853.
 - **Historical FCAs are filtered by their state now.** `list_fcas_at` applies the current
   `event_status` and the current `enabled` flag (`repos/flow.rs:33-38`). An event FCA that was

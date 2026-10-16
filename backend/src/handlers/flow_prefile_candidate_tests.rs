@@ -225,14 +225,19 @@ async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str) {
     .unwrap();
 }
 
-/// AC1: IDST and the FCA traffic route list connected pilots only. IDST lists ground departures, so
-/// the airborne KJFK departure is on the traffic route (the control) and not on IDST. PRE2's stored
-/// release stays out of `released` until PRE2 connects.
+/// AC1: IDST and the FCA traffic route list connected pilots only. IDST lists ground departures at
+/// the airports in scope, so the airborne KJFK departure and the ground pilot at KEWR are on the
+/// traffic route (the control) and not on IDST for KJFK. PRE2's stored release stays out of
+/// `released` until PRE2 connects.
 #[sqlx::test]
 async fn idst_and_fca_traffic_list_a_ground_pilot_once_and_no_prefile(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     let mut data = pilot_with_lingering_prefile_and_a_prefile_only();
     data.pilots.push(airborne_out_of_jfk("AIR1"));
+    let mut at_newark = parked_at_jfk("EWR1");
+    (at_newark.latitude, at_newark.longitude) = (40.69, -74.17);
+    at_newark.flight_plan = Some(plan("KEWR"));
+    data.pilots.push(at_newark);
     install_feed(&state, data).await;
     let fca_id = corridor_fca(&pool, "T834", 30).await;
     seed_release(&pool, &fca_id, "PRE2").await;
@@ -268,9 +273,22 @@ async fn idst_and_fca_traffic_list_a_ground_pilot_once_and_no_prefile(pool: PgPo
         rows,
         vec![
             ("AIR1".to_string(), "airborne".to_string()),
+            ("EWR1".to_string(), "ground".to_string()),
             ("GND1".to_string(), "ground".to_string()),
         ],
         "{traffic}"
+    );
+    let (_, newark) = send_json(
+        &state,
+        Method::GET,
+        "/api/v1/flow/idst?airports=KEWR",
+        &reader,
+    )
+    .await;
+    assert_eq!(
+        callsigns_and_statuses(&newark["unscheduled"]),
+        vec![("EWR1".to_string(), "ground".to_string())],
+        "control: EWR1 is listed for its own airport: {newark}"
     );
 
     let mut connected = pilot_with_lingering_prefile_and_a_prefile_only();
