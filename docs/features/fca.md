@@ -77,7 +77,7 @@ surface uses (#360). In order:
    or boundary data that failed to load, means no restriction (`:110`).
 
 Callers: `fca_counts` (`handlers/flow.rs:712`), `build_flight_advisory` (`:1085`), and both loops
-of `build_candidates` (`:1871`, `:1990`).
+of `build_candidates` (`:1871`, `:1990`). Since #834, `build_candidates` has the pilot loop only.
 
 `FcaBody.dir` (any/N/S/E/W) is stored (`repos/flow.rs:154`) and read nowhere in the backend.
 
@@ -374,7 +374,7 @@ for provenance only (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`). 
   `event_status` and the current `enabled` flag (`repos/flow.rs:33-38`). An event FCA that was
   live during the replayed window and is archived now is missing from the replay. One published
   now appears before it was published. Filed as #852, with the web half below.
-- IDST rows for one aircraft under two FCAs: **owned by #834** (path 2).
+- IDST rows for one aircraft under two FCAs: **owned by #862** (path 2 of #834).
 
 ## 6. Web
 
@@ -425,7 +425,8 @@ defect below and has to change with its fix.
   `HistoricalProvider`, `useFcas` reads the instant (`web/src/lib/fca.ts:158`) and switches to
   `/stats/hist/fcas` (`:169-175`). `useFcaCounts` and `useFcaTraffic` ignore it. The dashboard FCA
   widget joins the two (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
-- Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2).
+- Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2). Since
+  #834 a prefile is never a candidate, so it is never in the order.
 
 ## Determination for #812 (recommendation, for the operator to confirm)
 

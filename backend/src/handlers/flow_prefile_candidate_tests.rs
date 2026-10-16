@@ -93,7 +93,7 @@ async fn holder(pool: &PgPool, permission: &str) -> String {
     session_cookie(pool, &user).await
 }
 
-/// One request with a JSON body through the real router; `send_json` is GET-only.
+/// One request with a JSON body through the real router; `send_json` sends no body.
 async fn call(
     state: &AppState,
     method: Method,
@@ -198,28 +198,59 @@ async fn flow_counts_is_zero_for_an_fca_only_prefiles_cross(pool: PgPool) {
     );
 }
 
-/// AC1: IDST and the FCA traffic route list the connected pilot once and no prefile.
+/// Climbing out of KJFK, short of the corridor line, on the same plan: it crosses the FCA airborne.
+fn airborne_out_of_jfk(callsign: &str) -> Pilot {
+    Pilot {
+        callsign: callsign.into(),
+        latitude: 40.45,
+        longitude: -74.1,
+        altitude: 8_000,
+        groundspeed: 300,
+        heading: 230,
+        flight_plan: Some(plan("KJFK")),
+        ..Default::default()
+    }
+}
+
+async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str) {
+    let cta = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    sqlx::query(
+        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, $2, $3, $3)",
+    )
+    .bind(fca_id)
+    .bind(callsign)
+    .bind(cta)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// AC1: IDST and the FCA traffic route list connected pilots only. IDST lists ground departures, so
+/// the airborne KJFK departure is on the traffic route (the control) and not on IDST. PRE2's stored
+/// release stays out of `released` until PRE2 connects.
 #[sqlx::test]
 async fn idst_and_fca_traffic_list_a_ground_pilot_once_and_no_prefile(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
-    install_feed(&state, pilot_with_lingering_prefile_and_a_prefile_only()).await;
+    let mut data = pilot_with_lingering_prefile_and_a_prefile_only();
+    data.pilots.push(airborne_out_of_jfk("AIR1"));
+    install_feed(&state, data).await;
     let fca_id = corridor_fca(&pool, "T834", 30).await;
+    seed_release(&pool, &fca_id, "PRE2").await;
     let reader = holder(&pool, "flow.fca.read").await;
+    let idst_uri = "/api/v1/flow/idst?airports=KJFK";
 
-    let (status, idst) = send_json(
-        &state,
-        Method::GET,
-        "/api/v1/flow/idst?airports=KJFK",
-        &reader,
-    )
-    .await;
+    let (status, idst) = send_json(&state, Method::GET, idst_uri, &reader).await;
     assert_eq!(status, StatusCode::OK, "{idst}");
     assert_eq!(
         callsigns_and_statuses(&idst["unscheduled"]),
         vec![("GND1".to_string(), "ground".to_string())],
         "{idst}"
     );
-    assert_eq!(idst["released"], json!([]), "{idst}");
+    assert_eq!(
+        idst["released"],
+        json!([]),
+        "PRE2 has not connected: {idst}"
+    );
     assert_eq!(idst["unscheduled"][0]["fca_id"], fca_id.as_str());
     assert_eq!(idst["metered_count"], 1);
 
@@ -231,10 +262,25 @@ async fn idst_and_fca_traffic_list_a_ground_pilot_once_and_no_prefile(pool: PgPo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{traffic}");
+    let mut rows = callsigns_and_statuses(&traffic);
+    rows.sort();
     assert_eq!(
-        callsigns_and_statuses(&traffic),
-        vec![("GND1".to_string(), "ground".to_string())],
+        rows,
+        vec![
+            ("AIR1".to_string(), "airborne".to_string()),
+            ("GND1".to_string(), "ground".to_string()),
+        ],
         "{traffic}"
+    );
+
+    let mut connected = pilot_with_lingering_prefile_and_a_prefile_only();
+    connected.pilots.push(parked_at_jfk("PRE2"));
+    install_feed(&state, connected).await;
+    let (_, idst) = send_json(&state, Method::GET, idst_uri, &reader).await;
+    assert_eq!(
+        callsigns_and_statuses(&idst["released"]),
+        vec![("PRE2".to_string(), "ground".to_string())],
+        "once connected, PRE2's stored release applies: {idst}"
     );
 }
 
@@ -278,15 +324,7 @@ async fn the_clear_release_response_lists_no_prefile(pool: PgPool) {
     install_feed(&state, pilot_with_lingering_prefile_and_a_prefile_only()).await;
     let fca_id = corridor_fca(&pool, "T834", 30).await;
     let writer = holder(&pool, "flow.fca.update").await;
-    let cta = chrono::Utc::now().timestamp_millis() + 3_600_000;
-    sqlx::query(
-        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, 'PRE2', $2, $2)",
-    )
-    .bind(&fca_id)
-    .bind(cta)
-    .execute(&pool)
-    .await
-    .unwrap();
+    seed_release(&pool, &fca_id, "PRE2").await;
 
     let (status, body) = call(
         &state,

@@ -158,8 +158,8 @@ fn filed_altitude_ft(filed: &str) -> Option<i64> {
     Some(if n <= 600 { n * 100 } else { n })
 }
 
-/// Membership filters (dest / origin / fix / altitude). `cur_alt_ft` is the aircraft's live altitude
-/// (`None` for a prefile with no position). Altitude membership matches if **either** the filed cruise
+/// Membership filters (dest / origin / fix / altitude). `cur_alt_ft` is the aircraft's live altitude;
+/// `None` or a non-positive value reads as unknown. Altitude membership matches if **either** the filed cruise
 /// **or** the current altitude falls in the FCA's band: a climbing aircraft is caught by its filed
 /// cruise, and one that filed a bogus-low altitude but is actually cruising in-band is caught by its
 /// current altitude. Unknown-on-both ⇒ not excluded. ARTCC scope is enforced separately by
@@ -186,10 +186,11 @@ fn passes_filters(fca: &FcaBody, fp: &FlightPlan, cur_alt_ft: Option<i64>) -> bo
 ///
 /// Three surfaces have to agree on this: the metering board (`build_candidates`), the per-FCA badge
 /// counts (`fca_counts`), and the per-flight advisory (`build_flight_advisory`). They used to
-/// restate the decision — manual exclusion, then [`passes_filters`], then [`fca::crosses`], then [`passes_scope`] — in their own shape, so a new
-/// condition had to be added in three places by hand and a miss showed up as the board, the badge
-/// and the advisory quietly disagreeing about the same aircraft. #342 added its callsign check to
-/// all of them one at a time, which is what prompted this.
+/// restate the decision — manual exclusion, then [`passes_filters`], then [`fca::crosses`], then
+/// [`passes_scope`] — in their own shape, so a new condition had to be added in three places by
+/// hand and a miss showed up as the board, the badge and the advisory quietly disagreeing about the
+/// same aircraft. #342 added its callsign check to all of them one at a time, which is what prompted
+/// this.
 ///
 /// Returns the crossing when the flight is included, so the one caller that needs the geometry
 /// (`build_candidates`, for `along_nm` and the crossing position) gets it from the same call that
@@ -3444,27 +3445,44 @@ mod prefile_skip_integration_tests {
         );
     }
 
-    /// Measured effect (#834): on a 10/hr FCA, a prefile departing KEWR (~13 nm nearer RBV) crossed
-    /// ahead of a pilot parked at KJFK and held it 285 s (5 min) on `origin/next`. With prefiles no
-    /// longer candidates the pilot is alone on the FCA and owes nothing.
+    /// Measured effect (#834): on a 10/hr FCA, a flight out of KEWR crosses ahead of a pilot parked
+    /// at KJFK. Filed as a prefile it held the pilot 285 s (5 min) on `origin/next`; it now holds
+    /// nothing. The same plan flown by a connected pilot is the control: it still crosses first and
+    /// the KJFK pilot owes it the same 285 s.
     #[test]
     fn a_ground_pilot_is_no_longer_delayed_behind_an_earlier_prefile() {
         let mut airports = jfk_dca();
         airports.insert("KEWR".to_string(), Airport::at(40.69, -74.17));
         let mut fca = fca_crossing_the_corridor();
         fca.rate = 10;
-        let data = VatsimData {
+        let board = |data: &VatsimData| -> Vec<(String, String, i64, i64)> {
+            let (flights, metas) = candidates(&fca, data, &airports, &HashMap::new());
+            finalize(&fca, flights, &metas)
+                .into_iter()
+                .map(|f| (f.callsign, f.status, f.seq, f.delay_sec))
+                .collect()
+        };
+        let row =
+            |cs: &str, seq: i64, delay: i64| (cs.to_string(), "ground".to_string(), seq, delay);
+
+        let behind_a_prefile = VatsimData {
             pilots: vec![parked_at_jfk("GND1")],
             prefiles: vec![prefile("PRE1", "KEWR")],
             ..Default::default()
         };
-        let (flights, metas) = candidates(&fca, &data, &airports, &HashMap::new());
-        let metered = finalize(&fca, flights, &metas);
-        let board: Vec<(&str, &str, i64, i64)> = metered
-            .iter()
-            .map(|f| (f.callsign.as_str(), f.status.as_str(), f.seq, f.delay_sec))
-            .collect();
-        assert_eq!(board, vec![("GND1", "ground", 1, 0)]);
+        assert_eq!(board(&behind_a_prefile), vec![row("GND1", 1, 0)]);
+
+        let mut at_newark = parked_at_jfk("PRE1");
+        (at_newark.latitude, at_newark.longitude) = (40.69, -74.17);
+        at_newark.flight_plan = Some(plan("KEWR"));
+        let behind_a_pilot = VatsimData {
+            pilots: vec![parked_at_jfk("GND1"), at_newark],
+            ..Default::default()
+        };
+        assert_eq!(
+            board(&behind_a_pilot),
+            vec![row("PRE1", 1, 0), row("GND1", 2, 285)]
+        );
     }
 }
 
@@ -4714,9 +4732,9 @@ mod fca_inclusion_tests {
 
 /// #514 — trading two held release times without re-metering anyone else.
 ///
-/// Worth knowing for anyone extending this: `mark_release` and `clear_release` have no tests of
-/// their own, so these are the first on the release path. They drive `repos::flow::swap_releases`
-/// for the data semantics and the real router for the two guards the handler owns.
+/// These drive `repos::flow::swap_releases` for the data semantics and the real router for the two
+/// guards the handler owns. `mark_release` and `clear_release` are tested through the router in
+/// `machine_actor_tests` and `flow_prefile_candidate_tests`.
 #[cfg(test)]
 mod release_swap_tests {
     use std::collections::HashMap;
