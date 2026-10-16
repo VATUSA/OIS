@@ -5665,8 +5665,9 @@ export interface components {
             eta?: string | null;
             /**
              * Format: date-time
-             * @description Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time, plus the
-             *     ground allowance; null once airborne. Used to back out enroute time for GDP EDCTs.
+             * @description Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time (never
+             *     earlier than now + 20 min), plus the ground allowance; null once airborne. Used to back out
+             *     enroute time for GDP EDCTs.
              */
             etd?: string | null;
             /** @description True when a program excludes this aircraft from metering (still shown). */

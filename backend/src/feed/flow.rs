@@ -70,8 +70,9 @@ pub struct FlowFlight {
     pub status: String,
     pub distance_nm: Option<f64>,
     pub eta: Option<DateTime<Utc>>,
-    /// Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time, plus the
-    /// ground allowance; null once airborne. Used to back out enroute time for GDP EDCTs.
+    /// Estimated wheels-up for ground/proposed inbounds: now, or the filed departure time (never
+    /// earlier than now + 20 min), plus the ground allowance; null once airborne. Used to back out
+    /// enroute time for GDP EDCTs.
     pub etd: Option<DateTime<Utc>>,
     pub groundspeed: i64,
     /// True when a program excludes this aircraft from metering (still shown).
@@ -1738,29 +1739,71 @@ mod tests {
     }
 
     /// #815: `ready_time_slot` returns a wheels-up, so the enroute time it slots with is the
-    /// airborne ETE alone (`sta − cfr`, no ground allowance). GRD2 flies the same plan from the same
-    /// spot with a wheels-up locked at now + 40 min; GRD1 ready at now + 39 min would arrive 1 min
-    /// behind it, inside the 2 min runway interval (AAR 30), so its wheels-up is pushed to
-    /// now + 42 min. With the 660 s allowance counted in the enroute time, the ready slot would read
-    /// as 11 min clear of GRD2 and come back unchanged at now + 39 min.
+    /// airborne ETE alone (`sta − cfr`), with no ground allowance in it. AIR is airborne, so its slot
+    /// does not depend on any ETD. GRD1 is ready one airborne ETE plus 1 min before AIR's slot, so it
+    /// would arrive 1 min behind AIR, inside the 2 min runway interval (AAR 30), and its wheels-up is
+    /// pushed 1 min later. With the 660 s allowance counted in the enroute time, the ready time would
+    /// read as 12 min clear of AIR and come back unchanged.
     #[test]
     fn ready_time_slot_pushes_a_conflicting_wheels_up_by_the_runway_interval() {
         let now = t0();
-        // Five samples at KBOS; no gate list and parked pilots, so the airport tier: 50 + 40 + 570 s.
+        // Five samples at KBOS; no gate list and a parked pilot, so the airport tier: 50 + 40 + 570 s.
         let samples = HashMap::from([(
             "KBOS".to_string(),
             (0..5)
                 .map(|_| taxi_sample("A1", "B738", "04L", 570))
                 .collect::<Vec<_>>(),
         )]);
+        let plan = fp("KBOS", "KJFK", "DCT");
         let data = VatsimData {
             pilots: vec![
-                pilot("GRD1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT")),
-                pilot("GRD2", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "DCT")),
+                pilot("GRD1", 42.36, -71.0, 0, 0, plan.clone()),
+                // Airborne over Chicago, far enough out that GRD1's ready time is after now.
+                pilot("AIR", 41.9, -87.9, 35_000, 450, fp("KORD", "KJFK", "DCT")),
             ],
             ..Default::default()
         };
-        let issued = HashMap::from([("GRD2".to_string(), now + Duration::minutes(40))]);
+        let flow = compute(
+            "KJFK",
+            Some(&base_program()),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            now,
+        );
+        let air = flow.flights.iter().find(|f| f.callsign == "AIR").unwrap();
+        assert_eq!(
+            air.status, "airborne",
+            "positive control: AIR's slot ignores any ETD"
+        );
+        let air_sta = air.sta.unwrap();
+        // GRD1's full ground flight time from the same inputs; its airborne ETE is that less 660 s.
+        let (_, ft_min, allowance) = ground_estimate(
+            &NavData::default(),
+            "KBOS",
+            Some((40.6413, -73.7781)),
+            &plan,
+            &airports(),
+            &Winds::default(),
+            &trajectory::AircraftProfile::default(),
+            Some((42.36, -71.0, 0, 0)),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            now,
+        );
+        assert_eq!(allowance, 660.0, "positive control: the samples were read");
+        let airborne_ete = Duration::milliseconds((ft_min * 60_000.0) as i64 - 660_000);
+        let ready = air_sta - airborne_ete + Duration::minutes(1);
+        assert!(ready > now, "ready {ready} must be after now {now}");
+
         let slot = ready_time_slot(
             "KJFK",
             &base_program(),
@@ -1769,22 +1812,21 @@ mod tests {
             &NavData::default(),
             &Winds::default(),
             &trajectory::ProfileTable::default(),
-            &issued,
+            &HashMap::new(),
             &HashMap::new(),
             &RunwayDb::default(),
             &samples,
             &HashSet::new(),
             "GRD1",
-            now + Duration::minutes(39),
+            ready,
             now,
         );
-        assert_eq!(slot, Some(now + Duration::minutes(42)));
+        assert_eq!(slot, Some(ready + Duration::minutes(1)));
     }
 
-    /// #815 AC1 wiring (airport flow and GDP): `compute` puts a ground flight's ETD at its estimated
-    /// wheels-up (now, or the filed departure time, plus the ground allowance) and leaves its ETA
-    /// alone, so the CFR, Tier 2a's `flight_ms`, `ready_time_slot` and GDP's `eta − etd` all back out
-    /// the airborne ETE.
+    /// #815 AC1 wiring: `compute` puts a ground flight's and a prefile's ETD at its estimated
+    /// wheels-up (now, or the filed departure time, plus the ground allowance), leaves its ETA alone,
+    /// and meters it with a CFR that backs out only the airborne ETE (`sta − cfr`).
     #[test]
     fn a_ground_flights_etd_is_its_wheels_up_estimate() {
         use chrono::TimeZone;

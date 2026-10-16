@@ -14,6 +14,18 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
+  `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now, or the filed
+  departure time (never earlier than now + 20 min), plus the ground allowance. It was now, or the filed
+  time, with no allowance. Every time backed out of it moves with it, so for a ground or prefiled flight
+  each of these is one ground allowance later than before: `FlowFlight.cfr`, the wheels-up
+  `POST /api/v1/tmu/cfr` locks when it has no `ready_time`, the EDCTs a GDP assigns, the `edct` a
+  release stores when `POST /api/v1/flow/fcas/{id}/release/{callsign}` is sent without a `ready` time,
+  and the advisory `edct` on `GET /api/v1/flow/idst`. Each is now the CTA less the airborne flight time.
+  With a `ready_time`, `POST /api/v1/tmu/cfr` still locks that time unless the flight's arrival would
+  conflict, and it now projects the arrival from it by the airborne flight time alone. Releases and CFRs
+  stored before the change keep their stored value. The shapes are unchanged; a tool that read `etd` as
+  an off-block time should read it as wheels-up.
 - **New:** `PUT /api/v1/flow/sector-consolidations/{artcc}` changes several of one ARTCC's sector
   consolidations in one request. The body is `{ "into": { "<sector_id>": "<target_sector_id>" | null } }`:
   each sector is worked at the target given, or given its own row back for `null`. It needs

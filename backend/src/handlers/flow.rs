@@ -2173,7 +2173,16 @@ fn finalize(
     mut flights: Vec<FcaFlight>,
     metas: &[fca::MeterInput],
 ) -> Vec<FcaFlight> {
-    let order = manual_order(fca, &flights);
+    meter_in_place(fca, &mut flights, metas);
+    flights.sort_by_key(|f| f.seq);
+    flights
+}
+
+/// [`finalize`]'s metering without its sort: `flights` stays aligned with `metas`, so a caller can
+/// read each flight's own input by position. A callsign cannot key them: a connected pilot and a
+/// lingering prefile can share one.
+fn meter_in_place(fca: &FcaBody, flights: &mut [FcaFlight], metas: &[fca::MeterInput]) {
+    let order = manual_order(fca, flights);
     let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
     for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
@@ -2184,8 +2193,6 @@ fn finalize(
         f.delay_nm = (m.delay_sec as f64 / 3600.0 * input.cross_speed).round() as i64;
         f.seq = m.seq;
     }
-    flights.sort_by_key(|f| f.seq);
-    flights
 }
 
 /// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
@@ -2432,7 +2439,7 @@ pub async fn list_idst(
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
         for (fca, releases, holders) in &fca_releases {
-            let (flights, metas) = build_candidates(
+            let (mut flights, metas) = build_candidates(
                 fca,
                 &snap.data,
                 ap.as_ref(),
@@ -2449,13 +2456,15 @@ pub async fn list_idst(
                 now,
                 false,
             );
-            // `finalize` reorders the flights, so carry each one's ground allowance by callsign.
-            let allowance_ms: HashMap<String, i64> = flights
-                .iter()
-                .zip(&metas)
-                .map(|(f, m)| (f.callsign.clone(), m.ground_allowance_ms))
+            // Pair each flight with its own ground allowance before sorting, by position: a
+            // connected pilot and a lingering prefile can share a callsign.
+            meter_in_place(fca, &mut flights, &metas);
+            let mut rows: Vec<(FcaFlight, i64)> = flights
+                .into_iter()
+                .zip(metas.iter().map(|m| m.ground_allowance_ms))
                 .collect();
-            for f in finalize(fca, flights, &metas) {
+            rows.sort_by_key(|(f, _)| f.seq);
+            for (f, allowance_ms) in rows {
                 if (f.status != "ground" && f.status != "proposed")
                     || !airports.contains(&f.dep.to_ascii_uppercase())
                 {
@@ -2471,7 +2480,7 @@ pub async fn list_idst(
                         cta.timestamp_millis(),
                         eta.timestamp_millis(),
                         now.timestamp_millis(),
-                        allowance_ms.get(&f.callsign).copied().unwrap_or(0),
+                        allowance_ms,
                     ))
                 } else {
                     None

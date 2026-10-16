@@ -3978,3 +3978,92 @@ async fn a_connected_ground_pilot_gets_the_same_wheels_up_release(pool: PgPool) 
     let fx = Fixture815::connected(pool).await;
     idst_and_rdy_agree(fx).await;
 }
+
+/// #815: IDST pairs each row with its own ground allowance, by position. TEST1 is both a connected
+/// pilot rolling down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) and a lingering prefile (no
+/// position, so the airport tier: 50 + 40 + 570 = 660 s). Keyed by callsign, the prefile's 660 s
+/// overwrote the pilot's and its proposed EDCT came out 330 s early.
+#[sqlx::test]
+async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let runway_04l = state
+        .runways
+        .ends_for("KJFK")
+        .into_iter()
+        .find(|e| e.id == "04L")
+        .expect("KJFK 04L is in the bundled runway data");
+    let plan = FlightPlan {
+        departure: "KJFK".into(),
+        arrival: "KDCA".into(),
+        route: "RBV WHITE SIE".into(),
+        ..Default::default()
+    };
+    {
+        let mut feed = state.feed.write().await;
+        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            pilots: vec![crate::feed::vatsim::Pilot {
+                callsign: "TEST1".into(),
+                latitude: 40.64,
+                longitude: -73.78,
+                heading: runway_04l.hdg as i64,
+                groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
+                flight_plan: Some(plan.clone()),
+                ..Default::default()
+            }],
+            prefiles: vec![Prefile {
+                callsign: "TEST1".into(),
+                flight_plan: Some(plan),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })));
+    }
+    let sample = |runway: Option<&str>, taxi_sec| crate::feed::taxi_estimate::TaxiSample {
+        gate_id: None,
+        aircraft: None,
+        runway: runway.map(Into::into),
+        pushback_sec: Some(50),
+        startup_sec: Some(40),
+        taxi_sec,
+    };
+    let mut rows: Vec<_> = (0..5).map(|_| sample(Some("04L"), 900)).collect();
+    rows.extend((0..7).map(|_| sample(None, 570)));
+    state
+        .taxi_estimate_samples
+        .store(Arc::new(HashMap::from([("KJFK".to_string(), rows)])));
+    fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.read", None).await;
+
+    let (status, _, idst) = send_full(
+        &state,
+        http::Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &[&auth],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{idst}");
+    let as_of = at(&idst["as_of"]);
+    let row = |status: &str| {
+        idst["unscheduled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["callsign"] == "TEST1" && r["status"] == status)
+            .unwrap_or_else(|| panic!("no {status} TEST1 row: {idst}"))
+            .clone()
+    };
+    let pilot = row("ground");
+    let prefile = row("proposed");
+    // The prefile reaches the line ~330 s ahead, clear of the 2 min spacing, so neither is delayed
+    // and each proposed EDCT is now plus its own allowance.
+    for (r, allowance_ms) in [(&pilot, 990_000), (&prefile, ALLOWANCE_815_MS)] {
+        assert_eq!(r["delay_min"], 0, "{r}");
+        let proposed = at(&r["edct"]);
+        assert!(
+            (proposed - as_of - allowance_ms).abs() <= SLACK_815_MS,
+            "{} proposed {proposed}, as of {as_of}: not {allowance_ms} ms after",
+            r["status"]
+        );
+    }
+}
