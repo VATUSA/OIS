@@ -16,7 +16,7 @@ use sqlx::PgPool;
 
 use crate::auth::principal::Principal;
 use crate::feed::airports::Airport;
-use crate::feed::vatsim::{FlightPlan, Prefile, VatsimData};
+use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
 use crate::repos::access::{PermissionScope, sha256_hex};
 use crate::scope_test_support::{artcc, grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
@@ -207,13 +207,13 @@ async fn audited_actor(pool: &PgPool) -> Option<String> {
         .flatten()
 }
 
-/// A state whose feed holds one prefile, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
+/// A state whose feed holds one ground pilot, `TEST1` (KJFK→KDCA via RBV WHITE SIE), that crosses
 /// [`fca`] — so `mark_release` has a real crossing to release.
 async fn crossing_state(pool: PgPool) -> AppState {
     crossing_state_of(pool, &["TEST1"]).await
 }
 
-/// [`crossing_state`] with one such prefile per callsign.
+/// [`crossing_state`] with one such pilot per callsign.
 async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
     let state = test_state(pool, HashMap::new());
     {
@@ -223,10 +223,17 @@ async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]));
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: callsigns
+            pilots: callsigns
                 .iter()
-                .map(|callsign| Prefile {
+                .map(|callsign| Pilot {
                     callsign: (*callsign).into(),
+                    // Parked at KJFK: a connected ground departure. A prefile is not an FCA
+                    // candidate (#834), so a release needs a connected pilot.
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    altitude: 13,
+                    groundspeed: 0,
+                    heading: 310,
                     flight_plan: Some(FlightPlan {
                         departure: "KJFK".into(),
                         arrival: "KDCA".into(),
@@ -3702,7 +3709,7 @@ struct Fixture815 {
     state: AppState,
     fca_id: String,
     auth: String,
-    /// TEST1's ground ETA to the FCA line, and the window its `now` was taken in. A prefile's
+    /// TEST1's ground ETA to the FCA line, and the window its `now` was taken in. A parked pilot's
     /// `eta − now` is whole seconds and doesn't depend on `now`, so the airborne ETE lies in
     /// `[eta − after, eta − before] − allowance`.
     eta: i64,
@@ -3713,37 +3720,10 @@ struct Fixture815 {
 }
 
 impl Fixture815 {
-    /// TEST1 as a prefile.
+    /// TEST1 parked at KJFK, from [`crossing_state`]: a connected ground pilot (a prefile is not an
+    /// FCA candidate, #834). No gates are seeded and it isn't rolling, so it takes the airport tier.
     async fn new(pool: PgPool) -> Self {
-        Self::build(pool, false).await
-    }
-
-    /// TEST1 as a connected pilot parked at KJFK: `build_candidates`' pilot branch, not the prefile
-    /// one. No gates are seeded and it isn't rolling, so it takes the same airport tier.
-    async fn connected(pool: PgPool) -> Self {
-        Self::build(pool, true).await
-    }
-
-    async fn build(pool: PgPool, connected: bool) -> Self {
         let state = crossing_state(pool.clone()).await;
-        if connected {
-            let mut feed = state.feed.write().await;
-            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-                pilots: vec![crate::feed::vatsim::Pilot {
-                    callsign: "TEST1".into(),
-                    latitude: 40.64,
-                    longitude: -73.78,
-                    flight_plan: Some(FlightPlan {
-                        departure: "KJFK".into(),
-                        arrival: "KDCA".into(),
-                        route: "RBV WHITE SIE".into(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })));
-        }
         let sample = || crate::feed::taxi_estimate::TaxiSample {
             gate_id: None,
             aircraft: None,
@@ -3772,8 +3752,7 @@ impl Fixture815 {
         assert_eq!(status, http::StatusCode::OK, "{traffic}");
         let flight = &traffic[0];
         assert_eq!(flight["callsign"], "TEST1", "{traffic}");
-        let status = if connected { "ground" } else { "proposed" };
-        assert_eq!(flight["status"], status, "{traffic}");
+        assert_eq!(flight["status"], "ground", "{traffic}");
         // Positive control: the seeded samples were read, not the 180/120/480 s default tier.
         let taxi = &flight["debug"]["taxi_estimate"];
         assert_eq!(
@@ -3972,19 +3951,12 @@ async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
     idst_and_rdy_agree(Fixture815::new(pool).await).await;
 }
 
-/// The same for a connected ground pilot, which `build_candidates` times in its own branch.
+/// #815: IDST pairs each row with its own ground allowance before sorting by `seq`. TEST1 is a
+/// connected pilot rolling down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile
+/// still lingers. TEST2 is parked at KJFK (the airport tier: 50 + 40 + 570 = 660 s), listed after
+/// TEST1 but crossing first, so sorting before the pairing would swap the two allowances.
 #[sqlx::test]
-async fn a_connected_ground_pilot_gets_the_same_wheels_up_release(pool: PgPool) {
-    let fx = Fixture815::connected(pool).await;
-    idst_and_rdy_agree(fx).await;
-}
-
-/// #815: IDST pairs each row with its own ground allowance, by position. TEST1 is both a connected
-/// pilot rolling down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) and a lingering prefile (no
-/// position, so the airport tier: 50 + 40 + 570 = 660 s). Keyed by callsign, the prefile's 660 s
-/// overwrote the pilot's and its proposed EDCT came out 330 s early.
-#[sqlx::test]
-async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance(pool: PgPool) {
+async fn idst_gives_a_rolling_pilot_its_own_runway_tier_allowance(pool: PgPool) {
     let state = crossing_state(pool.clone()).await;
     let runway_04l = state
         .runways
@@ -4001,15 +3973,24 @@ async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance
     {
         let mut feed = state.feed.write().await;
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            pilots: vec![crate::feed::vatsim::Pilot {
-                callsign: "TEST1".into(),
-                latitude: 40.64,
-                longitude: -73.78,
-                heading: runway_04l.hdg as i64,
-                groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
-                flight_plan: Some(plan.clone()),
-                ..Default::default()
-            }],
+            pilots: vec![
+                crate::feed::vatsim::Pilot {
+                    callsign: "TEST1".into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    heading: runway_04l.hdg as i64,
+                    groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
+                    flight_plan: Some(plan.clone()),
+                    ..Default::default()
+                },
+                crate::feed::vatsim::Pilot {
+                    callsign: "TEST2".into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    flight_plan: Some(plan.clone()),
+                    ..Default::default()
+                },
+            ],
             prefiles: vec![Prefile {
                 callsign: "TEST1".into(),
                 flight_plan: Some(plan),
@@ -4044,26 +4025,28 @@ async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance
     .await;
     assert_eq!(status, http::StatusCode::OK, "{idst}");
     let as_of = at(&idst["as_of"]);
-    let row = |status: &str| {
-        idst["unscheduled"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["callsign"] == "TEST1" && r["status"] == status)
-            .unwrap_or_else(|| panic!("no {status} TEST1 row: {idst}"))
-            .clone()
-    };
-    let pilot = row("ground");
-    let prefile = row("proposed");
-    // The prefile reaches the line ~330 s ahead, clear of the 2 min spacing, so neither is delayed
-    // and each proposed EDCT is now plus its own allowance.
-    for (r, allowance_ms) in [(&pilot, 990_000), (&prefile, ALLOWANCE_815_MS)] {
+    let rows = idst["unscheduled"].as_array().unwrap();
+    let seen: Vec<_> = rows
+        .iter()
+        .map(|r| (r["callsign"].clone(), r["status"].clone(), r["seq"].clone()))
+        .collect();
+    // TEST2 crosses ~330 s ahead, clear of the spacing, so neither is delayed and each proposed
+    // EDCT is now plus its own allowance. One TEST1 row: the lingering prefile adds none.
+    assert_eq!(
+        seen,
+        vec![
+            (json!("TEST2"), json!("ground"), json!(1)),
+            (json!("TEST1"), json!("ground"), json!(2)),
+        ],
+        "{idst}"
+    );
+    for (r, allowance_ms) in [(&rows[0], 660_000), (&rows[1], 990_000)] {
         assert_eq!(r["delay_min"], 0, "{r}");
         let proposed = at(&r["edct"]);
         assert!(
             (proposed - as_of - allowance_ms).abs() <= SLACK_815_MS,
             "{} proposed {proposed}, as of {as_of}: not {allowance_ms} ms after",
-            r["status"]
+            r["callsign"]
         );
     }
 }
@@ -4072,7 +4055,7 @@ async fn idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance
 /// locks the flight's own wheels-up estimate, now + its 660 s allowance, not now.
 #[sqlx::test]
 async fn a_cfr_without_a_ready_time_or_program_locks_the_flights_wheels_up(pool: PgPool) {
-    let fx = Fixture815::connected(pool).await;
+    let fx = Fixture815::new(pool).await;
     sqlx::query(
         "insert into access.role_permissions (role_name, permission_name) \
          values ($1, 'tmu.cfr.assign') on conflict do nothing",
