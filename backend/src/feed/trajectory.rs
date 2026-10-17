@@ -1315,7 +1315,8 @@ mod tests {
     /// `interp` ramped between two speeds at the *same* altitude for the whole cruise leg
     /// (measured 440 → 462 → 485 → 508 → 519 kt at a flat 35,000 ft).
     ///
-    /// Removing `.min(cruise_tas_at(alt))` from `desc_tas` restores that ramp and fails here.
+    /// Removing `.min(self.cruise_in(temp_k))` from `Speeds::descent_in` restores that ramp and
+    /// fails here.
     #[test]
     fn the_cruise_leg_is_flat_at_cruise_speed() {
         let profile = AircraftProfile::default();

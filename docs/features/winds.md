@@ -50,16 +50,16 @@ These are the four limits the issue named, checked against the code on `next` be
 
 ## What changed
 
-- **RAP is the primary field.** `feed/rap.rs` asks for the forecast hour of the newest published
+- **RAP is the wind field.** `feed/rap.rs` asks for the forecast hour of the newest published
   cycle that is valid at the hour nearest now, reads only the wind and temperature messages it needs
   by byte range (1.6 MB of a 17 MB file in the 2026-10-16 00Z analysis), and averages the 13 km
   points into 1° cells. Winds are
   grid-relative in RAP and are turned to true north by the bearing of the grid's y axis at each
   point. Coverage is RAP's 13 km North American grid (NCEP grid 130), from 16.3°N 126.1°W at its
   southwest corner to 55.5°N 57.4°W at its northeast corner.
-- **When RAP fails.** `jobs::install_winds` reports the failure to the job registry, keeps a field
-  loaded within 3 h, and drops an older one for still air. The FB tables are no longer fetched;
-  snapshots holding them still replay.
+- **When RAP fails.** The hourly pass reports the failure to the job registry;
+  `jobs::install_winds` keeps a field loaded within 3 h and drops an older one for still air. The
+  FB tables are no longer fetched; snapshots holding them still replay.
 - **Per segment, at the profile's altitude.** `Winds::along` samples the field at most every 50 nm
   along the great circle of each leg the profile flies, each sample carrying the headwind on the
   course at that point at every level. The profile reads that at each step's own distance and

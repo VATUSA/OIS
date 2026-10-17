@@ -4761,9 +4761,9 @@ mod mit_cross_speed_wiring_tests {
 
     // ---- #836: FCA metering reads the per-segment wind at both candidate sites (AC5) ----------
     //
-    // Each site is mutated on its own: the live-pilot loop and the prefile loop each lay
-    // `winds.along(&path, route_len)` on their own profile. Fixture: arrival_at_cruise() (AAL1
-    // airborne at FL350, AAL2 prefile, both direct KJFK→KDCA).
+    // The live-pilot loop and the prefile loop each lay `winds.along(&path, route_len)` on their
+    // own profile. Fixture: arrival_at_cruise() (AAL1 airborne at FL350, AAL2 prefile, both direct
+    // KJFK→KDCA).
 
     /// 80 kt from 225° (on the nose of the SW-bound route) at and above 30,000 ft, calm at and
     /// below 18,000 ft, over 37–42°N 79–72°W.

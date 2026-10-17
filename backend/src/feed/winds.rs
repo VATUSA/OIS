@@ -878,7 +878,8 @@ mod tests {
         // Samples every 41 nm (205 nm in 5); only the first is inside the grid.
         let ds = rw.knot_distances();
         assert_eq!(ds.len(), 6, "{ds:?}");
-        // An eastbound great circle runs a hair off 090°, so a 50 kt westerly reads just under 50.
+        // An eastbound great circle runs a hair off 090°, so a 50 kt westerly reads just under 50 kt
+        // of tailwind.
         let start = rw.headwind(len, 34_000.0).unwrap();
         assert!((start + 50.0).abs() < 0.1, "{start}");
         // Up to the first uncovered sample the covered wind holds; past it, still air.

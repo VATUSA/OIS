@@ -1,4 +1,4 @@
-//! NOAA Rapid Refresh (RAP) winds and temperatures aloft, the primary wind field (#836).
+//! NOAA Rapid Refresh (RAP) winds and temperatures aloft, the wind field (#836).
 //!
 //! RAP runs hourly on a 13 km Lambert conformal grid over North America (NCEP grid 130, product
 //! `awp130pgrb`). The refresh reads the file's `.idx` index, range-fetches only the wind (UGRD and
