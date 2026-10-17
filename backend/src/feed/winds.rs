@@ -1,26 +1,30 @@
-//! US winds aloft from the Aviation Weather Center FB (winds/temps) tables, for enroute
-//! ETA correction. Fetched at runtime and hot-swapped; fails safe to still air whenever
-//! data is missing. Ported from vatflow's `winds-aloft.js`.
+//! US winds aloft for enroute ETA correction, from NOAA's Rapid Refresh (RAP) model decoded by
+//! [`crate::feed::rap`] onto a regular lat/lon grid (#836). An empty field is still air. Fields
+//! snapshotted before RAP hold AWC FB station winds; those still load and blend for historical
+//! replay. Fetched at runtime and hot-swapped; fails safe to still air whenever data is missing.
 
-use std::collections::HashMap;
-
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::airports::{Airport, AirportDb};
+use super::trajectory::{RouteWind, WindKnot};
 
 const R_NM: f64 = 3440.065;
-/// AWC FB tables cover the CONUS in these six regions.
-const REGIONS: [&str; 6] = ["bos", "mia", "chi", "dfw", "slc", "sfo"];
-/// FB table sets: `low` is 3,000–39,000 ft, `high` adds 45,000 and 53,000 ft.
-const TABLE_LEVELS: [&str; 2] = ["low", "high"];
 /// A station further than this from the query point contributes no wind (nm).
 const MAX_STATION_NM: f64 = 600.0;
 /// The wind at a point is an inverse-distance-squared blend of at most this many nearest stations.
 const BLEND_STATIONS: usize = 4;
 /// A query point this close to a station (nm) takes that station's wind outright.
 const ON_STATION_NM: f64 = 0.1;
+/// Longest gap (nm) between wind samples along a route: close to one 1° grid cell (60 nm north-south,
+/// 46 nm east-west at 40°N), so the samples follow the field at about its own resolution.
+const KNOT_SPACING_NM: f64 = 50.0;
+/// Celsius to kelvin.
+const C_TO_K: f64 = 273.15;
+/// A grid value that is not defined (outside the source model's footprint).
+pub const GRID_MISSING: i16 = i16::MIN;
 
-/// Wind at one forecast level: direction (deg true, None when calm) and speed (kt).
+/// Wind at one FB forecast level, as snapshots taken before RAP store it: direction (deg true,
+/// None when calm) and speed (kt).
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct WindLevel {
     pub dir: Option<f64>,
@@ -81,265 +85,246 @@ fn headwind_along((u, v): (f64, f64), course_deg: f64) -> f64 {
     u * c.sin() + v * c.cos()
 }
 
+/// One vertical column of the field at a point: `(altitude_ft, (u, v) "from" kt, temp_k)` in
+/// increasing altitude.
+type Column = Vec<(f64, (f64, f64), Option<f64>)>;
+
+/// A model wind field on a regular lat/lon grid, by pressure altitude. Values are stored as whole
+/// knots and whole °C to keep the `stats.winds` snapshot small; [`GRID_MISSING`] marks a point
+/// outside the source model's footprint.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WindGrid {
+    /// Latitude and longitude (deg) of grid index `[0][0]`, and the spacing (deg) of both axes.
+    pub lat0: f64,
+    pub lon0: f64,
+    pub step_deg: f64,
+    pub nlat: usize,
+    pub nlon: usize,
+    /// Pressure altitude (ft) of each level, in increasing altitude.
+    pub levels_ft: Vec<f64>,
+    /// The "from" wind vector `(east, north)` (kt), as [`WindLevel`] uses, and the temperature
+    /// (°C), each laid out `[level][lat][lon]`.
+    pub u: Vec<i16>,
+    pub v: Vec<i16>,
+    pub t: Vec<i16>,
+}
+
+impl WindGrid {
+    fn len_ok(&self) -> bool {
+        let n = self.levels_ft.len() * self.nlat * self.nlon;
+        n > 0 && self.u.len() == n && self.v.len() == n && self.t.len() == n
+    }
+
+    /// The column at a point, bilinear between the four surrounding grid points that are defined.
+    /// None outside the grid or where no surrounding point is defined.
+    fn column(&self, lat: f64, lon: f64) -> Option<Column> {
+        if !self.len_ok() {
+            return None;
+        }
+        let fi = (lat - self.lat0) / self.step_deg;
+        let fj = (lon - self.lon0) / self.step_deg;
+        let (imax, jmax) = ((self.nlat - 1) as f64, (self.nlon - 1) as f64);
+        if !(0.0..=imax).contains(&fi) || !(0.0..=jmax).contains(&fj) {
+            return None;
+        }
+        let (i0, j0) = (fi.floor() as usize, fj.floor() as usize);
+        let (i1, j1) = ((i0 + 1).min(self.nlat - 1), (j0 + 1).min(self.nlon - 1));
+        let (ti, tj) = (fi - i0 as f64, fj - j0 as f64);
+        let corners = [
+            (i0, j0, (1.0 - ti) * (1.0 - tj)),
+            (i0, j1, (1.0 - ti) * tj),
+            (i1, j0, ti * (1.0 - tj)),
+            (i1, j1, ti * tj),
+        ];
+        let plane = self.nlat * self.nlon;
+        let mut col = Column::new();
+        for (k, &alt) in self.levels_ft.iter().enumerate() {
+            let (mut u, mut v, mut wsum, mut t, mut tsum) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for &(i, j, w) in &corners {
+                let at = k * plane + i * self.nlon + j;
+                if self.u[at] != GRID_MISSING && self.v[at] != GRID_MISSING {
+                    u += w * self.u[at] as f64;
+                    v += w * self.v[at] as f64;
+                    wsum += w;
+                }
+                if self.t[at] != GRID_MISSING {
+                    t += w * self.t[at] as f64;
+                    tsum += w;
+                }
+            }
+            if wsum > 1e-9 {
+                let temp_k = (tsum > 1e-9).then(|| t / tsum + C_TO_K);
+                col.push((alt, (u / wsum, v / wsum), temp_k));
+            }
+        }
+        (!col.is_empty()).then_some(col)
+    }
+}
+
+/// Where the live wind field came from, for the data-status view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WindsSource {
+    /// NOAA Rapid Refresh.
+    Rap,
+    /// No field: every ETA flies still air.
+    None,
+}
+
 /// The winds-aloft picture. Serializable so the stats collector can snapshot it for historical
-/// replay (`stats.winds`) and the reconstruction can load a past snapshot back.
+/// replay (`stats.winds`) and the reconstruction can load a past snapshot back. The fields added
+/// since are `Option`s, which serde reads as `None` when absent, so an older snapshot still loads.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Winds {
     stations: Vec<Station>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grid: Option<WindGrid>,
+    /// The time the field is valid for (RAP); None for FB, whose tables carry a forecast window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_at: Option<DateTime<Utc>>,
 }
 
 impl Winds {
+    /// A RAP field.
+    pub fn from_grid(grid: WindGrid, valid_at: DateTime<Utc>) -> Self {
+        Self {
+            stations: Vec::new(),
+            grid: Some(grid),
+            valid_at: Some(valid_at),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.stations.is_empty()
+        self.stations.is_empty() && self.grid.is_none()
     }
 
-    pub fn station_count(&self) -> usize {
-        self.stations.len()
+    pub fn valid_at(&self) -> Option<DateTime<Utc>> {
+        self.valid_at
     }
 
-    /// The wind vector at a point: each of the [`BLEND_STATIONS`] nearest stations within
-    /// [`MAX_STATION_NM`] interpolated to `alt_ft`, blended by inverse distance squared. None when
-    /// no station covers the point (the caller flies still air).
-    fn wind_uv(&self, lat: f64, lon: f64, alt_ft: f64) -> Option<(f64, f64)> {
-        let mut near: Vec<(f64, (f64, f64))> = self
+    /// The source of a live field. Only replayed snapshots from before RAP hold stations, and
+    /// data-status never reports one of those.
+    pub fn source(&self) -> WindsSource {
+        if self.grid.is_some() {
+            WindsSource::Rap
+        } else {
+            WindsSource::None
+        }
+    }
+
+    /// The vertical column at a point. None when the field does not cover it (still air there).
+    fn column(&self, lat: f64, lon: f64) -> Option<Column> {
+        match &self.grid {
+            Some(grid) => grid.column(lat, lon),
+            None => self.station_column(lat, lon),
+        }
+    }
+
+    /// A pre-RAP snapshot's column: each of the [`BLEND_STATIONS`] nearest FB stations within [`MAX_STATION_NM`],
+    /// blended by inverse distance squared at every level any of them reports.
+    fn station_column(&self, lat: f64, lon: f64) -> Option<Column> {
+        let mut near: Vec<(f64, &Station)> = self
             .stations
             .iter()
-            .filter_map(|s| {
-                let d = gc_dist(lat, lon, s.lat, s.lon);
-                (d <= MAX_STATION_NM).then_some(d).zip(s.uv_at(alt_ft))
-            })
+            .map(|s| (gc_dist(lat, lon, s.lat, s.lon), s))
+            .filter(|(d, s)| *d <= MAX_STATION_NM && !s.levels.is_empty())
             .collect();
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         near.truncate(BLEND_STATIONS);
-        let &(nearest_d, nearest_uv) = near.first()?;
-        if nearest_d <= ON_STATION_NM {
-            return Some(nearest_uv);
+        if near.first()?.0 <= ON_STATION_NM {
+            near.truncate(1);
         }
-        let (mut u, mut v, mut wsum) = (0.0, 0.0, 0.0);
-        for (d, (su, sv)) in near {
-            let w = 1.0 / (d * d);
-            u += w * su;
-            v += w * sv;
-            wsum += w;
-        }
-        Some((u / wsum, v / wsum))
-    }
-
-    /// Mean headwind (kt; `+` = headwind, `-` = tailwind) along a `[lat, lon]` polyline at
-    /// `alt_ft`. None when no station covers the route (caller flies still air).
-    pub fn route_headwind(&self, points: &[[f64; 2]], alt_ft: f64) -> Option<f64> {
-        if points.len() < 2 || self.stations.is_empty() {
-            return None;
-        }
-        let mut sum = 0.0;
-        let mut cnt = 0;
-        for seg in points.windows(2) {
-            let (a, b) = (seg[0], seg[1]);
-            let course = bearing_deg(a[0], a[1], b[0], b[1]);
-            let (mlat, mlon) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
-            // A calm wind (9900) is a zero vector, so it still counts as a sample.
-            if let Some(uv) = self.wind_uv(mlat, mlon, alt_ft) {
-                sum += headwind_along(uv, course);
-                cnt += 1;
-            }
-        }
-        (cnt > 0).then(|| sum / cnt as f64)
-    }
-
-    /// Headwind (kt) at a single point along `course_deg`.
-    pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
-        self.wind_uv(lat, lon, alt_ft)
-            .map(|uv| headwind_along(uv, course_deg))
-    }
-}
-
-/// Fetch and assemble the current winds-aloft picture. Best-effort per region; an empty
-/// result simply means the model flies still air until the next refresh.
-pub async fn fetch(client: &reqwest::Client, airports: &AirportDb) -> Winds {
-    let mut merged: HashMap<String, Vec<(i32, WindLevel)>> = HashMap::new();
-    for level in TABLE_LEVELS {
-        for reg in REGIONS {
-            let url =
-                format!("https://aviationweather.gov/api/data/windtemp?region={reg}&level={level}");
-            let text = match client
-                .get(&url)
-                .send()
-                .await
-                .and_then(|r| r.error_for_status())
-            {
-                Ok(resp) => match resp.text().await {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                },
-                Err(e) => {
-                    tracing::debug!(region = reg, level, error = %e, "winds region fetch failed");
-                    continue;
+        let mut alts: Vec<i32> = near
+            .iter()
+            .flat_map(|(_, s)| s.levels.iter().map(|(a, _)| *a))
+            .collect();
+        alts.sort_unstable();
+        alts.dedup();
+        let single = near.len() == 1;
+        let col: Column = alts
+            .into_iter()
+            .map(|a| {
+                let alt = a as f64;
+                let (mut u, mut v, mut wsum) = (0.0, 0.0, 0.0);
+                for &(d, s) in &near {
+                    let w = if single { 1.0 } else { 1.0 / (d * d) };
+                    if let Some((su, sv)) = s.uv_at(alt) {
+                        u += w * su;
+                        v += w * sv;
+                        wsum += w;
+                    }
                 }
-            };
-            if !text.contains("FT") {
-                continue;
-            }
-            merge_table(&mut merged, &text);
-        }
+                (alt, (u / wsum, v / wsum), None)
+            })
+            .collect();
+        (!col.is_empty()).then_some(col)
     }
 
-    // Resolve each FB station id to airport coordinates (K.., P.., or bare).
-    let mut stations = Vec::new();
-    for (id, levels) in merged {
-        let coord = airports
-            .get(&format!("K{id}"))
-            .or_else(|| airports.get(&format!("P{id}")))
-            .or_else(|| airports.get(&id));
-        if let Some(&Airport { lat, lon, .. }) = coord {
-            stations.push(Station { lat, lon, levels });
-        }
+    /// Headwind (kt) at a single point along `course_deg`, interpolated to `alt_ft`.
+    #[cfg(test)]
+    pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
+        let col = self.column(lat, lon)?;
+        let levels = col
+            .iter()
+            .map(|&(a, uv, t)| (a, headwind_along(uv, course_deg), t))
+            .collect();
+        RouteWind::new(vec![WindKnot { d_nm: 0.0, levels }]).headwind(0.0, alt_ft)
     }
-    Winds { stations }
-}
 
-/// Add a table's station levels to `merged`, extending (never replacing) a station already seen —
-/// the high table's FL450/FL530 join the same station's low levels.
-fn merge_table(merged: &mut HashMap<String, Vec<(i32, WindLevel)>>, text: &str) {
-    for (id, levels) in parse_windtemp(text) {
-        merged.entry(id).or_default().extend(levels);
-    }
-}
-
-/// Parse an AWC FB table into `(station_id, levels)`. Columns are matched to their nearest
-/// header altitude by character position, tolerating irregular spacing.
-pub fn parse_windtemp(text: &str) -> Vec<(String, Vec<(i32, WindLevel)>)> {
-    let mut levels: Option<Vec<(i32, f64)>> = None;
-    let mut out = Vec::new();
-
-    for raw in text.lines() {
-        let line = raw.replace('\t', " ");
-
-        // Header row: its first token is exactly `FT`, followed by the altitude columns.
-        // (Matching a bare `contains("FT")` would misread stations like `FTW`.)
-        if line.split_whitespace().next() == Some("FT") {
-            let cols = level_columns(&line);
-            if !cols.is_empty() {
-                levels = Some(cols);
-                continue;
-            }
+    /// The wind along a `[lat, lon]` route path, for the trajectory model to read at each point's
+    /// own distance and altitude (#836). `route_len_nm` is the distance-to-destination the profile
+    /// starts at; the path's own length is scaled onto it, so a padded ground route
+    /// (`GROUND_ROUTE_FACTOR`) still spans the whole profile. Each sample carries the headwind along
+    /// the route's course at that point; samples are at most [`KNOT_SPACING_NM`] apart, on the great
+    /// circle of each leg. A point the field does not cover is a gap: the wind of the last covered
+    /// point holds up to it, at most one sample spacing, and is still air beyond. A route the field
+    /// does not cover at all is still air.
+    pub fn along(&self, path: &[[f64; 2]], route_len_nm: f64) -> RouteWind {
+        if self.is_empty() || path.len() < 2 {
+            return RouteWind::still();
         }
-        let Some(cols) = &levels else { continue };
-
-        // Station row: three alphanumerics followed by whitespace.
-        let Some((id, scan_from)) = station_id(&line) else {
-            continue;
+        let legs: Vec<f64> = path
+            .windows(2)
+            .map(|w| gc_dist(w[0][0], w[0][1], w[1][0], w[1][1]))
+            .collect();
+        let total: f64 = legs.iter().sum();
+        if total <= 0.0 {
+            return RouteWind::still();
+        }
+        let mut knots = Vec::new();
+        let mut knot = |point: [f64; 2], flown: f64, course: f64| {
+            let levels = self
+                .column(point[0], point[1])
+                .map_or_else(Vec::new, |col| {
+                    col.iter()
+                        .map(|&(a, uv, t)| (a, headwind_along(uv, course), t))
+                        .collect()
+                });
+            knots.push(WindKnot {
+                d_nm: route_len_nm * (1.0 - flown / total),
+                levels,
+            });
         };
-        let mut lev: Vec<(i32, WindLevel)> = Vec::new();
-        for (center, tok) in tokens_with_centers(&line, scan_from) {
-            let Some(w) = decode_fb(tok) else { continue };
-            // Assign the token to the nearest altitude column.
-            if let Some((alt, _)) = cols
-                .iter()
-                .min_by(|(_, ca), (_, cb)| (ca - center).abs().total_cmp(&(cb - center).abs()))
-            {
-                lev.push((*alt, w));
+        let (mut flown, mut last_course) = (0.0, 0.0);
+        for (seg, &len) in path.windows(2).zip(&legs) {
+            let (a, b) = (seg[0], seg[1]);
+            let n = (len / KNOT_SPACING_NM).ceil().max(1.0) as usize;
+            for k in 0..n {
+                let f = k as f64 / n as f64;
+                let point = great_circle_point(a, b, f);
+                knot(
+                    point,
+                    flown + f * len,
+                    bearing_deg(point[0], point[1], b[0], b[1]),
+                );
             }
+            flown += len;
+            // The course arriving at `b`: the reverse of the bearing from `b` back to `a`.
+            last_course = (bearing_deg(b[0], b[1], a[0], a[1]) + 180.0) % 360.0;
         }
-        if !lev.is_empty() {
-            out.push((id, lev));
-        }
+        knot(path[path.len() - 1], total, last_course);
+        RouteWind::new(knots)
     }
-    out
-}
-
-/// Decode an FB group like `2427+21`, `9900`, or `274131` → wind. `9900` = light/variable.
-fn decode_fb(g: &str) -> Option<WindLevel> {
-    let b = g.as_bytes();
-    if b.len() < 4 || !b[..4].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    if &g[..4] == "9900" {
-        return Some(WindLevel {
-            dir: None,
-            spd: 0.0,
-        });
-    }
-    let mut dd: i32 = g[0..2].parse().ok()?;
-    let mut ss: i32 = g[2..4].parse().ok()?;
-    if dd > 36 {
-        // Codes 51–86 encode ≥100 kt (subtract 50, add 100 kt); 37–50 are invalid.
-        if dd < 51 {
-            return None;
-        }
-        dd -= 50;
-        ss += 100;
-    }
-    Some(WindLevel {
-        dir: Some(((dd * 10) % 360) as f64),
-        spd: ss as f64,
-    })
-}
-
-/// Altitude columns `(alt_ft, center_char)` from a header row's 4–5 digit runs.
-fn level_columns(line: &str) -> Vec<(i32, f64)> {
-    let b = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i].is_ascii_digit() {
-            let start = i;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-            }
-            let len = i - start;
-            if (4..=5).contains(&len)
-                && let Ok(alt) = line[start..i].parse::<i32>()
-            {
-                out.push((alt, start as f64 + len as f64 / 2.0));
-            }
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// A station id is exactly three alphanumerics at the line start followed by whitespace;
-/// returns `(id, byte_offset_after_id)`.
-fn station_id(line: &str) -> Option<(String, usize)> {
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    if i + 3 > b.len() || !line.is_char_boundary(i + 3) {
-        return None;
-    }
-    let id = &line[i..i + 3];
-    if !id.bytes().all(|c| c.is_ascii_alphanumeric())
-        || !id.bytes().any(|c| c.is_ascii_alphabetic())
-    {
-        return None;
-    }
-    if i + 3 < b.len() && !b[i + 3].is_ascii_whitespace() {
-        return None;
-    }
-    Some((id.to_string(), i + 3))
-}
-
-/// Whitespace-separated tokens with their center char position, from `from`.
-fn tokens_with_centers(s: &str, from: usize) -> Vec<(f64, &str)> {
-    let b = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = from;
-    while i < b.len() {
-        if b[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < b.len() && !b[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let tok = &s[start..i];
-        out.push((start as f64 + tok.len() as f64 / 2.0, tok));
-    }
-    out
 }
 
 fn gc_dist(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
@@ -350,6 +335,31 @@ fn gc_dist(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
     2.0 * R_NM * a.sqrt().asin()
 }
 
+/// The point a fraction `f` of the way from `a` to `b` along the great circle between them.
+fn great_circle_point(a: [f64; 2], b: [f64; 2], f: f64) -> [f64; 2] {
+    let (p1, l1, p2, l2) = (
+        a[0].to_radians(),
+        a[1].to_radians(),
+        b[0].to_radians(),
+        b[1].to_radians(),
+    );
+    let delta = gc_dist(a[0], a[1], b[0], b[1]) / R_NM;
+    if delta < 1e-12 {
+        return a;
+    }
+    let (ka, kb) = (
+        ((1.0 - f) * delta).sin() / delta.sin(),
+        (f * delta).sin() / delta.sin(),
+    );
+    let x = ka * p1.cos() * l1.cos() + kb * p2.cos() * l2.cos();
+    let y = ka * p1.cos() * l1.sin() + kb * p2.cos() * l2.sin();
+    let z = ka * p1.sin() + kb * p2.sin();
+    [
+        z.atan2((x * x + y * y).sqrt()).to_degrees(),
+        y.atan2(x).to_degrees(),
+    ]
+}
+
 fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
     let dlo = (lo2 - lo1).to_radians();
     let y = dlo.sin() * la2.to_radians().cos();
@@ -358,82 +368,85 @@ fn bearing_deg(la1: f64, lo1: f64, la2: f64, lo2: f64) -> f64 {
     (y.atan2(x).to_degrees() + 360.0) % 360.0
 }
 
+/// Test-only constructor for a RAP-shaped field, for tests outside this module (the fields are
+/// private). A 1° grid with index `[0][0]` at `(lat0, lon0)`, `nlat × nlon` points, at `levels_ft`
+/// (increasing); each point's `(u, v, t)` (the "from" wind in kt and °C, or [`GRID_MISSING`]) is
+/// `at(alt_ft, lat, lon)`.
+#[cfg(test)]
+impl Winds {
+    pub(crate) fn test_grid(
+        (lat0, lon0): (f64, f64),
+        (nlat, nlon): (usize, usize),
+        levels_ft: &[f64],
+        valid_at: DateTime<Utc>,
+        at: impl Fn(f64, f64, f64) -> (i16, i16, i16),
+    ) -> Self {
+        let mut grid = WindGrid {
+            lat0,
+            lon0,
+            step_deg: 1.0,
+            nlat,
+            nlon,
+            levels_ft: levels_ft.to_vec(),
+            u: Vec::new(),
+            v: Vec::new(),
+            t: Vec::new(),
+        };
+        for &alt in levels_ft {
+            for i in 0..nlat {
+                for j in 0..nlon {
+                    let (u, v, t) = at(alt, lat0 + i as f64, lon0 + j as f64);
+                    grid.u.push(u);
+                    grid.v.push(v);
+                    grid.t.push(t);
+                }
+            }
+        }
+        Self::from_grid(grid, valid_at)
+    }
+
+    /// The field every #836 caller test seeds: over 37–42°N, 79–72°W, 80 kt from 225° (a headwind
+    /// on the south-west KJFK→KDCA course) at and above 30,000 ft east of 75.5°W, and calm
+    /// elsewhere. It shears with altitude and changes along the route, so both still air and any
+    /// single route-mean value time a flight through it differently.
+    pub(crate) fn test_shear() -> Self {
+        Self::test_grid(
+            (37.0, -79.0),
+            (6, 8),
+            &[5_000.0, 18_000.0, 30_000.0, 39_000.0],
+            DateTime::from_timestamp(1_792_112_400, 0).expect("2026-10-16T01:00Z"),
+            |alt, _, lon| {
+                if alt >= 30_000.0 && lon > -75.5 {
+                    (-57, -57, -45)
+                } else {
+                    (0, 0, -45)
+                }
+            },
+        )
+    }
+
+    /// An FB field of one station with one level.
+    pub(crate) fn test_station(lat: f64, lon: f64, alt_ft: i32, dir: f64, spd: f64) -> Self {
+        Self {
+            stations: vec![Station {
+                lat,
+                lon,
+                levels: vec![(
+                    alt_ft,
+                    WindLevel {
+                        dir: Some(dir),
+                        spd,
+                    },
+                )],
+            }],
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const SAMPLE: &str = "\
-DATA BASED ON 131800Z
-VALID 140000Z   FOR USE 2000-0300Z. TEMPS NEG ABV 24000
-
-FT  3000    6000    9000   12000   18000   24000  30000  34000  39000
-BRL 1817 2427+21 2727+14 2928+09 2933-05 2736-15 274131 264142 243352
-FWA 9900 2605+16 2708+12 2818+07 3025-05 2740-15 265031 265541 256053
-";
-
-    #[test]
-    fn decodes_fb_groups() {
-        // 2427 → from 240°, 27 kt.
-        let w = decode_fb("2427+21").unwrap();
-        assert_eq!(w.dir, Some(240.0));
-        assert_eq!(w.spd, 27.0);
-        // 9900 → calm / light-variable.
-        let calm = decode_fb("9900").unwrap();
-        assert_eq!(calm.dir, None);
-        assert_eq!(calm.spd, 0.0);
-        // dd>36 encodes speed ≥ 100 kt: 7420 → dir 240°, 120 kt.
-        let fast = decode_fb("7420").unwrap();
-        assert_eq!(fast.dir, Some(240.0));
-        assert_eq!(fast.spd, 120.0);
-        assert!(decode_fb("+21").is_none());
-    }
-
-    #[test]
-    fn parses_a_windtemp_table() {
-        let stations = parse_windtemp(SAMPLE);
-        let brl = stations
-            .iter()
-            .find(|(id, _)| id == "BRL")
-            .expect("BRL parsed");
-        // Nine levels, matching the nine header columns.
-        assert_eq!(brl.1.len(), 9);
-        // 3000 ft column: 1817 → 180°, 17 kt.
-        let (_, low) = brl.1.iter().find(|(a, _)| *a == 3000).unwrap();
-        assert_eq!(low.dir, Some(180.0));
-        assert_eq!(low.spd, 17.0);
-        // 39000 ft column: 2433 → 240°, 33+100 = ... actually 24 ≤ 36 so 240°, 33 kt.
-        let (_, high) = brl.1.iter().find(|(a, _)| *a == 39000).unwrap();
-        assert_eq!(high.dir, Some(240.0));
-        // FWA at 3000 is calm (9900).
-        let fwa = stations.iter().find(|(id, _)| id == "FWA").unwrap();
-        let (_, fwa_low) = fwa.1.iter().find(|(a, _)| *a == 3000).unwrap();
-        assert_eq!(fwa_low.spd, 0.0);
-    }
-
-    #[test]
-    fn station_id_containing_ft_is_not_a_header() {
-        // FTW (Fort Worth) contains "FT" — it must parse as a station, not a header, and
-        // must not corrupt the altitude columns for stations that follow it.
-        let sample = "\
-FT  3000    6000    9000
-FTW 1817 2427+21 2727+14
-BRL 2013 2110+18 2308+12
-";
-        let stations = parse_windtemp(sample);
-        let ftw = stations
-            .iter()
-            .find(|(id, _)| id == "FTW")
-            .expect("FTW parses as a station");
-        assert_eq!(
-            ftw.1.iter().find(|(a, _)| *a == 3000).map(|(_, w)| w.dir),
-            Some(Some(180.0)),
-            "FTW 3000ft = 180°/17kt"
-        );
-        assert!(
-            stations.iter().any(|(id, _)| id == "BRL"),
-            "the station after FTW must still parse"
-        );
-    }
 
     #[test]
     fn headwind_projection() {
@@ -451,10 +464,12 @@ BRL 2013 2110+18 2308+12
                     },
                 )],
             }],
+            ..Winds::default()
         };
         // Flying east (course ~090) directly into a 090° wind → +50 kt headwind.
         let hw = winds
-            .route_headwind(&[[40.0, -90.5], [40.0, -89.5]], 35000.0)
+            .along(&[[40.0, -90.5], [40.0, -89.5]], 60.0)
+            .headwind(30.0, 35000.0)
             .unwrap();
         assert!(
             (hw - 50.0).abs() < 1.0,
@@ -462,7 +477,8 @@ BRL 2013 2110+18 2308+12
         );
         // Flying west → tailwind (negative).
         let tw = winds
-            .route_headwind(&[[40.0, -89.5], [40.0, -90.5]], 35000.0)
+            .along(&[[40.0, -89.5], [40.0, -90.5]], 60.0)
+            .headwind(30.0, 35000.0)
             .unwrap();
         assert!(tw < -40.0, "expected strong tailwind, got {tw}");
     }
@@ -494,6 +510,7 @@ BRL 2013 2110+18 2308+12
                 -90.0,
                 vec![(39000, wind(360.0, 70.0)), (34000, wind(360.0, 20.0))],
             )],
+            ..Winds::default()
         };
         assert!((north_hw(&w, 40.0, -90.0, 37000.0) - 50.0).abs() < 1e-9);
         assert!((north_hw(&w, 40.0, -90.0, 45000.0) - 70.0).abs() < 1e-9);
@@ -508,6 +525,7 @@ BRL 2013 2110+18 2308+12
                 station(40.0, -90.0, vec![(35000, wind(360.0, 10.0))]),
                 station(42.0, -90.0, vec![(35000, wind(360.0, 50.0))]),
             ],
+            ..Winds::default()
         };
         // Midway: equal weights.
         assert!((north_hw(&w, 41.0, -90.0, 35000.0) - 30.0).abs() < 1e-6);
@@ -532,6 +550,7 @@ BRL 2013 2110+18 2308+12
                 near(40.0, -90.5),
                 station(42.0, -90.0, vec![(35000, wind(360.0, 90.0))]),
             ],
+            ..Winds::default()
         };
         assert!((north_hw(&w, 40.0, -90.0, 35000.0) - 10.0).abs() < 1e-9);
     }
@@ -546,6 +565,7 @@ BRL 2013 2110+18 2308+12
                 -90.0,
                 vec![(30000, wind(270.0, 50.0)), (40000, wind(360.0, 50.0))],
             )],
+            ..Winds::default()
         };
         let along = w.point_headwind(40.0, -90.0, 315.0, 35000.0).unwrap();
         let across = w.point_headwind(40.0, -90.0, 45.0, 35000.0).unwrap();
@@ -567,29 +587,420 @@ BRL 2013 2110+18 2308+12
                     },
                 )],
             )],
+            ..Winds::default()
         };
-        let hw = w.route_headwind(&[[40.0, -90.5], [40.0, -89.5]], 35000.0);
+        let hw = w
+            .along(&[[40.0, -90.5], [40.0, -89.5]], 60.0)
+            .headwind(30.0, 35000.0);
         assert_eq!(hw, Some(0.0));
     }
 
+    // ---- #836: snapshot compatibility, FB temperatures, the grid column and `along` ----
+
+    fn at_time(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn fb(stations: Vec<Station>) -> Winds {
+        Winds {
+            stations,
+            ..Winds::default()
+        }
+    }
+
+    /// The 2 x 2 grid at (40..41, -90..-89), one level at 34,000 ft, u 10/20/30/50 kt, v 0, -40 °C.
+    fn square(missing_ne: bool) -> Winds {
+        Winds::test_grid(
+            (40.0, -90.0),
+            (2, 2),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, lat, lon| {
+                let u = match (lat as i32, lon as i32) {
+                    (40, -90) => 10,
+                    (40, -89) => 20,
+                    (41, -90) => 30,
+                    _ if missing_ne => GRID_MISSING,
+                    _ => 50,
+                };
+                (u, if u == GRID_MISSING { GRID_MISSING } else { 0 }, -40)
+            },
+        )
+    }
+
+    fn east_u(w: &Winds, lat: f64, lon: f64) -> Option<f64> {
+        w.column(lat, lon)
+            .map(|c| c.iter().find(|l| l.0 == 34_000.0).unwrap().1.0)
+    }
+
+    // AC4: a `stats.winds` row written before #836 (FB stations, no grid, no valid_at) still loads
+    // and reads the same headwind.
     #[test]
-    fn high_table_extends_a_stations_low_levels() {
-        let high = "\
-FT   45000  53000
-BRL 264663 263369
-";
-        let mut merged = HashMap::new();
-        merge_table(&mut merged, SAMPLE);
-        merge_table(&mut merged, high);
-        let brl = &merged["BRL"];
-        assert_eq!(brl.len(), 11, "nine low levels + two high levels");
-        let at = |alt| {
-            brl.iter()
-                .find(|(a, _)| *a == alt)
-                .map(|(_, w)| (w.dir, w.spd))
+    fn a_pre_change_fb_snapshot_decodes_and_gives_the_same_headwind() {
+        let json = r#"{"stations":[{"lat":40.0,"lon":-90.0,"levels":[[3000,{"dir":180.0,"spd":17.0}],[35000,{"dir":90.0,"spd":50.0}]]}]}"#;
+        let w: Winds = serde_json::from_str(json).unwrap();
+        assert_eq!(w.valid_at(), None);
+        assert_eq!(w.stations.len(), 1);
+        let east = w.point_headwind(40.0, -90.0, 90.0, 35_000.0).unwrap();
+        assert!((east - 50.0).abs() < 1e-9, "{east}");
+        let north = w.point_headwind(40.0, -90.0, 0.0, 3_000.0).unwrap();
+        assert!((north + 17.0).abs() < 1e-9, "{north}");
+    }
+
+    // AC4 edge: an old snapshot's calm level (`dir: null`).
+    #[test]
+    fn a_pre_change_snapshot_with_a_calm_level_decodes_as_zero_wind() {
+        let json =
+            r#"{"stations":[{"lat":40.0,"lon":-90.0,"levels":[[35000,{"dir":null,"spd":0.0}]]}]}"#;
+        let w: Winds = serde_json::from_str(json).unwrap();
+        assert_eq!(w.point_headwind(40.0, -90.0, 90.0, 35_000.0), Some(0.0));
+    }
+
+    // A RAP field written to `stats.winds` reads back identical (replay of post-#836 snapshots).
+    #[test]
+    fn a_rap_field_round_trips_through_its_snapshot_json() {
+        let valid = at_time("2026-10-16T01:00:00Z");
+        let w = Winds::test_grid(
+            (38.0, -78.0),
+            (3, 4),
+            &[18_000.0, 34_000.0],
+            valid,
+            |alt, lat, lon| {
+                let t = if lat == 40.0 && lon == -75.0 {
+                    GRID_MISSING
+                } else {
+                    -30 - (alt / 1000.0) as i16
+                };
+                ((lon + 80.0) as i16 * 10, (lat - 37.0) as i16 * 5, t)
+            },
+        );
+        let json = serde_json::to_string(&w).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("grid").is_some() && v.get("valid_at").is_some());
+        let back: Winds = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source(), WindsSource::Rap);
+        assert_eq!(back.valid_at(), Some(valid));
+        assert_eq!(
+            back.point_headwind(39.5, -76.5, 45.0, 34_000.0),
+            w.point_headwind(39.5, -76.5, 45.0, 34_000.0)
+        );
+        assert_eq!(back.column(39.5, -76.5), w.column(39.5, -76.5));
+        // The missing temperature stays missing: its grid point alone reads no temperature.
+        assert_eq!(back.column(40.0, -75.0).unwrap()[1].2, None);
+    }
+
+    // data-status's `winds_source` comes from here.
+    #[test]
+    fn the_source_is_rap_for_a_grid_and_none_without_one() {
+        assert_eq!(Winds::default().source(), WindsSource::None);
+        assert_eq!(square(false).source(), WindsSource::Rap);
+    }
+
+    // Grid column: bilinear between the four surrounding points.
+    #[test]
+    fn the_grid_column_is_bilinear_between_the_four_surrounding_points() {
+        let w = square(false);
+        assert!((east_u(&w, 40.25, -89.5).unwrap() - 21.25).abs() < 1e-9);
+        assert_eq!(east_u(&w, 40.0, -90.0), Some(10.0));
+        let col = w.column(40.25, -89.5).unwrap();
+        assert!((col[0].2.unwrap() - 233.15).abs() < 1e-9);
+    }
+
+    // Grid column: a GRID_MISSING corner is left out and the others reweighted.
+    #[test]
+    fn a_missing_grid_corner_is_left_out_and_the_rest_reweighted() {
+        let w = square(true);
+        assert!((east_u(&w, 40.5, -89.5).unwrap() - 20.0).abs() < 1e-9);
+        // Only the missing corner surrounds this point: no wind there.
+        assert_eq!(w.column(41.0, -89.0), None);
+    }
+
+    // Grid column: a corner missing only its v is left out too, not averaged in with u alone.
+    #[test]
+    fn a_grid_corner_missing_only_its_v_is_left_out() {
+        let w = Winds::test_grid(
+            (40.0, -90.0),
+            (2, 2),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, lat, lon| match (lat as i32, lon as i32) {
+                (40, -90) => (10, 0, -40),
+                (40, -89) => (20, 0, -40),
+                (41, -90) => (30, 0, -40),
+                _ => (50, GRID_MISSING, -40),
+            },
+        );
+        assert!((east_u(&w, 40.5, -89.5).unwrap() - 20.0).abs() < 1e-9);
+    }
+
+    // A replayed station with no levels is not blended, even when it sits on the point asked about.
+    #[test]
+    fn a_station_with_no_levels_is_skipped() {
+        let w = Winds {
+            stations: vec![
+                station(40.0, -90.0, vec![]),
+                station(41.0, -90.0, vec![(35000, wind(360.0, 10.0))]),
+            ],
+            ..Winds::default()
         };
-        assert_eq!(at(3000), Some((Some(180.0), 17.0)), "low levels kept");
-        assert_eq!(at(45000), Some((Some(260.0), 46.0)));
-        assert_eq!(at(53000), Some((Some(260.0), 33.0)));
+        assert!((north_hw(&w, 40.0, -90.0, 35000.0) - 10.0).abs() < 1e-9);
+    }
+
+    // Grid column: outside the grid there is no wind (still air), not a clamped edge value.
+    #[test]
+    fn a_point_outside_the_grid_has_no_column() {
+        let w = square(false);
+        for (lat, lon) in [
+            (39.99, -89.5),
+            (41.01, -89.5),
+            (40.5, -90.01),
+            (40.5, -88.99),
+        ] {
+            assert_eq!(w.column(lat, lon), None, "({lat},{lon})");
+        }
+        assert!(w.column(41.0, -89.0).is_some());
+    }
+
+    // Grid column: wind present, temperature missing -> temp None, so the profile uses ISA.
+    #[test]
+    fn a_grid_point_with_wind_but_no_temperature_reads_isa_downstream() {
+        let w = Winds::test_grid(
+            (40.0, -90.0),
+            (2, 2),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, _, _| (30, 0, GRID_MISSING),
+        );
+        let rw = w.along(&[[40.2, -89.8], [40.2, -89.2]], 27.0);
+        assert_eq!(rw.temp_k(10.0, 34_000.0), None);
+        assert!(rw.headwind(10.0, 34_000.0).is_some());
+    }
+
+    // Grid column: arrays that do not match the declared shape are refused (a corrupt snapshot).
+    #[test]
+    fn a_grid_whose_arrays_do_not_match_its_shape_has_no_column() {
+        let grid = WindGrid {
+            lat0: 40.0,
+            lon0: -90.0,
+            step_deg: 1.0,
+            nlat: 2,
+            nlon: 2,
+            levels_ft: vec![34_000.0],
+            u: vec![10, 20, 30],
+            v: vec![0, 0, 0, 0],
+            t: vec![-40, -40, -40, -40],
+        };
+        assert_eq!(grid.column(40.5, -89.5), None);
+        let w = Winds::from_grid(grid, at_time("2026-10-16T01:00:00Z"));
+        assert!(w.along(&[[40.2, -89.8], [40.2, -89.2]], 27.0).is_still());
+    }
+
+    // along: a sample at most every 50 nm.
+    #[test]
+    fn along_samples_a_long_leg_at_most_every_fifty_nm() {
+        let w = fb(vec![station(40.0, -88.0, vec![(34000, wind(270.0, 40.0))])]);
+        let path = [[40.0, -90.0], [40.0, -85.5]];
+        let len = gc_dist(40.0, -90.0, 40.0, -85.5);
+        let ds = w.along(&path, len).knot_distances();
+        assert_eq!(ds.len(), (len / 50.0).ceil() as usize + 1, "{ds:?}");
+        assert!(ds.windows(2).all(|p| p[1] - p[0] <= 50.0 + 1e-9), "{ds:?}");
+        assert!(ds[0].abs() < 1e-9 && (ds[ds.len() - 1] - len).abs() < 1e-9);
+    }
+
+    // along: each leg's headwind is along that leg's own course.
+    #[test]
+    fn along_reads_each_legs_headwind_along_that_legs_course() {
+        let w = fb(vec![station(41.0, -89.0, vec![(34000, wind(360.0, 40.0))])]);
+        let path = [[40.0, -90.0], [40.0, -88.0], [42.0, -88.0]];
+        let (east, north) = (
+            gc_dist(40.0, -90.0, 40.0, -88.0),
+            gc_dist(40.0, -88.0, 42.0, -88.0),
+        );
+        let rw = w.along(&path, east + north);
+        let on_east = rw.headwind(north + east * 0.75, 34_000.0).unwrap();
+        let on_north = rw.headwind(north * 0.5, 34_000.0).unwrap();
+        assert!(
+            on_east.abs() < 0.5,
+            "crosswind on the east leg reads {on_east}"
+        );
+        assert!((on_north - 40.0).abs() < 0.5, "north leg reads {on_north}");
+    }
+
+    // along: the path's length is scaled onto the distance the profile starts at.
+    #[test]
+    fn along_scales_the_paths_length_onto_the_profiles_distance() {
+        // 60 kt from the east at and east of -87°, calm west of -88°.
+        let w = Winds::test_grid(
+            (39.0, -91.0),
+            (3, 7),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, _, lon| (if lon >= -87.0 { 60 } else { 0 }, 0, -40),
+        );
+        let path = [[40.0, -90.0], [40.0, -86.0]];
+        let route_len = 1.12 * gc_dist(40.0, -90.0, 40.0, -86.0);
+        let rw = w.along(&path, route_len);
+        assert_eq!(rw.headwind(route_len, 34_000.0), Some(0.0));
+        assert_eq!(rw.headwind(0.5 * route_len, 34_000.0), Some(0.0));
+        let east = rw.headwind(0.25 * route_len, 34_000.0).unwrap();
+        assert!(
+            (east - 60.0).abs() < 0.1,
+            "flying east into an easterly reads {east}"
+        );
+    }
+
+    // along: a route the field does not reach is still air (no error, no zero-wind knots).
+    #[test]
+    fn along_a_route_the_field_does_not_cover_is_still_air() {
+        let w = fb(vec![station(40.0, -90.0, vec![(34000, wind(270.0, 40.0))])]);
+        assert!(w.along(&[[60.0, -150.0], [61.0, -150.0]], 60.0).is_still());
+        assert!(
+            square(false)
+                .along(&[[60.0, -150.0], [61.0, -150.0]], 60.0)
+                .is_still()
+        );
+    }
+
+    // along: a point outside the field is a gap knot, so the covered wind stops one sample past
+    // the edge.
+    #[test]
+    fn along_marks_the_points_outside_the_field_as_gaps() {
+        let w = Winds::test_grid(
+            (40.0, -90.0),
+            (2, 2),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, _, _| (-50, 0, -40),
+        );
+        let path = [[40.5, -89.5], [40.5, -85.0]];
+        let len = gc_dist(40.5, -89.5, 40.5, -85.0);
+        let rw = w.along(&path, len);
+        // Samples every 41 nm (205 nm in 5); only the first is inside the grid.
+        let ds = rw.knot_distances();
+        assert_eq!(ds.len(), 6, "{ds:?}");
+        // An eastbound great circle runs a hair off 090°, so a 50 kt westerly reads just under 50 kt
+        // of tailwind.
+        let start = rw.headwind(len, 34_000.0).unwrap();
+        assert!((start + 50.0).abs() < 0.1, "{start}");
+        // Up to the first uncovered sample the covered wind holds; past it, still air.
+        assert_eq!(rw.headwind(ds[4] + 1.0, 34_000.0), Some(start));
+        assert_eq!(rw.headwind(ds[3] + 1.0, 34_000.0), None);
+        assert_eq!(rw.headwind(0.0, 34_000.0), None);
+    }
+
+    // along: degenerate inputs.
+    #[test]
+    fn along_a_degenerate_path_is_still_air() {
+        let w = square(false);
+        assert!(w.along(&[], 10.0).is_still());
+        assert!(w.along(&[[40.5, -89.5]], 10.0).is_still());
+        assert!(w.along(&[[40.5, -89.5], [40.5, -89.5]], 10.0).is_still());
+        assert!(
+            Winds::default()
+                .along(&[[40.2, -89.8], [40.8, -89.2]], 40.0)
+                .is_still()
+        );
+    }
+
+    // along on a RAP grid carries every pressure level with its temperature, so the profile can
+    // read wind and temperature at its own altitude.
+    #[test]
+    fn along_on_a_grid_carries_every_level_with_its_temperature() {
+        let w = Winds::test_grid(
+            (38.0, -78.0),
+            (3, 4),
+            &[5_000.0, 18_000.0, 34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |alt, _, _| match alt as i32 {
+                5_000 => (0, 0, 5),
+                18_000 => (0, 20, -20),
+                _ => (0, 80, -50),
+            },
+        );
+        let path = [[38.2, -76.5], [39.8, -76.5]];
+        let len = gc_dist(38.2, -76.5, 39.8, -76.5);
+        let rw = w.along(&path, len);
+        let d = len / 2.0;
+        let hw = |alt| rw.headwind(d, alt).unwrap();
+        assert!(hw(5_000.0).abs() < 1e-6);
+        assert!((hw(18_000.0) - 20.0).abs() < 1e-6);
+        assert!((hw(26_000.0) - 50.0).abs() < 1e-6);
+        assert!((hw(34_000.0) - 80.0).abs() < 1e-6);
+        assert!((rw.temp_k(d, 34_000.0).unwrap() - 223.15).abs() < 1e-9);
+    }
+
+    // Long legs are sampled on the great circle, not a straight lat/lon line.
+    #[test]
+    fn great_circle_points_follow_the_great_circle() {
+        let mid = great_circle_point([0.0, 0.0], [0.0, 90.0], 0.5);
+        assert!(
+            mid[0].abs() < 1e-9 && (mid[1] - 45.0).abs() < 1e-9,
+            "{mid:?}"
+        );
+        // Halfway between two points on 45°N, 180° apart, the great circle crosses the pole.
+        let pole = great_circle_point([45.0, -90.0], [45.0, 90.0], 0.5);
+        assert!((pole[0] - 90.0).abs() < 1e-9, "{pole:?}");
+        assert_eq!(
+            great_circle_point([40.0, -90.0], [40.0, -90.0], 0.5),
+            [40.0, -90.0]
+        );
+    }
+
+    // Each sample reads the headwind on the route's course where it sits: on a KJFK→KLAX direct
+    // leg the course turns from 274° to 246°, so a 50 kt northerly goes from a crosswind to a
+    // 20 kt tailwind (50 kt × cos 246°).
+    #[test]
+    fn along_reads_the_course_at_each_point_of_a_long_leg() {
+        let w = Winds::test_grid(
+            (30.0, -120.0),
+            (15, 50),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, _, _| (0, 50, -45),
+        );
+        let (jfk, lax) = ([40.64, -73.78], [33.94, -118.41]);
+        let len = gc_dist(jfk[0], jfk[1], lax[0], lax[1]);
+        let rw = w.along(&[jfk, lax], len);
+        let start = rw.headwind(len, 34_000.0).unwrap();
+        let end = rw.headwind(0.0, 34_000.0).unwrap();
+        assert!((start - 3.3).abs() < 1.5, "start {start}");
+        assert!((end + 20.4).abs() < 1.5, "end {end}");
+    }
+
+    // Interior samples sit on the great circle and read the course there. Halfway along KJFK→KLAX
+    // (sample 21 of 43, 1,098 nm from LAX) the great circle is at 39.54°N on a 259.0° course; a
+    // straight lat/lon line would be at 37.37°N. A 50 kt northerly blowing only north of 39°N
+    // reads 50 × cos 259.0° = -9.5 kt there, and nothing on the straight line.
+    #[test]
+    fn along_samples_a_long_leg_on_the_great_circle_with_the_course_there() {
+        let w = Winds::test_grid(
+            (30.0, -120.0),
+            (15, 50),
+            &[34_000.0],
+            at_time("2026-10-16T01:00:00Z"),
+            |_, lat, _| (0, if lat >= 39.0 { 50 } else { 0 }, -45),
+        );
+        let (jfk, lax) = ([40.64, -73.78], [33.94, -118.41]);
+        let len = gc_dist(jfk[0], jfk[1], lax[0], lax[1]);
+        let rw = w.along(&[jfk, lax], len);
+        let mid = rw.headwind(1_097.95, 34_000.0).unwrap();
+        assert!((mid + 9.5).abs() < 1.0, "halfway reads {mid} kt");
+    }
+
+    // A grid with no rows has no column rather than underflowing its index arithmetic.
+    #[test]
+    fn a_grid_with_no_rows_has_no_column() {
+        let grid = WindGrid {
+            lat0: 40.0,
+            lon0: -90.0,
+            step_deg: 1.0,
+            nlat: 0,
+            nlon: 2,
+            levels_ft: vec![34_000.0],
+            u: vec![],
+            v: vec![],
+            t: vec![],
+        };
+        assert_eq!(grid.column(40.0, -90.0), None);
     }
 }

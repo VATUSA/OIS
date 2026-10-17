@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, fcaIsLive, refreshToast} from "./fca";
+import {type DataStatus, fcaIsLive, refreshToast, windsLabel} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -12,7 +12,7 @@ function status(over: Partial<DataStatus>): DataStatus {
     nav_source: "runtime fetch (faa)",
     navaids: 3,
     procedures: 4,
-    winds_stations: 176,
+    winds_source: "rap",
     ...over,
   };
 }
@@ -21,7 +21,7 @@ describe("refreshToast", () => {
   it("reads as success only when the loaded cycle is current", () => {
     const toast = refreshToast(status({}));
     expect(toast.variant).toBe("success");
-    expect(toast.title).toBe("Nav 2026-09-03 · 176 wind stations");
+    expect(toast.title).toBe("Nav 2026-09-03 · RAP winds");
     expect(toast.description).toBeUndefined();
   });
 
@@ -31,7 +31,7 @@ describe("refreshToast", () => {
     const toast = refreshToast(status({ nav_cycle: "2026-07-09", nav_cycles_behind: 2 }));
     expect(toast.variant).toBe("warning");
     expect(toast.title).toBe("NASR cycle 2026-07-09 is 2 cycles behind");
-    expect(toast.description).toBe("Nav 2026-07-09 · 176 wind stations · current 2026-09-03");
+    expect(toast.description).toBe("Nav 2026-07-09 · RAP winds · current 2026-09-03");
   });
 
   it("says one cycle behind in the singular", () => {
@@ -48,6 +48,17 @@ describe("refreshToast", () => {
     const absent = refreshToast(status({ nav_cycle: "unknown", nav_cycles_behind: undefined }));
     expect(absent.variant).toBe("warning");
     expect(absent.title).toBe("NASR cycle unknown is unreadable");
+  });
+});
+
+// The summary names the wind source the ETAs use, so still air is visible (#836).
+describe("windsLabel", () => {
+  it("names RAP", () => {
+    expect(windsLabel(status({ winds_source: "rap" }))).toBe("RAP winds");
+  });
+
+  it("says when there is no wind field", () => {
+    expect(windsLabel(status({ winds_source: "none" }))).toBe("no winds");
   });
 });
 

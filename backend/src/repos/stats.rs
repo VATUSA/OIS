@@ -2703,3 +2703,128 @@ mod taxi_reload_tests {
         drop(previous);
     }
 }
+
+#[cfg(test)]
+mod winds_snapshot_tests {
+    use chrono::{DateTime, Utc};
+
+    use super::*;
+    use crate::feed::winds::{Winds, WindsSource};
+
+    fn at(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// The JSON the pre-#836 binary wrote: stations only, no temperatures, no grid, no valid time.
+    const PRE_RAP: &str = r#"{"stations":[{"lat":40.0,"lon":-90.0,"levels":[[3000,{"dir":180.0,"spd":17.0}],[35000,{"dir":90.0,"spd":50.0}]]}]}"#;
+
+    async fn insert_raw(pool: &PgPool, ts: &str, json: &str) {
+        sqlx::query("insert into stats.winds (ts, data) values ($1::timestamptz, $2::jsonb)")
+            .bind(ts)
+            .bind(json)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn rap(valid: &str, u: i16) -> Winds {
+        Winds::test_grid(
+            (38.0, -78.0),
+            (3, 4),
+            &[18_000.0, 34_000.0],
+            at(valid),
+            move |alt, lat, _| (u + (alt / 10_000.0) as i16, (lat - 38.0) as i16 * 5, -40),
+        )
+    }
+
+    // AC4: a row written by the pre-#836 binary.
+    #[sqlx::test]
+    async fn a_snapshot_written_before_rap_reads_back_with_its_winds(pool: PgPool) {
+        insert_raw(&pool, "2026-10-15T18:00:00Z", PRE_RAP).await;
+        let w = winds_at(&pool, at("2026-10-15T18:30:00Z"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.point_headwind(40.0, -90.0, 90.0, 35_000.0), Some(50.0));
+        let north = w.point_headwind(40.0, -90.0, 0.0, 3_000.0).unwrap();
+        assert!((north + 17.0).abs() < 1e-9, "{north}");
+    }
+
+    // AC4: a RAP snapshot reads back as the same field.
+    #[sqlx::test]
+    async fn a_rap_snapshot_round_trips_with_its_grid_and_valid_time(pool: PgPool) {
+        let field = rap("2026-10-16T01:00:00Z", -40);
+        upsert_winds(&pool, at("2026-10-16T01:00:00Z"), &field)
+            .await
+            .unwrap();
+        let back = winds_at(&pool, at("2026-10-16T01:30:00Z"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.source(), WindsSource::Rap);
+        assert_eq!(back.valid_at(), Some(at("2026-10-16T01:00:00Z")));
+        let hw = |w: &Winds| w.point_headwind(39.5, -76.5, 270.0, 34_000.0);
+        assert!(hw(&field).is_some());
+        assert_eq!(hw(&back), hw(&field));
+    }
+
+    // AC4: replay at an instant reads the snapshot in force then, old or new shape.
+    #[sqlx::test]
+    async fn replay_reads_the_newest_snapshot_at_or_before_the_instant(pool: PgPool) {
+        upsert_winds(
+            &pool,
+            at("2026-10-16T01:00:00Z"),
+            &rap("2026-10-16T01:00:00Z", -40),
+        )
+        .await
+        .unwrap();
+        insert_raw(&pool, "2026-10-15T18:00:00Z", PRE_RAP).await;
+        let source = |w: Option<Winds>| w.map(|w| w.source());
+        // The pre-RAP row: stations only, so no grid source, and its station wind reads.
+        let old = winds_at(&pool, at("2026-10-16T00:59:00Z"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.source(), WindsSource::None);
+        assert_eq!(old.point_headwind(40.0, -90.0, 90.0, 35_000.0), Some(50.0));
+        assert_eq!(
+            source(winds_at(&pool, at("2026-10-16T01:00:00Z")).await.unwrap()),
+            Some(WindsSource::Rap)
+        );
+        assert_eq!(
+            source(winds_at(&pool, at("2026-10-16T02:00:00Z")).await.unwrap()),
+            Some(WindsSource::Rap)
+        );
+        assert_eq!(
+            source(winds_at(&pool, at("2026-10-15T17:59:00Z")).await.unwrap()),
+            None
+        );
+    }
+
+    // AC4: two replicas snapshot the same RAP valid time; the first row stands.
+    #[sqlx::test]
+    async fn a_second_snapshot_at_the_same_valid_time_is_ignored(pool: PgPool) {
+        let (a, b) = (
+            rap("2026-10-16T01:00:00Z", -40),
+            rap("2026-10-16T01:00:00Z", 30),
+        );
+        upsert_winds(&pool, at("2026-10-16T01:00:00Z"), &a)
+            .await
+            .unwrap();
+        upsert_winds(&pool, at("2026-10-16T01:00:00Z"), &b)
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("select count(*) from stats.winds")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let back = winds_at(&pool, at("2026-10-16T01:00:00Z"))
+            .await
+            .unwrap()
+            .unwrap();
+        let hw = |w: &Winds| w.point_headwind(39.5, -76.5, 270.0, 34_000.0);
+        assert_eq!(hw(&back), hw(&a));
+        assert_ne!(hw(&a), hw(&b));
+    }
+}

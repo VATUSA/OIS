@@ -32,8 +32,10 @@ relaxed so the whole network is recorded (see [Capture windows](#capture-windows
 - `stats.controller_session` — ATC/ATIS sessions (no positions — they don't move).
 - `stats.snapshot` — per-tick network totals (read-time hourly roll-up; no continuous aggregate).
 - `stats.capture` — a saved/open time window (below).
-- `stats.winds` (0042) — one serialized winds-aloft snapshot per hourly refresh, `jsonb` (Postgres
-  TOASTs it) — so historical ETAs are computed against the winds that actually applied.
+- `stats.winds` (0042) — one serialized wind field per hourly refresh, `jsonb` (Postgres TOASTs
+  it), so historical ETAs are computed against the winds that actually applied. A RAP field is keyed
+  on its valid time, so replicas loading the same cycle write one row. Snapshots from before RAP
+  (FB stations only) still load and replay with their station winds (#836).
 - `stats.flight_plan` (0044) — flight-plan **revision history**, for temporally-faithful replay.
 
 ## Data compression

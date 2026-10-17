@@ -14,6 +14,12 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
+  is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
+  RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
+  RAP, which has no stations. A caller reading `winds_stations` must read `winds_source` instead.
+  `FcaFlightDebug.headwind` is the mean headwind over the remaining route, each point read at the
+  profile's altitude there. (#836)
 - **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
   `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
   flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min
