@@ -1024,6 +1024,8 @@ mod tests {
         assert!(err.contains("point count"), "{err}");
         let err = point_order(&[(0, 0), (1, 0), (0, 1), (2, 1)], (2, 2), 4).unwrap_err();
         assert!(err.contains("outside the grid"), "{err}");
+        let err = point_order(&[(0, 0), (1, 0), (0, 1), (1, 2)], (2, 2), 4).unwrap_err();
+        assert!(err.contains("outside the grid"), "{err}");
         let err = point_order(&[(0, 0), (1, 0), (0, 1), (0, 1)], (2, 2), 4).unwrap_err();
         assert!(err.contains("do not cover"), "{err}");
     }
@@ -1049,8 +1051,10 @@ mod tests {
             turn: vec![(0.0, 1.0); 4],
         };
         assert!(r.check_value_count(4).is_ok());
-        let err = r.check_value_count(3).unwrap_err();
-        assert!(err.contains("value count"), "{err}");
+        for n in [3, 5] {
+            let err = r.check_value_count(n).unwrap_err();
+            assert!(err.contains("value count"), "{n}: {err}");
+        }
     }
 
     // Two messages on different grids are refused rather than averaged together.

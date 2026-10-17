@@ -632,12 +632,9 @@ impl VerticalProfile {
     /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
     /// the paired ETA in the same row was actually timed against.
     ///
-    /// This used to cap the result at the cruise groundspeed wherever the profile was still at
-    /// cruise altitude, because [`Self::build`]'s samples made the cruise leg a TAS ramp (#355).
-    /// That cap was a workaround over wrong samples, and deliberately did not apply to
-    /// [`Self::time_between`], so ETAs stayed optimistic. #361 fixed the samples instead — the
-    /// cruise leg is genuinely flat now and the profile never exceeds cruise TAS — so the cap is
-    /// gone and this is simply the profile's own speed again.
+    /// No cap at the cruise groundspeed: [`Self::build`]'s samples are the truth, read the same way
+    /// here and by [`Self::time_between`] (#361). The cruise leg's TAS changes only with the air
+    /// temperature under a cruise Mach (#836).
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
         self.gs_at(d_nm)
     }
@@ -1733,8 +1730,9 @@ mod tests {
         assert!(RouteWind::new(vec![knot(10.0, vec![]), knot(20.0, vec![])]).is_still());
     }
 
-    /// A field covering only 450 and 500 nm out with these levels, every other knot (each 50 nm)
-    /// a gap: covered values hold from 400 to 550 nm, and the air is still beyond.
+    /// Knots every 50 nm from 0 to 600 nm out, covered (with these levels) only at 450 and 500 nm
+    /// and gaps everywhere else: covered values hold from 400 to 550 nm, and the air is still
+    /// beyond.
     fn covered_450_to_500(levels: Vec<(f64, f64, Option<f64>)>) -> RouteWind {
         let mut knots = vec![knot(500.0, levels.clone()), knot(450.0, levels)];
         for d in [
