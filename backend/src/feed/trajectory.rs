@@ -1827,6 +1827,22 @@ mod tests {
         assert!(!RouteWind::uniform(0.0).is_still());
     }
 
+    // The span between the last two samples (the departure end) interpolates like any other: a
+    // departure from the surface is part way up its first 500 ft climb step just after the start,
+    // not held at the start sample's altitude.
+    #[test]
+    fn the_profile_interpolates_inside_its_last_segment() {
+        let p = AircraftProfile::default();
+        let vp = VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, RouteWind::still());
+        // The first climb step: 500 ft at 2,000 fpm is 15 s, about 1 nm at the climb speed.
+        let a = vp.alt_at(299.9);
+        assert!(a > 10.0 && a < 500.0, "0.1 nm into the climb at {a} ft");
+        assert!(
+            vp.alt_at(299.95) < a,
+            "the altitude rises away from the start"
+        );
+    }
+
     // The debug view's headwind is the profile's own distance-weighted mean.
     #[test]
     fn mean_headwind_weights_each_step_at_the_profiles_altitude_there() {
