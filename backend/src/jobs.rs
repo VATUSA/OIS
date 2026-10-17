@@ -3201,6 +3201,40 @@ mod winds_refresh_tests {
         assert_eq!(rows, 0);
     }
 
+    // AC2 through the hourly pass: a loaded field whose stats.winds write fails finishes
+    // winds_refresh not ok, with the store failure in its detail, and keeps the field in use.
+    #[sqlx::test]
+    async fn the_hourly_pass_reports_a_failed_snapshot_to_the_registry(pool: sqlx::PgPool) {
+        let now = at("2026-10-16T01:20:00Z");
+        // Contained: #[sqlx::test] owns this database.
+        sqlx::query("drop table stats.winds")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let reg = winds_registry();
+        let (winds, refreshed) = (ArcSwap::from_pointee(Winds::default()), AtomicI64::new(0));
+        let target = WindsRefreshTarget {
+            reg: &reg,
+            winds: &winds,
+            refreshed: &refreshed,
+            pool: Some(&pool),
+        };
+        let run = winds_refresh_pass(&target, Ok(rap_field()), now).await;
+        assert!(!run.ok);
+        let job = winds_job(&reg);
+        assert_eq!(job.last_ok, Some(false));
+        let detail = job.last_detail.unwrap_or_default();
+        assert!(
+            detail.starts_with("RAP valid 0100Z; snapshot store failed"),
+            "{detail}"
+        );
+        assert_eq!(
+            winds.load().source(),
+            WindsSource::Rap,
+            "the field stays in use"
+        );
+    }
+
     // A run that loaded nothing writes no snapshot, so a store failure cannot touch it, and with
     // no database there is nothing to write.
     #[sqlx::test]
