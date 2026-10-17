@@ -1057,10 +1057,53 @@ mod tests {
         }
     }
 
+    // Each level's wind and temperature land in that level's slot, whatever order the fields
+    // arrive in.
+    #[test]
+    fn grid_puts_each_levels_fields_in_its_own_slot() {
+        let r = Resampler {
+            grid: GridKey {
+                shape: (2, 2),
+                first: (0, 0),
+                lov: 0,
+                spacing: (1, 1),
+                grid_relative: false,
+                j_positive: true,
+            },
+            lat0: 40.0,
+            lon0: -90.0,
+            nlat: 1,
+            nlon: 1,
+            cell: vec![0; 4],
+            turn: vec![(0.0, 1.0); 4],
+        };
+        let field = |param, hpa, value| Field {
+            param,
+            hpa,
+            values: vec![value; 4],
+        };
+        // 300 hPa first, so a lookup that ignored the level would hand 500 hPa the 300 hPa fields.
+        let fields = [
+            field(UGRD, 300.0, 0.0),
+            field(VGRD, 300.0, 20.0),
+            field(TMP, 300.0, 233.15),
+            field(UGRD, 500.0, 10.0),
+            field(VGRD, 500.0, 0.0),
+            field(TMP, 500.0, 263.15),
+        ];
+        let g = r.grid(&fields).unwrap();
+        // Lowest altitude (500 hPa) first; the wind is the "from" vector in kt.
+        assert_eq!(g.levels_ft.len(), 2);
+        assert!(g.levels_ft[0] < g.levels_ft[1], "{:?}", g.levels_ft);
+        assert_eq!(g.u, vec![-19, 0]);
+        assert_eq!(g.v, vec![0, -39]);
+        assert_eq!(g.t, vec![-10, -40]);
+    }
+
     // Two messages on different grids are refused rather than averaged together.
     #[test]
     fn build_grid_refuses_messages_on_different_grids() {
-        // Dx is octets 56-59 of section 3; one metre off is a different grid.
+        // Dx is octets 56-59 of section 3, in mm; 88 mm off is a different grid.
         let other = with_u32(3, 56, 13_545_088);
         let err = build_grid(vec![UV.to_vec(), other]).err().unwrap();
         assert!(err.contains("different grids"), "{err}");

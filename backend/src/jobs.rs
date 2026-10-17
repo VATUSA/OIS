@@ -315,7 +315,7 @@ pub async fn refresh_airports_once(
 /// The outcome of one winds refresh, for the job registry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindsRefresh {
-    /// False whenever RAP did not load (#836).
+    /// False when RAP did not load or its `stats.winds` snapshot failed to store (#836).
     pub ok: bool,
     pub detail: String,
     /// A new field was installed, so it is worth a `stats.winds` snapshot.

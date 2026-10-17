@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(hw, Some(0.0));
     }
 
-    // ---- #836: snapshot compatibility, FB temperatures, the grid column and `along` ----
+    // ---- #836: snapshot compatibility, the grid column and `along` ----
 
     fn at_time(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

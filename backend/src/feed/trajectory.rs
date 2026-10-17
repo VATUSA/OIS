@@ -1604,7 +1604,8 @@ mod tests {
         assert!((mach_to_tas(0.84, 35_000.0) - mach_to_tas_at(0.84, ISA_FL350_K)).abs() < 1e-9);
     }
 
-    // ISA where the field has no temperature (FB 3,000 ft; a RAP point with TMP missing).
+    // ISA where the field has no temperature (any replayed FB snapshot; a RAP point with TMP
+    // missing).
     #[test]
     fn a_field_without_temperatures_flies_mach_on_isa() {
         let wind = RouteWind::new(vec![knot(0.0, vec![(35_000.0, 40.0, None)])]);
@@ -1675,6 +1676,22 @@ mod tests {
         assert!((fast.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
     }
 
+    // Anchoring divides by the cruise speed the profile flies in the field's air, not the ISA
+    // speed: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
+    #[test]
+    fn anchoring_a_mach_cruise_off_isa_lands_on_the_observed_groundspeed() {
+        let warm = flat(&[
+            (0.0, 0.0, Some(ISA_FL350_K + 15.0)),
+            (400.0, 0.0, Some(ISA_FL350_K + 15.0)),
+        ]);
+        let vp = cruise(400.0, 520.0, &b77w(), warm).anchor_to_observed_gs(520.0);
+        assert!(
+            (vp.ground_speed_at(400.0) - 520.0).abs() < 1e-6,
+            "{}",
+            vp.ground_speed_at(400.0)
+        );
+    }
+
     // RouteWind sampling between and outside knots.
     #[test]
     fn route_wind_interpolates_between_knots_and_holds_outside_them() {
@@ -1710,6 +1727,22 @@ mod tests {
         assert_eq!(w.headwind(0.0, 5_000.0), Some(10.0));
         assert_eq!(w.headwind(0.0, 40_000.0), Some(50.0));
         assert_eq!(w.temp_k(0.0, 20_000.0), Some(240.0));
+    }
+
+    // by_altitude brackets with the nearest level above, not the highest, when three or more
+    // levels carry a value.
+    #[test]
+    fn route_wind_brackets_with_the_nearest_level_above() {
+        let w = RouteWind::new(vec![knot(
+            0.0,
+            vec![
+                (10_000.0, 10.0, Some(250.0)),
+                (20_000.0, 30.0, Some(240.0)),
+                (30_000.0, 90.0, Some(200.0)),
+            ],
+        )]);
+        assert_eq!(w.headwind(0.0, 15_000.0), Some(20.0));
+        assert_eq!(w.temp_k(0.0, 15_000.0), Some(245.0));
     }
 
     // RouteWind::new normalizes its input.
