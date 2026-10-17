@@ -271,12 +271,13 @@ pub async fn update_tmi(
     //
     // Enqueued in the same tx as the edit, for the reason `publish_tmi` does it: an edit that commits
     // without its job is this bug again, and a job without its edit posts a line the row never had.
-    if tmi.status == "published" && edit.line_changed {
-        if let Some(channel_id) = &channel {
-            let job = tmi_publish_job(channel_id, &tmi);
-            integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
-                .await?;
-        }
+    if tmi.status == "published"
+        && edit.line_changed
+        && let Some(channel_id) = &channel
+    {
+        let job = tmi_publish_job(channel_id, &tmi);
+        integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
+            .await?;
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
