@@ -335,11 +335,7 @@ impl Resampler {
         sub: &grib::SubMessage<'_, R>,
         grid: GridKey,
     ) -> Result<Self, String> {
-        let latlons: Vec<(f64, f64)> = sub
-            .latlons()
-            .map_err(|e| e.to_string())?
-            .map(|(la, lo)| (la, if lo > 180.0 { lo - 360.0 } else { lo }))
-            .collect();
+        let latlons: Vec<(f64, f64)> = sub.latlons().map_err(|e| e.to_string())?.collect();
         let ij: Vec<(usize, usize)> = sub.ij().map_err(|e| e.to_string())?.collect();
         let at = point_order(&ij, grid.shape, latlons.len())?;
         let turn = if grid.grid_relative {
@@ -1057,11 +1053,9 @@ mod tests {
         }
     }
 
-    // Each level's wind and temperature land in that level's slot, whatever order the fields
-    // arrive in.
-    #[test]
-    fn grid_puts_each_levels_fields_in_its_own_slot() {
-        let r = Resampler {
+    /// Four source points that all fall in one 1° cell, their winds already earth-relative.
+    fn one_cell() -> Resampler {
+        Resampler {
             grid: GridKey {
                 shape: (2, 2),
                 first: (0, 0),
@@ -1076,28 +1070,128 @@ mod tests {
             nlon: 1,
             cell: vec![0; 4],
             turn: vec![(0.0, 1.0); 4],
-        };
-        let field = |param, hpa, value| Field {
+        }
+    }
+
+    fn field(param: (u8, u8), hpa: f64, values: [f32; 4]) -> Field {
+        Field {
             param,
             hpa,
-            values: vec![value; 4],
-        };
+            values: values.to_vec(),
+        }
+    }
+
+    // Each level's wind and temperature land in that level's slot, whatever order the fields
+    // arrive in.
+    #[test]
+    fn grid_puts_each_levels_fields_in_its_own_slot() {
         // 300 hPa first, so a lookup that ignored the level would hand 500 hPa the 300 hPa fields.
         let fields = [
-            field(UGRD, 300.0, 0.0),
-            field(VGRD, 300.0, 20.0),
-            field(TMP, 300.0, 233.15),
-            field(UGRD, 500.0, 10.0),
-            field(VGRD, 500.0, 0.0),
-            field(TMP, 500.0, 263.15),
+            field(UGRD, 300.0, [0.0; 4]),
+            field(VGRD, 300.0, [20.0; 4]),
+            field(TMP, 300.0, [233.15; 4]),
+            field(UGRD, 500.0, [10.0; 4]),
+            field(VGRD, 500.0, [0.0; 4]),
+            field(TMP, 500.0, [263.15; 4]),
         ];
-        let g = r.grid(&fields).unwrap();
+        let g = one_cell().grid(&fields).unwrap();
         // Lowest altitude (500 hPa) first; the wind is the "from" vector in kt.
         assert_eq!(g.levels_ft.len(), 2);
         assert!(g.levels_ft[0] < g.levels_ft[1], "{:?}", g.levels_ft);
         assert_eq!(g.u, vec![-19, 0]);
         assert_eq!(g.v, vec![0, -39]);
         assert_eq!(g.t, vec![-10, -40]);
+    }
+
+    // A level whose wind arrives in two messages is one level, not two.
+    #[test]
+    fn grid_reads_a_repeated_wind_level_once() {
+        let fields = [
+            field(UGRD, 500.0, [10.0; 4]),
+            field(VGRD, 500.0, [0.0; 4]),
+            field(UGRD, 500.0, [10.0; 4]),
+        ];
+        let g = one_cell().grid(&fields).unwrap();
+        assert_eq!(g.levels_ft.len(), 1);
+        assert_eq!((g.u, g.v), (vec![-19], vec![0]));
+    }
+
+    // A point missing its V or its temperature is left out of the cell mean; the other points
+    // still make it.
+    #[test]
+    fn grid_leaves_out_a_point_missing_a_value() {
+        let fields = [
+            field(UGRD, 500.0, [10.0, 10.0, 10.0, 50.0]),
+            field(VGRD, 500.0, [10.0, 10.0, 10.0, f32::NAN]),
+            field(TMP, 500.0, [263.15, 263.15, 263.15, f32::NAN]),
+        ];
+        let g = one_cell().grid(&fields).unwrap();
+        assert_eq!((g.u, g.v, g.t), (vec![-19], vec![-19], vec![-10]));
+    }
+
+    // On a grid whose rows run the other way (j negative), the first row takes its turn from the
+    // row next to it, as the others do: on a straight meridian every row reads true north.
+    #[test]
+    fn a_j_negative_grid_turns_its_first_row_like_the_rest() {
+        let latlons = [(41.0, -90.0), (40.0, -90.0)];
+        for j in 0..2 {
+            let (s, c) = grid_turn(&latlons, &[0, 1], (0, j), (1, 2), false);
+            assert!(
+                s.abs() < 1e-9 && (c - 1.0).abs() < 1e-9,
+                "row {j}: ({s}, {c})"
+            );
+        }
+    }
+
+    /// A local server for [`get`]: `/echo` answers 206 with the `Range` header it was sent (or
+    /// "none"), `/full` answers 200 with the whole body whatever was asked, and `/big` sends one
+    /// byte more than [`MAX_BODY_BYTES`].
+    async fn local_server() -> String {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get as route;
+        let app = axum::Router::new()
+            .route(
+                "/echo",
+                route(|h: HeaderMap| async move {
+                    let range = h
+                        .get("range")
+                        .map_or("none".to_string(), |v| v.to_str().unwrap().to_string());
+                    (StatusCode::PARTIAL_CONTENT, range)
+                }),
+            )
+            .route("/full", route(|| async { "whole file" }))
+            .route("/big", route(|| async { vec![0u8; MAX_BODY_BYTES + 1] }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    // A ranged fetch sends the byte range, and an answer that ignored it is refused.
+    #[tokio::test]
+    async fn get_asks_for_the_range_and_refuses_a_whole_file_answer() {
+        let (base, client) = (local_server().await, reqwest::Client::new());
+        let echo = format!("{base}/echo");
+        assert_eq!(
+            get(&client, &echo, Some((10, Some(19)))).await.unwrap(),
+            b"bytes=10-19"
+        );
+        assert_eq!(
+            get(&client, &echo, Some((10, None))).await.unwrap(),
+            b"bytes=10-"
+        );
+        let full = format!("{base}/full");
+        let err = get(&client, &full, Some((0, Some(9)))).await.unwrap_err();
+        assert!(err.contains("range request answered 200"), "{err}");
+        assert_eq!(get(&client, &full, None).await.unwrap(), b"whole file");
+    }
+
+    // A response past the cap is refused, not read to the end.
+    #[tokio::test]
+    async fn get_refuses_a_body_past_the_cap() {
+        let big = format!("{}/big", local_server().await);
+        let err = get(&reqwest::Client::new(), &big, None).await.unwrap_err();
+        assert!(err.contains("larger than"), "{err}");
     }
 
     // Two messages on different grids are refused rather than averaged together.

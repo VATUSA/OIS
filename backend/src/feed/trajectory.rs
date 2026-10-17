@@ -1676,6 +1676,24 @@ mod tests {
         assert!((fast.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
     }
 
+    // Into a headwind stronger than the climb and descent speeds, each step is flown at the
+    // groundspeed floor (60 kt): a 500 fpm climb or descent through 5,000 ft covers 10 nm.
+    #[test]
+    fn climb_and_descent_into_a_headwind_past_their_tas_fly_the_groundspeed_floor() {
+        let wind = flat(&[(0.0, 200.0, None), (200.0, 200.0, None)]);
+        let vp = VerticalProfile::build(0.0, 200.0, 0.0, 10_000.0, 110.0, &c172(), wind);
+        assert!(
+            (vp.alt_at(190.0) - 5_000.0).abs() < 1e-6,
+            "{}",
+            vp.alt_at(190.0)
+        );
+        assert!(
+            (vp.alt_at(10.0) - 5_000.0).abs() < 1e-6,
+            "{}",
+            vp.alt_at(10.0)
+        );
+    }
+
     // Anchoring divides by the cruise speed the profile flies in the field's air, not the ISA
     // speed: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
     #[test]
