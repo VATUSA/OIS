@@ -3951,9 +3951,10 @@ async fn idst_proposes_the_same_edct_a_release_stores(pool: PgPool) {
     idst_and_rdy_agree(Fixture815::new(pool).await).await;
 }
 
-/// #815: IDST pairs each row with its own ground allowance. TEST1 is a connected pilot rolling down
-/// KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile still lingers (the airport tier
-/// would give 50 + 40 + 570 = 660 s). The pilot's proposed EDCT carries its own 990 s, not the 660 s.
+/// #815: IDST pairs each row with its own ground allowance before sorting by `seq`. TEST1 is a
+/// connected pilot rolling down KJFK 04L (the runway tier: 50 + 40 + 900 = 990 s) whose prefile
+/// still lingers. TEST2 is parked at KJFK (the airport tier: 50 + 40 + 570 = 660 s), listed after
+/// TEST1 but crossing first, so sorting before the pairing would swap the two allowances.
 #[sqlx::test]
 async fn idst_gives_a_rolling_pilot_its_own_runway_tier_allowance(pool: PgPool) {
     let state = crossing_state(pool.clone()).await;
@@ -3972,15 +3973,24 @@ async fn idst_gives_a_rolling_pilot_its_own_runway_tier_allowance(pool: PgPool) 
     {
         let mut feed = state.feed.write().await;
         feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            pilots: vec![crate::feed::vatsim::Pilot {
-                callsign: "TEST1".into(),
-                latitude: 40.64,
-                longitude: -73.78,
-                heading: runway_04l.hdg as i64,
-                groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
-                flight_plan: Some(plan.clone()),
-                ..Default::default()
-            }],
+            pilots: vec![
+                crate::feed::vatsim::Pilot {
+                    callsign: "TEST1".into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    heading: runway_04l.hdg as i64,
+                    groundspeed: crate::feed::flow::TAXI_ROLL_GS_KT + 1,
+                    flight_plan: Some(plan.clone()),
+                    ..Default::default()
+                },
+                crate::feed::vatsim::Pilot {
+                    callsign: "TEST2".into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
+                    flight_plan: Some(plan.clone()),
+                    ..Default::default()
+                },
+            ],
             prefiles: vec![Prefile {
                 callsign: "TEST1".into(),
                 flight_plan: Some(plan),
@@ -4016,20 +4026,29 @@ async fn idst_gives_a_rolling_pilot_its_own_runway_tier_allowance(pool: PgPool) 
     assert_eq!(status, http::StatusCode::OK, "{idst}");
     let as_of = at(&idst["as_of"]);
     let rows = idst["unscheduled"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "one TEST1 row, no prefile row: {idst}");
-    let pilot = &rows[0];
+    let seen: Vec<_> = rows
+        .iter()
+        .map(|r| (r["callsign"].clone(), r["status"].clone(), r["seq"].clone()))
+        .collect();
+    // TEST2 crosses ~330 s ahead, clear of the spacing, so neither is delayed and each proposed
+    // EDCT is now plus its own allowance. One TEST1 row: the lingering prefile adds none.
     assert_eq!(
-        (&pilot["callsign"], &pilot["status"]),
-        (&json!("TEST1"), &json!("ground")),
+        seen,
+        vec![
+            (json!("TEST2"), json!("ground"), json!(1)),
+            (json!("TEST1"), json!("ground"), json!(2)),
+        ],
         "{idst}"
     );
-    // Alone on the FCA, so not delayed: the proposed EDCT is now plus the pilot's own allowance.
-    assert_eq!(pilot["delay_min"], 0, "{pilot}");
-    let proposed = at(&pilot["edct"]);
-    assert!(
-        (proposed - as_of - 990_000).abs() <= SLACK_815_MS,
-        "proposed {proposed}, as of {as_of}: not 990 000 ms after"
-    );
+    for (r, allowance_ms) in [(&rows[0], 660_000), (&rows[1], 990_000)] {
+        assert_eq!(r["delay_min"], 0, "{r}");
+        let proposed = at(&r["edct"]);
+        assert!(
+            (proposed - as_of - allowance_ms).abs() <= SLACK_815_MS,
+            "{} proposed {proposed}, as of {as_of}: not {allowance_ms} ms after",
+            r["callsign"]
+        );
+    }
 }
 
 /// #815: with no `ready_time` and no airport-flow program (so no metered CFR), `POST /api/v1/tmu/cfr`
