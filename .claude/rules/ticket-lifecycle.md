@@ -331,7 +331,20 @@ points above, nothing more:
   through a short `wsl.exe` call dies when that call returns.
 - **A stopped mutation run can leave its mutant on disk**: stopping the task skips `bin/mutate.sh`'s
   restore. Run `git diff` first and restore from the `mutate.*` copy. `git checkout --` under
-  `core.autocrlf` rewrites the file CRLF, and multi-line OLD patterns then stop matching.
+  `core.autocrlf` rewrites the file CRLF, and multi-line OLD patterns then stop matching. Stopping
+  the task can also leave `bin/mutate.sh` and its cargo children running and still mutating: find
+  them (`Get-CimInstance Win32_Process` with a command line matching `mutate`) and `taskkill /T` each
+  before the next run.
+- **WSL's `df` reports its virtual disk, not C:.** Ubuntu's `ext4.vhdx` grows on C: and does not
+  shrink; a second cold `target/` filled C: and remounted the distro read-only mid-gate (#872). Check
+  `(Get-PSDrive C).Free` from Windows before a WSL build, budget about 15 GB per cold `target/`, and
+  take a `next` baseline from CI on its SHA. To hand space back: `docker desktop stop` (Docker
+  restarts WSL otherwise), `wsl --shutdown`, `wsl --manage Ubuntu --set-sparse true`, then
+  `fstrim -v /` as root.
+- **Scripts that false-fail on a CRLF checkout (#873):** `bin/verify-worktree.sh`'s lockfile check,
+  and `review-attestation.sh check`, which passes with `REVIEW_LENSES_MAP` pointed at an LF copy of
+  `.claude/review-lenses.tsv`. `codegen` fails under cmd.exe; in `packages/api-client` run
+  `pnpm exec openapi-typescript <spec> -o src/generated/schema.d.ts`.
 - **Stopping a backgrounded web server leaves its node processes holding the port.** Find the port's
   owner (`Get-NetTCPConnection -LocalPort 5173`) and stop it after the task.
 - **After `git worktree move`, run `pnpm install --frozen-lockfile --force`**: `node_modules` junctions
