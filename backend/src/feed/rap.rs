@@ -544,7 +544,7 @@ mod tests {
     const LOV_DEG: f64 = -95.0;
 
     /// Every raw point of one field in a captured message, decoded here with the grib crate:
-    /// `(lat, lon east-negative, value)`.
+    /// `(lat, lon west-negative, value)`.
     fn raw(bytes: &[u8], param: (u8, u8)) -> Vec<(f64, f64, f64)> {
         let g = grib::from_bytes(bytes.to_vec()).unwrap();
         for (_, sub) in g.iter() {
