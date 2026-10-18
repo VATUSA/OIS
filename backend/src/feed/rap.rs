@@ -1103,7 +1103,7 @@ mod tests {
         assert_eq!(g.t, vec![-10, -40]);
     }
 
-    // A level whose wind arrives in two messages is one level, not two.
+    // A level whose UGRD arrives twice is one level, not two.
     #[test]
     fn grid_reads_a_repeated_wind_level_once() {
         let fields = [
@@ -1114,6 +1114,16 @@ mod tests {
         let g = one_cell().grid(&fields).unwrap();
         assert_eq!(g.levels_ft.len(), 1);
         assert_eq!((g.u, g.v), (vec![-19], vec![0]));
+    }
+
+    // A level with a UGRD field but no VGRD is refused, not decoded with half its wind.
+    #[test]
+    fn grid_refuses_a_level_without_its_v_wind() {
+        let err = one_cell()
+            .grid(&[field(UGRD, 500.0, [10.0; 4])])
+            .err()
+            .unwrap();
+        assert!(err.contains("VGRD missing at 500 hPa"), "{err}");
     }
 
     // A point missing its V or its temperature is left out of the cell mean; the other points
@@ -1144,8 +1154,8 @@ mod tests {
     }
 
     /// A local server for [`get`]: `/echo` answers 206 with the `Range` header it was sent (or
-    /// "none"), `/full` answers 200 with the whole body whatever was asked, and `/big` sends one
-    /// byte more than [`MAX_BODY_BYTES`].
+    /// "none"), `/full` answers 200 with the whole body whatever was asked, `/big` sends one byte
+    /// more than [`MAX_BODY_BYTES`], and `/missing` answers 404.
     async fn local_server() -> String {
         use axum::http::{HeaderMap, StatusCode};
         use axum::routing::get as route;
@@ -1160,7 +1170,8 @@ mod tests {
                 }),
             )
             .route("/full", route(|| async { "whole file" }))
-            .route("/big", route(|| async { vec![0u8; MAX_BODY_BYTES + 1] }));
+            .route("/big", route(|| async { vec![0u8; MAX_BODY_BYTES + 1] }))
+            .route("/missing", route(|| async { StatusCode::NOT_FOUND }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1192,6 +1203,16 @@ mod tests {
         let big = format!("{}/big", local_server().await);
         let err = get(&reqwest::Client::new(), &big, None).await.unwrap_err();
         assert!(err.contains("larger than"), "{err}");
+    }
+
+    // An error status is refused with that status, not read as an empty file.
+    #[tokio::test]
+    async fn get_refuses_an_error_status() {
+        let missing = format!("{}/missing", local_server().await);
+        let err = get(&reqwest::Client::new(), &missing, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("404"), "{err}");
     }
 
     // Two messages on different grids are refused rather than averaged together.
