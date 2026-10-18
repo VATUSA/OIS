@@ -43,6 +43,8 @@ An empty group list is a stop: tell the operator through AskUserQuestion (option
 
 ## 2. BUILD
 
+Before the first dispatch, check the machine can build: the primary checkout's `.env`, `cargo`, `cargo-nextest`, `just` and `pnpm` on `PATH`, Postgres reachable, and free disk on the drive `target/` lives on. A missing one is a stop through AskUserQuestion, before any card moves.
+
 Dispatch `ticket-worker` with the issue number, the learnings path and the operator's pick as its proceed confirmation.
 
 - `plan-ready`: present the ACs and plan through AskUserQuestion (approve / change / abandon). Relay the answer, quoted, so the worker can write it into its `Operator decisions and rejected findings` record.

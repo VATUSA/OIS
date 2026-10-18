@@ -320,6 +320,23 @@ points above, nothing more:
   `branch-ancestry-gate.sh` blocks merging or rebasing any other ref. If you need another branch's
   changes, they go to `next` first.
 
+## A Windows host
+
+- **`just test` cannot stamp a tests marker on Windows.** Seven tests fail on CRLF or `\` paths, in
+  files no branch touches (#873), so `test-run-gate.sh` blocks `gh pr create`. Gate, push and open
+  the PR from a WSL clone of the branch (#872). Under the WSL memory cap, build with
+  `CARGO_BUILD_JOBS=1` and `CARGO_ENCODED_RUSTFLAGS` overriding `-Zthreads=8` to `-Zthreads=1`; two
+  parallel `ois_backend` compiles have hung the VM.
+- **Run long WSL work under a long-lived, backgrounded `wsl.exe`.** A `setsid`/`nohup` job started
+  through a short `wsl.exe` call dies when that call returns.
+- **A stopped mutation run can leave its mutant on disk**: stopping the task skips `bin/mutate.sh`'s
+  restore. Run `git diff` first and restore from the `mutate.*` copy. `git checkout --` under
+  `core.autocrlf` rewrites the file CRLF, and multi-line OLD patterns then stop matching.
+- **Stopping a backgrounded web server leaves its node processes holding the port.** Find the port's
+  owner (`Get-NetTCPConnection -LocalPort 5173`) and stop it after the task.
+- **After `git worktree move`, run `pnpm install --frozen-lockfile --force`**: `node_modules` junctions
+  still point at the old directory. The throwaway database keeps the old admin name.
+
 ## Stage on purpose
 
 - Stage explicit paths. Never `git add -A`, `git add .` or `git add --all`: they commit unmerged
