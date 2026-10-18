@@ -44,7 +44,7 @@ locals). To lower parallelism on a memory-capped machine, set
 `CARGO_TARGET_<TRIPLE>_RUSTFLAGS="-Zthreads=1"` (cargo appends it, and rustc takes the last
 `-Zthreads`) and `CARGO_BUILD_JOBS`; plain `RUSTFLAGS` replaces the config's flags and drops mold
 on Linux. The config file has the exact lines. Neither noticeably shrinks the
-ois-backend test build's own rustc, the largest single process.
+rustc compiling ois-backend, the largest single process.
 
 **On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
 `cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
