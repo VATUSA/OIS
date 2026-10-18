@@ -322,11 +322,16 @@ points above, nothing more:
 
 ## A Windows host
 
-- **`just test` cannot stamp a tests marker on Windows.** Seven tests fail on CRLF or `\` paths, in
-  files no branch touches (#873), so `test-run-gate.sh` blocks `gh pr create`. Gate, push and open
-  the PR from a WSL clone of the branch (#872). Under the WSL memory cap, build with
-  `CARGO_BUILD_JOBS=1` and `CARGO_ENCODED_RUSTFLAGS` overriding `-Zthreads=8` to `-Zthreads=1`; two
-  parallel `ois_backend` compiles have hung the VM.
+- **`just test` cannot stamp a tests marker on Windows.** Seven nextest and seven vitest tests fail
+  on CRLF or `\` paths in files no branch touches (#875), and codegen fails under cmd.exe (#873), so
+  `bin/pre-push` and `test-run-gate.sh` block the push and `gh pr create`. Gate, push and open the
+  PR from a WSL clone of the branch (#872). Under the WSL memory cap, build with
+  `CARGO_BUILD_JOBS=1` and `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Zthreads=1"`: cargo
+  appends it after the config's `-Zthreads=8` and mold stays. One `ois_backend` rustc still peaks
+  near 8.5 GB whatever `-Zthreads` is, and two in parallel have hung the VM.
+- **When the WSL gate cannot run either** (the VM is reaped or out of memory), return the push and
+  the PR to the user as literal commands for their own terminal: `git push --no-verify` under the
+  confirmed-pre-existing exception, then `gh pr create`. Green CI on the head is the Linux gate.
 - **Run long WSL work under a long-lived, backgrounded `wsl.exe`.** A `setsid`/`nohup` job started
   through a short `wsl.exe` call dies when that call returns.
 - **A stopped mutation run can leave its mutant on disk**: stopping the task skips `bin/mutate.sh`'s

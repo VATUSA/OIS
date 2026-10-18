@@ -140,8 +140,9 @@ Nothing else in this project creates a branch.
    or to resume, `git worktree add <path> "{type}/<n>/{desc}"` for an existing branch; a worktree
    `git worktree list` already shows needs nothing created. Then run every git, gh and stamper
    command as exactly
-   `cd <absolute worktree path> && <command>`. The gates accept that form for `just test`,
-   `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`. Never wrap a
+   `cd <absolute worktree path> && <command>`, the path starting with `/` (Git Bash on Windows:
+   `/c/Users/...`; the gates refuse `C:/...` and relative paths). The gates accept that form for
+   `just test`, `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`. Never wrap a
    push or a stamp in a script to get past a gate: the gates cannot see inside it.
 
 4. **Provision it — run the PRIMARY checkout's copy of setup**, never the worktree's: a resumed
