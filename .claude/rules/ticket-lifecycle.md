@@ -334,9 +334,10 @@ points above, nothing more:
   #   ... pr <branch> [gh pr create args]   also needs the Windows worktree's review marker
   ```
   Commit in the Windows worktree, never in the clone. These subcommands are the one exception to
-  "never wrap a push or a stamp": they check the markers the gates would. Never run a bin/ script
-  from a worktree's `/mnt/c` copy: Linux git cannot open a Windows-created worktree (its `.git`
-  names a `C:/` path) and lists every Windows worktree as prunable, so never `git gc` or
+  "never wrap a push or a stamp": `gate` runs the real `just test`, and `push` and `pr` check the
+  markers the gates would; none of them works on `main` or `next`. A worktree's `/mnt/c` copy runs
+  only with `OIS_WSL_SOURCE=/mnt/c/<primary>`: Linux git cannot open a Windows-created worktree (its
+  `.git` names a `C:/` path) and lists every Windows worktree as prunable, so never `git gc` or
   `git worktree prune` the Windows repo from WSL.
 - **The WSL build env applies only in the clone.** `bin/lib/wsl.sh` writes `CARGO_BUILD_JOBS=1` and
   `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=1` into the clone's `.env`, which

@@ -144,8 +144,8 @@ Nothing else in this project creates a branch.
    `/c/Users/...`; the gates refuse `C:/...` and relative paths). The gates accept that form for
    `just test`, `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`. Never wrap a
    push or a stamp in a script to get past a gate: the gates cannot see inside it. The one exception
-   is `bin/wsl-clone.sh gate|push|pr` on a Windows host, which checks the markers itself
-   (`ticket-lifecycle.md` → "A Windows host").
+   is `bin/wsl-clone.sh gate|push|pr` on a Windows host: `gate` runs the real `just test`, and
+   `push` and `pr` check the markers the gates would (`ticket-lifecycle.md` → "A Windows host").
 
 4. **Provision it — run the PRIMARY checkout's copy of setup**, never the worktree's: a resumed
    branch carries whatever copy of the script it was cut with.

@@ -28,7 +28,7 @@ Under the ticket loop you may run `/start` (its worktree and branch), `/review-b
 
 A slash command named here means its file: when you cannot run `/ship` as a command, follow `.claude/commands/ship.md` step by step (likewise `start.md`, `code-review.md`, `review-before-shipping.md`, `cleanup.md`). Never improvise the procedure from memory.
 
-Use absolute paths. The session cwd is shared with the orchestrator and pins to whoever entered a worktree last. `EnterWorktree` refuses a subagent, so follow the subagent fallback in `/start` Step 2.3: run every git, gh and stamper command as `cd <absolute worktree path> && <command>`, and never wrap a push or a stamp in a script to get past a gate. On a Windows host, `bin/wsl-clone.sh gate|push|pr` is the one exception: it checks the markers itself (`ticket-lifecycle.md` → "A Windows host").
+Use absolute paths. The session cwd is shared with the orchestrator and pins to whoever entered a worktree last. `EnterWorktree` refuses a subagent, so follow the subagent fallback in `/start` Step 2.3: run every git, gh and stamper command as `cd <absolute worktree path> && <command>`, and never wrap a push or a stamp in a script to get past a gate. On a Windows host, `bin/wsl-clone.sh gate|push|pr` is the one exception: `gate` runs the real `just test`, and `push` and `pr` check the markers the gates would (`ticket-lifecycle.md` → "A Windows host").
 
 ## Phase A: Intake (first dispatch)
 
