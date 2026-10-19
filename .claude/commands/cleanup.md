@@ -72,6 +72,14 @@ bash bin/teardown-worktree.sh <NAME>
 
 Both paths drop the worktree's throwaway database (and read it back), remove the directory, and delete the local branch when origin holds its commits.
 
+**On a Windows host, also remove the branch's WSL clone** (`ticket-lifecycle.md` → "A Windows host"), from the primary checkout's copy:
+
+```bash
+wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh remove <branch>'
+```
+
+It refuses a dirty clone or one whose HEAD origin does not hold, as teardown does, then drops `ois_wsl_<name>` (read back), deletes `~/ois-wsl/<name>` and runs `fstrim` as root. With no clone it still drops the database. Exit 1 after "removed" means fstrim did not run: run the command it prints from Windows.
+
 ## Step 5: Verify and report
 
 From the primary checkout:
@@ -81,6 +89,7 @@ ls -d .claude/worktrees/<NAME> 2>/dev/null && echo "DIR STILL PRESENT" || echo "
 git branch --list "<branch>"                     # empty, unless kept for unpushed commits
 git worktree list                                # target not listed
 git worktree prune --dry-run                     # nothing stale left behind
+wsl.exe -d Ubuntu -- bash -c 'ls ~/ois-wsl'      # Windows host: the clone is not listed
 ```
 
 And the worktree's throwaway database is gone. Anything left over: re-run `bash bin/teardown-worktree.sh <NAME>` (idempotent) and check again. A worktree locked by a live session in another terminal is refused before anything is dropped; exit that session first.
