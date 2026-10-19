@@ -59,10 +59,17 @@ require_wsl() {
 }
 
 # The main checkout this script sits in, on /mnt/c: the clone's source and its .env's.
+# OIS_WSL_SOURCE names it instead, for a copy of this script outside that checkout (a
+# branch changing the script, whose Windows worktree Linux git cannot open).
 find_source() {
     local common
-    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-        || fatal "cannot find the checkout ${SCRIPT_DIR} belongs to."
+    if [[ -n "${OIS_WSL_SOURCE:-}" ]]; then
+        common="$(git -C "$OIS_WSL_SOURCE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+            || fatal "OIS_WSL_SOURCE=${OIS_WSL_SOURCE} is not a git checkout."
+    else
+        common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+            || fatal "cannot find the checkout ${SCRIPT_DIR} belongs to. From a copy elsewhere, set OIS_WSL_SOURCE to the primary checkout."
+    fi
     SOURCE="$(dirname "$common")"
 }
 

@@ -277,6 +277,19 @@ printf 'Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)\n' > "$WOR
 WSL_PROC_VERSION="$WORK/version.wsl1" wsl_clone preflight
 [[ $RC -eq 0 ]] && ok "a capitalized Microsoft kernel string is accepted" || bad "WSL1 version refused: $OUT"
 
+echo "== a copy of the script outside the checkout =="
+setup copy
+mkdir -p "$WORK/copy/bin/lib"
+for f in bin/wsl-clone.sh bin/lib/wsl.sh bin/lib/portable.sh bin/lib/marker_manifest.py; do cp "$MAIN/$f" "$WORK/copy/$f"; done
+# copy_clone [ARGS...]: wsl_clone, but running the copy outside any git checkout.
+copy_clone() { local m="$MAIN"; MAIN="$WORK/copy"; wsl_clone "$@"; MAIN="$m"; }
+copy_clone create "$BR"
+[[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a copy outside any checkout refuses, naming OIS_WSL_SOURCE" "set OIS_WSL_SOURCE to the primary checkout" || bad "copy without source: rc $RC: $OUT"
+OIS_WSL_SOURCE="$WORK/copy" copy_clone create "$BR"
+[[ $RC -ne 0 && ! -e "$CLONE" ]] && has "an OIS_WSL_SOURCE that is not a checkout is refused" "is not a git checkout" || bad "bad source: rc $RC: $OUT"
+OIS_WSL_SOURCE="$MAIN" copy_clone create "$BR"
+[[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "with OIS_WSL_SOURCE the copy clones from that checkout" || bad "copy with source: rc $RC: $OUT"
+
 echo "== AC4: build env in the clone's .env =="
 setup buildenv
 printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\nCARGO_BUILD_JOBS=8\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=8\n' > "$MAIN/.env"
