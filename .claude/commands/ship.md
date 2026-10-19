@@ -151,3 +151,5 @@ The branch is on `origin` and the PR is open, so the local worktree and its thro
    ```
 
    And the throwaway database `bin/setup-worktree.sh` reported for this worktree is gone. Anything left over: run `bash bin/teardown-worktree.sh <dir-name>` (idempotent) and re-check. The remote branch and the PR are deliberately left alone.
+
+4. **On a Windows host, remove the branch's WSL clone** the same way `/cleanup` Step 4 does: `wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh remove <branch>'`. It drops `ois_wsl_<name>`, deletes `~/ois-wsl/<name>` and runs `fstrim`; exit 1 after "removed" means fstrim did not run, so run the command it prints from Windows. Then check `wsl.exe -d Ubuntu -- bash -c 'ls ~/ois-wsl'` no longer lists it.
