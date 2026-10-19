@@ -1,0 +1,451 @@
+#!/bin/bash
+# ==============================================================================
+# Tests for bin/wsl-clone.sh and bin/lib/wsl.sh: the WSL clone that runs the full
+# gate off the Windows checkout. What create provisions, what remove refuses and
+# what it removes, the C: free-space and MemAvailable preflight, the VHDX sparse
+# check and the fstrim after removal, the build-env lines in the clone's .env,
+# the Windows-interop node/pnpm refusal, and the marker checks on push and pr.
+#
+#   bash bin/lib/wsl-clone.test.sh
+#
+# Each case builds a scratch "main" checkout (on next, pushed to a bare origin)
+# with the scripts under test copied into its bin/, because wsl-clone.sh finds its
+# source repository from its own location. Stub reg.exe, fsutil.exe, df, wsl.exe,
+# psql, pg_isready, pnpm, node, just and gh sit first on PATH and serve, or derive
+# from, bytes captured on a real WSL2 host (bin/lib/fixtures/wsl/, CRLF kept by
+# its .gitattributes). No real database, registry, disk or GitHub is touched.
+# ==============================================================================
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT="$ROOT/bin/wsl-clone.sh"
+LIB="$ROOT/bin/lib/wsl.sh"
+FIX="$ROOT/bin/lib/fixtures/wsl"
+WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/wsl-clone-test.XXXXXX")" && pwd -P)"
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR CARGO_TARGET_DIR
+unset CARGO_BUILD_JOBS CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS OIS_WSL_CLONES
+export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e.com GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e.com
+export GIT_CONFIG_NOSYSTEM=1 HOME="$WORK" FIX
+
+PASS=0
+FAIL=0
+ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+has()   { case "$OUT" in *"$2"*) ok "$1" ;; *) bad "$1 (no '$2' in: $OUT)" ;; esac; }
+lacks() { case "$OUT" in *"$2"*) bad "$1 ('$2' in: $OUT)" ;; *) ok "$1" ;; esac; }
+
+# Thresholds as literals from the requirement (GiB in KiB), never from wsl.sh.
+C_FREE_OK_KB=20971520          # 20 GiB
+C_FREE_SHORT_KB=20971519       # 20 GiB - 1 KiB
+MEM_OK_KB=9437184              # 9 GiB
+MEM_SHORT_KB=9437183           # 9 GiB - 1 KiB
+
+# ------------------------------------------------------------------------------
+# Stubs. Each logs its call to $STUB_LOG and serves a captured fixture or a file
+# derived from one. Env knobs: STUB_REG (file), STUB_REG_RC, STUB_FSUTIL (file),
+# STUB_FSUTIL_RC, STUB_DF (file), STUB_WSL_RC, STUB_JUST_RC, STUB_PG_RC,
+# STUB_DROP_FAILS, STUB_DB (file standing for the database), STUB_DB_NAME.
+# ------------------------------------------------------------------------------
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/reg.exe" <<'STUB'
+#!/bin/bash
+echo "reg.exe $*" >> "$STUB_LOG"
+[[ -n "${STUB_REG_RC:-}" ]] && exit "$STUB_REG_RC"
+cat "${STUB_REG:-$FIX/reg-all.txt}"
+STUB
+cat > "$WORK/bin/fsutil.exe" <<'STUB'
+#!/bin/bash
+echo "fsutil.exe $*" >> "$STUB_LOG"
+cat "${STUB_FSUTIL:-$FIX/fsutil-sparse.txt}"
+exit "${STUB_FSUTIL_RC:-0}"
+STUB
+cat > "$WORK/bin/df" <<'STUB'
+#!/bin/bash
+echo "df $*" >> "$STUB_LOG"
+cat "${STUB_DF:-$FIX/df.txt}"
+STUB
+cat > "$WORK/bin/wsl.exe" <<'STUB'
+#!/bin/bash
+echo "wsl.exe $*" >> "$STUB_LOG"
+exit "${STUB_WSL_RC:-0}"
+STUB
+cat > "$WORK/bin/psql" <<'STUB'
+#!/bin/bash
+sql="${*: -1}"
+echo "psql $sql" >> "$STUB_LOG"
+echo "psql-url $1" >> "$STUB_LOG"
+[[ -n "${STUB_PG_RC:-}" && "$STUB_PG_RC" != 0 ]] && exit 2
+case "$sql" in
+    *"from pg_database"*"'$STUB_DB_NAME'"*) [[ -f "$STUB_DB" ]] && echo 1; exit 0 ;;
+    *"create database"*"$STUB_DB_NAME"*) touch "$STUB_DB"; exit 0 ;;
+    *"drop database"*"$STUB_DB_NAME"*) [[ -n "${STUB_DROP_FAILS:-}" ]] && exit 1; rm -f "$STUB_DB"; exit 0 ;;
+esac
+exit 1
+STUB
+printf '#!/bin/bash\nexit "${STUB_PG_RC:-0}"\n' > "$WORK/bin/pg_isready"
+printf '#!/bin/bash\necho "pnpm $* in $PWD" >> "$STUB_LOG"\nexit 0\n' > "$WORK/bin/pnpm"
+printf '#!/bin/bash\nexit 0\n' > "$WORK/bin/node"
+printf '#!/bin/bash\necho "just $* in $PWD" >> "$STUB_LOG"\nexit "${STUB_JUST_RC:-0}"\n' > "$WORK/bin/just"
+printf '#!/bin/bash\necho "gh $* in $PWD" >> "$STUB_LOG"\nexit 0\n' > "$WORK/bin/gh"
+chmod +x "$WORK/bin/"*
+export STUB_LOG="$WORK/stub.log"
+
+# df_with_free KB OUT: the captured df output with line 2's Available field set to KB.
+df_with_free() { awk -v kb="$1" 'NR == 2 { $4 = kb } { print }' "$FIX/df.txt" > "$2"; }
+# meminfo_with_available KB OUT: the captured meminfo with MemAvailable set to KB.
+meminfo_with_available() { sed -E "s/^(MemAvailable: +)[0-9]+ kB$/\\1$1 kB/" "$FIX/meminfo.txt" > "$2"; }
+# not_wsl_version OUT: a native Linux /proc/version, no "microsoft" in it.
+not_wsl_version() { printf 'Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) #45-Ubuntu SMP\n' > "$1"; }
+
+# setup CASE: $MAIN (on next, pushed to a bare $ORIGIN) with the scripts under test
+# copied into its bin/, a .env, and a local branch $BR = feat/1/<CASE> one commit
+# ahead, checked out in a Windows-side worktree $WT. $NAME is the clone name
+# (feat-1-<case>), $CLONE its directory under $OIS_WSL_CLONES, STUB_DB the file
+# standing for its database ois_wsl_feat_1_<case>.
+setup() {
+    local base="$WORK/$1" f
+    rm -rf "$base"; mkdir -p "$base"
+    ORIGIN="$base/origin.git"
+    git init -q --bare "$ORIGIN"
+    MAIN="$base/main"
+    git init -q -b next "$MAIN"
+    mkdir -p "$MAIN/bin/lib" "$MAIN/.githooks"
+    for f in bin/wsl-clone.sh bin/lib/wsl.sh bin/lib/portable.sh bin/check-marker.sh bin/lib/marker_manifest.py; do
+        [[ -f "$ROOT/$f" ]] && cp "$ROOT/$f" "$MAIN/$f"
+    done
+    printf '.env\n.claude/\nnode_modules/\n' > "$MAIN/.gitignore"
+    printf 'lockfileVersion: 9.0\n' > "$MAIN/pnpm-lock.yaml"
+    git -C "$MAIN" add -A && git -C "$MAIN" -c core.hooksPath=/dev/null commit -qm init
+    git -C "$MAIN" remote add origin "$ORIGIN"
+    git -C "$MAIN" push -q -u origin next
+    printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\n' > "$MAIN/.env"
+    BR="feat/1/$1"
+    NAME="feat-1-$1"
+    WT="$MAIN/.claude/worktrees/feat+1+$1"
+    git -C "$MAIN" worktree add -q -b "$BR" "$WT" next
+    printf 'x\n' > "$WT/file.txt" && git -C "$WT" add file.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm work
+    export OIS_WSL_CLONES="$base/clones"
+    CLONE="$OIS_WSL_CLONES/$NAME"
+    STUB_DB="$base/db.exists"
+    STUB_DB_NAME="ois_wsl_feat_1_$(printf '%s' "$1" | tr '-' '_')"
+    export STUB_DB STUB_DB_NAME
+    : > "$STUB_LOG"
+}
+# stamp_marker ROOT KIND SHA: a marker with the manifest line check_marker_for_head vouches for.
+stamp_marker() { python3 -I "$ROOT/bin/lib/marker_manifest.py" stamp "$@"; }
+# wsl_clone [ARGS...]: runs $MAIN's copy of the script as on the captured WSL host; sets OUT
+# (colors stripped) and RC. WSL_PROC_VERSION / WSL_MEMINFO / STUB_DF override per case.
+wsl_clone() {
+    OUT="$(cd "$WORK" && PATH="${TEST_PATH:-$WORK/bin:$PATH}" WSL_DISTRO_NAME="${WSL_DISTRO_NAME:-Ubuntu}" \
+        WSL_PROC_VERSION="${WSL_PROC_VERSION:-$FIX/version.txt}" WSL_MEMINFO="${WSL_MEMINFO:-$FIX/meminfo.txt}" \
+        bash "$MAIN/bin/wsl-clone.sh" "$@" 2>&1 | sed $'s/\033\\[[0-9;]*m//g'; exit "${PIPESTATUS[0]}")"
+    RC=$?
+}
+
+echo "== harness: fixtures are the captured bytes, stubs serve them =="
+for f in reg-all.txt fsutil-sparse.txt fsutil-notsparse.txt df.txt meminfo.txt version.txt; do
+    [[ -s "$FIX/$f" ]] && ok "fixture $f is present" || bad "fixture $f missing"
+done
+[[ "$(cat "$FIX/.gitattributes")" == "* -text" ]] && ok ".gitattributes turns off EOL conversion" || bad ".gitattributes: $(cat "$FIX/.gitattributes" 2>&1)"
+# Linux git cannot open a worktree Windows git registered (its .git names a C:/ path).
+if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    ok "(skip: git cannot open $ROOT from here, so its attributes are unchecked)"
+else
+    [[ "$(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)" == *"text: unset" ]] && ok "...and git honours it" || bad "check-attr: $(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)"
+fi
+[[ "$(od -An -c "$FIX/fsutil-sparse.txt" | tr -s ' \n' ' ')" == " T h i s f i l e i s s e t a s s p a r s e \r \n " ]] && ok "fsutil-sparse.txt is the CRLF capture" || bad "fsutil-sparse.txt bytes: $(od -An -c "$FIX/fsutil-sparse.txt")"
+[[ "$(head -c 31 "$FIX/fsutil-notsparse.txt")" == "This file is NOT set as sparse"$'\r' ]] && ok "fsutil-notsparse.txt is the CRLF capture" || bad "fsutil-notsparse.txt bytes"
+# crs FILE / lfs FILE: count CR and LF bytes (grep's $ is CR-blind on some builds, so count bytes).
+crs() { tr -cd '\r' < "$1" | wc -c | tr -d ' '; }
+lfs() { tr -cd '\n' < "$1" | wc -c | tr -d ' '; }
+[[ "$(crs "$FIX/reg-all.txt")" -eq "$(lfs "$FIX/reg-all.txt")" && "$(lfs "$FIX/reg-all.txt")" -gt 30 ]] && ok "every reg-all.txt line ends CRLF" || bad "reg-all.txt: $(crs "$FIX/reg-all.txt") CRs for $(lfs "$FIX/reg-all.txt") lines"
+grep -q $'BasePath    REG_SZ    \\\\\\\\?\\\\C:' "$FIX/reg-all.txt" && ok "reg-all.txt carries a \\\\?\\ BasePath (docker-desktop)" || bad "reg-all.txt has no \\\\?\\ BasePath"
+[[ "$(crs "$FIX/df.txt")$(crs "$FIX/meminfo.txt")$(crs "$FIX/version.txt")" == 000 ]] && ok "df, meminfo and version captures are LF, as Linux wrote them" || bad "a Linux capture gained a CR"
+grep -qi microsoft "$FIX/version.txt" && ok "version.txt is a WSL kernel" || bad "version.txt lacks microsoft"
+df_with_free "$C_FREE_SHORT_KB" "$WORK/df.short"
+[[ "$(awk 'NR == 2 { print $4 }' "$WORK/df.short")" == 20971519 && "$(head -1 "$WORK/df.short")" == "$(head -1 "$FIX/df.txt")" ]] && ok "df_with_free sets only the Available field" || bad "df_with_free: $(cat "$WORK/df.short")"
+meminfo_with_available "$MEM_SHORT_KB" "$WORK/meminfo.short"
+[[ "$(grep '^MemAvailable:' "$WORK/meminfo.short")" == "MemAvailable:   9437183 kB" && "$(wc -l < "$WORK/meminfo.short")" -eq "$(wc -l < "$FIX/meminfo.txt")" ]] && ok "meminfo_with_available sets only MemAvailable" || bad "meminfo_with_available: $(grep '^MemAvailable' "$WORK/meminfo.short")"
+: > "$STUB_LOG"
+[[ "$(PATH="$WORK/bin:$PATH" reg.exe query x | grep -c 'DistributionName')" -eq 2 ]] && ok "the reg.exe stub serves reg-all.txt" || bad "reg.exe stub: $(PATH="$WORK/bin:$PATH" reg.exe query x)"
+PATH="$WORK/bin:$PATH" fsutil.exe sparse queryflag y > "$WORK/fsutil.out"
+cmp -s "$WORK/fsutil.out" "$FIX/fsutil-sparse.txt" && ok "the fsutil.exe stub serves the sparse capture byte for byte" || bad "fsutil.exe stub: $(od -c "$WORK/fsutil.out")"
+[[ "$(cat "$STUB_LOG")" == "reg.exe query x"*"fsutil.exe sparse queryflag y" ]] && ok "...and each stub logs its call" || bad "stub log: $(cat "$STUB_LOG")"
+setup harness
+[[ "$(git -C "$MAIN" worktree list --porcelain | grep -c "^branch refs/heads/$BR$")" -eq 1 ]] && ok "setup builds a source repo with $BR in a worktree" || bad "setup: $(git -C "$MAIN" worktree list --porcelain)"
+
+echo "== wsl.sh: names, constants, build env =="
+lib() { bash -c '. "$1"; shift; "$@"' _ "$LIB" "$@"; }
+[[ "$(lib wsl_clone_name feat/1/x-y)" == "feat-1-x-y" ]] && ok "wsl_clone_name writes / as -" || bad "wsl_clone_name: $(lib wsl_clone_name feat/1/x-y)"
+[[ "$(lib wsl_db_name Feat-1.X)" == "ois_wsl_feat_1_x" ]] && ok "wsl_db_name lower-cases and folds to [a-z0-9_]" || bad "wsl_db_name: $(lib wsl_db_name Feat-1.X)"
+LONG="$(lib wsl_db_name "$(printf 'a%.0s' {1..70})")"
+[[ ${#LONG} -eq 63 && "$LONG" == ois_wsl_a* ]] && ok "...cut to 63 characters, prefix kept" || bad "long db name: $LONG (${#LONG})"
+CONSTS="$(bash -c '. "$1"; echo "$WSL_MIN_C_FREE_GB $WSL_MIN_MEM_AVAILABLE_GB"' _ "$LIB")"
+[[ "$CONSTS" == "20 9" ]] && ok "the thresholds are 20 GiB of C: and 9 GiB of MemAvailable" || bad "thresholds: $CONSTS"
+(( C_FREE_SHORT_KB < 20 * 1024 * 1024 && 20 * 1024 * 1024 <= C_FREE_OK_KB && MEM_SHORT_KB < 9 * 1024 * 1024 && 9 * 1024 * 1024 <= MEM_OK_KB )) \
+    && ok "...and the boundary literals straddle them" || bad "boundary literals"
+[[ "$(lib wsl_build_env_lines)" == $'CARGO_BUILD_JOBS=1\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=1' ]] \
+    && ok "wsl_build_env_lines prints exactly the two lines" || bad "build env: $(lib wsl_build_env_lines)"
+[[ -z "$(bash -c '. "$1"' _ "$LIB" 2>&1)" ]] && ok "sourcing wsl.sh prints nothing" || bad "sourcing wsl.sh printed output"
+
+echo "== AC2: preflight thresholds =="
+[[ "$(PATH="$WORK/bin:$PATH" lib wsl_c_free_kb)" == 38548880 ]] && ok "C: free parses from the captured df" || bad "wsl_c_free_kb: $(PATH="$WORK/bin:$PATH" lib wsl_c_free_kb)"
+[[ "$(WSL_MEMINFO="$FIX/meminfo.txt" lib wsl_mem_available_kb)" == 11023184 ]] && ok "MemAvailable parses from the captured meminfo" || bad "wsl_mem_available_kb"
+df_with_free "$C_FREE_OK_KB" "$WORK/df.ok"
+meminfo_with_available "$MEM_OK_KB" "$WORK/meminfo.ok"
+setup preflight
+STUB_DF="$WORK/df.short" WSL_MEMINFO="$WORK/meminfo.ok" wsl_clone preflight
+[[ $RC -eq 1 ]] && has "C: free 1 KiB under 20 GiB is refused, naming C:" "C: free 19 GiB (20971519 KiB) is under 20 GiB" || bad "C: short: rc $RC: $OUT"
+lacks "...with MemAvailable fine" "MemAvailable 8 GiB"
+STUB_DF="$WORK/df.ok" WSL_MEMINFO="$WORK/meminfo.ok" wsl_clone preflight
+[[ $RC -eq 0 ]] && ok "C: free of exactly 20 GiB and MemAvailable of exactly 9 GiB pass" || bad "at thresholds: rc $RC: $OUT"
+has "...printing the C: figure and threshold" "C: free 20 GiB (minimum 20 GiB)"
+has "...and the MemAvailable figure and threshold" "WSL MemAvailable 9 GiB (minimum 9 GiB)"
+STUB_DF="$WORK/df.ok" WSL_MEMINFO="$WORK/meminfo.short" wsl_clone preflight
+[[ $RC -eq 1 ]] && has "MemAvailable 1 KiB under 9 GiB is refused, naming it" "WSL MemAvailable 8 GiB (9437183 KiB) is under 9 GiB" || bad "mem short: rc $RC: $OUT"
+grep -q '^df -Pk /mnt/c$' "$STUB_LOG" && ok "C: is read as df -Pk /mnt/c" || bad "df call: $(grep '^df' "$STUB_LOG")"
+WSL_MEMINFO=/dev/null wsl_clone preflight
+[[ $RC -eq 1 ]] && has "an unreadable MemAvailable is a failure, not a pass" "cannot read WSL MemAvailable" || bad "unreadable meminfo: rc $RC"
+for short in df meminfo; do
+    setup "create-short-$short"
+    if [[ $short == df ]]; then export STUB_DF="$WORK/df.short" WSL_MEMINFO="$WORK/meminfo.ok"; else export STUB_DF="$WORK/df.ok" WSL_MEMINFO="$WORK/meminfo.short"; fi
+    wsl_clone create "$BR"
+    [[ $RC -ne 0 && ! -e "$CLONE" && ! -f "$STUB_DB" ]] && ok "create under the $short threshold creates no clone and no database" || bad "create short $short: rc $RC, clone $([[ -e $CLONE ]] && echo made)"
+    grep -q '^pnpm' "$STUB_LOG" && bad "...but ran pnpm" || ok "...and runs no pnpm install"
+    unset STUB_DF WSL_MEMINFO
+    setup "gate-short-$short"
+    wsl_clone create "$BR"
+    : > "$STUB_LOG"
+    if [[ $short == df ]]; then export STUB_DF="$WORK/df.short"; else export WSL_MEMINFO="$WORK/meminfo.short"; fi
+    wsl_clone gate "$NAME"
+    [[ $RC -ne 0 ]] && ok "gate under the $short threshold fails" || bad "gate short $short: rc $RC"
+    grep -q '^just' "$STUB_LOG" && bad "...but ran just test" || ok "...without running just test"
+    unset STUB_DF WSL_MEMINFO
+done
+setup gate
+wsl_clone create "$BR"
+printf 'y\n' > "$WT/two.txt" && git -C "$WT" add two.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm two
+: > "$STUB_LOG"
+wsl_clone gate "$BR"
+[[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "gate fast-forwards the clone to the Windows branch" || bad "gate ff: rc $RC: $OUT"
+grep -q "^just test in .*$NAME$" "$STUB_LOG" && ok "...then runs just test in the clone" || bad "just call: $(cat "$STUB_LOG")"
+STUB_JUST_RC=3 wsl_clone gate "$BR"
+[[ $RC -eq 3 ]] && ok "gate exits with just test's status" || bad "gate rc $RC on a failing just test"
+
+echo "== AC1: create provisions the clone =="
+setup create
+printf '# dev\nDATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois?sslmode=disable\nRUST_LOG=info\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+[[ $RC -eq 0 ]] && ok "create exits 0" || bad "create rc $RC: $OUT"
+[[ "$(git -C "$CLONE" symbolic-ref --short HEAD)" == "$BR" && "$(git -C "$CLONE" rev-parse --abbrev-ref '@{u}')" == "windows/$BR" ]] \
+    && ok "the clone has $BR checked out, tracking windows/$BR" || bad "clone branch: $(git -C "$CLONE" status -sb 2>&1 | head -1)"
+[[ "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "...at the Windows branch's commit" || bad "clone HEAD differs"
+[[ "$(cd "$(git -C "$CLONE" remote get-url origin)" && pwd -P)" == "$(cd "$ORIGIN" && pwd -P)" ]] && ok "origin is the source's origin" || bad "origin: $(git -C "$CLONE" remote get-url origin)"
+[[ -n "$(git -C "$CLONE" remote get-url windows)" && "$(git -C "$CLONE" rev-parse "windows/$BR")" == "$(git -C "$MAIN" rev-parse "$BR")" ]] && ok "windows is the source checkout" || bad "windows remote"
+[[ "$(git -C "$CLONE" config core.hooksPath)" == ".githooks" ]] && ok "core.hooksPath is .githooks" || bad "hooksPath: $(git -C "$CLONE" config core.hooksPath)"
+grep -qx "DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME?sslmode=disable" "$CLONE/.env" \
+    && ok ".env points DATABASE_URL at the clone's database, query kept" || bad ".env: $(cat "$CLONE/.env")"
+[[ "$(grep -c '^DATABASE_URL=' "$CLONE/.env")" -eq 1 ]] && grep -qx 'RUST_LOG=info' "$CLONE/.env" && grep -qx '# dev' "$CLONE/.env" \
+    && ok "...one DATABASE_URL, every other line kept" || bad ".env lines: $(cat "$CLONE/.env")"
+[[ -f "$STUB_DB" ]] && ok "the database $STUB_DB_NAME is created" || bad "no database: $(cat "$STUB_LOG")"
+grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois?sslmode=disable$" "$STUB_LOG" && ok "...through the source's DATABASE_URL" || bad "admin url: $(grep psql-url "$STUB_LOG")"
+grep -q "^pnpm install --frozen-lockfile.* in .*$NAME$" "$STUB_LOG" && ok "pnpm install --frozen-lockfile runs in the clone" || bad "pnpm: $(grep pnpm "$STUB_LOG")"
+printf 'y\n' > "$WT/two.txt" && git -C "$WT" add two.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm two
+wsl_clone create "$BR"
+[[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "re-running create fast-forwards to the new commit" || bad "re-run: rc $RC: $OUT"
+printf 'z\n' > "$CLONE/local.txt" && git -C "$CLONE" add local.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm local
+LOCAL="$(git -C "$CLONE" rev-parse HEAD)"
+wsl_clone create "$BR"
+[[ $RC -ne 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$LOCAL" ]] && has "a clone with commits windows lacks is refused, HEAD kept" "the clone has commits windows/$BR lacks" || bad "local commits: rc $RC: $OUT"
+setup unknown
+wsl_clone create feat/1/no-such-branch
+[[ $RC -ne 0 && ! -e "$OIS_WSL_CLONES/feat-1-no-such-branch" ]] && has "an unknown branch is refused, nothing cloned" "has no branch feat/1/no-such-branch" || bad "unknown: rc $RC: $OUT"
+[[ ! -f "$STUB_DB" ]] && ok "...and no database made" || bad "unknown branch made a database"
+setup not-wsl
+not_wsl_version "$WORK/version.native"
+wsl_clone create "$BR"
+for sub in "create $BR" "gate $NAME" "push $NAME" "pr $NAME" "remove $NAME" preflight; do
+    # shellcheck disable=SC2086
+    WSL_PROC_VERSION="$WORK/version.native" wsl_clone $sub
+    [[ $RC -ne 0 && "$OUT" == *"not inside WSL"* ]] && ok "$sub refuses outside WSL" || bad "$sub outside WSL: rc $RC: $OUT"
+done
+[[ -d "$CLONE" ]] && ok "...and remove outside WSL left the clone" || bad "remove outside WSL deleted the clone"
+printf 'Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com)\n' > "$WORK/version.wsl1"
+WSL_PROC_VERSION="$WORK/version.wsl1" wsl_clone preflight
+[[ $RC -eq 0 ]] && ok "a capitalized Microsoft kernel string is accepted" || bad "WSL1 version refused: $OUT"
+
+echo "== AC4: build env in the clone's .env =="
+setup buildenv
+printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\nCARGO_BUILD_JOBS=8\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=8\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+[[ "$(grep -c '^CARGO_BUILD_JOBS=' "$CLONE/.env")" -eq 1 ]] && grep -qx 'CARGO_BUILD_JOBS=1' "$CLONE/.env" \
+    && ok ".env sets CARGO_BUILD_JOBS=1 once, over the source's 8" || bad "jobs: $(grep CARGO "$CLONE/.env")"
+[[ "$(grep -c '^CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=' "$CLONE/.env")" -eq 1 ]] \
+    && grep -qx 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=1' "$CLONE/.env" \
+    && ok ".env sets the target rustflags to -Zthreads=1 once, over the source's" || bad "rustflags: $(grep CARGO "$CLONE/.env")"
+grep -q 'Zthreads=1' "$ROOT/bin/lib/wsl.sh" && ok "wsl.sh holds the -Zthreads=1 value" || bad "wsl.sh lacks -Zthreads=1"
+grep -qE 'Zthreads=1|CARGO_BUILD_JOBS=1' "$ROOT/bin/wsl-clone.sh" && bad "wsl-clone.sh writes a build env value of its own" || ok "...and wsl-clone.sh writes none of its own"
+
+echo "== (a): node and pnpm must be Linux binaries =="
+for tool in node pnpm; do
+    setup "interop-$tool"
+    mkdir -p "$WORK/mnt/c/bin"
+    cp "$WORK/bin/$tool" "$WORK/mnt/c/bin/$tool"
+    TEST_PATH="$WORK/mnt/c/bin:$WORK/bin:$PATH" WSL_WINDOWS_MOUNT="$WORK/mnt" wsl_clone create "$BR"
+    [[ $RC -ne 0 && ! -e "$CLONE" ]] && has "$tool from the Windows mount is refused, nothing cloned" "$tool resolves to Windows's copy" || bad "interop $tool: rc $RC: $OUT"
+    rm -rf "$WORK/mnt"
+    # A PATH holding only the system tools the script needs, plus every stub but $tool.
+    rm -rf "$WORK/only"; mkdir -p "$WORK/only"
+    for f in "$WORK/bin/"*; do [[ "$(basename "$f")" == "$tool" ]] || cp "$f" "$WORK/only/"; done
+    SYS=""
+    for t in git bash sed awk grep tr cut mkdir dirname basename cat rm mv timeout env head tail od wc; do
+        d="$(dirname "$(command -v "$t")")"; case ":$SYS:" in *":$d:"*) ;; *) SYS="$SYS:$d" ;; esac
+    done
+    if PATH="$WORK/only$SYS" command -v "$tool" >/dev/null 2>&1; then
+        ok "(skip: a system $tool shares a directory with git here, so its absence cannot be staged)"
+    else
+        TEST_PATH="$WORK/only$SYS" wsl_clone create "$BR"
+        [[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a missing $tool is refused, nothing cloned" "$tool not found in WSL" || bad "missing $tool: rc $RC: $OUT"
+    fi
+done
+
+echo "== AC3: sparse VHDX check =="
+setup sparse
+wsl_clone create "$BR"
+has "the sparse capture reports the disk sparse" 'ext4.vhdx is sparse'
+grep -qF 'fsutil.exe sparse queryflag C:\Users\Matthew\AppData\Local\wsl\{bf97ba49-2f87-4e72-b74d-0094544fc778}\ext4.vhdx' "$STUB_LOG" \
+    && ok "fsutil gets Ubuntu's BasePath and VhdFileName" || bad "fsutil call: $(grep fsutil "$STUB_LOG")"
+[[ "$(crs "$STUB_LOG")" -eq 0 ]] && ok "...with the registry's CRs stripped" || bad "a CR reached a stub argument"
+grep -qF 'reg.exe query HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss /s' "$STUB_LOG" && ok "reg.exe queries the Lxss key recursively" || bad "reg call: $(grep reg.exe "$STUB_LOG")"
+sparse_warns() {
+    has "$1 warns with wsl --shutdown" "wsl --shutdown"
+    has "...and the set-sparse command" "wsl --manage ${2:-Ubuntu} --set-sparse true"
+    [[ $RC -eq 0 ]] && ok "...and create still exits 0" || bad "$1: rc $RC"
+}
+STUB_FSUTIL="$FIX/fsutil-notsparse.txt" wsl_clone create "$BR"
+sparse_warns "the not-sparse capture"
+has "...naming the disk as not sparse" "ext4.vhdx is not sparse"
+STUB_REG_RC=1 wsl_clone create "$BR"
+sparse_warns "a failing reg.exe (as when interop is off)"
+STUB_FSUTIL_RC=1 STUB_FSUTIL=/dev/null wsl_clone create "$BR"
+sparse_warns "a failing fsutil.exe"
+: > "$STUB_LOG"
+WSL_DISTRO_NAME=NoSuchDistro wsl_clone create "$BR"
+sparse_warns "a distro the registry does not list" NoSuchDistro
+grep -q '^fsutil' "$STUB_LOG" && bad "...but fsutil was called" || ok "...without calling fsutil"
+: > "$STUB_LOG"
+WSL_DISTRO_NAME=docker-desktop wsl_clone create "$BR"
+grep -qF 'fsutil.exe sparse queryflag C:\Users\Matthew\AppData\Local\Docker\wsl\main\ext4.vhdx' "$STUB_LOG" \
+    && ok "a \\\\?\\ BasePath reaches fsutil with the prefix stripped" || bad "docker-desktop fsutil: $(grep fsutil "$STUB_LOG")"
+
+echo "== AC1 + AC3: remove =="
+# created_pushed CASE: a clone of a fresh setup, its branch pushed to origin.
+created_pushed() { setup "$1"; wsl_clone create "$BR"; git -C "$CLONE" push -q origin "$BR"; : > "$STUB_LOG"; }
+created_pushed remove
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "remove deletes a clean, pushed clone" || bad "remove: rc $RC: $OUT"
+[[ ! -f "$STUB_DB" ]] && has "...drops its database" "database $STUB_DB_NAME dropped" || bad "database left: $(cat "$STUB_LOG")"
+[[ "$(grep -c "from pg_database where datname = '$STUB_DB_NAME'" "$STUB_LOG")" -ge 2 ]] && ok "...and reads the drop back" || bad "no read-back: $(cat "$STUB_LOG")"
+grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois$" "$STUB_LOG" && ok "...over the source's DATABASE_URL, not the database being dropped" || bad "drop url: $(grep psql-url "$STUB_LOG")"
+[[ "$(tail -1 "$STUB_LOG")" == "wsl.exe -d Ubuntu -u root fstrim -v /" ]] && ok "...then runs fstrim as root, last" || bad "fstrim: $(cat "$STUB_LOG")"
+git -C "$ORIGIN" show-ref --verify --quiet "refs/heads/$BR" && ok "...leaving the remote branch alone" || bad "remote branch deleted"
+created_pushed remove-branch
+wsl_clone remove "$BR"
+[[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "remove takes the branch name too" || bad "remove by branch: rc $RC: $OUT"
+created_pushed fstrim-fails
+STUB_WSL_RC=1 wsl_clone remove "$NAME"
+[[ $RC -eq 1 && ! -e "$CLONE" && ! -f "$STUB_DB" ]] && ok "a failed fstrim exits 1 after the clone and database are gone" || bad "fstrim fail: rc $RC: $OUT"
+has "...printing the command to run from Windows" "From Windows: wsl.exe -d Ubuntu -u root fstrim -v /"
+created_pushed dirty
+printf 'u\n' > "$CLONE/untracked.txt"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" && -f "$STUB_DB" ]] && has "an untracked file blocks, clone and database kept" "has uncommitted or untracked changes" || bad "dirty: rc $RC: $OUT"
+grep -q '^wsl.exe' "$STUB_LOG" && bad "...but fstrim ran" || ok "...and no fstrim"
+created_pushed modified
+printf 'm\n' >> "$CLONE/file.txt"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && ok "a modified tracked file blocks" || bad "modified: rc $RC: $OUT"
+setup unpushed
+wsl_clone create "$BR"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" && -f "$STUB_DB" ]] && has "a HEAD on neither origin/<branch> nor origin/next blocks" "is neither on origin/$BR nor in origin/next" || bad "unpushed: rc $RC: $OUT"
+git -C "$CLONE" push -q origin "HEAD:refs/heads/next"
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "a HEAD already in origin/next is removed, its branch never pushed" || bad "on next: rc $RC: $OUT"
+created_pushed pruned
+git -C "$ORIGIN" update-ref -d "refs/heads/$BR"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && ok "a branch since deleted on origin is not taken as pushed" || bad "pruned: rc $RC: $OUT"
+created_pushed unreachable
+STUB_PG_RC=2 wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && has "an unreachable Postgres blocks, clone kept" "cannot reach Postgres" || bad "unreachable: rc $RC: $OUT"
+grep -q '^wsl.exe' "$STUB_LOG" && bad "...but fstrim ran" || ok "...and no fstrim"
+created_pushed drop-fails
+STUB_DROP_FAILS=1 wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && has "a drop that does not take blocks, clone kept" "still exists after the drop" || bad "drop fails: rc $RC: $OUT"
+setup gone
+touch "$STUB_DB"
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -f "$STUB_DB" ]] && has "with no clone, remove still drops the database" "no clone at" || bad "gone: rc $RC: $OUT"
+[[ "$(tail -1 "$STUB_LOG")" == "wsl.exe -d Ubuntu -u root fstrim -v /" ]] && ok "...and runs fstrim" || bad "gone fstrim: $(cat "$STUB_LOG")"
+setup bad-name
+mkdir -p "$WORK/outside"; touch "$WORK/outside/keep"
+for n in "../outside" "a b" "x;y"; do
+    wsl_clone remove "$n"
+    [[ $RC -ne 0 ]] && ok "remove refuses the name '$n'" || bad "name '$n': rc $RC: $OUT"
+done
+wsl_clone remove ""
+[[ $RC -eq 2 ]] && ok "an empty name prints usage" || bad "empty name: rc $RC"
+[[ -f "$WORK/outside/keep" ]] && ok "...and nothing outside the clones root was removed" || bad "outside file removed"
+
+echo "== push and pr: marker checks =="
+setup push
+wsl_clone create "$BR"
+SHA="$(git -C "$CLONE" rev-parse HEAD)"
+wsl_clone push "$NAME"
+[[ $RC -ne 0 ]] && has "push without a tests marker is refused" "Tests (" || bad "push unmarked: rc $RC: $OUT"
+git -C "$ORIGIN" show-ref --verify --quiet "refs/heads/$BR" && bad "...but the branch reached origin" || ok "...and nothing reaches origin"
+mkdir -p "$CLONE/.claude/markers/tests" && touch "$CLONE/.claude/markers/tests/$SHA"
+wsl_clone push "$NAME"
+[[ $RC -ne 0 ]] && ok "a marker file with no manifest line is refused" || bad "unvouched marker pushed"
+rm -rf "$CLONE/.claude/markers"
+stamp_marker "$CLONE" tests "$SHA" >/dev/null
+wsl_clone push "$NAME"
+[[ $RC -eq 0 && "$(git -C "$ORIGIN" rev-parse "refs/heads/$BR" 2>/dev/null)" == "$SHA" ]] && ok "push with a vouched tests marker reaches origin" || bad "push: rc $RC: $OUT"
+[[ "$(git -C "$CLONE" rev-parse --abbrev-ref '@{u}')" == "origin/$BR" ]] && ok "...and sets the upstream to origin" || bad "upstream: $(git -C "$CLONE" rev-parse --abbrev-ref '@{u}' 2>&1)"
+setup pr
+wsl_clone create "$BR"
+SHA="$(git -C "$CLONE" rev-parse HEAD)"
+: > "$STUB_LOG"
+stamp_marker "$WT" review-shipping "$SHA" >/dev/null
+wsl_clone pr "$NAME"
+[[ $RC -ne 0 ]] && has "pr without the clone's tests marker is refused" "Tests (" || bad "pr no tests: rc $RC: $OUT"
+stamp_marker "$CLONE" tests "$SHA" >/dev/null
+rm -rf "$WT/.claude/markers"
+wsl_clone pr "$NAME"
+[[ $RC -ne 0 ]] && has "pr without the Windows worktree's review marker is refused" "Review (/review-before-shipping) has not run" || bad "pr no review: rc $RC: $OUT"
+grep -q '^gh' "$STUB_LOG" && bad "...but gh ran" || ok "...and gh never runs"
+stamp_marker "$WT" review-shipping "$SHA" >/dev/null
+printf 'w\n' > "$WT/three.txt" && git -C "$WT" add three.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm three
+stamp_marker "$WT" review-shipping "$(git -C "$WT" rev-parse HEAD)" >/dev/null
+wsl_clone pr "$NAME"
+[[ $RC -ne 0 ]] && has "pr refuses when the clone's HEAD is not the Windows branch's" "is not the Windows branch's" || bad "pr heads differ: rc $RC: $OUT"
+grep -q '^gh' "$STUB_LOG" && bad "...but gh ran" || ok "...and gh never runs"
+wsl_clone gate "$NAME"
+SHA="$(git -C "$CLONE" rev-parse HEAD)"
+stamp_marker "$CLONE" tests "$SHA" >/dev/null
+: > "$STUB_LOG"
+wsl_clone pr "$NAME" --title T --body "B two"
+[[ $RC -eq 0 ]] && ok "pr with both markers for the same HEAD runs" || bad "pr: rc $RC: $OUT"
+grep -q "^gh pr create --repo VATUSA/OIS --base next --head $BR --title T --body B two in .*$NAME$" "$STUB_LOG" \
+    && ok "...gh pr create in the clone, with the arguments passed through" || bad "gh call: $(cat "$STUB_LOG")"
+git -C "$MAIN" worktree remove --force "$WT"
+wsl_clone pr "$NAME"
+[[ $RC -ne 0 ]] && has "pr refuses when no Windows worktree has the branch checked out" "no Windows worktree has $BR checked out" || bad "pr no worktree: rc $RC: $OUT"
+
+echo
+echo "wsl-clone: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

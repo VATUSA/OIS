@@ -1,0 +1,328 @@
+#!/bin/bash
+set -uo pipefail
+
+# ==============================================================================
+# The WSL gate clone, for a Windows host
+# ==============================================================================
+# `just test` cannot stamp a tests marker on a Windows checkout, so a Windows host gates,
+# pushes and opens the PR from a Linux clone of the branch inside WSL. This script owns
+# that clone's whole life, so nothing is made by hand and nothing is left on C:.
+#
+# Run inside WSL, from the primary checkout's copy (its path under /mnt/c). Each clone is a
+# standalone clone at ~/ois-wsl/<name> (`/` in the branch written as `-`) with its own
+# .env, throwaway database ois_wsl_<name>, node_modules and target/.
+#
+# Usage (inside WSL; from Windows prefix `wsl.exe -d Ubuntu -- bash -lic '...'`):
+#   bash bin/wsl-clone.sh preflight              # C: free space and WSL memory, against bin/lib/wsl.sh
+#   bash bin/wsl-clone.sh create <branch>        # clone (or fast-forward) and provision
+#   bash bin/wsl-clone.sh gate   <name|branch>   # fast-forward, preflight, `just test` in the clone
+#   bash bin/wsl-clone.sh push   <name|branch>   # push, only with the clone's tests marker for HEAD
+#   bash bin/wsl-clone.sh pr     <name|branch> [gh pr create args...]
+#                                                # open the PR, only with the clone's tests marker
+#                                                # and the Windows worktree's review marker for HEAD
+#   bash bin/wsl-clone.sh remove <name|branch>   # drop the database, delete the clone, fstrim
+#
+# Settings and thresholds: bin/lib/wsl.sh. Tests: bin/lib/wsl-clone.test.sh.
+# ==============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# The message is printed with %s, never echo -e: a Windows path's \e would become an escape.
+fatal()   { printf "${RED}FATAL:${NC} %s\n" "$1" >&2; exit 1; }
+blocked() { printf "${RED}BLOCKED:${NC} %s\n" "$1" >&2; exit 1; }
+step()    { printf "\n${CYAN}==>${NC} %s\n" "$1"; }
+ok()      { printf "  ${GREEN}ok${NC} %s\n" "$1"; }
+warn()    { printf "  ${YELLOW}warn${NC} %s\n" "$1"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A Windows checkout under core.autocrlf holds portable.sh with CRLF endings, which bash on
+# Linux cannot parse, so it is read with the CRs stripped. This file and wsl.sh are pinned
+# to LF by bin/.gitattributes.
+# shellcheck source=lib/portable.sh
+. <(tr -d '\r' < "$SCRIPT_DIR/lib/portable.sh") || { echo "FATAL: cannot load ${SCRIPT_DIR}/lib/portable.sh" >&2; exit 1; }
+# shellcheck source=lib/wsl.sh
+. "$SCRIPT_DIR/lib/wsl.sh" || { echo "FATAL: cannot load ${SCRIPT_DIR}/lib/wsl.sh" >&2; exit 1; }
+
+CLONES_ROOT="${OIS_WSL_CLONES:-$HOME/ois-wsl}"
+DISTRO="${WSL_DISTRO_NAME:-}"
+LXSS_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss'
+
+usage() { sed -n '15,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+require_wsl() {
+    grep -qi microsoft "${WSL_PROC_VERSION:-/proc/version}" 2>/dev/null \
+        || fatal "not inside WSL. Run it there: wsl.exe -d Ubuntu -- bash -lic 'bash <this script> ...'"
+}
+
+# The main checkout this script sits in, on /mnt/c: the clone's source and its .env's.
+find_source() {
+    local common
+    common="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+        || fatal "cannot find the checkout ${SCRIPT_DIR} belongs to."
+    SOURCE="$(dirname "$common")"
+}
+
+# resolve NAME|BRANCH: sets NAME, DIR, DB.
+resolve() {
+    [[ -n "${1:-}" ]] || usage
+    NAME="$(wsl_clone_name "$1")"
+    [[ "$NAME" =~ ^[A-Za-z0-9_+-]+$ ]] || fatal "'$1' is not a clone name or branch."
+    DIR="$CLONES_ROOT/$NAME"
+    # Interpolated into SQL: wsl_db_name leaves nothing outside [a-z0-9_] in it.
+    DB="$(wsl_db_name "$NAME")" || fatal "cannot derive the database name for ${NAME}."
+}
+
+clone_branch() {
+    BRANCH="$(git -C "$DIR" symbolic-ref --quiet --short HEAD 2>/dev/null)" || fatal "${DIR} is not on a branch."
+    SHA="$(git -C "$DIR" rev-parse HEAD)" || fatal "cannot read HEAD in ${DIR}."
+}
+
+env_value() { grep -E "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/'; }
+
+# url_with_db URL DB: URL pointing at database DB, its query string kept.
+url_with_db() {
+    local base="${1%%\?*}"
+    printf '%s/%s%s\n' "${base%/*}" "$2" "${1#"$base"}"
+}
+
+# The source's DATABASE_URL, for creating and dropping the clone's database: a database
+# cannot be dropped over a connection to itself.
+use_admin_db() {
+    DATABASE_URL="$(env_value "$SOURCE/.env" DATABASE_URL)"
+    export DATABASE_URL
+    [[ -n "$DATABASE_URL" ]] || blocked "${SOURCE}/.env sets no DATABASE_URL."
+    db_reachable "$(url_part "$DATABASE_URL" host)" "$(url_part "$DATABASE_URL" port)" \
+        || blocked "cannot reach Postgres at $(url_part "$DATABASE_URL" host):$(url_part "$DATABASE_URL" port). Start it (just up) and re-run."
+}
+
+db_exists() {
+    local out
+    out="$(db_query "select 1 from pg_database where datname = '${DB}'")" || blocked "cannot query Postgres (psql, or docker exec into its container)."
+    [[ -n "$out" ]]
+}
+
+# native_tool NAME: refuses a missing tool or Windows's copy through interop, which
+# installs Windows binaries into node_modules.
+native_tool() {
+    local path
+    path="$(command -v "$1" 2>/dev/null)" || fatal "$1 not found in WSL. Install it there (fnm or nvm, then corepack enable) and run this through bash -lic."
+    case "$path" in
+        "${WSL_WINDOWS_MOUNT:-/mnt}"/*) fatal "$1 resolves to Windows's copy (${path}). Install a native one in WSL and run this through bash -lic." ;;
+    esac
+    ok "$1: ${path}"
+}
+
+# sync_clone: fast-forward the clone to the Windows branch; never past local-only commits.
+sync_clone() {
+    git -C "$DIR" fetch -q windows || fatal "cannot fetch from ${SOURCE}."
+    git -C "$DIR" merge-base --is-ancestor HEAD "windows/$BRANCH" 2>/dev/null \
+        || blocked "the clone has commits windows/${BRANCH} lacks. Commit in the Windows worktree, never in the clone."
+    git -C "$DIR" merge -q --ff-only "windows/$BRANCH" || fatal "cannot fast-forward ${DIR} to windows/${BRANCH}."
+    ok "clone at $(git -C "$DIR" rev-parse --short HEAD) (windows/${BRANCH})"
+}
+
+clone_fresh() {
+    local origin_url
+    origin_url="$(git -C "$SOURCE" remote get-url origin)" || fatal "the source has no origin remote."
+    mkdir -p "$CLONES_ROOT" || fatal "cannot create ${CLONES_ROOT}."
+    git clone -q --no-checkout --origin windows "$SOURCE" "$DIR" || fatal "git clone of ${SOURCE} failed."
+    git -C "$DIR" remote add origin "$origin_url" || fatal "cannot add origin to ${DIR}."
+    git -C "$DIR" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fatal "cannot check out ${BRANCH} in ${DIR}."
+    ok "cloned ${BRANCH} into ${DIR}"
+}
+
+# write_env: the source's .env, pointed at the clone's database, with the WSL build env.
+write_env() {
+    local src="$SOURCE/.env" url tmp
+    url="$(env_value "$src" DATABASE_URL)"
+    [[ -n "$url" ]] || fatal "${src} sets no DATABASE_URL."
+    tmp="$DIR/.env.tmp"
+    grep -vE "^(DATABASE_URL|CARGO_BUILD_JOBS|${WSL_RUSTFLAGS_VAR})=" "$src" > "$tmp"
+    { echo "DATABASE_URL=$(url_with_db "$url" "$DB")"; wsl_build_env_lines; } >> "$tmp"
+    mv "$tmp" "$DIR/.env" || fatal "cannot write ${DIR}/.env."
+    ok ".env: DATABASE_URL -> ${DB}; $(wsl_build_env_lines | tr '\n' ' ')"
+}
+
+create_db() {
+    use_admin_db
+    if db_exists; then
+        ok "database ${DB} already exists"
+        return 0
+    fi
+    db_query "create database \"${DB}\"" >/dev/null || true
+    db_exists || blocked "database ${DB} does not exist after create."
+    ok "database ${DB} created"
+}
+
+# vhdx_path: Windows path of this distro's ext4.vhdx, from the Lxss registry key.
+vhdx_path() {
+    reg.exe query "$LXSS_KEY" /s 2>/dev/null | tr -d '\r' | awk -v d="$DISTRO" '
+        function flush() { if (name == d && base != "") print base "\\" (file == "" ? "ext4.vhdx" : file) }
+        /^HKEY_/ { flush(); name = ""; base = ""; file = ""; next }
+        { v = $0; sub(/^[ \t]*[^ \t]+[ \t]+REG_[A-Z_]+[ \t]+/, "", v) }
+        $1 == "DistributionName" { name = v }
+        $1 == "BasePath" { sub(/^\\\\\?\\/, "", v); base = v }
+        $1 == "VhdFileName" { file = v }
+        END { flush() }'
+}
+
+# sparse_check: a sparse vhdx hands space freed inside WSL back to C: (after fstrim).
+# The flag cannot be set while the distro runs, so this only reports.
+sparse_check() {
+    local hint="From Windows, with nothing running in WSL: wsl --shutdown, then wsl --manage ${DISTRO:-<distro>} --set-sparse true"
+    local vhd flag
+    vhd="$(vhdx_path)"
+    if [[ -z "$DISTRO" || -z "$vhd" ]]; then
+        warn "cannot find this distro's disk in the registry, so its sparse flag is unchecked. ${hint}"
+        return 0
+    fi
+    flag="$(fsutil.exe sparse queryflag "$vhd" 2>/dev/null | tr -d '\r')"
+    case "$flag" in
+        *"NOT set as sparse"*) warn "${vhd} is not sparse: space freed in WSL stays taken on C:. ${hint}" ;;
+        *"set as sparse"*) ok "${vhd} is sparse" ;;
+        *) warn "fsutil could not read the sparse flag of ${vhd}. ${hint}" ;;
+    esac
+}
+
+cmd_preflight() { wsl_preflight; }
+
+cmd_create() {
+    BRANCH="${1:-}"
+    [[ -n "$BRANCH" ]] || usage
+    resolve "$BRANCH"
+    step "preflight"
+    wsl_preflight || blocked "below a preflight threshold; nothing was created."
+    step "tools"
+    native_tool node
+    native_tool pnpm
+    step "clone"
+    git -C "$SOURCE" show-ref --verify --quiet "refs/heads/$BRANCH" || fatal "${SOURCE} has no branch ${BRANCH}."
+    if [[ -d "$DIR/.git" ]]; then sync_clone; else clone_fresh; fi
+    git -C "$DIR" config core.hooksPath .githooks || fatal "cannot set core.hooksPath in ${DIR}."
+    GIT_TERMINAL_PROMPT=0 with_timeout 60 git -C "$DIR" fetch -q origin \
+        || warn "cannot fetch origin: origin/next is stale until the next fetch"
+    step "environment"
+    write_env
+    create_db
+    (cd "$DIR" && pnpm install --frozen-lockfile --prefer-offline) || fatal "pnpm install --frozen-lockfile failed in ${DIR}."
+    ok "node_modules installed"
+    step "disk"
+    sparse_check
+    printf "\n${GREEN}Clone ready:${NC} %s. Gate it: bash %s/wsl-clone.sh gate %s\n" "$DIR" "$SCRIPT_DIR" "$NAME"
+}
+
+cmd_gate() {
+    resolve "${1:-}"
+    [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}. Run: bash ${SCRIPT_DIR}/wsl-clone.sh create <branch>"
+    clone_branch
+    sync_clone
+    wsl_preflight || blocked "below a preflight threshold; the build did not start."
+    cd "$DIR" && just test
+}
+
+# marker_vouched ROOT KIND LABEL: the marker for $SHA in ROOT, with its manifest line, the
+# same test bin/check-marker.sh applies for the PR gates.
+marker_vouched() {
+    python3 -I "$SCRIPT_DIR/lib/marker_manifest.py" vouched "$1" "$2" "$SHA" \
+        || blocked "$3 has not run for ${SHA:0:8} in $1."
+    ok "$3 marker for ${SHA:0:8} in $1"
+}
+
+cmd_push() {
+    resolve "${1:-}"
+    [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}."
+    clone_branch
+    marker_vouched "$DIR" tests "Tests (bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME})"
+    git -C "$DIR" push -u origin "$BRANCH" || fatal "push failed."
+    [[ "$(git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')" == "$SHA" ]] \
+        || fatal "origin's ${BRANCH} does not equal ${SHA:0:8} after the push."
+    ok "origin/${BRANCH} is ${SHA:0:8}"
+}
+
+# windows_worktree BRANCH: the directory of the worktree with BRANCH checked out. Linux git
+# prints a worktree Windows git registered as <common dir>/worktrees/<id>/C:/..., reading
+# its drive path as relative; when that is not a directory, the drive path is taken from it
+# and read through /mnt.
+windows_worktree() {
+    local wt
+    wt="$(git -C "$SOURCE" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$1" '
+        /^worktree / { wt = substr($0, 10) }
+        $1 == "branch" && $2 == b { print wt; exit }')"
+    [[ -z "$wt" || -d "$wt" ]] || wt="$(printf '%s\n' "$wt" | sed -E 's#\\#/#g; s#^(.*/)?([A-Za-z]):/#/mnt/\L\2/#')"
+    printf '%s\n' "$wt"
+}
+
+cmd_pr() {
+    resolve "${1:-}"
+    shift || true
+    [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}."
+    clone_branch
+    local wt
+    wt="$(windows_worktree "$BRANCH")"
+    [[ -n "$wt" && -d "$wt" ]] || blocked "no Windows worktree has ${BRANCH} checked out, so its review marker cannot be read."
+    [[ "$(git -C "$SOURCE" rev-parse "refs/heads/$BRANCH" 2>/dev/null)" == "$SHA" ]] \
+        || blocked "the clone's HEAD ${SHA:0:8} is not the Windows branch's. Run: bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME}"
+    marker_vouched "$DIR" tests "Tests (bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME})"
+    marker_vouched "$wt" review-shipping "Review (/review-before-shipping)"
+    (cd "$DIR" && gh pr create --repo VATUSA/OIS --base next --head "$BRANCH" "$@")
+}
+
+drop_db() {
+    use_admin_db
+    if ! db_exists; then
+        ok "database ${DB} not present"
+        return 0
+    fi
+    db_query "drop database \"${DB}\"" >/dev/null || true
+    # Read back, so a drop that did not take (a backend still connected) fails here.
+    db_exists && blocked "${DB} still exists after the drop (a backend still connected to it?). Stop it and re-run."
+    ok "database ${DB} dropped"
+}
+
+# The clone's commits must be on origin: its pushed branch at HEAD, or origin/next.
+check_saved() {
+    [[ -z "$(git -C "$DIR" status --porcelain)" ]] || blocked "${DIR} has uncommitted or untracked changes."
+    clone_branch
+    GIT_TERMINAL_PROMPT=0 with_timeout 60 git -C "$DIR" fetch -q --prune origin \
+        || blocked "cannot fetch origin, so whether ${SHA:0:8} is saved there is unknown."
+    local remote
+    remote="$(GIT_TERMINAL_PROMPT=0 with_timeout 30 git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')"
+    if [[ "$remote" != "$SHA" ]] && ! git -C "$DIR" merge-base --is-ancestor "$SHA" origin/next 2>/dev/null; then
+        blocked "${BRANCH} at ${SHA:0:8} is neither on origin/${BRANCH} nor in origin/next. Push it first."
+    fi
+    ok "${SHA:0:8} is on origin"
+}
+
+cmd_remove() {
+    resolve "${1:-}"
+    if [[ -d "$DIR" ]]; then
+        check_saved
+    else
+        ok "no clone at ${DIR}"
+    fi
+    drop_db
+    rm -rf "$DIR"
+    [[ ! -e "$DIR" ]] || blocked "${DIR} is still there after rm -rf."
+    ok "removed ${DIR}"
+    # Hand the freed blocks back to the vhdx, so a sparse disk shrinks on C:.
+    if [[ -n "$DISTRO" ]] && wsl.exe -d "$DISTRO" -u root fstrim -v /; then
+        ok "fstrim done"
+        return 0
+    fi
+    printf "${RED}fstrim did not run; the space stays taken on C:.${NC} From Windows: wsl.exe -d %s -u root fstrim -v /\n" "${DISTRO:-<distro>}" >&2
+    return 1
+}
+
+SUBCOMMAND="${1:-}"
+shift || true
+case "$SUBCOMMAND" in
+    preflight|create|gate|push|pr|remove) ;;
+    *) usage ;;
+esac
+require_wsl
+case "$SUBCOMMAND" in create|pr|remove) find_source ;; esac
+"cmd_$SUBCOMMAND" "$@"
