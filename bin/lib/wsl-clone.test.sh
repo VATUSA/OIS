@@ -91,7 +91,17 @@ STUB
 printf '#!/bin/bash\nexit "${STUB_PG_RC:-0}"\n' > "$WORK/bin/pg_isready"
 printf '#!/bin/bash\necho "pnpm $* in $PWD" >> "$STUB_LOG"\nexit "${STUB_PNPM_RC:-0}"\n' > "$WORK/bin/pnpm"
 printf '#!/bin/bash\nexit 0\n' > "$WORK/bin/node"
-printf '#!/bin/bash\necho "just $* in $PWD" >> "$STUB_LOG"\nexit "${STUB_JUST_RC:-0}"\n' > "$WORK/bin/just"
+cat > "$WORK/bin/just" <<'STUB'
+#!/bin/bash
+echo "just $* in $PWD" >> "$STUB_LOG"
+# STUB_JUST_EDIT=FILE: rewrite FILE in place mid-run (same inode, as an editor or a checkout
+# writing over it does), shifting every byte the running bash has yet to read.
+if [[ -n "${STUB_JUST_EDIT:-}" ]]; then
+    { printf '# %s\n' "$(printf 'x%.0s' {1..4000})"; cat "$STUB_JUST_EDIT"; } > "$STUB_JUST_EDIT.new" \
+        && cat "$STUB_JUST_EDIT.new" > "$STUB_JUST_EDIT" && rm -f "$STUB_JUST_EDIT.new"
+fi
+exit "${STUB_JUST_RC:-0}"
+STUB
 printf '#!/bin/bash\necho "gh $* in $PWD" >> "$STUB_LOG"\nexit 0\n' > "$WORK/bin/gh"
 chmod +x "$WORK/bin/"*
 export STUB_LOG="$WORK/stub.log"
@@ -237,6 +247,10 @@ wsl_clone gate "$BR"
 grep -q "^just test in .*$NAME$" "$STUB_LOG" && ok "...then runs just test in the clone" || bad "just call: $(cat "$STUB_LOG")"
 STUB_JUST_RC=3 wsl_clone gate "$BR"
 [[ $RC -eq 3 ]] && ok "gate exits with just test's status" || bad "gate rc $RC on a failing just test"
+cp "$MAIN/bin/wsl-clone.sh" "$WORK/wsl-clone.orig"
+STUB_JUST_EDIT="$MAIN/bin/wsl-clone.sh" wsl_clone gate "$BR"
+[[ $RC -eq 0 ]] && lacks "a script rewritten during just test still exits with just test's status" "syntax error" || bad "rewritten mid-run: rc $RC: $OUT"
+cp "$WORK/wsl-clone.orig" "$MAIN/bin/wsl-clone.sh"
 
 echo "== AC1: create provisions the clone =="
 setup create

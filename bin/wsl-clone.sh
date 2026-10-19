@@ -380,4 +380,6 @@ case "$SUBCOMMAND" in
 esac
 require_wsl
 case "$SUBCOMMAND" in create|pr|remove) find_source ;; esac
-"cmd_$SUBCOMMAND" "$@"
+# One line, ending in exit: bash reads a script as it runs, so a checkout updated during a
+# long gate would otherwise feed it the new file's bytes from the old offset.
+"cmd_$SUBCOMMAND" "$@"; exit $?
