@@ -38,6 +38,17 @@ wsl_db_name() {
     printf 'ois_wsl_%s\n' "$id" | cut -c1-63
 }
 
+# wsl_mount_path PATH: a worktree path from `git worktree list` as WSL can open it. Linux git
+# prints a worktree Windows git registered as <common dir>/worktrees/<id>/C:/..., reading its
+# drive path as relative; when PATH is not a directory, its drive path is read through /mnt.
+wsl_mount_path() {
+    if [[ -z "$1" || -d "$1" ]]; then
+        printf '%s\n' "$1"
+        return 0
+    fi
+    printf '%s\n' "$1" | sed -E 's#\\#/#g; s#^(.*/)?([A-Za-z]):/#/mnt/\L\2/#'
+}
+
 # wsl_c_free_kb: free KiB on Windows C:, through its /mnt/c mount. WSL's own `df /` reports
 # the virtual disk, which has room long after C: is full.
 wsl_c_free_kb() {

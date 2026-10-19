@@ -10,7 +10,8 @@ set -uo pipefail
 #
 # Run inside WSL, from the primary checkout's copy (its path under /mnt/c). Each clone is a
 # standalone clone at ~/ois-wsl/<name> (`/` in the branch written as `-`) with its own
-# .env, throwaway database ois_wsl_<name>, node_modules and target/.
+# .env, throwaway database (ois_wsl_ plus the name lower-cased, `-` as `_`), node_modules and
+# target/. create, gate, push and pr refuse main and next.
 #
 # Usage (inside WSL; from Windows prefix `wsl.exe -d Ubuntu -- bash -lic '...'`):
 #   bash bin/wsl-clone.sh preflight              # C: free space and WSL memory, against bin/lib/wsl.sh
@@ -50,8 +51,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLONES_ROOT="${OIS_WSL_CLONES:-$HOME/ois-wsl}"
 DISTRO="${WSL_DISTRO_NAME:-}"
 LXSS_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss'
+# The lines attribution-gate.sh refuses in a commit, PR or comment.
+ATTRIBUTION='Drafted by|Generated with|Co-Authored'
 
-usage() { sed -n '15,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '/^# Usage/,/^# Settings/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 require_wsl() {
     grep -qi microsoft "${WSL_PROC_VERSION:-/proc/version}" 2>/dev/null \
@@ -88,13 +91,23 @@ clone_branch() {
     SHA="$(git -C "$DIR" rev-parse HEAD)" || fatal "cannot read HEAD in ${DIR}."
 }
 
+# not_protected BRANCH: main and next are never pushed or gated here. master-protection-gate.sh
+# refuses that push on Windows, and it cannot see a push run inside WSL.
+not_protected() {
+    case "$1" in
+        main|next) blocked "${1} is a protected branch; this script works only on an issue branch." ;;
+    esac
+}
+
 # The source's .env sits in a Windows checkout and may be CRLF; every read strips the CRs.
 env_value() { tr -d '\r' < "$1" 2>/dev/null | grep -E "^$2=" | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/'; }
 
 # url_with_db URL DB: URL pointing at database DB, its query string kept.
 url_with_db() {
     local base="${1%%\?*}"
-    printf '%s/%s%s\n' "${base%/*}" "$2" "${1#"$base"}"
+    local rest="${base#*://}"
+    [[ "$rest" == */* ]] && base="${base%/*}"
+    printf '%s/%s%s\n' "$base" "$2" "${1#"${1%%\?*}"}"
 }
 
 # The source's DATABASE_URL, for creating and dropping the clone's database: a database
@@ -126,7 +139,7 @@ native_tool() {
 
 # sync_clone: fast-forward the clone to the Windows branch; never past local-only commits.
 sync_clone() {
-    git -C "$DIR" fetch -q windows || fatal "cannot fetch from ${SOURCE}."
+    git -C "$DIR" fetch -q windows || fatal "cannot fetch the clone's windows remote in ${DIR}."
     git -C "$DIR" merge-base --is-ancestor HEAD "windows/$BRANCH" 2>/dev/null \
         || blocked "the clone has commits windows/${BRANCH} lacks. Commit in the Windows worktree, never in the clone."
     git -C "$DIR" merge -q --ff-only "windows/$BRANCH" || fatal "cannot fast-forward ${DIR} to windows/${BRANCH}."
@@ -150,7 +163,8 @@ write_env() {
     [[ -n "$url" ]] || fatal "${src} sets no DATABASE_URL."
     tmp="$DIR/.env.tmp"
     tr -d '\r' < "$src" | grep -vE "^(DATABASE_URL|CARGO_BUILD_JOBS|${WSL_RUSTFLAGS_VAR})=" > "$tmp"
-    { echo "DATABASE_URL=$(url_with_db "$url" "$DB")"; wsl_build_env_lines; } >> "$tmp"
+    # Quoted: the file is sourced with `set -a`, where a bare `&` in a query string would fork.
+    { echo "DATABASE_URL=\"$(url_with_db "$url" "$DB")\""; wsl_build_env_lines; } >> "$tmp"
     mv "$tmp" "$DIR/.env" || fatal "cannot write ${DIR}/.env."
     ok ".env: DATABASE_URL -> ${DB}; $(wsl_build_env_lines | tr '\n' ' ')"
 }
@@ -201,6 +215,7 @@ cmd_preflight() { wsl_preflight; }
 cmd_create() {
     BRANCH="${1:-}"
     [[ -n "$BRANCH" ]] || usage
+    not_protected "$BRANCH"
     resolve "$BRANCH"
     step "preflight"
     wsl_preflight || blocked "below a preflight threshold; nothing was created."
@@ -209,7 +224,14 @@ cmd_create() {
     native_tool pnpm
     step "clone"
     git -C "$SOURCE" show-ref --verify --quiet "refs/heads/$BRANCH" || fatal "${SOURCE} has no branch ${BRANCH}."
-    if [[ -d "$DIR/.git" ]]; then sync_clone; else clone_fresh; fi
+    if [[ -d "$DIR/.git" ]]; then
+        local want="$BRANCH"
+        clone_branch
+        [[ "$BRANCH" == "$want" ]] || blocked "${DIR} has ${BRANCH} checked out, not ${want}. Remove it first: bash ${SCRIPT_DIR}/wsl-clone.sh remove ${NAME}"
+        sync_clone
+    else
+        clone_fresh
+    fi
     git -C "$DIR" config core.hooksPath .githooks || fatal "cannot set core.hooksPath in ${DIR}."
     GIT_TERMINAL_PROMPT=0 with_timeout 60 git -C "$DIR" fetch -q origin \
         || warn "cannot fetch origin: origin/next is stale until the next fetch"
@@ -227,6 +249,7 @@ cmd_gate() {
     resolve "${1:-}"
     [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}. Run: bash ${SCRIPT_DIR}/wsl-clone.sh create <branch>"
     clone_branch
+    not_protected "$BRANCH"
     sync_clone
     wsl_preflight || blocked "below a preflight threshold; the build did not start."
     cd "$DIR" && just test
@@ -244,6 +267,7 @@ cmd_push() {
     resolve "${1:-}"
     [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}."
     clone_branch
+    not_protected "$BRANCH"
     marker_vouched "$DIR" tests "Tests (bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME})"
     git -C "$DIR" push -u origin "$BRANCH" || fatal "push failed."
     [[ "$(git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')" == "$SHA" ]] \
@@ -251,17 +275,33 @@ cmd_push() {
     ok "origin/${BRANCH} is ${SHA:0:8}"
 }
 
-# windows_worktree BRANCH: the directory of the worktree with BRANCH checked out. Linux git
-# prints a worktree Windows git registered as <common dir>/worktrees/<id>/C:/..., reading
-# its drive path as relative; when that is not a directory, the drive path is taken from it
-# and read through /mnt.
+# windows_worktree BRANCH: the directory of the worktree with BRANCH checked out.
 windows_worktree() {
-    local wt
-    wt="$(git -C "$SOURCE" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$1" '
+    wsl_mount_path "$(git -C "$SOURCE" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$1" '
         /^worktree / { wt = substr($0, 10) }
         $1 == "branch" && $2 == b { print wt; exit }')"
-    [[ -z "$wt" || -d "$wt" ]] || wt="$(printf '%s\n' "$wt" | sed -E 's#\\#/#g; s#^(.*/)?([A-Za-z]):/#/mnt/\L\2/#')"
-    printf '%s\n' "$wt"
+}
+
+# pr_args_allowed ARGS...: the script sets the repo, base and head itself, and the PR text
+# carries no attribution (attribution-gate.sh never sees a PR opened here).
+pr_args_allowed() {
+    local a next_is_file=""
+    for a in "$@"; do
+        if [[ -n "$next_is_file" ]]; then
+            tr -d '\r' < "$a" 2>/dev/null | grep -qiE "$ATTRIBUTION" && blocked "${a} carries an attribution line."
+            next_is_file=""
+            continue
+        fi
+        case "$a" in
+            -R*|--repo|--repo=*|-B*|--base|--base=*|-H*|--head|--head=*) blocked "pr sets ${a%%=*} itself; drop it." ;;
+            -F|--body-file) next_is_file=1 ;;
+            --body-file=*|-F?*)
+                local f="${a#--body-file=}"; f="${f#-F}"
+                tr -d '\r' < "$f" 2>/dev/null | grep -qiE "$ATTRIBUTION" && blocked "${f} carries an attribution line." ;;
+        esac
+        printf '%s' "$a" | grep -qiE "$ATTRIBUTION" && blocked "an argument carries an attribution line."
+    done
+    return 0
 }
 
 cmd_pr() {
@@ -269,11 +309,16 @@ cmd_pr() {
     shift || true
     [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}."
     clone_branch
+    not_protected "$BRANCH"
+    pr_args_allowed "$@"
     local wt
     wt="$(windows_worktree "$BRANCH")"
     [[ -n "$wt" && -d "$wt" ]] || blocked "no Windows worktree has ${BRANCH} checked out, so its review marker cannot be read."
     [[ "$(git -C "$SOURCE" rev-parse "refs/heads/$BRANCH" 2>/dev/null)" == "$SHA" ]] \
         || blocked "the clone's HEAD ${SHA:0:8} is not the Windows branch's. Run: bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME}"
+    # gh opens the PR on origin's branch, so that is the commit the markers must cover.
+    [[ "$(GIT_TERMINAL_PROMPT=0 with_timeout 30 git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')" == "$SHA" ]] \
+        || blocked "origin's ${BRANCH} is not ${SHA:0:8}. Run: bash ${SCRIPT_DIR}/wsl-clone.sh push ${NAME}"
     marker_vouched "$DIR" tests "Tests (bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME})"
     marker_vouched "$wt" review-shipping "Review (/review-before-shipping)"
     (cd "$DIR" && gh pr create --repo VATUSA/OIS --base next --head "$BRANCH" "$@")
@@ -293,7 +338,9 @@ drop_db() {
 
 # The clone's commits must be on origin: its pushed branch at HEAD, or origin/next.
 check_saved() {
-    [[ -z "$(git -C "$DIR" status --porcelain)" ]] || blocked "${DIR} has uncommitted or untracked changes."
+    local status
+    status="$(git -C "$DIR" status --porcelain)" || blocked "git status failed in ${DIR}, so its changes are unknown."
+    [[ -z "$status" ]] || blocked "${DIR} has uncommitted or untracked changes."
     clone_branch
     GIT_TERMINAL_PROMPT=0 with_timeout 60 git -C "$DIR" fetch -q --prune origin \
         || blocked "cannot fetch origin, so whether ${SHA:0:8} is saved there is unknown."

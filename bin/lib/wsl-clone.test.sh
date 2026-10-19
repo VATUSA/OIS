@@ -32,7 +32,9 @@ export GIT_CONFIG_NOSYSTEM=1 HOME="$WORK" FIX
 
 PASS=0
 FAIL=0
+SKIP=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 has()   { case "$OUT" in *"$2"*) ok "$1" ;; *) bad "$1 (no '$2' in: $OUT)" ;; esac; }
 lacks() { case "$OUT" in *"$2"*) bad "$1 ('$2' in: $OUT)" ;; *) ok "$1" ;; esac; }
@@ -44,7 +46,7 @@ MEM_OK_KB=9437184              # 9 GiB
 MEM_SHORT_KB=9437183           # 9 GiB - 1 KiB
 
 # ------------------------------------------------------------------------------
-# Stubs. Each logs its call to $STUB_LOG and serves a captured fixture or a file
+# Stubs. Most log their call to $STUB_LOG and serve a captured fixture or a file
 # derived from one. Env knobs: STUB_REG (file), STUB_REG_RC, STUB_FSUTIL (file),
 # STUB_FSUTIL_RC, STUB_DF (file), STUB_WSL_RC, STUB_JUST_RC, STUB_PG_RC,
 # STUB_DROP_FAILS, STUB_DB (file standing for the database), STUB_DB_NAME.
@@ -86,7 +88,7 @@ esac
 exit 1
 STUB
 printf '#!/bin/bash\nexit "${STUB_PG_RC:-0}"\n' > "$WORK/bin/pg_isready"
-printf '#!/bin/bash\necho "pnpm $* in $PWD" >> "$STUB_LOG"\nexit 0\n' > "$WORK/bin/pnpm"
+printf '#!/bin/bash\necho "pnpm $* in $PWD" >> "$STUB_LOG"\nexit "${STUB_PNPM_RC:-0}"\n' > "$WORK/bin/pnpm"
 printf '#!/bin/bash\nexit 0\n' > "$WORK/bin/node"
 printf '#!/bin/bash\necho "just $* in $PWD" >> "$STUB_LOG"\nexit "${STUB_JUST_RC:-0}"\n' > "$WORK/bin/just"
 printf '#!/bin/bash\necho "gh $* in $PWD" >> "$STUB_LOG"\nexit 0\n' > "$WORK/bin/gh"
@@ -152,7 +154,7 @@ done
 [[ "$(cat "$FIX/.gitattributes")" == "* -text" ]] && ok ".gitattributes turns off EOL conversion" || bad ".gitattributes: $(cat "$FIX/.gitattributes" 2>&1)"
 # Linux git cannot open a worktree Windows git registered (its .git names a C:/ path).
 if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    ok "(skip: git cannot open $ROOT from here, so its attributes are unchecked)"
+    skip "git cannot open $ROOT from here, so its attributes are unchecked"
 else
     [[ "$(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)" == *"text: unset" ]] && ok "...and git honours it" || bad "check-attr: $(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)"
 fi
@@ -246,8 +248,8 @@ wsl_clone create "$BR"
 [[ "$(cd "$(git -C "$CLONE" remote get-url origin)" && pwd -P)" == "$(cd "$ORIGIN" && pwd -P)" ]] && ok "origin is the source's origin" || bad "origin: $(git -C "$CLONE" remote get-url origin)"
 [[ -n "$(git -C "$CLONE" remote get-url windows)" && "$(git -C "$CLONE" rev-parse "windows/$BR")" == "$(git -C "$MAIN" rev-parse "$BR")" ]] && ok "windows is the source checkout" || bad "windows remote"
 [[ "$(git -C "$CLONE" config core.hooksPath)" == ".githooks" ]] && ok "core.hooksPath is .githooks" || bad "hooksPath: $(git -C "$CLONE" config core.hooksPath)"
-grep -qx "DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME?sslmode=disable" "$CLONE/.env" \
-    && ok ".env points DATABASE_URL at the clone's database, query kept" || bad ".env: $(cat "$CLONE/.env")"
+grep -qx "DATABASE_URL=\"postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME?sslmode=disable\"" "$CLONE/.env" \
+    && ok ".env points DATABASE_URL at the clone's database, query kept, quoted" || bad ".env: $(cat "$CLONE/.env")"
 [[ "$(grep -c '^DATABASE_URL=' "$CLONE/.env")" -eq 1 ]] && grep -qx 'RUST_LOG=info' "$CLONE/.env" && grep -qx '# dev' "$CLONE/.env" \
     && ok "...one DATABASE_URL, every other line kept" || bad ".env lines: $(cat "$CLONE/.env")"
 [[ -f "$STUB_DB" ]] && ok "the database $STUB_DB_NAME is created" || bad "no database: $(cat "$STUB_LOG")"
@@ -329,7 +331,7 @@ for tool in node pnpm; do
         d="$(dirname "$(command -v "$t")")"; case ":$SYS:" in *":$d:"*) ;; *) SYS="$SYS:$d" ;; esac
     done
     if PATH="$WORK/only$SYS" command -v "$tool" >/dev/null 2>&1; then
-        ok "(skip: a system $tool shares a directory with git here, so its absence cannot be staged)"
+        skip "a system $tool shares a directory with git here, so its absence cannot be staged"
     else
         TEST_PATH="$WORK/only$SYS" wsl_clone create "$BR"
         [[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a missing $tool is refused, nothing cloned" "$tool not found in WSL" || bad "missing $tool: rc $RC: $OUT"
@@ -417,10 +419,12 @@ wsl_clone remove "$NAME"
 [[ "$(tail -1 "$STUB_LOG")" == "wsl.exe -d Ubuntu -u root fstrim -v /" ]] && ok "...and runs fstrim" || bad "gone fstrim: $(cat "$STUB_LOG")"
 setup bad-name
 mkdir -p "$WORK/outside"; touch "$WORK/outside/keep"
-for n in "../outside" "a b" "x;y"; do
+mkdir -p "$OIS_WSL_CLONES"
+for n in "../outside" "a b" "x;y" "." ".."; do
     wsl_clone remove "$n"
-    [[ $RC -ne 0 ]] && ok "remove refuses the name '$n'" || bad "name '$n': rc $RC: $OUT"
+    [[ $RC -ne 0 ]] && has "remove refuses the name '$n' at the name guard" "is not a clone name or branch" || bad "name '$n': rc $RC: $OUT"
 done
+[[ -d "$OIS_WSL_CLONES" && -d "$OIS_WSL_CLONES/.." ]] && ok "...leaving the clones root and its parent" || bad "clones root removed"
 wsl_clone remove ""
 [[ $RC -eq 2 ]] && ok "an empty name prints usage" || bad "empty name: rc $RC"
 [[ -f "$WORK/outside/keep" ]] && ok "...and nothing outside the clones root was removed" || bad "outside file removed"
@@ -443,6 +447,7 @@ wsl_clone push "$NAME"
 setup pr
 wsl_clone create "$BR"
 SHA="$(git -C "$CLONE" rev-parse HEAD)"
+git -C "$CLONE" push -q origin "$BR"
 : > "$STUB_LOG"
 stamp_marker "$WT" review-shipping "$SHA" >/dev/null
 wsl_clone pr "$NAME"
@@ -462,6 +467,23 @@ wsl_clone gate "$NAME"
 SHA="$(git -C "$CLONE" rev-parse HEAD)"
 stamp_marker "$CLONE" tests "$SHA" >/dev/null
 : > "$STUB_LOG"
+wsl_clone pr "$NAME" --title T
+[[ $RC -ne 0 ]] && has "pr refuses while origin's branch is not the vouched commit" "is not ${SHA:0:8}" || bad "pr unpushed: rc $RC: $OUT"
+git -C "$CLONE" push -q origin "$BR"
+printf 'Body\nGenerated with a tool\n' > "$WORK/body-attr.md"
+for args in "--base main" "-B main" "--head other" "-Hother" "--repo x/y" "-R x/y" "--base=main"; do
+    # shellcheck disable=SC2086
+    wsl_clone pr "$NAME" $args
+    [[ $RC -ne 0 ]] && has "pr refuses a caller's '$args'" "sets ${args%%[ =]*}" || bad "pr '$args': rc $RC: $OUT"
+done
+wsl_clone pr "$NAME" --title T --body "Co-Authored-By: x"
+[[ $RC -ne 0 ]] && has "pr refuses an attribution line in --body" "carries an attribution line" || bad "pr body attribution: rc $RC: $OUT"
+for form in "--body-file $WORK/body-attr.md" "-F $WORK/body-attr.md" "--body-file=$WORK/body-attr.md" "-F$WORK/body-attr.md"; do
+    # shellcheck disable=SC2086
+    wsl_clone pr "$NAME" --title T $form
+    [[ $RC -ne 0 ]] && has "pr refuses an attribution line in a body file ($form)" "carries an attribution line" || bad "pr file '$form': rc $RC: $OUT"
+done
+grep -q '^gh' "$STUB_LOG" && bad "...but gh ran for a refused pr" || ok "...and gh never runs for any of them"
 wsl_clone pr "$NAME" --title T --body "B two"
 [[ $RC -eq 0 ]] && ok "pr with both markers for the same HEAD runs" || bad "pr: rc $RC: $OUT"
 grep -q "^gh pr create --repo VATUSA/OIS --base next --head $BR --title T --body B two in .*$NAME$" "$STUB_LOG" \
@@ -470,6 +492,69 @@ git -C "$MAIN" worktree remove --force "$WT"
 wsl_clone pr "$NAME"
 [[ $RC -ne 0 ]] && has "pr refuses when no Windows worktree has the branch checked out" "no Windows worktree has $BR checked out" || bad "pr no worktree: rc $RC: $OUT"
 
+echo "== main and next are never worked on =="
+setup protected
+printf 's\n' > "$MAIN/stray.txt" && git -C "$MAIN" add stray.txt && git -C "$MAIN" -c core.hooksPath=/dev/null commit -qm stray
+NEXT_ON_ORIGIN="$(git -C "$ORIGIN" rev-parse refs/heads/next)"
+for b in next main; do
+    wsl_clone create "$b"
+    [[ $RC -ne 0 && ! -e "$OIS_WSL_CLONES/$b" ]] && has "create refuses $b, nothing cloned" "$b is a protected branch" || bad "create $b: rc $RC: $OUT"
+done
+# A clone that is on next anyway (made by hand, or left by an older script).
+git clone -q --origin windows "$MAIN" "$OIS_WSL_CLONES/next"
+git -C "$OIS_WSL_CLONES/next" remote add origin "$ORIGIN"
+SHA="$(git -C "$OIS_WSL_CLONES/next" rev-parse HEAD)"
+stamp_marker "$OIS_WSL_CLONES/next" tests "$SHA" >/dev/null
+: > "$STUB_LOG"
+for sub in gate push pr; do
+    wsl_clone "$sub" next
+    [[ $RC -ne 0 ]] && has "$sub refuses a clone on next" "next is a protected branch" || bad "$sub next: rc $RC: $OUT"
+done
+[[ "$(git -C "$ORIGIN" rev-parse refs/heads/next)" == "$NEXT_ON_ORIGIN" ]] && ok "...and origin's next did not move" || bad "origin next moved"
+grep -qE '^(just|gh)' "$STUB_LOG" && bad "...but just or gh ran" || ok "...and neither just nor gh ran"
+setup other-branch
+wsl_clone create "$BR"
+git -C "$CLONE" checkout -q -b feat/1/something-else
+wsl_clone create "$BR"
+[[ $RC -ne 0 ]] && has "create refuses a clone with another branch checked out" "has feat/1/something-else checked out, not $BR" || bad "other branch: rc $RC: $OUT"
+
+echo "== failures that must stop the script =="
+setup no-git
+mkdir -p "$CLONE"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && has "remove refuses a directory git cannot read" "git status failed" || bad "no-git remove: rc $RC: $OUT"
+setup no-path-url
+printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+grep -qx "DATABASE_URL=\"postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME\"" "$CLONE/.env" && ok "a DATABASE_URL with no database gets the clone's appended" || bad "no-path url: $(grep DATABASE_URL "$CLONE/.env")"
+setup no-db-url
+printf 'RUST_LOG=info\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+[[ $RC -ne 0 && ! -f "$STUB_DB" ]] && has "a source .env without DATABASE_URL stops create" "sets no DATABASE_URL" || bad "no db url: rc $RC: $OUT"
+setup pnpm-fails
+STUB_PNPM_RC=1 wsl_clone create "$BR"
+[[ $RC -ne 0 ]] && has "a failed pnpm install stops create" "pnpm install --frozen-lockfile failed" || bad "pnpm fails: rc $RC: $OUT"
+lacks "...before it reports the clone ready" "Clone ready"
+STUB_DF=/dev/null wsl_clone preflight
+[[ $RC -ne 0 ]] && has "an unreadable C: figure is a failure, not a pass" "cannot read C: free space" || bad "unreadable df: rc $RC"
+wsl_clone gate feat-1-never-made
+[[ $RC -ne 0 ]] && has "gate with no clone says how to make one" "no clone at" || bad "gate no clone: rc $RC"
+wsl_clone frobnicate
+[[ $RC -eq 2 ]] && has "an unknown subcommand prints usage" "bash bin/wsl-clone.sh create <branch>" || bad "unknown subcommand: rc $RC: $OUT"
+setup crlf-portable
+tr -d '\r' < "$MAIN/bin/lib/portable.sh" | sed 's/$/\r/' > "$WORK/portable.crlf" && cp "$WORK/portable.crlf" "$MAIN/bin/lib/portable.sh"
+[[ "$(crs "$MAIN/bin/lib/portable.sh")" -gt 10 ]] || bad "could not stage a CRLF portable.sh"
+wsl_clone create "$BR"
+[[ $RC -eq 0 && -f "$STUB_DB" ]] && ok "a CRLF portable.sh (a Windows checkout) still loads" || bad "crlf portable: rc $RC: $OUT"
+
+echo "== Windows worktree paths as Linux git prints them =="
+WT_LINE="$(awk '/^worktree / { wt = substr($0, 10) } $1 == "branch" && $2 == "refs/heads/chore/872/wsl-gate-clone" { print wt }' "$FIX/worktree-list.txt")"
+[[ "$WT_LINE" == */C:/Users/* ]] && ok "the captured listing prints the Windows worktree under the common dir" || bad "fixture line: $WT_LINE"
+[[ "$(lib wsl_mount_path "$WT_LINE")" == "/mnt/c/Users/Matthew/orca/workspaces/OIS/ticket-loops-wsl-gate-clone-is-unmanaged-target" ]] \
+    && ok "wsl_mount_path reads its drive path through /mnt" || bad "wsl_mount_path: $(lib wsl_mount_path "$WT_LINE")"
+[[ "$(lib wsl_mount_path 'C:\Users\M\wt')" == "/mnt/c/Users/M/wt" ]] && ok "...a backslash path too" || bad "backslash path: $(lib wsl_mount_path 'C:\Users\M\wt')"
+[[ "$(lib wsl_mount_path "$WORK")" == "$WORK" ]] && ok "an existing directory passes through unchanged" || bad "existing dir changed"
+
 echo
-echo "wsl-clone: $PASS passed, $FAIL failed"
+echo "wsl-clone: $PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]
