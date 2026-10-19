@@ -80,9 +80,10 @@ sql="${*: -1}"
 echo "psql $sql" >> "$STUB_LOG"
 echo "psql-url $1" >> "$STUB_LOG"
 [[ -n "${STUB_PG_RC:-}" && "$STUB_PG_RC" != 0 ]] && exit 2
+[[ -n "${STUB_PSQL_RC:-}" ]] && exit "$STUB_PSQL_RC"
 case "$sql" in
     *"from pg_database"*"'$STUB_DB_NAME'"*) [[ -f "$STUB_DB" ]] && echo 1; exit 0 ;;
-    *"create database"*"$STUB_DB_NAME"*) touch "$STUB_DB"; exit 0 ;;
+    *"create database"*"$STUB_DB_NAME"*) [[ -n "${STUB_CREATE_FAILS:-}" ]] && exit 1; touch "$STUB_DB"; exit 0 ;;
     *"drop database"*"$STUB_DB_NAME"*) [[ -n "${STUB_DROP_FAILS:-}" ]] && exit 1; rm -f "$STUB_DB"; exit 0 ;;
 esac
 exit 1
@@ -546,6 +547,34 @@ tr -d '\r' < "$MAIN/bin/lib/portable.sh" | sed 's/$/\r/' > "$WORK/portable.crlf"
 [[ "$(crs "$MAIN/bin/lib/portable.sh")" -gt 10 ]] || bad "could not stage a CRLF portable.sh"
 wsl_clone create "$BR"
 [[ $RC -eq 0 && -f "$STUB_DB" ]] && ok "a CRLF portable.sh (a Windows checkout) still loads" || bad "crlf portable: rc $RC: $OUT"
+
+setup quoted-url
+printf 'DATABASE_URL="postgres://ois:ois@127.0.0.1:5432/ois"   # dev\nDATABASE_URL=postgres://ois:ois@127.0.0.1:5432/stale\nDATABASE_URL="postgres://ois:ois@127.0.0.1:5432/ois"  # last wins\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois$" "$STUB_LOG" && ok "the source DATABASE_URL is read unquoted, its comment dropped, the last line winning" || bad "quoted url: $(grep psql-url "$STUB_LOG" | sort -u)"
+setup psql-fails
+STUB_PSQL_RC=1 wsl_clone create "$BR"
+[[ $RC -ne 0 && ! -f "$STUB_DB" ]] && has "a failing psql stops create" "cannot query Postgres" || bad "psql fails: rc $RC: $OUT"
+setup create-fails
+STUB_CREATE_FAILS=1 wsl_clone create "$BR"
+[[ $RC -ne 0 ]] && has "a create that did not take stops create" "does not exist after create" || bad "create fails: rc $RC: $OUT"
+setup no-vhdfile
+grep -v 'VhdFileName' "$FIX/reg-all.txt" > "$WORK/reg-novhd.txt"
+: > "$STUB_LOG"
+STUB_REG="$WORK/reg-novhd.txt" wsl_clone create "$BR"
+grep -qF 'fsutil.exe sparse queryflag C:\Users\Matthew\AppData\Local\wsl\{bf97ba49-2f87-4e72-b74d-0094544fc778}\ext4.vhdx' "$STUB_LOG" \
+    && ok "a distro with no VhdFileName defaults to ext4.vhdx" || bad "no VhdFileName: $(grep fsutil "$STUB_LOG")"
+setup fetch-fails
+wsl_clone create "$BR"
+git -C "$CLONE" push -q origin "$BR"
+git -C "$CLONE" remote set-url origin "$WORK/no-such-origin.git"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && has "remove refuses when origin cannot be fetched" "cannot fetch origin" || bad "fetch fails: rc $RC: $OUT"
+setup detached
+wsl_clone create "$BR"
+git -C "$CLONE" checkout -q --detach
+wsl_clone push "$NAME"
+[[ $RC -ne 0 ]] && has "push refuses a detached clone" "is not on a branch" || bad "detached: rc $RC: $OUT"
 
 echo "== Windows worktree paths as Linux git prints them =="
 WT_LINE="$(awk '/^worktree / { wt = substr($0, 10) } $1 == "branch" && $2 == "refs/heads/chore/872/wsl-gate-clone" { print wt }' "$FIX/worktree-list.txt")"
