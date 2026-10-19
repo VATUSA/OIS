@@ -88,7 +88,8 @@ clone_branch() {
     SHA="$(git -C "$DIR" rev-parse HEAD)" || fatal "cannot read HEAD in ${DIR}."
 }
 
-env_value() { grep -E "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/'; }
+# The source's .env sits in a Windows checkout and may be CRLF; every read strips the CRs.
+env_value() { tr -d '\r' < "$1" 2>/dev/null | grep -E "^$2=" | tail -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/^"(.*)"$/\1/'; }
 
 # url_with_db URL DB: URL pointing at database DB, its query string kept.
 url_with_db() {
@@ -148,7 +149,7 @@ write_env() {
     url="$(env_value "$src" DATABASE_URL)"
     [[ -n "$url" ]] || fatal "${src} sets no DATABASE_URL."
     tmp="$DIR/.env.tmp"
-    grep -vE "^(DATABASE_URL|CARGO_BUILD_JOBS|${WSL_RUSTFLAGS_VAR})=" "$src" > "$tmp"
+    tr -d '\r' < "$src" | grep -vE "^(DATABASE_URL|CARGO_BUILD_JOBS|${WSL_RUSTFLAGS_VAR})=" > "$tmp"
     { echo "DATABASE_URL=$(url_with_db "$url" "$DB")"; wsl_build_env_lines; } >> "$tmp"
     mv "$tmp" "$DIR/.env" || fatal "cannot write ${DIR}/.env."
     ok ".env: DATABASE_URL -> ${DB}; $(wsl_build_env_lines | tr '\n' ' ')"

@@ -290,6 +290,17 @@ OIS_WSL_SOURCE="$WORK/copy" copy_clone create "$BR"
 OIS_WSL_SOURCE="$MAIN" copy_clone create "$BR"
 [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "with OIS_WSL_SOURCE the copy clones from that checkout" || bad "copy with source: rc $RC: $OUT"
 
+echo "== a CRLF .env in the Windows checkout =="
+setup crlf-env
+printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\r\nRUST_LOG=info\r\n' > "$MAIN/.env"
+wsl_clone create "$BR"
+[[ $RC -eq 0 && -f "$STUB_DB" ]] && ok "a CRLF source .env still creates the database" || bad "crlf create: rc $RC: $OUT"
+grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois$" "$STUB_LOG" && ok "...over a DATABASE_URL with no CR" || bad "crlf url: $(grep psql-url "$STUB_LOG" | od -c | head -3)"
+[[ "$(crs "$CLONE/.env")" -eq 0 ]] && grep -qx 'RUST_LOG=info' "$CLONE/.env" && ok "the clone's .env has no CR, every line kept" || bad "crlf .env: $(od -c "$CLONE/.env" | head -5)"
+touch "$STUB_DB"; git -C "$CLONE" push -q origin "$BR"; : > "$STUB_LOG"
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -f "$STUB_DB" ]] && ok "remove drops the database through a CRLF source .env" || bad "crlf remove: rc $RC: $OUT"
+
 echo "== AC4: build env in the clone's .env =="
 setup buildenv
 printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\nCARGO_BUILD_JOBS=8\nCARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=8\n' > "$MAIN/.env"
