@@ -14,6 +14,10 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
+  `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
+  `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory
+  outside the caller's facility scope; the OpenAPI document now lists both. Nothing changes for a caller.
 - **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
   `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
   flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min
