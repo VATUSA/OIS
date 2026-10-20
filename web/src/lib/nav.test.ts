@@ -239,6 +239,11 @@ describe("groupContainsPath (#823)", () => {
     expect(groupContainsPath(advisories, "/advisories")).toBe(true);
   });
 
+  it("contains a page below a non-exact item in a group with no prefix", () => {
+    expect(advisories.prefix).toBeUndefined();
+    expect(groupContainsPath(advisories, "/facility-map/ZNY")).toBe(true);
+  });
+
   it("does not contain a page in another group", () => {
     expect(groupContainsPath(planning, "/admin/historical/replay")).toBe(false);
     expect(groupContainsPath(advisories, "/ops/fca")).toBe(false);

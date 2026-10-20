@@ -160,37 +160,35 @@ function usePathname(): string {
   return useRouterState({ select: (s) => s.location.pathname });
 }
 
+/**
+ * The User group's page links, in display order. One list drives both the rendered items and the
+ * collapsed icon's active state, so a link added here is active-aware without a second edit.
+ * Desktop app is deliberately permission-less: anyone signed in may install the app (#534).
+ */
+function userLinks(canCreateKeys: boolean) {
+  return [
+    { to: "/profile", icon: UserIcon, label: "Profile" },
+    { to: "/settings", icon: SettingsIcon, label: "Settings" },
+    ...(canCreateKeys ? [{ to: "/api-keys", icon: KeyRound, label: "API keys" }] : []),
+    { to: "/download", icon: DownloadIcon, label: "Desktop app" },
+  ] as const;
+}
+
 /** Profile, settings, API keys and sign out — the signed-in user's own links. */
 export function UserGroup() {
   const { data: me } = useMe();
   const logout = useLogout();
   const pathname = usePathname();
   if (!me) return null;
-  const canCreateKeys = hasPermission(me, "api_keys.key.create");
-  const links = ["/profile", "/settings", ...(canCreateKeys ? ["/api-keys"] : []), "/download"];
-  const active = groupContainsPath({ items: links.map((to) => ({ to })) }, pathname);
+  const links = userLinks(hasPermission(me, "api_keys.key.create"));
+  const active = groupContainsPath({ items: links }, pathname);
   return (
     <SidebarGroup label="User" icon={CircleUser} active={active}>
-      <SidebarItem asChild icon={UserIcon} label="Profile">
-        <Link to="/profile" />
-      </SidebarItem>
-      <SidebarItem asChild icon={SettingsIcon} label="Settings">
-        <Link to="/settings" />
-      </SidebarItem>
-      {canCreateKeys && (
-        <SidebarItem asChild icon={KeyRound} label="API keys">
-          <Link to="/api-keys" />
+      {links.map(({ to, icon, label }) => (
+        <SidebarItem key={to} asChild icon={icon} label={label}>
+          <Link to={to} />
         </SidebarItem>
-      )}
-      {/*
-        Deliberately permission-less: `canSeeItem` treats an item with neither `permission` nor
-        `anyOf` as public, and anyone signed in may install the app. Before #534 the only link to
-        this page was in the footer, which renders solely on the signed-out landing page — so a
-        signed-in user had no route to it at all.
-      */}
-      <SidebarItem asChild icon={DownloadIcon} label="Desktop app">
-        <Link to="/download" />
-      </SidebarItem>
+      ))}
       {/*
         Reopens the full changelog — once dismissed, the panel otherwise never shows again (#665). It
         sits directly above Sign out (#680), and its gold hover is DESIGN.md's one named icon exception.

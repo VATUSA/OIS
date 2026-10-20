@@ -30,6 +30,9 @@ import type {Me} from "@/lib/auth";
 // AC4 active group per route (each group)        | marks exactly the {group} trigger active on {path}                            | done
 // AC4 Admin landing exact                        | marks the Admin trigger active on /admin and not on /admin/planning/events    | done
 // AC4 deep page under a group                    | keeps the Planning trigger active on a page below Events …                    | done
+// AC4 non-exact item, no group prefix           | marks the Advisories trigger active on a page below Facility Map …            | done
+// AC4 every User link                            | marks exactly the User trigger active on {path} for an api_keys.key.create …  | done
+// AC4 API keys link only when shown              | marks no trigger active on /api-keys for a member who cannot create keys      | done
 // AC4 Home                                       | marks the Home link current and no trigger active on /                        | done
 // Operator: User flyout contents                 | lists Profile, Settings, Desktop app, What's new and Sign out …               | done
 // Operator: API keys item gated                  | adds API keys to the User flyout only for an api_keys.key.create holder       | done
@@ -201,6 +204,23 @@ describe("collapsed AppSidebar active group (#823)", () => {
       expect(activeTriggers()).toEqual([group]);
     });
   }
+
+  it("marks the Advisories trigger active on a page below Facility Map, which no nav item names", async () => {
+    await renderAt("/facility-map/ZNY", user(...ADMIN));
+    expect(activeTriggers()).toEqual(["Advisories"]);
+  });
+
+  for (const path of ["/profile", "/settings", "/api-keys", "/download"]) {
+    it(`marks exactly the User trigger active on ${path} for an api_keys.key.create holder`, async () => {
+      await renderAt(path, user("api_keys.key.create", ...ADMIN));
+      expect(activeTriggers()).toEqual(["User"]);
+    });
+  }
+
+  it("marks no trigger active on /api-keys for a member who cannot create keys", async () => {
+    await renderAt("/api-keys", user(...ADMIN));
+    expect(activeTriggers()).toEqual([]);
+  });
 
   it("marks the Admin trigger active on /admin and not on /admin/planning/events", async () => {
     await renderAt("/admin", user(...ADMIN));

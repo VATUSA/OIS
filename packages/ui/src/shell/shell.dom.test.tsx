@@ -172,7 +172,8 @@ describe("collapsed SidebarGroup flyout (#823)", () => {
   function Rail({ collapsed = true, path = "/a", icon = true, active, inSidebar = true }: RailProps) {
     const groups = (
       <>
-        <SidebarGroup>
+        {/* An icon but no label: only the label decides that Home stays a direct item. */}
+        <SidebarGroup icon={Home}>
           <SidebarItem href="/" icon={Home} label="Home" />
         </SidebarGroup>
         <SidebarGroup label="Planning" icon={icon ? CalendarRange : undefined} active={active}>
@@ -277,6 +278,8 @@ describe("collapsed SidebarGroup flyout (#823)", () => {
       expect(a.querySelector("svg")).not.toBeNull();
       // Visible: the collapsed sr-only variant needs a `data-collapsed` ancestor, and there is none.
       expect(a.closest("[data-collapsed]")).toBeNull();
+      // Not wrapped in the collapsed rail's tooltip: its trigger would stamp `data-state`.
+      expect(a.hasAttribute("data-state")).toBe(false);
     }
   });
 
