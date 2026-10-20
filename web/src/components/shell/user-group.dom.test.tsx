@@ -16,6 +16,8 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   )),
   useRouter: () => ({}),
+  // The sidebar reads the pathname to mark the active group and close a flyout on navigation (#823).
+  useRouterState: () => "/",
 }));
 vi.mock("@/lib/auth", () => ({
   useMe: () => ({data: {id: "u1", display_name: "Test", cid: 1, permissions: ["api_keys.key.create"]}}),
