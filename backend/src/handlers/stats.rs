@@ -1090,4 +1090,88 @@ mod tests {
             http::StatusCode::NOT_FOUND
         );
     }
+
+    /// Seeds what `save_capture` needs to reach its `event_id` check and the insert after it: one
+    /// `stats.position` row inside the last hour, so `has_positions_in` passes, and a session holding
+    /// `stats.capture.update`. Returns the router state and the session cookie.
+    async fn capture_saver(pool: &PgPool) -> (crate::state::AppState, String) {
+        sqlx::query(
+            "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading)              values (1, now() - interval '30 minutes', 38.9, -77.4, 10000, 300, 90)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let user = seed_user(pool).await;
+        grant(pool, &user, "stats.capture.update", None).await;
+        let cookie = session_cookie(pool, &user).await;
+        (test_state(pool.clone(), HashMap::new()), cookie)
+    }
+
+    async fn capture_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from stats.capture")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A capture naming an event that does not exist answers 404 and writes nothing. The window
+    /// holds positions, so without the event check the request would reach the insert.
+    #[sqlx::test]
+    async fn saving_a_capture_for_an_unknown_event_is_not_found_and_writes_nothing(pool: PgPool) {
+        let (state, cookie) = capture_saver(&pool).await;
+        let now = chrono::Utc::now().timestamp();
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/stats/captures",
+            &cookie,
+            Some(serde_json::json!({
+                "label": "unknown event", "from": now - 3600, "to": now, "event_id": 990_001
+            })),
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            capture_count(&pool).await,
+            0,
+            "a refused save must write no capture"
+        );
+    }
+
+    /// Positive control for the test above: the same request naming a seeded event answers 200 and
+    /// writes one capture carrying that event and label.
+    #[sqlx::test]
+    async fn saving_a_capture_for_a_seeded_event_writes_one_capture_row(pool: PgPool) {
+        let (state, cookie) = capture_saver(&pool).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time)              values (501, 'E', now() - interval '1 hour', now())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        let status = send(
+            &state,
+            http::Method::POST,
+            "/api/v1/stats/captures",
+            &cookie,
+            Some(serde_json::json!({
+                "label": "seeded event", "from": now - 3600, "to": now, "event_id": 501
+            })),
+        )
+        .await;
+
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(capture_count(&pool).await, 1);
+        let (event_id, label): (Option<i64>, String) =
+            sqlx::query_as("select event_id, label from stats.capture")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(event_id, Some(501));
+        assert_eq!(label, "seeded event");
+    }
 }
