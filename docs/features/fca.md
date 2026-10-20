@@ -374,7 +374,7 @@ covers `hist_fcas`.
   `proposed` rows (`web/src/pages/fca/detail.tsx:221`); #834 removed prefiles from both the count and
   the board. Counts still skip a disabled FCA while traffic serves it (area 2), so the comment at
   `handlers/flow.rs:710-711` ("a badge count can never disagree with the board") holds for an enabled
-  FCA only. Filed as #853.
+  FCA only. Filed as #853; the disabled-FCA gap is #846.
 - **Historical FCAs are filtered by their state now.** `list_fcas_at` applies the current
   `event_status` and the current `enabled` flag (`repos/flow.rs:33-38`). An event FCA that was
   live during the replayed window and is archived now is missing from the replay. One published
