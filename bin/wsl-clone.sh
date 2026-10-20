@@ -15,8 +15,8 @@ set -uo pipefail
 #
 # Usage (inside WSL; from Windows prefix `wsl.exe -d Ubuntu -- bash -lic '...'`):
 #   bash bin/wsl-clone.sh preflight              # C: free space and WSL memory, against bin/lib/wsl.sh
-#   bash bin/wsl-clone.sh create <branch>        # clone (or fast-forward) and provision
-#   bash bin/wsl-clone.sh gate   <name|branch>   # fast-forward, preflight, `just test` in the clone
+#   bash bin/wsl-clone.sh create <branch>        # clone (or catch up with the Windows branch) and provision
+#   bash bin/wsl-clone.sh gate   <name|branch>   # catch up, preflight, `just test` in the clone
 #   bash bin/wsl-clone.sh push   <name|branch>   # push, only with the clone's tests marker for HEAD
 #   bash bin/wsl-clone.sh pr     <name|branch> [gh pr create args...]
 #                                                # open the PR, only with the clone's tests marker
@@ -140,7 +140,8 @@ native_tool() {
 from_windows() {
     local head
     head="$(git -C "$DIR" rev-parse HEAD 2>/dev/null)" || return 1
-    git -C "$DIR" reflog show --format=%H "refs/remotes/windows/$BRANCH" 2>/dev/null | grep -qx "$head"
+    # grep reads the whole reflog (no -q), so git never dies on SIGPIPE and fails the pipeline.
+    git -C "$DIR" reflog show --format=%H "refs/remotes/windows/$BRANCH" 2>/dev/null | grep -Fx "$head" >/dev/null
 }
 
 # sync_clone: move the clone to the Windows branch: a fast-forward, or, when that branch was
@@ -167,12 +168,19 @@ clone_fresh() {
     mkdir -p "$CLONES_ROOT" || fatal "cannot create ${CLONES_ROOT}."
     # init and fetch, not clone: git clone writes no reflog for the remote-tracking refs it
     # creates, and from_windows needs the first tip of windows/<branch> in that reflog.
+    # Any step failing after init removes the half-made clone, as git clone does; left in
+    # place, its unborn HEAD would stop both create and remove.
     git init -q "$DIR" || fatal "cannot create ${DIR}."
-    git -C "$DIR" remote add windows "$SOURCE" || fatal "cannot add the windows remote to ${DIR}."
-    git -C "$DIR" fetch -q windows || fatal "cannot fetch ${SOURCE} into ${DIR}."
-    git -C "$DIR" remote add origin "$origin_url" || fatal "cannot add origin to ${DIR}."
-    git -C "$DIR" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fatal "cannot check out ${BRANCH} in ${DIR}."
+    git -C "$DIR" remote add windows "$SOURCE" || fresh_failed "cannot add the windows remote to ${DIR}."
+    git -C "$DIR" fetch -q windows || fresh_failed "cannot fetch ${SOURCE} into ${DIR}."
+    git -C "$DIR" remote add origin "$origin_url" || fresh_failed "cannot add origin to ${DIR}."
+    git -C "$DIR" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fresh_failed "cannot check out ${BRANCH} in ${DIR}."
     ok "cloned ${BRANCH} into ${DIR}"
+}
+
+fresh_failed() {
+    rm -rf "$DIR"
+    fatal "$1 The half-made clone was removed; run create again."
 }
 
 # write_env: the source's .env, pointed at the clone's database, with the WSL build env.
@@ -396,8 +404,8 @@ drop_db() {
     ok "database ${DB} dropped"
 }
 
-# The clone's commits must be saved elsewhere: on origin (its pushed branch at HEAD, or
-# origin/next), or in the Windows checkout they all came from (from_windows).
+# The clone may go when it holds nothing of its own: its HEAD is on origin (its pushed branch,
+# or origin/next), or came from the Windows checkout and it made no commits (from_windows).
 check_saved() {
     local status
     status="$(git -C "$DIR" status --porcelain)" || blocked "git status failed in ${DIR}, so its changes are unknown."

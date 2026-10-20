@@ -278,6 +278,7 @@ printf 'y\n' > "$WT/two.txt" && git -C "$WT" add two.txt && git -C "$WT" -c core
 : > "$STUB_LOG"
 wsl_clone create "$BR"
 [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "re-running create fast-forwards to the new commit" || bad "re-run: rc $RC: $OUT"
+lacks "...by a fast-forward, not a reset" "was rewritten"
 grep -q 'create database' "$STUB_LOG" && bad "...but issued create database for a database that exists" || ok "...and issues no create database for the existing one"
 WINDOWS_URL="$(git -C "$CLONE" remote get-url windows)"
 git -C "$CLONE" remote set-url windows "$WORK/no-such-source"
@@ -430,6 +431,12 @@ wsl_clone create "$BR"
 printf 'c\n' > "$CLONE/clone-only.txt" && git -C "$CLONE" add clone-only.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm clone-only
 wsl_clone remove "$NAME"
 [[ $RC -ne 0 && -d "$CLONE" && -f "$STUB_DB" ]] && has "a commit made in the clone, on neither origin/<branch> nor origin/next, blocks" "is neither on origin/$BR nor in origin/next" || bad "made in clone: rc $RC: $OUT"
+git -C "$CLONE" push -q origin "$BR"
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -e "$CLONE" ]] && has "a clone commit pushed to origin/<branch> is removed" "is on origin" || bad "pushed clone commit: rc $RC: $OUT"
+setup made-in-clone-next
+wsl_clone create "$BR"
+printf 'c\n' > "$CLONE/clone-only.txt" && git -C "$CLONE" add clone-only.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm clone-only
 git -C "$CLONE" push -q origin "HEAD:refs/heads/next"
 wsl_clone remove "$NAME"
 [[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "a clone commit already in origin/next is removed, its branch never pushed" || bad "on next: rc $RC: $OUT"
@@ -700,7 +707,7 @@ for kind in amend squash rebase; do
     wsl_clone gate "$BR"
     [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] \
         && has "after a $kind, gate moves the clone to the rewritten tip" "was rewritten" || bad "$kind gate: rc $RC: $OUT"
-    grep -q '^just test' "$STUB_LOG" && ok "...and runs just test there" || bad "$kind gate: no just test"
+    grep -q "^just test in .*$NAME$" "$STUB_LOG" && ok "...and runs just test in the clone" || bad "$kind gate: no just test in the clone: $(grep just "$STUB_LOG")"
     rewrite amend
     wsl_clone remove "$NAME"
     [[ $RC -eq 0 && ! -e "$CLONE" && ! -f "$STUB_DB" ]] && ok "after a $kind, remove takes the clone and its database" || bad "$kind remove: rc $RC: $OUT"
@@ -720,6 +727,17 @@ rewrite amend
 printf 'd\n' >> "$CLONE/file.txt"
 wsl_clone gate "$BR"
 [[ $RC -ne 0 ]] && grep -q '^d$' "$CLONE/file.txt" && has "a dirty clone is not reset onto a rewritten branch" "uncommitted or untracked changes" || bad "rewrite dirty: rc $RC: $OUT"
+
+echo "== a first fetch that fails =="
+setup fetch-first-fails
+mkdir -p "$WORK/nofetch"
+REAL_GIT="$(command -v git)"
+printf '#!/bin/bash\nfor a in "$@"; do [[ "$a" == fetch ]] && exit 1; done\nexec "%s" "$@"\n' "$REAL_GIT" > "$WORK/nofetch/git"
+chmod +x "$WORK/nofetch/git"
+TEST_PATH="$WORK/nofetch:$WORK/bin:$PATH" wsl_clone create "$BR"
+[[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a failed first fetch removes the half-made clone" "half-made clone was removed" || bad "first fetch fails: rc $RC, clone $([[ -e $CLONE ]] && echo left): $OUT"
+wsl_clone create "$BR"
+[[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "...so create succeeds on retry" || bad "retry after failed fetch: rc $RC: $OUT"
 
 echo
 echo "wsl-clone: $PASS passed, $FAIL failed, $SKIP skipped"
