@@ -11,8 +11,9 @@ yanked = "deny"
 #   - the unic-* family  <- urlpattern <- tauri-utils
 #
 # zip extraction advisories (0367-0369), patched only in zip >= 9. The backend's own zip is on 9;
-# these entries cover the two older copies that dependents pin and have not yet released past:
-#   - zip 3.x <- utoipa-swagger-ui 9 (build-dependency). Its build.rs unpacks the Swagger UI
+# these entries cover the two older copies that dependents pin:
+#   - zip 3.x <- utoipa-swagger-ui 9 (build-dependency). 10.0.2 moves to zip 9 but needs utoipa 6,
+#     and OIS is on utoipa 5. Its build.rs unpacks the Swagger UI
 #     archive itself and never calls `ZipArchive::extract` or `ZipStreamReader::extract`, the APIs
 #     the advisories name. It does copy each entry's Unix mode itself, but only at build time, on
 #     the swagger-ui release archive it downloads from GitHub.
@@ -24,8 +25,8 @@ yanked = "deny"
 # zbus wire crates (0370-0372), unmaintained since their merge into zbus 6. They arrive through
 # zbus 5 <- notify-rust and secret-service (keyring), which compile them only on Linux and the BSDs.
 #
-# Revisit the zip and zbus entries by 2026-11-19, or at the next utoipa-swagger-ui,
-# tauri-plugin-updater, notify-rust or keyring release, whichever comes first.
+# Revisit the zip and zbus entries by 2026-11-19, or at the next tauri-plugin-updater, notify-rust
+# or keyring release or the move to utoipa 6, whichever comes first.
 ignore = [
     "RUSTSEC-2024-0370",  # proc-macro-error
     "RUSTSEC-2025-0081",  # unic-char-property
@@ -33,9 +34,9 @@ ignore = [
     "RUSTSEC-2025-0080",  # unic-common
     "RUSTSEC-2025-0100",  # unic-ucd-ident
     "RUSTSEC-2025-0098",  # unic-ucd-version
-    { id = "RUSTSEC-2026-0367", reason = "zip 3/4 SUID bits on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. Revisit by 2026-11-19 or the next release of either" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 3/4 symlink targets on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater extracts only a minisign-verified bundle. Revisit by 2026-11-19 or the next release of either" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 3/4 permissions through symlinks on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. Revisit by 2026-11-19 or the next release of either" },
+    { id = "RUSTSEC-2026-0367", reason = "zip 3/4 SUID bits on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. utoipa-swagger-ui 10.0.2 moves to zip 9 but needs utoipa 6. Revisit by 2026-11-19, the next tauri-plugin-updater release or the move to utoipa 6" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 3/4 symlink targets on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater extracts only a minisign-verified bundle. utoipa-swagger-ui 10.0.2 moves to zip 9 but needs utoipa 6. Revisit by 2026-11-19, the next tauri-plugin-updater release or the move to utoipa 6" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 3/4 permissions through symlinks on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. utoipa-swagger-ui 10.0.2 moves to zip 9 but needs utoipa 6. Revisit by 2026-11-19, the next tauri-plugin-updater release or the move to utoipa 6" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
