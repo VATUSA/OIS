@@ -275,8 +275,15 @@ grep -qx "DATABASE_URL=\"postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME?sslmode
 grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois?sslmode=disable$" "$STUB_LOG" && ok "...through the source's DATABASE_URL" || bad "admin url: $(grep psql-url "$STUB_LOG")"
 grep -q "^pnpm install --frozen-lockfile.* in .*$NAME$" "$STUB_LOG" && ok "pnpm install --frozen-lockfile runs in the clone" || bad "pnpm: $(grep pnpm "$STUB_LOG")"
 printf 'y\n' > "$WT/two.txt" && git -C "$WT" add two.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm two
+: > "$STUB_LOG"
 wsl_clone create "$BR"
 [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "re-running create fast-forwards to the new commit" || bad "re-run: rc $RC: $OUT"
+grep -q 'create database' "$STUB_LOG" && bad "...but issued create database for a database that exists" || ok "...and issues no create database for the existing one"
+WINDOWS_URL="$(git -C "$CLONE" remote get-url windows)"
+git -C "$CLONE" remote set-url windows "$WORK/no-such-source"
+wsl_clone create "$BR"
+[[ $RC -ne 0 ]] && has "create stops when the clone's windows remote cannot be fetched" "cannot fetch the clone's windows remote" || bad "windows fetch: rc $RC: $OUT"
+git -C "$CLONE" remote set-url windows "$WINDOWS_URL"
 printf 'z\n' > "$CLONE/local.txt" && git -C "$CLONE" add local.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm local
 LOCAL="$(git -C "$CLONE" rev-parse HEAD)"
 wsl_clone create "$BR"
@@ -316,6 +323,7 @@ setup crlf-env
 printf 'DATABASE_URL=postgres://ois:ois@127.0.0.1:5432/ois\r\nRUST_LOG=info\r\n' > "$MAIN/.env"
 wsl_clone create "$BR"
 [[ $RC -eq 0 && -f "$STUB_DB" ]] && ok "a CRLF source .env still creates the database" || bad "crlf create: rc $RC: $OUT"
+[[ "$(crs "$STUB_LOG")" -eq 0 ]] && ok "...and no CR reaches psql" || bad "a CR reached psql: $(grep psql-url "$STUB_LOG" | od -c | head -3)"
 grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois$" "$STUB_LOG" && ok "...over a DATABASE_URL with no CR" || bad "crlf url: $(grep psql-url "$STUB_LOG" | od -c | head -3)"
 [[ "$(crs "$CLONE/.env")" -eq 0 ]] && grep -qx 'RUST_LOG=info' "$CLONE/.env" && ok "the clone's .env has no CR, every line kept" || bad "crlf .env: $(od -c "$CLONE/.env" | head -5)"
 touch "$STUB_DB"; git -C "$CLONE" push -q origin "$BR"; : > "$STUB_LOG"
@@ -463,6 +471,15 @@ stamp_marker "$CLONE" tests "$SHA" >/dev/null
 wsl_clone push "$NAME"
 [[ $RC -eq 0 && "$(git -C "$ORIGIN" rev-parse "refs/heads/$BR" 2>/dev/null)" == "$SHA" ]] && ok "push with a vouched tests marker reaches origin" || bad "push: rc $RC: $OUT"
 [[ "$(git -C "$CLONE" rev-parse --abbrev-ref '@{u}')" == "origin/$BR" ]] && ok "...and sets the upstream to origin" || bad "upstream: $(git -C "$CLONE" rev-parse --abbrev-ref '@{u}' 2>&1)"
+printf 'p\n' > "$CLONE/later.txt" && git -C "$CLONE" add later.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm later
+stamp_marker "$CLONE" tests "$(git -C "$CLONE" rev-parse HEAD)" >/dev/null
+# A git whose push reports success without sending anything.
+mkdir -p "$WORK/fakepush"
+REAL_GIT="$(command -v git)"
+printf '#!/bin/bash\nfor a in "$@"; do [[ "$a" == push ]] && exit 0; done\nexec "%s" "$@"\n' "$REAL_GIT" > "$WORK/fakepush/git"
+chmod +x "$WORK/fakepush/git"
+TEST_PATH="$WORK/fakepush:$WORK/bin:$PATH" wsl_clone push "$NAME"
+[[ $RC -ne 0 ]] && has "a push origin did not take is refused" "after the push" || bad "fake push: rc $RC: $OUT"
 setup pr
 wsl_clone create "$BR"
 SHA="$(git -C "$CLONE" rev-parse HEAD)"
@@ -524,6 +541,16 @@ for form in "--body-file $WORK/body-attr.md" "-F $WORK/body-attr.md" "--body-fil
     [[ $RC -ne 0 ]] && has "pr refuses an attribution line in a body file ($form)" "carries an attribution line" || bad "pr file '$form': rc $RC: $OUT"
 done
 grep -q '^gh' "$STUB_LOG" && bad "...but gh ran for a refused pr" || ok "...and gh never runs for any of them"
+for args in "--body=Co-Authored-By: Claude <noreply@anthropic.com>" "-bCo-Authored-By: Claude <noreply@anthropic.com>"; do
+    wsl_clone pr "$NAME" --title T "$args"
+    [[ $RC -ne 0 ]] && has "pr refuses an attribution line attached to its flag (${args:0:7})" "carries an attribution line" || bad "pr attached '$args': rc $RC: $OUT"
+done
+printf 'Body\r\n\r\nDrafted by Claude Code\r\n' > "$WORK/body-drafted.md"
+wsl_clone pr "$NAME" --title T -F "$WORK/body-drafted.md"
+[[ $RC -ne 0 ]] && has "pr refuses a CRLF footer line" "carries an attribution line" || bad "pr crlf footer: rc $RC: $OUT"
+: > "$STUB_LOG"
+wsl_clone pr "$NAME" -t -dBmain --body x
+[[ $RC -eq 0 ]] && grep -q -- "--title -dBmain\|-t -dBmain" "$STUB_LOG" && ok "a value that looks like flags (-t -dBmain) is a value, not a cluster" || bad "flag-like value: rc $RC: $OUT"
 wsl_clone pr "$NAME" --title T -F "$WORK/body-prose.md"
 [[ $RC -eq 0 ]] && ok "prose that names a tool generating code is not an attribution" || bad "pr prose body: rc $RC: $OUT"
 wsl_clone pr "$NAME" --title T --body "B two"
@@ -573,6 +600,7 @@ setup no-db-url
 printf 'RUST_LOG=info\n' > "$MAIN/.env"
 wsl_clone create "$BR"
 [[ $RC -ne 0 && ! -f "$STUB_DB" ]] && has "a source .env without DATABASE_URL stops create" "sets no DATABASE_URL" || bad "no db url: rc $RC: $OUT"
+[[ ! -e "$CLONE/.env" ]] && ok "...before it writes the clone's .env" || bad "a .env was written without DATABASE_URL: $(cat "$CLONE/.env")"
 setup pnpm-fails
 STUB_PNPM_RC=1 wsl_clone create "$BR"
 [[ $RC -ne 0 ]] && has "a failed pnpm install stops create" "pnpm install --frozen-lockfile failed" || bad "pnpm fails: rc $RC: $OUT"
