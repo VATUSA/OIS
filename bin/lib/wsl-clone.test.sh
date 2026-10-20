@@ -755,6 +755,20 @@ git init -q "$PARTIAL"
 wsl_clone remove "$NAME"
 [[ $RC -eq 0 && ! -e "$CLONE" && ! -e "$PARTIAL" ]] && ok "remove takes a leftover partial clone too" || bad "remove partial: rc $RC: $OUT"
 
+setup undeletable-partial
+PARTIAL="$OIS_WSL_CLONES/.$NAME.partial"
+mkdir -p "$PARTIAL/locked" && touch "$PARTIAL/locked/f" && chmod 500 "$PARTIAL/locked"
+mkdir -p "$WORK/probe-rm/locked" && touch "$WORK/probe-rm/locked/f" && chmod 500 "$WORK/probe-rm/locked"
+rm -rf "$WORK/probe-rm" 2>/dev/null
+if [[ ! -e "$WORK/probe-rm" ]]; then
+    skip "chmod cannot make a directory undeletable here (Git Bash on Windows, or root)"
+else
+    wsl_clone create "$BR"
+    [[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a partial clone that cannot be cleared stops create" "cannot clear the earlier partial clone" || bad "undeletable partial: rc $RC: $OUT"
+    chmod 700 "$WORK/probe-rm/locked"
+fi
+chmod 700 "$PARTIAL/locked"
+
 echo "== a non-clone directory at the clone path =="
 setup foreign-dir
 mkdir -p "$CLONE" && printf 'mine\n' > "$CLONE/keep.txt"
