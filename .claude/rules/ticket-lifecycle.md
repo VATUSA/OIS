@@ -363,7 +363,12 @@ points above, nothing more:
   database, deletes the clone and runs `fstrim` as root, which hands the space back only on a sparse
   disk. `create` warns when it is not; to set it: `docker desktop stop` (Docker restarts WSL
   otherwise), `wsl --shutdown`, then `wsl --manage Ubuntu --set-sparse true`.
-- **Scripts that false-fail on a CRLF checkout (#873):** `bin/verify-worktree.sh`'s lockfile check,
+- **A Windows worktree's own `target/` can hold 27 GiB.** Once its gate is going to WSL, `cargo
+  clean` it before the WSL build.
+- **Windows git here sets `user.email` but no `user.name`**, so commits are authored `unknown`.
+  Check `git config user.name` resolves before the first commit.
+- **Scripts that false-fail on a CRLF checkout (#873):** `bin/verify-worktree.sh`'s lockfile check
+  and its hooks check (an absolute `core.hooksPath` to the primary's `.githooks` is correct),
   and `review-attestation.sh check`, which passes with `REVIEW_LENSES_MAP` pointed at an LF copy of
   `.claude/review-lenses.tsv`. `codegen` fails under cmd.exe; in `packages/api-client` run
   `pnpm exec openapi-typescript <spec> -o src/generated/schema.d.ts`.
