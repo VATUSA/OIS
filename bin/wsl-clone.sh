@@ -51,8 +51,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLONES_ROOT="${OIS_WSL_CLONES:-$HOME/ois-wsl}"
 DISTRO="${WSL_DISTRO_NAME:-}"
 LXSS_KEY='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss'
-# The lines attribution-gate.sh refuses in a commit, PR or comment.
-ATTRIBUTION='Drafted by|Generated with|Co-Authored'
 
 usage() { sed -n '/^# Usage/,/^# Settings/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
@@ -132,7 +130,7 @@ native_tool() {
     local path
     path="$(command -v "$1" 2>/dev/null)" || fatal "$1 not found in WSL. Install it there (fnm or nvm, then corepack enable) and run this through bash -lic."
     case "$path" in
-        "${WSL_WINDOWS_MOUNT:-/mnt}"/*) fatal "$1 resolves to Windows's copy (${path}). Install a native one in WSL and run this through bash -lic." ;;
+        "$WSL_WINDOWS_MOUNT"/*) fatal "$1 resolves to Windows's copy (${path}). Install a native one in WSL and run this through bash -lic." ;;
     esac
     ok "$1: ${path}"
 }
@@ -270,7 +268,7 @@ cmd_push() {
     not_protected "$BRANCH"
     marker_vouched "$DIR" tests "Tests (bash ${SCRIPT_DIR}/wsl-clone.sh gate ${NAME})"
     git -C "$DIR" push -u origin "$BRANCH" || fatal "push failed."
-    [[ "$(git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')" == "$SHA" ]] \
+    [[ "$(GIT_TERMINAL_PROMPT=0 with_timeout 30 git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')" == "$SHA" ]] \
         || fatal "origin's ${BRANCH} does not equal ${SHA:0:8} after the push."
     ok "origin/${BRANCH} is ${SHA:0:8}"
 }
@@ -282,26 +280,68 @@ windows_worktree() {
         $1 == "branch" && $2 == b { print wt; exit }')"
 }
 
-# pr_args_allowed ARGS...: the script sets the repo, base and head itself, and the PR text
-# carries no attribution (attribution-gate.sh never sees a PR opened here).
-pr_args_allowed() {
-    local a next_is_file=""
-    for a in "$@"; do
-        if [[ -n "$next_is_file" ]]; then
-            tr -d '\r' < "$a" 2>/dev/null | grep -qiE "$ATTRIBUTION" && blocked "${a} carries an attribution line."
-            next_is_file=""
-            continue
-        fi
-        case "$a" in
-            -R*|--repo|--repo=*|-B*|--base|--base=*|-H*|--head|--head=*) blocked "pr sets ${a%%=*} itself; drop it." ;;
-            -F|--body-file) next_is_file=1 ;;
-            --body-file=*|-F?*)
-                local f="${a#--body-file=}"; f="${f#-F}"
-                tr -d '\r' < "$f" 2>/dev/null | grep -qiE "$ATTRIBUTION" && blocked "${f} carries an attribution line." ;;
+# pr_text_clean LABEL FILE: refuses FILE when attribution_hits, the check attribution-gate.sh
+# runs on the Windows side and never sees here, finds a credit in it or cannot read it.
+pr_text_clean() {
+    local tmp rc
+    [[ "$2" != - && -f "$2" && -r "$2" ]] || blocked "cannot read ${1}, so its attribution is unchecked; pass a readable file."
+    tmp="$(mktemp)" || fatal "mktemp failed."
+    tr -d '\r' < "$2" > "$tmp"
+    attribution_hits "$tmp" >/dev/null
+    rc=$?
+    rm -f "$tmp"
+    case "$rc" in
+        1) return 0 ;;
+        0) blocked "${1} carries an attribution line." ;;
+        *) blocked "cannot read ${1}, so its attribution is unchecked." ;;
+    esac
+}
+
+pr_arg_clean() {
+    local tmp
+    tmp="$(mktemp)" || fatal "mktemp failed."
+    printf '%s\n' "$1" > "$tmp"
+    pr_text_clean "an argument" "$tmp"
+    rm -f "$tmp"
+}
+
+# pr_short_flags CLUSTER: one `-xyz` cluster, read as gh's flag parser reads it. Sets PR_NEXT to
+# `value` or `file` when the cluster's last flag takes the next argument.
+pr_short_flags() {
+    local i c rest
+    for (( i = 1; i < ${#1}; i++ )); do
+        c="${1:i:1}"; rest="${1:i+1}"
+        case "$c" in
+            R|B|H) blocked "pr sets -${c} itself; drop it." ;;
+            e|T|w) blocked "pr takes its text from --title, --body or --body-file only; drop -${c}." ;;
+            F) if [[ -n "$rest" ]]; then pr_text_clean "$rest" "$rest"; else PR_NEXT=file; fi; return 0 ;;
+            t|b|a|l|m|p|r) [[ -n "$rest" ]] || PR_NEXT=value; return 0 ;;
         esac
-        printf '%s' "$a" | grep -qiE "$ATTRIBUTION" && blocked "an argument carries an attribution line."
     done
-    return 0
+}
+
+# pr_args_allowed ARGS...: the script sets the repo, base and head itself, and the PR text
+# carries no attribution.
+pr_args_allowed() {
+    local a
+    PR_NEXT=""
+    for a in "$@"; do
+        case "$PR_NEXT" in
+            file) PR_NEXT=""; pr_text_clean "$a" "$a"; continue ;;
+            value) PR_NEXT=""; pr_arg_clean "$a"; continue ;;
+        esac
+        case "$a" in
+            --repo|--repo=*|--base|--base=*|--head|--head=*) blocked "pr sets ${a%%=*} itself; drop it." ;;
+            --editor|--template|--template=*|--web) blocked "pr takes its text from --title, --body or --body-file only; drop ${a%%=*}." ;;
+            --body-file) PR_NEXT=file ;;
+            --body-file=*) pr_text_clean "${a#*=}" "${a#*=}" ;;
+            --title|--body|--assignee|--label|--milestone|--project|--reviewer|--recover) PR_NEXT=value ;;
+            --*) ;;
+            -?*) pr_short_flags "$a" ;;
+        esac
+        pr_arg_clean "$a"
+    done
+    [[ -z "$PR_NEXT" ]] || blocked "the last flag has no value."
 }
 
 cmd_pr() {
@@ -310,6 +350,10 @@ cmd_pr() {
     [[ -d "$DIR/.git" ]] || fatal "no clone at ${DIR}."
     clone_branch
     not_protected "$BRANCH"
+    # The primary checkout's copy of the hooks' own pattern, as the hooks themselves run it.
+    # shellcheck source=../.claude/hooks/lib/attribution.sh
+    . <(tr -d '\r' < "$SOURCE/.claude/hooks/lib/attribution.sh" 2>/dev/null) && declare -F attribution_hits >/dev/null \
+        || blocked "cannot load ${SOURCE}/.claude/hooks/lib/attribution.sh, so the PR text cannot be checked."
     pr_args_allowed "$@"
     local wt
     wt="$(windows_worktree "$BRANCH")"

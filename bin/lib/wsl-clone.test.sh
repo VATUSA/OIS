@@ -11,9 +11,10 @@
 # Each case builds a scratch "main" checkout (on next, pushed to a bare origin)
 # with the scripts under test copied into its bin/, because wsl-clone.sh finds its
 # source repository from its own location. Stub reg.exe, fsutil.exe, df, wsl.exe,
-# psql, pg_isready, pnpm, node, just and gh sit first on PATH and serve, or derive
-# from, bytes captured on a real WSL2 host (bin/lib/fixtures/wsl/, CRLF kept by
-# its .gitattributes). No real database, registry, disk or GitHub is touched.
+# psql, pg_isready, pnpm, node, just and gh sit first on PATH. reg.exe, fsutil.exe and
+# df serve, or derive from, bytes captured on a real WSL2 host (bin/lib/fixtures/wsl/,
+# CRLF kept by its .gitattributes), as do the meminfo and /proc/version files. No real
+# database, registry, disk or GitHub is touched.
 # ==============================================================================
 set -uo pipefail
 
@@ -46,10 +47,11 @@ MEM_OK_KB=9437184              # 9 GiB
 MEM_SHORT_KB=9437183           # 9 GiB - 1 KiB
 
 # ------------------------------------------------------------------------------
-# Stubs. Most log their call to $STUB_LOG and serve a captured fixture or a file
-# derived from one. Env knobs: STUB_REG (file), STUB_REG_RC, STUB_FSUTIL (file),
-# STUB_FSUTIL_RC, STUB_DF (file), STUB_WSL_RC, STUB_JUST_RC, STUB_PG_RC,
-# STUB_DROP_FAILS, STUB_DB (file standing for the database), STUB_DB_NAME.
+# Stubs. All but pg_isready and node log their call to $STUB_LOG. Env knobs: STUB_REG
+# (file), STUB_REG_RC, STUB_FSUTIL (file), STUB_FSUTIL_RC, STUB_DF (file), STUB_WSL_RC,
+# STUB_JUST_RC, STUB_JUST_EDIT, STUB_PNPM_RC, STUB_PG_RC, STUB_PSQL_RC,
+# STUB_CREATE_FAILS, STUB_DROP_FAILS, STUB_DB (file standing for the database),
+# STUB_DB_NAME.
 # ------------------------------------------------------------------------------
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/reg.exe" <<'STUB'
@@ -125,8 +127,8 @@ setup() {
     git init -q --bare "$ORIGIN"
     MAIN="$base/main"
     git init -q -b next "$MAIN"
-    mkdir -p "$MAIN/bin/lib" "$MAIN/.githooks"
-    for f in bin/wsl-clone.sh bin/lib/wsl.sh bin/lib/portable.sh bin/check-marker.sh bin/lib/marker_manifest.py; do
+    mkdir -p "$MAIN/bin/lib" "$MAIN/.githooks" "$MAIN/.claude/hooks/lib"
+    for f in bin/wsl-clone.sh bin/lib/wsl.sh bin/lib/portable.sh bin/check-marker.sh bin/lib/marker_manifest.py .claude/hooks/lib/attribution.sh; do
         [[ -f "$ROOT/$f" ]] && cp "$ROOT/$f" "$MAIN/$f"
     done
     printf '.env\n.claude/\nnode_modules/\n' > "$MAIN/.gitignore"
@@ -167,7 +169,7 @@ done
 if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     skip "git cannot open $ROOT from here, so its attributes are unchecked"
 else
-    [[ "$(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)" == *"text: unset" ]] && ok "...and git honours it" || bad "check-attr: $(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)"
+    [[ "$(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)" == *"text: unset" ]] && ok "...and git honors it" || bad "check-attr: $(git -C "$ROOT" check-attr text -- bin/lib/fixtures/wsl/reg-all.txt)"
 fi
 [[ "$(od -An -c "$FIX/fsutil-sparse.txt" | tr -s ' \n' ' ')" == " T h i s f i l e i s s e t a s s p a r s e \r \n " ]] && ok "fsutil-sparse.txt is the CRLF capture" || bad "fsutil-sparse.txt bytes: $(od -An -c "$FIX/fsutil-sparse.txt")"
 [[ "$(head -c 31 "$FIX/fsutil-notsparse.txt")" == "This file is NOT set as sparse"$'\r' ]] && ok "fsutil-notsparse.txt is the CRLF capture" || bad "fsutil-notsparse.txt bytes"
@@ -487,20 +489,39 @@ stamp_marker "$CLONE" tests "$SHA" >/dev/null
 wsl_clone pr "$NAME" --title T
 [[ $RC -ne 0 ]] && has "pr refuses while origin's branch is not the vouched commit" "is not ${SHA:0:8}" || bad "pr unpushed: rc $RC: $OUT"
 git -C "$CLONE" push -q origin "$BR"
-printf 'Body\nGenerated with a tool\n' > "$WORK/body-attr.md"
-for args in "--base main" "-B main" "--head other" "-Hother" "--repo x/y" "-R x/y" "--base=main"; do
+printf 'Body\r\n\r\nGenerated with [Claude Code](https://claude.com/claude-code)\r\n' > "$WORK/body-attr.md"
+printf 'The client types are generated with openapi-typescript.\n' > "$WORK/body-prose.md"
+for args in "--base main" "-B main" "--head other" "-Hother" "--repo x/y" "-R x/y" "--base=main" "--head=other" "--repo=x/y" "-dB main" "-dBmain" "-dH other"; do
     # shellcheck disable=SC2086
     wsl_clone pr "$NAME" $args
-    [[ $RC -ne 0 ]] && has "pr refuses a caller's '$args'" "sets ${args%%[ =]*}" || bad "pr '$args': rc $RC: $OUT"
+    [[ $RC -ne 0 ]] && has "pr refuses a caller's '$args'" "itself; drop it" || bad "pr '$args': rc $RC: $OUT"
 done
-wsl_clone pr "$NAME" --title T --body "Co-Authored-By: x"
-[[ $RC -ne 0 ]] && has "pr refuses an attribution line in --body" "carries an attribution line" || bad "pr body attribution: rc $RC: $OUT"
+for body in "Co-Authored-By: Claude Opus <noreply@anthropic.com>" "Session: https://claude.ai/code/session_01abc" "Drafted by Claude Code"; do
+    wsl_clone pr "$NAME" --title T --body "$body"
+    [[ $RC -ne 0 ]] && has "pr refuses an attribution line in --body ($body)" "carries an attribution line" || bad "pr body '$body': rc $RC: $OUT"
+done
+wsl_clone pr "$NAME" -t "Generated with [Claude Code]"
+[[ $RC -ne 0 ]] && has "...and in a short flag's value (-t)" "carries an attribution line" || bad "pr -t attribution: rc $RC: $OUT"
+for args in "-F -" "--body-file=-" "--body-file $WORK/no-such-body.md" "-F$WORK/no-such-body.md"; do
+    # shellcheck disable=SC2086
+    wsl_clone pr "$NAME" --title T $args
+    [[ $RC -ne 0 ]] && has "pr refuses a body it cannot read ($args)" "attribution is unchecked" || bad "pr unreadable '$args': rc $RC: $OUT"
+done
+for args in "--editor" "-e" "--template t.md" "-T t.md" "--web" "-dw"; do
+    # shellcheck disable=SC2086
+    wsl_clone pr "$NAME" --title T $args
+    [[ $RC -ne 0 ]] && has "pr refuses text from outside the checked arguments ($args)" "takes its text from" || bad "pr '$args': rc $RC: $OUT"
+done
+wsl_clone pr "$NAME" --title
+[[ $RC -ne 0 ]] && has "pr refuses a last flag with no value" "has no value" || bad "pr dangling flag: rc $RC: $OUT"
 for form in "--body-file $WORK/body-attr.md" "-F $WORK/body-attr.md" "--body-file=$WORK/body-attr.md" "-F$WORK/body-attr.md"; do
     # shellcheck disable=SC2086
     wsl_clone pr "$NAME" --title T $form
     [[ $RC -ne 0 ]] && has "pr refuses an attribution line in a body file ($form)" "carries an attribution line" || bad "pr file '$form': rc $RC: $OUT"
 done
 grep -q '^gh' "$STUB_LOG" && bad "...but gh ran for a refused pr" || ok "...and gh never runs for any of them"
+wsl_clone pr "$NAME" --title T -F "$WORK/body-prose.md"
+[[ $RC -eq 0 ]] && ok "prose that names a tool generating code is not an attribution" || bad "pr prose body: rc $RC: $OUT"
 wsl_clone pr "$NAME" --title T --body "B two"
 [[ $RC -eq 0 ]] && ok "pr with both markers for the same HEAD runs" || bad "pr: rc $RC: $OUT"
 grep -q "^gh pr create --repo VATUSA/OIS --base next --head $BR --title T --body B two in .*$NAME$" "$STUB_LOG" \
@@ -565,9 +586,11 @@ wsl_clone create "$BR"
 [[ $RC -eq 0 && -f "$STUB_DB" ]] && ok "a CRLF portable.sh (a Windows checkout) still loads" || bad "crlf portable: rc $RC: $OUT"
 
 setup quoted-url
-printf 'DATABASE_URL="postgres://ois:ois@127.0.0.1:5432/ois"   # dev\nDATABASE_URL=postgres://ois:ois@127.0.0.1:5432/stale\nDATABASE_URL="postgres://ois:ois@127.0.0.1:5432/ois"  # last wins\n' > "$MAIN/.env"
+printf 'DATABASE_URL="postgres://ois:ois@127.0.0.1:5432/first"   # dev\nDATABASE_URL=postgres://ois:ois@127.0.0.1:5432/stale\nDATABASE_URL="postgres://ois:ois@127.0.0.1:5432/ois"  # last wins\n' > "$MAIN/.env"
 wsl_clone create "$BR"
-grep -q "^psql-url postgres://ois:ois@127.0.0.1:5432/ois$" "$STUB_LOG" && ok "the source DATABASE_URL is read unquoted, its comment dropped, the last line winning" || bad "quoted url: $(grep psql-url "$STUB_LOG" | sort -u)"
+[[ "$(grep '^psql-url' "$STUB_LOG" | sort -u)" == "psql-url postgres://ois:ois@127.0.0.1:5432/ois" ]] \
+    && ok "the source DATABASE_URL is read unquoted, its comment dropped, the last line winning" || bad "quoted url: $(grep psql-url "$STUB_LOG" | sort -u)"
+grep -qx "DATABASE_URL=\"postgres://ois:ois@127.0.0.1:5432/$STUB_DB_NAME\"" "$CLONE/.env" && ok "...and the clone's URL is built from that last line" || bad "clone url: $(grep DATABASE_URL "$CLONE/.env")"
 setup psql-fails
 STUB_PSQL_RC=1 wsl_clone create "$BR"
 [[ $RC -ne 0 && ! -f "$STUB_DB" ]] && has "a failing psql stops create" "cannot query Postgres" || bad "psql fails: rc $RC: $OUT"
@@ -599,6 +622,17 @@ WT_LINE="$(awk '/^worktree / { wt = substr($0, 10) } $1 == "branch" && $2 == "re
     && ok "wsl_mount_path reads its drive path through /mnt" || bad "wsl_mount_path: $(lib wsl_mount_path "$WT_LINE")"
 [[ "$(lib wsl_mount_path 'C:\Users\M\wt')" == "/mnt/c/Users/M/wt" ]] && ok "...a backslash path too" || bad "backslash path: $(lib wsl_mount_path 'C:\Users\M\wt')"
 [[ "$(lib wsl_mount_path "$WORK")" == "$WORK" ]] && ok "an existing directory passes through unchanged" || bad "existing dir changed"
+
+echo "== remaining refusals =="
+[[ "$(env -u WSL_WINDOWS_MOUNT bash -c '. "$1"; echo "$WSL_WINDOWS_MOUNT"' _ "$LIB")" == "/mnt" ]] && ok "the Windows mount defaults to /mnt" || bad "mount default"
+wsl_clone create
+[[ $RC -eq 2 ]] && ok "create with no branch prints usage" || bad "create no branch: rc $RC"
+setup remove-no-url
+wsl_clone create "$BR"
+git -C "$CLONE" push -q origin "$BR"
+printf 'RUST_LOG=info\n' > "$MAIN/.env"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && has "remove refuses without a source DATABASE_URL, clone kept" "sets no DATABASE_URL" || bad "remove no url: rc $RC: $OUT"
 
 echo
 echo "wsl-clone: $PASS passed, $FAIL failed, $SKIP skipped"

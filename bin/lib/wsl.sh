@@ -17,6 +17,9 @@ WSL_CARGO_BUILD_JOBS=1
 WSL_RUSTFLAGS_VAR=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS
 WSL_RUSTFLAGS=-Zthreads=1
 
+# Where WSL mounts the Windows drives: a node or pnpm under it is Windows's copy (interop).
+WSL_WINDOWS_MOUNT="${WSL_WINDOWS_MOUNT:-/mnt}"
+
 # wsl_build_env_lines: the KEY=VALUE lines bin/wsl-clone.sh writes into the clone's .env,
 # which bin/run-tests.sh (`just test`) and bin/pre-push load with `set -a`.
 wsl_build_env_lines() {
