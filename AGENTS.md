@@ -37,7 +37,14 @@ per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog 
 `docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
 
 Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
-features, so `stable` remains a valid fallback).
+features, so `stable` remains a valid fallback). Build settings live in `.cargo/config.toml`
+(`-Zthreads=8`; mold on Linux, rust-lld on Windows) and the root `Cargo.toml`'s `[profile.dev]`
+(file:line only for workspace crates, no debug info for dependencies, so a debugger shows no
+locals). To lower parallelism on a memory-capped machine, set
+`CARGO_TARGET_<TRIPLE>_RUSTFLAGS="-Zthreads=1"` (cargo appends it, and rustc takes the last
+`-Zthreads`) and `CARGO_BUILD_JOBS`; plain `RUSTFLAGS` replaces the config's flags and drops mold
+on Linux. The config file has the exact lines. Neither noticeably shrinks the
+rustc compiling ois-backend, the largest single process.
 
 **On Linux, `just ci` needs the GTK/WebKit dev packages.** `just check` is
 `cargo check --workspace`, and the workspace includes the Tauri shell (`desktop/src-tauri`), whose
