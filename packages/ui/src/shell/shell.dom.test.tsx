@@ -377,6 +377,39 @@ describe("collapsed SidebarGroup flyout (#823)", () => {
     expect(t.querySelector("svg")!.getAttribute("class")).toContain("group-data-[active]/item:text-brand-ink");
   });
 
+  it("highlights an open flyout's trigger through an attribute the open trigger carries", () => {
+    mount(<Rail active={false} />);
+    press(trigger());
+    const t = trigger();
+    // The tooltip wrapping the trigger overwrites its data-state, so the open-state class must key off
+    // an attribute whose value on the open trigger actually matches the class's selector.
+    const open = t.className
+      .split(/\s+/)
+      .map((c) => /^(data|aria)-\[([a-z-]+)=([a-z]+)\]:bg-panel-2$/.exec(c))
+      .filter((m): m is RegExpExecArray => m != null && m[2] !== "active");
+    expect(open).toHaveLength(1);
+    const [, prefix, name, value] = open[0];
+    expect(t.getAttribute(`${prefix}-${name}`)).toBe(value);
+  });
+
+  it("passes a non-element child of a flyout through unwrapped, beside its items", () => {
+    mount(
+      <TooltipProvider>
+        <Sidebar collapsed path="/a">
+          <SidebarGroup label="Planning" icon={CalendarRange}>
+            <SidebarItem href="/a" icon={CalendarClock} label="Events" />
+            {"Note"}
+            {null}
+          </SidebarGroup>
+        </Sidebar>
+      </TooltipProvider>,
+    );
+    press(trigger());
+    expect(menu()!.textContent).toContain("Note");
+    expect(menu()!.querySelectorAll('[role="menuitem"]')).toHaveLength(1);
+    expect(menu()!.querySelector('[role="menuitem"]')!.getAttribute("href")).toBe("/a");
+  });
+
   it("leaves an inactive trigger without data-active or the active tile styling", () => {
     mount(<Rail active={false} />);
     expect(trigger().hasAttribute("data-active")).toBe(false);

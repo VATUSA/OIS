@@ -212,7 +212,7 @@ function SidebarFlyout({
             <button
               type="button"
               data-active={active || undefined}
-              className="group/item flex w-full items-center justify-center rounded-sm py-2 text-ink-2 outline-none transition-colors hover:bg-panel-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-ring data-[active]:bg-panel-2 data-[active]:text-ink data-[state=open]:bg-panel-2"
+              className="group/item flex w-full items-center justify-center rounded-sm py-2 text-ink-2 outline-none transition-colors hover:bg-panel-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-ring data-[active]:bg-panel-2 data-[active]:text-ink aria-[expanded=true]:bg-panel-2"
             >
               <Icon className="size-[17px] shrink-0 text-ink-3 group-hover/item:text-ink-2 group-data-[active]/item:text-brand-ink" />
               <span className="sr-only">{label}</span>
