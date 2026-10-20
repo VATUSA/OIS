@@ -283,14 +283,9 @@ windows_worktree() {
 # pr_text_clean LABEL FILE: refuses FILE when attribution_hits, the check attribution-gate.sh
 # runs on the Windows side and never sees here, finds a credit in it or cannot read it.
 pr_text_clean() {
-    local tmp rc
     [[ "$2" != - && -f "$2" && -r "$2" ]] || blocked "cannot read ${1}, so its attribution is unchecked; pass a readable file."
-    tmp="$(mktemp)" || fatal "mktemp failed."
-    tr -d '\r' < "$2" > "$tmp"
-    attribution_hits "$tmp" >/dev/null
-    rc=$?
-    rm -f "$tmp"
-    case "$rc" in
+    attribution_hits "$2" >/dev/null
+    case "$?" in
         1) return 0 ;;
         0) blocked "${1} carries an attribution line." ;;
         *) blocked "cannot read ${1}, so its attribution is unchecked." ;;
