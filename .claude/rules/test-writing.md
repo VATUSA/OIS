@@ -234,7 +234,7 @@ already cost a false start:
 
 The regression in OIS is usually a call site drifting, not the unit misbehaving: reverting the real
 bug has left the suite green when the unit was tested and its caller was not (#428, #433, #419).
-Four shapes have precedent:
+Five shapes have precedent:
 
 - **A source scan over call sites**, named `*.guard.test.ts` (`web/src/components/shell/window-chrome.guard.test.ts`,
   `web/src/lib/api-paths.guard.test.ts`).
@@ -247,6 +247,9 @@ Four shapes have precedent:
 - **A test on the `jobs.rs` pass itself** when a background job is the writer. The private `*_once`
   functions are the recurring blind spot; `mod ace_reminder_tests` in `backend/src/jobs.rs` is the
   precedent.
+- **A DOM test driving the consumer** when a component's input moves from a prop into a React
+  context or a ref: change the value after mount and assert what the consumer renders, so dropping
+  the Provider turns it red (#824).
 
 ## Absence needs a guard, not a grep
 
