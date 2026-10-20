@@ -18,10 +18,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 // The list view is the one that renders a DataTable; the grid view uses cards.
 vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => {}, useView: () => "list"}));
-vi.mock("@/lib/auth", () => ({useMe: () => ({data: {tmu_national: false}})}));
 
 import {BoardLibraryPage} from "./library";
 import type {DashboardLibrary} from "@/lib/dashboards";
+import type {Me} from "@/lib/auth";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -39,6 +39,19 @@ afterEach(() => {
   document.body.innerHTML = "";
   del.mockReset();
 });
+
+// The page reads `useMe` only for `tmu_national`, which picks the board templates it offers.
+const ME = {
+  id: "u1",
+  cid: 1,
+  email: "",
+  display_name: "Test Controller",
+  rating: null,
+  primary_role: null,
+  server_admin: false,
+  tmu_national: false,
+  permissions: {},
+} as unknown as Me;
 
 const LIBRARY: DashboardLibrary = {
   dashboards: [{id: "b1", name: "ZDC overview", collection_id: null, updated_at: "2026-10-01T00:00:00Z"}],
@@ -58,6 +71,7 @@ async function mount() {
     },
   });
   qc.setQueryData(["dashboards"], LIBRARY);
+  qc.setQueryData(["me"], ME);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);

@@ -6,15 +6,16 @@ import {ToastProvider} from "@ois/ui";
 import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 const del = vi.hoisted(() => vi.fn());
+const put = vi.hoisted(() => vi.fn());
 
 // The generated client captures `fetch` when its module loads, so stubbing `fetch` is always too
 // late (VATUSA/OIS#387): mock the client itself, and seed the cache so nothing loads.
-vi.mock("@/lib/api", () => ({ois: {GET: vi.fn(), POST: vi.fn(), PUT: vi.fn(), DELETE: del}}));
+vi.mock("@/lib/api", () => ({ois: {GET: vi.fn(), POST: vi.fn(), PUT: put, DELETE: del}}));
 vi.mock("@/components/shell/page-meta", () => ({usePageHeader: () => {}}));
-vi.mock("@/lib/auth", () => ({useMe: () => ({data: {server_admin: true, permissions: {}}})}));
 
 import {AdminApiKeys} from "./api-keys";
 import type {ApiKey} from "@/lib/api-keys";
+import type {Me} from "@/lib/auth";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -31,7 +32,21 @@ afterEach(() => {
   }
   document.body.innerHTML = "";
   del.mockReset();
+  put.mockReset();
 });
+
+// A real permission tree, not `server_admin`: `api_keys.key.delete` is what shows the Delete button
+// and makes the limit cell an input.
+const ME = {
+  id: "u1",
+  cid: 1,
+  email: "",
+  display_name: "Test Admin",
+  rating: null,
+  primary_role: null,
+  server_admin: false,
+  permissions: {api_keys: {key: ["read", "delete"]}},
+} as unknown as Me;
 
 const KEY: ApiKey = {
   id: "k1",
@@ -42,6 +57,7 @@ const KEY: ApiKey = {
   created_at: "2026-09-01T00:00:00Z",
   owner_cid: 1000001,
   owner_display_name: "Some Controller",
+  rate_limit_per_min: 60,
   usage: {requests_this_hour: 0, requests_last_day: 0, refused_last_day: 0},
 };
 
@@ -61,6 +77,7 @@ async function mount() {
     },
   });
   qc.setQueryData(KEYS, [KEY]);
+  qc.setQueryData(["me"], ME);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -119,5 +136,29 @@ describe("Deleting a key from the admin table confirms on the second click (#824
     expect(host.querySelector("tbody")?.textContent).toContain("Ops script v2");
     await click(deleteButton(host));
     expect(del).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("A rate limit typed into an admin key row is saved on blur (#824)", () => {
+  // The rate-limit save now calls `useAdminSetKeyRateLimit().mutate` from the column, not the whole
+  // mutation result, so this pins the argument shape the column passes.
+  it("sends the typed limit for that key when the cell loses focus", async () => {
+    put.mockResolvedValue({data: undefined, error: undefined, response: {status: 204}});
+    await mount();
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Ops script rate limit per minute"]');
+    if (!input) throw new Error("no rate-limit input for the Ops script row");
+    expect(input.value).toBe("60");
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "45");
+      input.dispatchEvent(new Event("input", {bubbles: true}));
+    });
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", {bubbles: true})));
+
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledWith("/api/v1/admin/api-keys/{id}/rate-limit", {
+      params: {path: {id: "k1"}},
+      body: {rate_limit_per_min: 45},
+    });
   });
 });

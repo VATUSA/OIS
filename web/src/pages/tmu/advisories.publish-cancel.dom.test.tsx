@@ -3,10 +3,14 @@
 //
 // Requirement                              | Test                                                    | Red when
 // -----------------------------------------|---------------------------------------------------------|---------------------------------------------
-// AC7 publish 403/404/409 toast differently | answers a 403, a 404 and a 409 on publish with ...      | publish mutationFn drops `response.status`, or
-//                                          |                                                         | any one status branch of its onError is removed
+// AC7 publish 403/404/409 toast differently | answers a 403, a 404 and a 409 on publish with ...      | publish mutationFn drops `response.status`,
+//                                          |                                                         | a status branch of its onError is removed, or
+//                                          |                                                         | two of its messages are swapped
 // AC7 cancel 403/404/409 toast differently  | answers a 403, a 404 and a 409 on cancel with ...       | the same, for useCancelAdvisory
-// AC7 publish/cancel confirm on 2nd click   | sends the POST to publish / cancel on the second click  | the columns depend on the mutation result object
+// AC7 publish/cancel confirm on 2nd click   | sends the POST to publish / cancel on the second click  | the pre-fix code (toast context value and
+//                                          |                                                         | columns together); the column deps alone are
+//                                          |                                                         | pinned by the Discard refetch test in
+//                                          |                                                         | advisories.confirm.dom.test.tsx
 import {act} from "react";
 import {createRoot} from "react-dom/client";
 import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
@@ -115,7 +119,7 @@ function button(host: HTMLElement, label: string) {
 }
 const click = (el: Element) => act(async () => el.dispatchEvent(new MouseEvent("click", {bubbles: true})));
 const toasts = () => [...document.querySelectorAll('[role="status"]')].map((t) => t.textContent ?? "");
-/** The mutation's onError runs after the rejected promise settles, a macrotask after the click. */
+/** Lets the mutation's onError and the toast it pushes land before the toasts are read. */
 const settle = () => act(() => new Promise<void>((r) => setTimeout(r, 0)));
 
 describe("Publish and cancel confirm on the second click (#824)", () => {
@@ -163,17 +167,41 @@ describe("A failed publish or cancel says why (#824)", () => {
     return shown[0]!;
   }
 
-  // The copy is the implementation's; what AC7 asks is that each status reads differently, and
-  // differently from the fallback a 500 gets. Collapsing any two branches turns this red.
+  // AC7 asks that each status reads differently, and differently from the fallback a 500 gets; the
+  // exact strings pin which reason each status gets, so swapping two messages turns this red too.
   it.each([
-    ["publish", DRAFT, "Publish", "Publish this advisory?"],
-    ["cancel", PUBLISHED, "Cancel", "Cancel this advisory?"],
+    [
+      "publish",
+      DRAFT,
+      "Publish",
+      "Publish this advisory?",
+      {
+        403: "You can’t publish advisories for this facility",
+        404: "That advisory no longer exists",
+        409: "Only a draft can be published",
+        500: "Couldn’t publish the advisory",
+      },
+    ],
+    [
+      "cancel",
+      PUBLISHED,
+      "Cancel",
+      "Cancel this advisory?",
+      {
+        403: "You can’t cancel advisories for this facility",
+        404: "That advisory no longer exists",
+        409: "That advisory is already cancelled",
+        500: "Couldn’t cancel the advisory",
+      },
+    ],
   ] as const)(
     "answers a 403, a 404 and a 409 on %s with three different toasts, none of them the fallback",
-    async (_name, row, label, warn) => {
+    async (_name, row, label, warn, expected) => {
       const byStatus = new Map<number, string>();
-      for (const status of [403, 404, 409, 500]) {
-        byStatus.set(status, await errorToastFor(row, label, warn, status));
+      for (const status of [403, 404, 409, 500] as const) {
+        const shown = await errorToastFor(row, label, warn, status);
+        expect(shown, `${label} ${status}`).toContain(expected[status]);
+        byStatus.set(status, shown);
       }
       expect(new Set(byStatus.values()).size, JSON.stringify([...byStatus])).toBe(4);
     },

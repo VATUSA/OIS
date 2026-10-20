@@ -8,6 +8,9 @@
 // AC9 failed refetch keeps table + armed button | keeps the table and an armed Delete when a background ... | QueryState gets `isError` without `&& !data`
 // AC9 control: error with no data              | shows the error state when the first load fails          | the gate drops `isError` altogether
 // AC9 a 5xx refetch                            | keeps the table and an armed Delete when a background refetch answers 500 | useDashboards returns an empty library on an error response
+// Move menu lists the refetched collections     | offers every collection in a row's Move menu after ... | the row menu stops reading LibraryCollections, or
+//                                              |                                                          | the Provider is dropped or moved below the table
+// Rename and Move still reach the board          | (same test) and renames a board from its row ...       | onMove / onRename lose their wiring in actionsFor
 import type * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
@@ -17,10 +20,11 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 const get = vi.hoisted(() => vi.fn());
 const del = vi.hoisted(() => vi.fn());
+const put = vi.hoisted(() => vi.fn());
 
 // The generated client captures `fetch` when its module loads, so stubbing `fetch` is always too
 // late (#387): mock the client itself, and seed the cache so nothing loads.
-vi.mock("@/lib/api", () => ({ois: {GET: get, POST: vi.fn(), PUT: vi.fn(), PATCH: vi.fn(), DELETE: del}}));
+vi.mock("@/lib/api", () => ({ois: {GET: get, POST: vi.fn(), PUT: put, PATCH: vi.fn(), DELETE: del}}));
 // The page needs a router only for links and navigation, neither of which this file exercises.
 vi.mock("@tanstack/react-router", () => ({
   Link: ({children}: {children?: React.ReactNode}) => <a>{children}</a>,
@@ -49,6 +53,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   get.mockReset();
   del.mockReset();
+  put.mockReset();
 });
 
 const ME = {
@@ -211,5 +216,83 @@ describe("A failed background refetch keeps the library table and an armed Delet
     expect(host.querySelector("table"), "the table stays mounted").not.toBeNull();
     await click(deleteButton(host));
     expect(del).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("The list view's row menu still files and renames boards (#824)", () => {
+  /** The row's Move or Rename button, by its text. */
+  function rowButton(host: HTMLElement, label: string) {
+    const el = [...host.querySelectorAll("tbody button")].find((b) => b.textContent?.trim() === label);
+    if (!el) throw new Error(`no ${label} button in the row`);
+    return el;
+  }
+
+  it("offers every collection in a row's Move menu after the collections refetch, and files the board", async () => {
+    put.mockResolvedValue({data: {}, error: undefined, response: {status: 200}});
+    const {host, qc} = await mount(LIBRARY);
+
+    // The collections change after mount, so the menu can only list "Departures" if it reads the
+    // current collections through the context.
+    get.mockResolvedValue({
+      data: {
+        dashboards: LIBRARY.dashboards,
+        collections: [
+          {id: "c1", name: "Arrivals"},
+          {id: "c2", name: "Departures"},
+        ],
+      },
+      error: undefined,
+      response: {status: 200},
+    });
+    await act(async () => {
+      await qc.refetchQueries({queryKey: ["dashboards"]});
+    });
+    await settle();
+
+    await act(async () => {
+      // Radix opens the menu on pointerdown, which jsdom does not synthesise from a click.
+      rowButton(host, "Move").dispatchEvent(
+        new MouseEvent("pointerdown", {bubbles: true, cancelable: true, button: 0}),
+      );
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const items = () => [...document.querySelectorAll('[role="menuitem"]')];
+    expect(items().map((el) => el.textContent?.trim())).toEqual(["No collection", "Arrivals", "Departures"]);
+
+    const departures = items().find((el) => el.textContent?.trim() === "Departures")!;
+    await act(async () => {
+      departures.dispatchEvent(new MouseEvent("pointerdown", {bubbles: true, cancelable: true}));
+      departures.dispatchEvent(new MouseEvent("pointerup", {bubbles: true, cancelable: true}));
+      departures.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true}));
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledWith("/api/v1/dashboards/{id}", {
+      params: {path: {id: "b1"}},
+      body: {name: undefined, data: undefined, collection_id: "c2"},
+    });
+  });
+
+  it("renames a board from its row through the rename prompt", async () => {
+    put.mockResolvedValue({data: {}, error: undefined, response: {status: 200}});
+    const {host} = await mount(LIBRARY);
+
+    await click(rowButton(host, "Rename"));
+    const input = document.querySelector<HTMLInputElement>('[role="dialog"] input');
+    if (!input) throw new Error("the rename prompt did not open");
+    expect(input.value).toBe("ZDC overview");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "ZDC arrivals");
+      input.dispatchEvent(new Event("input", {bubbles: true}));
+    });
+    await act(async () => {
+      input.form!.requestSubmit();
+    });
+    await settle();
+
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledWith("/api/v1/dashboards/{id}", {
+      params: {path: {id: "b1"}},
+      body: {name: "ZDC arrivals", data: undefined, collection_id: undefined},
+    });
   });
 });
