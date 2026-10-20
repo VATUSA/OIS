@@ -1096,7 +1096,8 @@ mod tests {
     /// `stats.capture.update`. Returns the router state and the session cookie.
     async fn capture_saver(pool: &PgPool) -> (crate::state::AppState, String) {
         sqlx::query(
-            "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading)              values (1, now() - interval '30 minutes', 38.9, -77.4, 10000, 300, 90)",
+            "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+             values (1, now() - interval '30 minutes', 38.9, -77.4, 10000, 300, 90)",
         )
         .execute(pool)
         .await
@@ -1146,7 +1147,8 @@ mod tests {
     async fn saving_a_capture_for_a_seeded_event_writes_one_capture_row(pool: PgPool) {
         let (state, cookie) = capture_saver(&pool).await;
         sqlx::query(
-            "insert into events.event (id, title, start_time, end_time)              values (501, 'E', now() - interval '1 hour', now())",
+            "insert into events.event (id, title, start_time, end_time) \
+             values (501, 'E', now() - interval '1 hour', now())",
         )
         .execute(&pool)
         .await
