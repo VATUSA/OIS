@@ -18,7 +18,7 @@ WSL_RUSTFLAGS_VAR=CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS
 WSL_RUSTFLAGS=-Zthreads=1
 
 # wsl_build_env_lines: the KEY=VALUE lines bin/wsl-clone.sh writes into the clone's .env,
-# which bin/run-tests.sh, bin/pre-push and the justfile load with `set -a`.
+# which bin/run-tests.sh (`just test`) and bin/pre-push load with `set -a`.
 wsl_build_env_lines() {
     printf 'CARGO_BUILD_JOBS=%s\n' "$WSL_CARGO_BUILD_JOBS"
     printf '%s=%s\n' "$WSL_RUSTFLAGS_VAR" "$WSL_RUSTFLAGS"

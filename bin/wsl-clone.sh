@@ -5,8 +5,8 @@ set -uo pipefail
 # The WSL gate clone, for a Windows host
 # ==============================================================================
 # `just test` cannot stamp a tests marker on a Windows checkout, so a Windows host gates,
-# pushes and opens the PR from a Linux clone of the branch inside WSL. This script owns
-# that clone's whole life, so nothing is made by hand and nothing is left on C:.
+# pushes and opens the PR from a Linux clone of the branch inside WSL. This script creates,
+# gates, pushes from and removes that clone, so none is made by hand or left behind.
 #
 # Run inside WSL, from the primary checkout's copy (its path under /mnt/c). Each clone is a
 # standalone clone at ~/ois-wsl/<name> (`/` in the branch written as `-`) with its own
@@ -126,8 +126,8 @@ db_exists() {
     [[ -n "$out" ]]
 }
 
-# native_tool NAME: refuses a missing tool or Windows's copy through interop, which
-# installs Windows binaries into node_modules.
+# native_tool NAME: refuses a missing tool, and Windows's copy reached through interop: the
+# clone's node_modules must be installed by the Linux toolchain that runs its tests.
 native_tool() {
     local path
     path="$(command -v "$1" 2>/dev/null)" || fatal "$1 not found in WSL. Install it there (fnm or nvm, then corepack enable) and run this through bash -lic."
@@ -193,7 +193,7 @@ vhdx_path() {
 }
 
 # sparse_check: a sparse vhdx hands space freed inside WSL back to C: (after fstrim).
-# The flag cannot be set while the distro runs, so this only reports.
+# Setting the flag refuses while the distro runs (WSL_E_DISTRO_NOT_STOPPED), so this only reports.
 sparse_check() {
     local hint="From Windows, with nothing running in WSL: wsl --shutdown, then wsl --manage ${DISTRO:-<distro>} --set-sparse true"
     local vhd flag
