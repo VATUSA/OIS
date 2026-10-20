@@ -3,10 +3,12 @@ import {
   BarChart3,
   Bot,
   CalendarClock,
+  CalendarRange,
   FileText,
   Film,
   Gauge,
   Grid3x3,
+  History,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -19,10 +21,12 @@ import {
   PlaneTakeoff,
   Radar,
   ScrollText,
+  Shield,
   Stethoscope,
   ShieldCheck,
   Split,
   Timer,
+  TowerControl,
   TrendingUp,
   Waypoints,
   Wind,
@@ -46,8 +50,11 @@ export type NavItem = {
   exact?: boolean;
 };
 
-/** `prefix` claims deeper pages under the group that aren't nav items (an event, a flight). */
-export type NavGroup = { label?: string; prefix?: string; items: readonly NavItem[] };
+/**
+ * `prefix` claims deeper pages under the group that aren't nav items (an event, a flight). `icon` is
+ * the group's one icon in the collapsed sidebar (#823).
+ */
+export type NavGroup = { label?: string; icon: LucideIcon; prefix?: string; items: readonly NavItem[] };
 
 export type NavArea = {
   id: "advisories" | "operations" | "admin";
@@ -66,6 +73,7 @@ export const AREAS: readonly NavArea[] = [
     prefixes: ["/advisories", "/facility-map", "/pilot"],
     groups: [
       {
+        icon: Megaphone,
         items: [
           { label: "Advisories", to: "/advisories", icon: Megaphone, exact: true },
           { label: "FCAs", to: "/advisories/fcas", icon: Waypoints },
@@ -81,6 +89,7 @@ export const AREAS: readonly NavArea[] = [
     prefixes: ["/ops"],
     groups: [
       {
+        icon: TowerControl,
         items: [
           { label: "Airport", to: "/ops/airport", icon: Plane, permission: "tmu.program.read" },
           { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: OPS_ANY },
@@ -101,6 +110,7 @@ export const AREAS: readonly NavArea[] = [
     groups: [
       {
         label: "Planning",
+        icon: CalendarRange,
         prefix: "/admin/planning",
         items: [
           { label: "Events", to: "/admin/planning/events", icon: CalendarClock, permission: "events.plan.read" },
@@ -112,6 +122,7 @@ export const AREAS: readonly NavArea[] = [
       },
       {
         label: "Historical",
+        icon: History,
         prefix: "/admin/historical",
         items: [
           { label: "Overview", to: "/admin/historical", icon: TrendingUp, permission: "stats.data.read", exact: true },
@@ -123,6 +134,7 @@ export const AREAS: readonly NavArea[] = [
       },
       {
         label: "Admin",
+        icon: Shield,
         items: [
           { label: "Access", to: "/admin/access", icon: ShieldCheck, permission: "access.users.read" },
       { label: "Groups", to: "/admin/groups", icon: Users, permission: "access.groups.read" },
@@ -188,6 +200,18 @@ export function areaForPath(pathname: string): NavArea | undefined {
 /** The nav group whose `prefix` contains `pathname`, for pages below a group but not a nav item. */
 export function groupForPath(pathname: string): NavGroup | undefined {
   return areaForPath(pathname)?.groups.find((g) => g.prefix && matchesPrefix(pathname, g.prefix));
+}
+
+/**
+ * Whether `pathname` is inside a group: on one of its items (an item's own active rule, exact or by
+ * prefix) or under its `prefix`. Marks a collapsed sidebar group's icon active (#823).
+ */
+export function groupContainsPath(
+  group: { prefix?: string; items: readonly Pick<NavItem, "to" | "exact">[] },
+  pathname: string,
+): boolean {
+  if (group.prefix && matchesPrefix(pathname, group.prefix)) return true;
+  return group.items.some((i) => (i.exact ? pathname === i.to : matchesPrefix(pathname, i.to)));
 }
 
 /** The most specific nav item whose path contains `pathname` (for breadcrumbs). */

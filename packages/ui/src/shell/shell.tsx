@@ -3,7 +3,9 @@ import {Slot} from "@radix-ui/react-slot";
 import {ChevronRight, type LucideIcon} from "lucide-react";
 
 import {cn} from "../lib/utils";
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import {Tooltip, TooltipContent, TooltipTrigger} from "../components/tooltip";
+import {DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuTrigger} from "../components/dropdown-menu";
 
 /**
  * The console shell (DESIGN.md "The shell"): full-height, flush to the viewport, holding the
@@ -82,7 +84,8 @@ export function ShellContent({
   );
 }
 
-const SidebarContext = React.createContext({ collapsed: false });
+/** `path` is the current route's pathname, so an open group flyout closes on any navigation. */
+const SidebarContext = React.createContext<{ collapsed: boolean; path?: string }>({ collapsed: false });
 
 /**
  * In a collapsed sidebar, labels are hidden — wrap an icon-only control so hovering or focusing it
@@ -103,12 +106,15 @@ export function SidebarTooltip({ label, children }: { label: React.ReactNode; ch
 
 export function Sidebar({
   collapsed = false,
+  path,
   header,
   footer,
   children,
   className,
 }: {
   collapsed?: boolean;
+  /** The current route's pathname: a change closes any open group flyout. */
+  path?: string;
   /** Chrome row, identity switcher, ⌘K pill. */
   header?: React.ReactNode;
   footer?: React.ReactNode;
@@ -116,7 +122,7 @@ export function Sidebar({
   className?: string;
 }) {
   return (
-    <SidebarContext.Provider value={{ collapsed }}>
+    <SidebarContext.Provider value={{ collapsed, path }}>
     <aside
       data-collapsed={collapsed || undefined}
       className={cn(
@@ -134,23 +140,105 @@ export function Sidebar({
   );
 }
 
+/**
+ * A labelled run of sidebar items. In a collapsed sidebar, a group with a `label` and an `icon` is one
+ * icon that opens its items in a flyout to the right (#823); `active` marks that icon when the current
+ * route is inside the group. Selecting an item closes the flyout, except a child carrying
+ * `data-keep-open` (a confirm-in-place button). Expanded, or outside a `Sidebar`, `icon` and `active`
+ * change nothing.
+ */
 export function SidebarGroup({
   label,
+  icon,
+  active,
   className,
   children,
 }: {
   label?: React.ReactNode;
+  icon?: LucideIcon;
+  active?: boolean;
   className?: string;
   children: React.ReactNode;
 }) {
+  const { collapsed } = React.useContext(SidebarContext);
+  if (collapsed && label && icon) {
+    return (
+      <SidebarFlyout label={label} icon={icon} active={active} className={className}>
+        {children}
+      </SidebarFlyout>
+    );
+  }
   return (
     <div className={cn("flex flex-col gap-0.5", className)}>
       {label && (
-        <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-ink-3 group-data-[collapsed]/sidebar:sr-only">
+        <div className={cn(GROUP_LABEL, "group-data-[collapsed]/sidebar:sr-only")}>
           {label}
         </div>
       )}
       {children}
+    </div>
+  );
+}
+
+const GROUP_LABEL = "px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-ink-3";
+
+/** A collapsed group: one icon that opens the group's items, with their labels, to its right. */
+function SidebarFlyout({
+  label,
+  icon: Icon,
+  active,
+  className,
+  children,
+}: {
+  label: React.ReactNode;
+  icon: LucideIcon;
+  active?: boolean;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const { path } = React.useContext(SidebarContext);
+  const [open, setOpen] = React.useState(false);
+  // Adjusting state while rendering (not in an effect) closes it in the same render the route changes.
+  const [openedPath, setOpenedPath] = React.useState(path);
+  if (path !== openedPath) {
+    setOpenedPath(path);
+    setOpen(false);
+  }
+  return (
+    <div className={cn("flex flex-col", className)}>
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <SidebarTooltip label={label}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              data-active={active || undefined}
+              className="group/item flex w-full items-center justify-center rounded-sm py-2 text-ink-2 outline-none transition-colors hover:bg-panel-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-ring data-[active]:bg-panel-2 data-[active]:text-ink data-[state=open]:bg-panel-2"
+            >
+              <Icon className="size-[17px] shrink-0 text-ink-3 group-hover/item:text-ink-2 group-data-[active]/item:text-brand-ink" />
+              <span className="sr-only">{label}</span>
+            </button>
+          </DropdownMenuTrigger>
+        </SidebarTooltip>
+        <DropdownMenuContent side="right" align="start" sideOffset={10} className="rounded-md bg-panel p-1.5">
+          <DropdownMenuLabel className={GROUP_LABEL}>{label}</DropdownMenuLabel>
+          {/* Inside the flyout the labels show, so items drop their collapsed-mode tooltips. */}
+          <SidebarContext.Provider value={{ collapsed: false, path }}>
+            {React.Children.map(children, (child) => {
+              if (!React.isValidElement(child)) return child;
+              const keepOpen = (child.props as Record<string, unknown>)["data-keep-open"] != null;
+              return (
+                <DropdownMenuPrimitive.Item
+                  asChild
+                  className="outline-none data-[highlighted]:bg-panel-2 data-[highlighted]:text-ink"
+                  onSelect={keepOpen ? (e) => e.preventDefault() : undefined}
+                >
+                  {child}
+                </DropdownMenuPrimitive.Item>
+              );
+            })}
+          </SidebarContext.Provider>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

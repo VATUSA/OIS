@@ -1,3 +1,4 @@
+import {CalendarRange, History, Megaphone, Shield, TowerControl} from "lucide-react";
 import {describe, expect, it} from "vitest";
 
 import type {Me} from "./auth";
@@ -9,6 +10,7 @@ import {
   canSeeAdmin,
   canSeeArea,
   canSeeItem,
+  groupContainsPath,
   groupForPath,
   itemForPath,
   visibleGroups,
@@ -201,5 +203,44 @@ describe("path lookup", () => {
     expect(groupForPath("/admin/flow/sectors")).toBeUndefined();
     expect(canOpenPath(holding("flow.sectors.read"), "/admin/flow/sectors")).toBe(true);
     expect(canOpenPath(holding("discord.config.read"), "/admin/flow/sectors")).toBe(false);
+  });
+});
+
+describe("nav group icons (#823)", () => {
+  it("uses Megaphone for Advisories, TowerControl for Operations, CalendarRange for Planning, History for Historical and Shield for Admin", () => {
+    const icons = AREAS.flatMap((a) => a.groups.map((g) => [g.label ?? a.label, g.icon]));
+    expect(icons).toEqual([
+      ["Advisories", Megaphone],
+      ["Operations", TowerControl],
+      ["Planning", CalendarRange],
+      ["Historical", History],
+      ["Admin", Shield],
+    ]);
+  });
+});
+
+describe("groupContainsPath (#823)", () => {
+  const planning = areaById("admin").groups.find((g) => g.label === "Planning")!;
+  const advisories = areaById("advisories").groups[0];
+
+  it("contains a page on one of the group's items and a page below it", () => {
+    expect(groupContainsPath(planning, "/admin/planning/events")).toBe(true);
+    expect(groupContainsPath(planning, "/admin/planning/events/42")).toBe(true);
+  });
+
+  it("contains a page under the group's prefix that is no nav item", () => {
+    expect(groupContainsPath(planning, "/admin/planning")).toBe(true);
+    expect(groupContainsPath(planning, "/admin/planningx")).toBe(false);
+  });
+
+  it("matches an exact item only on its own path", () => {
+    expect(groupContainsPath({items: [{to: "/admin", exact: true}]}, "/admin")).toBe(true);
+    expect(groupContainsPath({items: [{to: "/admin", exact: true}]}, "/admin/access")).toBe(false);
+    expect(groupContainsPath(advisories, "/advisories")).toBe(true);
+  });
+
+  it("does not contain a page in another group", () => {
+    expect(groupContainsPath(planning, "/admin/historical/replay")).toBe(false);
+    expect(groupContainsPath(advisories, "/ops/fca")).toBe(false);
   });
 });
