@@ -5369,7 +5369,7 @@ export interface components {
              * @description 1-based sequence in the metered order.
              */
             seq: number;
-            /** @description airborne | ground | proposed */
+            /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
             status: string;
         };
         /**
@@ -6094,7 +6094,7 @@ export interface components {
              * @description 1-based sequence in that FCA's metered order.
              */
             seq: number;
-            /** @description `ground` | `proposed`. */
+            /** @description Always `ground`: IDST lists connected pilots on the ground, never a prefile (#834). */
             status: string;
         };
         /** @description The IDST board: FCA-metered ground departures in scope, split by release state. */

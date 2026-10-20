@@ -82,8 +82,8 @@ is the default failure mode: one aircraft showing two ETAs.
 2. **Runway ETE**: `feed::runway::collect_arrivals`
 3. **Sector occupancy and demand**: `feed::sector_tracks::project_tracks`, cached per publish by
    `handlers/sector_demand_cache.rs`
-4. **FCA metering**: `handlers::flow::build_candidates`, two sites (live pilots and prefiles), each
-   feeding `MeterInput.cross_speed` from `predict::eta_along_route`
+4. **FCA metering**: `handlers::flow::build_candidates`, connected pilots only (#834), airborne and
+   ground, feeding `MeterInput.cross_speed` from `predict::eta_along_route`
 5. **Map traffic and the per-fix debug table**: `handlers::flow::project_traffic`, `fix_predictions`,
    `prefile_fix_predictions`
 6. **Inputs, not callers**: `fca::route_path` (the route every surface times along) and
@@ -98,7 +98,8 @@ and `git grep 'predict::' -- backend/src`, keeping only non-test call sites.
 
 **Each site gets its own wiring test, and each is mutated on its own.** On #355 the wiring test seeded
 only live pilots, so reverting the prefile site alone passed the whole suite;
-`handlers::flow::mit_cross_speed_wiring_tests` now mutates each site independently.
+`handlers::flow::mit_cross_speed_wiring_tests` now covers an airborne and a ground pilot (#834 removed
+the prefile site).
 
 ## Metering
 

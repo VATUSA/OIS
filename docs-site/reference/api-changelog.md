@@ -14,6 +14,16 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and
+  `GET /api/v1/flow/counts`** list and count connected pilots with a flight plan only. A prefile is no
+  longer an FCA candidate, so `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always
+  `ground`; neither carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404`
+  for a callsign that is only prefiled. A release already stored for a prefiled callsign is kept but
+  appears on no FCA surface (IDST `released`, the traffic list, metering) until that pilot connects;
+  `GET /api/v1/tmu/departures/{dep}` and sector demand still read it as the flight's locked wheels-up
+  (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
+  count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
+  prefiled flights must wait for the pilot to connect. (#834)
 - **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
   `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
   `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory
