@@ -196,6 +196,8 @@ lib() { bash -c '. "$1"; shift; "$@"' _ "$LIB" "$@"; }
 [[ "$(lib wsl_db_name Feat-1.X)" == "ois_wsl_feat_1_x" ]] && ok "wsl_db_name lower-cases and folds to [a-z0-9_]" || bad "wsl_db_name: $(lib wsl_db_name Feat-1.X)"
 LONG="$(lib wsl_db_name "$(printf 'a%.0s' {1..70})")"
 [[ ${#LONG} -eq 63 && "$LONG" == ois_wsl_a* ]] && ok "...cut to 63 characters, prefix kept" || bad "long db name: $LONG (${#LONG})"
+EMPTY="$(lib wsl_db_name "")"; rc=$?
+[[ $rc -ne 0 && -z "$EMPTY" ]] && ok "wsl_db_name refuses an empty name rather than naming ois_wsl_" || bad "empty db name: rc $rc, '$EMPTY'"
 CONSTS="$(bash -c '. "$1"; echo "$WSL_MIN_C_FREE_GB $WSL_MIN_MEM_AVAILABLE_GB"' _ "$LIB")"
 [[ "$CONSTS" == "20 9" ]] && ok "the thresholds are 20 GiB of C: and 9 GiB of MemAvailable" || bad "thresholds: $CONSTS"
 (( C_FREE_SHORT_KB < 20 * 1024 * 1024 && 20 * 1024 * 1024 <= C_FREE_OK_KB && MEM_SHORT_KB < 9 * 1024 * 1024 && 9 * 1024 * 1024 <= MEM_OK_KB )) \
