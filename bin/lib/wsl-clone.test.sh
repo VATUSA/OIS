@@ -424,14 +424,22 @@ wsl_clone remove "$NAME"
 setup unpushed
 wsl_clone create "$BR"
 wsl_clone remove "$NAME"
-[[ $RC -ne 0 && -d "$CLONE" && -f "$STUB_DB" ]] && has "a HEAD on neither origin/<branch> nor origin/next blocks" "is neither on origin/$BR nor in origin/next" || bad "unpushed: rc $RC: $OUT"
+[[ $RC -eq 0 && ! -e "$CLONE" && ! -f "$STUB_DB" ]] && has "an unpushed clone that made no commits is removed: the Windows checkout holds its work" "came from windows/$BR" || bad "unpushed from windows: rc $RC: $OUT"
+setup made-in-clone
+wsl_clone create "$BR"
+printf 'c\n' > "$CLONE/clone-only.txt" && git -C "$CLONE" add clone-only.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm clone-only
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" && -f "$STUB_DB" ]] && has "a commit made in the clone, on neither origin/<branch> nor origin/next, blocks" "is neither on origin/$BR nor in origin/next" || bad "made in clone: rc $RC: $OUT"
 git -C "$CLONE" push -q origin "HEAD:refs/heads/next"
 wsl_clone remove "$NAME"
-[[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "a HEAD already in origin/next is removed, its branch never pushed" || bad "on next: rc $RC: $OUT"
-created_pushed pruned
+[[ $RC -eq 0 && ! -e "$CLONE" ]] && ok "a clone commit already in origin/next is removed, its branch never pushed" || bad "on next: rc $RC: $OUT"
+setup pruned
+wsl_clone create "$BR"
+printf 'c\n' > "$CLONE/clone-only.txt" && git -C "$CLONE" add clone-only.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm clone-only
+git -C "$CLONE" push -q origin "$BR"
 git -C "$ORIGIN" update-ref -d "refs/heads/$BR"
 wsl_clone remove "$NAME"
-[[ $RC -ne 0 && -d "$CLONE" ]] && ok "a branch since deleted on origin is not taken as pushed" || bad "pruned: rc $RC: $OUT"
+[[ $RC -ne 0 && -d "$CLONE" ]] && ok "a clone commit whose branch was since deleted on origin is not taken as pushed" || bad "pruned: rc $RC: $OUT"
 created_pushed unreachable
 STUB_PG_RC=2 wsl_clone remove "$NAME"
 [[ $RC -ne 0 && -d "$CLONE" ]] && has "an unreachable Postgres blocks, clone kept" "cannot reach Postgres" || bad "unreachable: rc $RC: $OUT"
@@ -665,6 +673,53 @@ git -C "$CLONE" push -q origin "$BR"
 printf 'RUST_LOG=info\n' > "$MAIN/.env"
 wsl_clone remove "$NAME"
 [[ $RC -ne 0 && -d "$CLONE" ]] && has "remove refuses without a source DATABASE_URL, clone kept" "sets no DATABASE_URL" || bad "remove no url: rc $RC: $OUT"
+
+echo "== the Windows branch rewritten before its first push =="
+# rewrite KIND: amend, squash or rebase the Windows branch $BR after the clone took its tip.
+rewrite() {
+    case "$1" in
+        amend) printf 'amended\n' > "$WT/file.txt" && git -C "$WT" add file.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -q --amend -m work-amended ;;
+        squash)
+            printf 's\n' > "$WT/second.txt" && git -C "$WT" add second.txt && git -C "$WT" -c core.hooksPath=/dev/null commit -qm second
+            wsl_clone create "$BR"
+            git -C "$WT" reset -q --soft next && git -C "$WT" -c core.hooksPath=/dev/null commit -qm squashed ;;
+        rebase)
+            printf 'n\n' > "$MAIN/on-next.txt" && git -C "$MAIN" add on-next.txt && git -C "$MAIN" -c core.hooksPath=/dev/null commit -qm on-next
+            git -C "$MAIN" push -q origin next
+            git -C "$WT" -c core.hooksPath=/dev/null rebase -q next ;;
+    esac
+}
+for kind in amend squash rebase; do
+    setup "rewrite-$kind"
+    wsl_clone create "$BR"
+    OLD_HEAD="$(git -C "$CLONE" rev-parse HEAD)"
+    rewrite "$kind"
+    [[ "$(git -C "$WT" rev-parse HEAD)" != "$OLD_HEAD" ]] && ! git -C "$WT" merge-base --is-ancestor "$OLD_HEAD" HEAD \
+        || bad "$kind did not rewrite the branch (fixture)"
+    : > "$STUB_LOG"
+    wsl_clone gate "$BR"
+    [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] \
+        && has "after a $kind, gate moves the clone to the rewritten tip" "was rewritten" || bad "$kind gate: rc $RC: $OUT"
+    grep -q '^just test' "$STUB_LOG" && ok "...and runs just test there" || bad "$kind gate: no just test"
+    rewrite amend
+    wsl_clone remove "$NAME"
+    [[ $RC -eq 0 && ! -e "$CLONE" && ! -f "$STUB_DB" ]] && ok "after a $kind, remove takes the clone and its database" || bad "$kind remove: rc $RC: $OUT"
+done
+setup rewrite-then-local
+wsl_clone create "$BR"
+rewrite amend
+printf 'c\n' > "$CLONE/clone-only.txt" && git -C "$CLONE" add clone-only.txt && git -C "$CLONE" -c core.hooksPath=/dev/null commit -qm clone-only
+LOCAL="$(git -C "$CLONE" rev-parse HEAD)"
+wsl_clone gate "$BR"
+[[ $RC -ne 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$LOCAL" ]] && has "a commit made in the clone is still refused after a rewrite, HEAD kept" "the clone has commits windows/$BR lacks" || bad "rewrite then local: rc $RC: $OUT"
+wsl_clone remove "$NAME"
+[[ $RC -ne 0 && -d "$CLONE" ]] && ok "...and remove keeps it" || bad "rewrite then local remove: rc $RC: $OUT"
+setup rewrite-dirty
+wsl_clone create "$BR"
+rewrite amend
+printf 'd\n' >> "$CLONE/file.txt"
+wsl_clone gate "$BR"
+[[ $RC -ne 0 ]] && grep -q '^d$' "$CLONE/file.txt" && has "a dirty clone is not reset onto a rewritten branch" "uncommitted or untracked changes" || bad "rewrite dirty: rc $RC: $OUT"
 
 echo
 echo "wsl-clone: $PASS passed, $FAIL failed, $SKIP skipped"

@@ -135,12 +135,29 @@ native_tool() {
     ok "$1: ${path}"
 }
 
-# sync_clone: fast-forward the clone to the Windows branch; never past local-only commits.
+# from_windows: the clone's HEAD is a commit windows/$BRANCH has pointed at (that ref's
+# reflog), so every commit in the clone came from the Windows checkout and none was made here.
+from_windows() {
+    local head
+    head="$(git -C "$DIR" rev-parse HEAD 2>/dev/null)" || return 1
+    git -C "$DIR" reflog show --format=%H "refs/remotes/windows/$BRANCH" 2>/dev/null | grep -qx "$head"
+}
+
+# sync_clone: move the clone to the Windows branch: a fast-forward, or, when that branch was
+# amended, squashed or rebased, a reset to its new tip. Commits made in the clone are refused.
 sync_clone() {
+    local status
     git -C "$DIR" fetch -q windows || fatal "cannot fetch the clone's windows remote in ${DIR}."
-    git -C "$DIR" merge-base --is-ancestor HEAD "windows/$BRANCH" 2>/dev/null \
-        || blocked "the clone has commits windows/${BRANCH} lacks. Commit in the Windows worktree, never in the clone."
-    git -C "$DIR" merge -q --ff-only "windows/$BRANCH" || fatal "cannot fast-forward ${DIR} to windows/${BRANCH}."
+    if git -C "$DIR" merge-base --is-ancestor HEAD "windows/$BRANCH" 2>/dev/null; then
+        git -C "$DIR" merge -q --ff-only "windows/$BRANCH" || fatal "cannot fast-forward ${DIR} to windows/${BRANCH}."
+    elif from_windows; then
+        status="$(git -C "$DIR" status --porcelain)" || blocked "git status failed in ${DIR}, so its changes are unknown."
+        [[ -z "$status" ]] || blocked "${DIR} has uncommitted or untracked changes."
+        git -C "$DIR" reset -q --hard "windows/$BRANCH" || fatal "cannot move ${DIR} to the rewritten windows/${BRANCH}."
+        ok "windows/${BRANCH} was rewritten; the clone, which made no commits, follows it"
+    else
+        blocked "the clone has commits windows/${BRANCH} lacks. Commit in the Windows worktree, never in the clone."
+    fi
     ok "clone at $(git -C "$DIR" rev-parse --short HEAD) (windows/${BRANCH})"
 }
 
@@ -148,7 +165,11 @@ clone_fresh() {
     local origin_url
     origin_url="$(git -C "$SOURCE" remote get-url origin)" || fatal "the source has no origin remote."
     mkdir -p "$CLONES_ROOT" || fatal "cannot create ${CLONES_ROOT}."
-    git clone -q --no-checkout --origin windows "$SOURCE" "$DIR" || fatal "git clone of ${SOURCE} failed."
+    # init and fetch, not clone: git clone writes no reflog for the remote-tracking refs it
+    # creates, and from_windows needs the first tip of windows/<branch> in that reflog.
+    git init -q "$DIR" || fatal "cannot create ${DIR}."
+    git -C "$DIR" remote add windows "$SOURCE" || fatal "cannot add the windows remote to ${DIR}."
+    git -C "$DIR" fetch -q windows || fatal "cannot fetch ${SOURCE} into ${DIR}."
     git -C "$DIR" remote add origin "$origin_url" || fatal "cannot add origin to ${DIR}."
     git -C "$DIR" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fatal "cannot check out ${BRANCH} in ${DIR}."
     ok "cloned ${BRANCH} into ${DIR}"
@@ -375,7 +396,8 @@ drop_db() {
     ok "database ${DB} dropped"
 }
 
-# The clone's commits must be on origin: its pushed branch at HEAD, or origin/next.
+# The clone's commits must be saved elsewhere: on origin (its pushed branch at HEAD, or
+# origin/next), or in the Windows checkout they all came from (from_windows).
 check_saved() {
     local status
     status="$(git -C "$DIR" status --porcelain)" || blocked "git status failed in ${DIR}, so its changes are unknown."
@@ -385,10 +407,13 @@ check_saved() {
         || blocked "cannot fetch origin, so whether ${SHA:0:8} is saved there is unknown."
     local remote
     remote="$(GIT_TERMINAL_PROMPT=0 with_timeout 30 git -C "$DIR" ls-remote origin "refs/heads/$BRANCH" | awk '{ print $1 }')"
-    if [[ "$remote" != "$SHA" ]] && ! git -C "$DIR" merge-base --is-ancestor "$SHA" origin/next 2>/dev/null; then
-        blocked "${BRANCH} at ${SHA:0:8} is neither on origin/${BRANCH} nor in origin/next. Push it first."
+    if [[ "$remote" == "$SHA" ]] || git -C "$DIR" merge-base --is-ancestor "$SHA" origin/next 2>/dev/null; then
+        ok "${SHA:0:8} is on origin"
+    elif from_windows; then
+        ok "${SHA:0:8} came from windows/${BRANCH}; the clone made no commits of its own"
+    else
+        blocked "${BRANCH} at ${SHA:0:8} was made in the clone and is neither on origin/${BRANCH} nor in origin/next. Push it first."
     fi
-    ok "${SHA:0:8} is on origin"
 }
 
 cmd_remove() {
