@@ -514,6 +514,10 @@ for args in "--editor" "-e" "--template t.md" "-T t.md" "--web" "-dw"; do
 done
 wsl_clone pr "$NAME" --title
 [[ $RC -ne 0 ]] && has "pr refuses a last flag with no value" "has no value" || bad "pr dangling flag: rc $RC: $OUT"
+mv "$MAIN/.claude/hooks/lib/attribution.sh" "$WORK/attribution.sh.away"
+wsl_clone pr "$NAME" --title T --body "B"
+[[ $RC -ne 0 ]] && has "pr refuses when the primary checkout's attribution library is missing" "cannot load" || bad "pr no library: rc $RC: $OUT"
+mv "$WORK/attribution.sh.away" "$MAIN/.claude/hooks/lib/attribution.sh"
 for form in "--body-file $WORK/body-attr.md" "-F $WORK/body-attr.md" "--body-file=$WORK/body-attr.md" "-F$WORK/body-attr.md"; do
     # shellcheck disable=SC2086
     wsl_clone pr "$NAME" --title T $form
