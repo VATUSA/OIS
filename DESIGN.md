@@ -145,7 +145,7 @@ native frame. It holds:
 - **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
   identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
   — Home, Advisories, Operations, Planning, Historical, Admin, and a **User** group (Profile, Settings,
-  API keys, Sign out) — and Docs / theme / Zulu clock at the foot. No dropdown menus for navigation. It is the only navigation: there is no top bar.
+  API keys, Sign out) — and Docs / theme / Zulu clock at the foot. No dropdown menus for navigation, except when the sidebar is collapsed: each group is then one icon that opens a flyout of its items to the right (#823). It is the only navigation: there is no top bar.
 - **Main**: a breadcrumb row (muted parents, bright current crumb with its icon), then the page's
   **content panel** — inset and rounded on all four corners, with no divider between it and the
   sidebar. Inside: the page header (700 title + count chip + subtitle, with a segmented view switch)

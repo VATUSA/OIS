@@ -416,7 +416,9 @@ export function AdminServiceAccounts() {
   const [rotating, setRotating] = useState<ServiceAccount | null>(null);
   const canCreate = hasPermission(me, "service_accounts.create");
   const canUpdate = hasPermission(me, "service_accounts.update");
-  const setLimit = useSetServiceAccountRateLimit();
+  // `.mutate` is stable; the mutation result object is new on every render, and the columns depend on
+  // this, so a rebuilt cell would drop a rate limit half-typed into `RateLimitCell` (#824).
+  const setLimit = useSetServiceAccountRateLimit().mutate;
 
   const reveal = useCallback((token: ServiceAccountToken, rolesSet: boolean) => {
     setReveals((list) => withReveal(list, token));
@@ -490,7 +492,7 @@ export function AdminServiceAccounts() {
             label={c.row.original.name}
             value={c.row.original.rate_limit_per_min}
             editable={canUpdate}
-            onSave={(perMin) => setLimit.mutate({id: c.row.original.id, perMin})}
+            onSave={(perMin) => setLimit({id: c.row.original.id, perMin})}
           />
         ),
         },

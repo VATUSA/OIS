@@ -44,9 +44,12 @@ export function AdvisoriesTab() {
 
   const advisories = useAdvisories();
   const create = useCreateAdvisory();
-  const publish = usePublishAdvisory();
-  const cancel = useCancelAdvisory();
-  const del = useDeleteAdvisory();
+  // `.mutate` is stable; the mutation result object is new on every render. The columns below depend
+  // on these, and a rebuilt `cell` function remounts the cell, so an armed ConfirmButton would come
+  // back idle before its second click (#824).
+  const publish = usePublishAdvisory().mutate;
+  const cancel = useCancelAdvisory().mutate;
+  const del = useDeleteAdvisory().mutate;
 
   const [mode, setMode] = useState<Mode>("structured");
   const [facility, setFacility] = useState("");
@@ -82,17 +85,17 @@ export function AdvisoriesTab() {
                 Preview
               </Button>
               {canPublish && a.status === "draft" && (
-                <ConfirmButton size="sm" onConfirm={() => publish.mutate(a.id)} warn="Publish this advisory?">
+                <ConfirmButton size="sm" onConfirm={() => publish(a.id)} warn="Publish this advisory?">
                   Publish
                 </ConfirmButton>
               )}
               {canPublish && a.status === "published" && (
-                <ConfirmButton size="sm" onConfirm={() => cancel.mutate(a.id)} warn="Cancel this advisory?">
+                <ConfirmButton size="sm" onConfirm={() => cancel(a.id)} warn="Cancel this advisory?">
                   Cancel
                 </ConfirmButton>
               )}
               {canUpdate && a.status === "draft" && (
-                <ConfirmButton size="sm" onConfirm={() => del.mutate(a.id)} warn="Discard this draft?">
+                <ConfirmButton size="sm" onConfirm={() => del(a.id)} warn="Discard this draft?">
                   Discard
                 </ConfirmButton>
               )}
