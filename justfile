@@ -140,7 +140,8 @@ test *args:
 
 # The same steps as `just test` (bin/run-tests.sh, so the two never drift), without the marker.
 # A step it cannot run here is MISSING, never passed. Not covered: the macOS/Windows/Linux
-# `desktop` matrix (clippy compiles the Tauri shell for this host only).
+# `desktop` matrix (clippy compiles the Tauri shell for this host only) and the `windows-hooks`
+# job (bin/lib/file-lock.test.sh on Windows).
 # Everything .github/workflows/ci.yml runs that can run on this machine
 ci-full:
     bash bin/run-tests.sh --no-stamp

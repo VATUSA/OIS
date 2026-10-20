@@ -46,7 +46,7 @@ export function SectorsPage() {
       isError={sectors.isError}
       onRetry={() => sectors.refetch()}
       isEmpty={sectors.data?.length === 0}
-      empty="No sector volumes are loaded. Run the airspace-sector-importer; the map picks them up within five minutes."
+      empty="No sector volumes are loaded yet. The backend loads them on start; if this stays empty, check the airspace_sector_seed job under Admin → Jobs."
       className="rounded-md border border-line"
     >
         <div className="relative isolate h-[75vh] w-full overflow-hidden rounded-md border border-line">

@@ -9,7 +9,7 @@ set -e
 # remote branch and any PR are never touched.
 #
 # Usage (from the main checkout):
-#   bash bin/teardown-worktree.sh fix+289+logbook-map-starburst          # .claude/worktrees/<NAME>
+#   bash bin/teardown-worktree.sh fix-289-logbook-map-starburst          # .claude/worktrees/<NAME>
 #   bash bin/teardown-worktree.sh ../ois-wt/fix/289/logbook-map-starburst # any registered worktree, by path
 #   bash bin/teardown-worktree.sh fix/289/logbook-map-starburst          # by the branch it has checked out
 # Inside a worktree session use ExitWorktree instead: its hook
@@ -84,8 +84,8 @@ NAME=""
 BRANCH=""
 LOCK_LINE=""
 # A .claude/worktrees name is interpolated into a path. `[[ =~ ]]`, not `echo | grep`:
-# grep matches per line and would let a payload through on its second line. `+` is how
-# EnterWorktree encodes a branch name's `/`.
+# grep matches per line and would let a payload through on its second line. `-` (or `+`
+# in older worktrees) is how a worktree name encodes a branch name's `/`.
 if [[ "$ARG" =~ ^[A-Za-z0-9_+-]+$ ]] && [[ -d "$PROJECT_ROOT/.claude/worktrees/$ARG" || ! -e "$ARG" ]] \
     && ! git -C "$PROJECT_ROOT" show-ref --verify --quiet "refs/heads/$ARG"; then
     NAME="$ARG"

@@ -89,7 +89,7 @@ For every CRITICAL-PATH set: trace it end to end (route → handler → repo →
 
 1. **The full gate, once per SHA** (`.claude/rules/test-quality.md` → "A gate counts once per SHA"). For the reviewed SHA, accept either of these and run nothing more:
    - a tests marker in this checkout, `.claude/markers/tests/<reviewed SHA>`, which only `bin/run-tests.sh` writes after a green full run on that clean commit;
-   - green CI on that SHA: `gh api repos/VATUSA/OIS/commits/<sha>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`, with every job of `.github/workflows/ci.yml` (`migrations`, `rust`, `js`, the three `desktop` runs, `deny`, `client-drift`) concluded `success`. An empty list or a `null` conclusion means CI has not run or not finished, not green.
+   - green CI on that SHA: `gh api repos/VATUSA/OIS/commits/<sha>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`, with every check-run concluded `success` (the check-runs are the job list; never compare against a copied one). An empty list or a `null` conclusion means CI has not run or not finished, not green.
 
    Only when neither exists, run `just test` (`bin/run-tests.sh`; in the background, output to a file, long timeout). Never re-run the full suite on a SHA that already has one. Targeted runs (one test in isolation, a mutation's killing test) are always fine.
 2. Report each gate's line: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, nextest's summary line (never the exit code; `.claude/rules/test-quality.md` → "Reading a test result"), doc tests, `pnpm lint`, `pnpm typecheck`, vitest's `Test Files` and `Tests` lines, `pnpm audit --audit-level=high`, `cargo deny check`, client drift. From CI, report each job's conclusion. Any failure: re-run it in isolation and compare against `origin/next` before blaming the branch — separate **pre-existing / flake** failures (`#[sqlx::test]` harness contention lands on a different test each run) from real regressions.
@@ -119,6 +119,8 @@ Only when no lens returned CHANGES REQUESTED (Phase 3) and every blocking findin
 ```bash
 bash bin/review-marker.sh code-review <the full 40-character SHA pinned in Phase 0>
 ```
+
+From a session outside the worktree (a subagent), run it as exactly `cd <absolute worktree root> && bash bin/review-marker.sh code-review <sha>`; any other wrapper and the marker audit deletes the marker (`review-before-shipping.md` → Phase 9).
 
 Write the SHA in literally. The script refuses (`BLOCKER:`) when HEAD moved, the checkout is dirty, or the attestation for that SHA is incomplete, and otherwise writes `.claude/markers/code-review/<sha>`. The filename IS the commit SHA, so any new commit invalidates the marker and forces another round; its attestations are carried only as "Repeat rounds" says. The marker means the review passed, not merely that it ran.
 

@@ -1,10 +1,10 @@
 //! ATC sector volumes (#594): altitude-bounded polygons OIS owns in `flow.airspace_sector`
 //! (migration 0111). The Airspace Monitor that first used them was removed (#719); the dataset stays.
 //!
-//! No public feed supplies these, so they are imported offline by `bin/airspace_sector_importer.rs`
-//! and loaded into `AppState::airspace_sectors` by `jobs::spawn_airspace_sectors_refresh`. The
-//! importer is a separate process, so nothing in the server can force-reload on its write: a new
-//! import shows up on the job's next tick. An in-app editor would call `repos::airspace_sectors::
+//! No public feed supplies these. The backend loads them from a pinned vtsd commit with
+//! `repos::airspace_sector_seed`, run by the `airspace_sector_seed` job at start (#821), and
+//! `jobs::spawn_airspace_sectors_refresh` loads the table into `AppState::airspace_sectors`; the seed
+//! triggers that refresh when it writes. An in-app editor would call `repos::airspace_sectors::
 //! load_all` and store the result after each write, as `handlers::aircraft_profiles` does.
 //!
 //! **Which volumes count a fix (#726).** A volume *contains* a fix when it is laterally inside a ring
@@ -129,8 +129,8 @@ impl SectorTable {
     }
 }
 
-/// Why a volume can't be stored, or `Ok` if it can. The single gate every write passes through
-/// (`repos::airspace_sectors::replace_artcc`), so nothing in the table fails it.
+/// Why a volume can't be stored, or `Ok` if it can. Every writer must call it before inserting
+/// (`repos::airspace_sectors::insert_volumes` does not), so nothing in the table fails it.
 pub fn validate_volume(v: &SectorVolume) -> Result<(), String> {
     if v.base_alt_ft < 0 || v.base_alt_ft >= v.top_alt_ft {
         return Err(format!(
@@ -353,7 +353,7 @@ pub(crate) mod tests {
         assert_eq!(ids(70_000.0), Vec::<&str>::new());
     }
 
-    /// A volume can have several parts: the importer makes one ring per `MultiPolygon` part. A point
+    /// A volume can have several parts: the seed makes one ring per `MultiPolygon` part. A point
     /// in any part is inside; one between the parts is not. A single-ring fixture can't tell `any`
     /// from `all`, so this one has two.
     #[test]

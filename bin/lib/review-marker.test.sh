@@ -23,7 +23,7 @@ REPO="$WORK/repo"
 mkdir -p "$REPO/bin/lib" "$REPO/.claude" "$REPO/rules"
 cp "$ROOT/bin/review-marker.sh" "$REPO/bin/review-marker.sh"
 cp "$ROOT/bin/lib/review-attestation.sh" "$REPO/bin/lib/review-attestation.sh"
-cp "$ROOT/bin/lib/marker_manifest.py" "$REPO/bin/lib/marker_manifest.py"
+cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$REPO/bin/lib/"
 vouched() { python3 -I "$ROOT/bin/lib/marker_manifest.py" vouched "$@"; }
 printf 'code\trules/a.md\n' > "$REPO/.claude/review-lenses.tsv"
 printf '## Alpha\n' > "$REPO/rules/a.md"

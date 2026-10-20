@@ -6,8 +6,8 @@ import {ois} from "./api";
 export type SectorVolume = components["schemas"]["SectorVolumeBody"];
 
 /**
- * Every ATC sector volume (#594), for the admin sector map (#602). The set changes only when someone
- * runs the offline importer, so it is fetched once and kept.
+ * Every ATC sector volume (#594), for the admin sector map (#602). The set changes only when the
+ * backend's seed loads a new pinned source revision (#821), so it is fetched once and kept.
  */
 export function useSectors() {
   return useQuery({

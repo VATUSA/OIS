@@ -1,12 +1,12 @@
 //! ATC sector volumes (#594, migration 0111). `load_all` builds the [`SectorTable`] cached in
-//! `AppState`; `replace_artcc` is the only write, used by the offline importer
-//! (`bin/airspace_sector_importer.rs`). See `feed::sectors` for the model.
+//! `AppState`. The table is written by `repos::airspace_sector_seed`, which the backend runs at
+//! start (#821), through [`insert_volumes`]. See `feed::sectors` for the model.
 
-use sqlx::{PgPool, types::Json};
+use sqlx::{PgPool, Postgres, Transaction, types::Json};
 
 use crate::{
     errors::ApiError,
-    feed::sectors::{SectorTable, SectorVolume, validate_volume},
+    feed::sectors::{SectorTable, SectorVolume},
 };
 
 #[derive(sqlx::FromRow)]
@@ -46,10 +46,11 @@ pub async fn load_all(pool: &PgPool) -> Result<SectorTable, ApiError> {
     Ok(SectorTable { volumes })
 }
 
-/// Replace one ARTCC's volumes with `volumes`, atomically, stamping each with its provenance.
-/// Every volume must belong to `artcc` and pass [`validate_volume`]; if any doesn't, nothing is
-/// written and the error names it. Errors are plain text because the only caller is a CLI.
-pub async fn replace_artcc(
+/// Test fixture writer: replace one ARTCC's volumes with `volumes`, atomically, stamping each with
+/// its provenance. Every volume must belong to `artcc` and pass `validate_volume`; if any doesn't,
+/// nothing is written and the error names it.
+#[cfg(test)]
+pub(crate) async fn replace_artcc(
     pool: &PgPool,
     artcc: &str,
     volumes: &[SectorVolume],
@@ -60,7 +61,8 @@ pub async fn replace_artcc(
         if v.artcc != artcc {
             return Err(format!("{} {} is not in {artcc}", v.artcc, v.volume_id));
         }
-        validate_volume(v).map_err(|e| format!("{artcc} {}: {e}", v.volume_id))?;
+        crate::feed::sectors::validate_volume(v)
+            .map_err(|e| format!("{artcc} {}: {e}", v.volume_id))?;
     }
     let db = |e: sqlx::Error| format!("{artcc}: {e}");
     let mut tx = pool.begin().await.map_err(db)?;
@@ -69,6 +71,20 @@ pub async fn replace_artcc(
         .execute(&mut *tx)
         .await
         .map_err(db)?;
+    insert_volumes(&mut tx, volumes, source, source_cycle)
+        .await
+        .map_err(db)?;
+    tx.commit().await.map_err(db)
+}
+
+/// Insert `volumes`, stamped with their provenance, in the caller's transaction. It does not
+/// validate: every caller must pass each volume through `feed::sectors::validate_volume` first.
+pub(crate) async fn insert_volumes(
+    tx: &mut Transaction<'_, Postgres>,
+    volumes: &[SectorVolume],
+    source: &str,
+    source_cycle: &str,
+) -> Result<(), sqlx::Error> {
     for v in volumes {
         sqlx::query(
             "insert into flow.airspace_sector \
@@ -86,17 +102,19 @@ pub async fn replace_artcc(
         .bind(Json(&v.rings))
         .bind(source)
         .bind(source_cycle)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
+        .execute(&mut **tx)
+        .await?;
     }
-    tx.commit().await.map_err(db)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::sectors::tests::{bridged_ring, volume};
+    use crate::feed::sectors::{
+        tests::{bridged_ring, volume},
+        validate_volume,
+    };
 
     async fn count(pool: &PgPool) -> i64 {
         sqlx::query_scalar("select count(*) from flow.airspace_sector")

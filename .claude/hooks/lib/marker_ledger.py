@@ -9,7 +9,8 @@ for each marker they write (bin/lib/marker_manifest.py). Any process can append 
 records which lines the hooks accepted, per checkout. Before each call the snapshot notes what that call
 may stamp (marker_write.stampers): a line that is nothing but a stamper and reads, the stamper being
 `just test`, this checkout's bin/run-tests.sh (tests for HEAD) or bin/review-marker.sh KIND SHA, with
-no cd, or exactly `cd ABSDIR && just test` for the checkout at ABSDIR.
+no cd, or exactly `cd ABSDIR && just test` or `cd ABSDIR && [bash|sh] bin/review-marker.sh KIND SHA` for the
+checkout at ABSDIR (`cd ABSDIR && bash bin/run-tests.sh` does not stamp).
 
 A new line is accepted in two ways only: by the audit of the very call whose snapshot covers its kind and
 SHA, or by a grant. A run_in_background stamper leaves a one-shot grant for each line its own audit did
@@ -31,7 +32,6 @@ of the ledger and its seal is outside it, as is a forged line that lands while t
 call is still running, or while a grant for it is open. Python 3.8-compatible.
 """
 
-import fcntl
 import hashlib
 import json
 import os
@@ -44,6 +44,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MAIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
 sys.path.insert(1, os.path.join(MAIN_ROOT, "bin", "lib"))
+import file_lock  # noqa: E402
 import marker_manifest  # noqa: E402
 from marker_write import LEDGER_DIR, payload_cwd, stampers  # noqa: E402
 
@@ -86,8 +87,8 @@ class Ledger(object):
     def __init__(self, root):
         directory = state_dir(root)
         os.makedirs(directory, exist_ok=True)
-        self.lock = open(os.path.join(directory, "lock"), "a")
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.lock = open(os.path.join(directory, "lock"), "a+")
+        file_lock.lock(self.lock)
         self.path = os.path.join(directory, "ledger.json")
         state, self.tampered = {}, False
         if os.path.lexists(self.path):
@@ -114,7 +115,7 @@ class Ledger(object):
                      "snapshots": {key: snap for key, snap in self.snapshots.items()
                                    if now - snap["at"] <= SNAPSHOT_SECONDS}}
             write_atomic(self.path, json.dumps({"seal": seal(state), "state": state}, sort_keys=True))
-        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        file_lock.unlock(self.lock)
         self.lock.close()
 
 
