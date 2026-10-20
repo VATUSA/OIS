@@ -298,7 +298,10 @@ rejects or changes an AC, edit the section the same turn (`gh issue edit <n> --b
 only after the user approves the exact new text, and change nothing else in the body. A dropped
 or changed AC also gets a spec correction comment. An issue with no section gets one once the
 user confirms the ACs (older issues carry `## Acceptance` checkboxes; convert them then). Out-of-scope
-items go under their own heading, never in the list, so every AC count agrees. Batch a round's AC
+items go under their own heading, never in the list, so every AC count agrees. So does an outcome
+only a PR can show (CI check-runs green on the PR): it goes under `## Checked after the PR opens`,
+which `/ship` Phase D and `ticket-reviewer` check. In the list it deadlocks `/ship`, whose review
+marker needs every AC met before `gh pr create` (#891). Batch a round's AC
 changes into one body edit and one spec correction comment.
 
 If the correction needs more than 400 characters to be actionable, it is a scope change rather
