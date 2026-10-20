@@ -74,12 +74,13 @@ find_source() {
     SOURCE="$(dirname "$common")"
 }
 
-# resolve NAME|BRANCH: sets NAME, DIR, DB.
+# resolve NAME|BRANCH: sets NAME, DIR, PARTIAL (where clone_fresh builds), DB.
 resolve() {
     [[ -n "${1:-}" ]] || usage
     NAME="$(wsl_clone_name "$1")"
     [[ "$NAME" =~ ^[A-Za-z0-9_+-]+$ ]] || fatal "'$1' is not a clone name or branch."
     DIR="$CLONES_ROOT/$NAME"
+    PARTIAL="$CLONES_ROOT/.$NAME.partial"
     # Interpolated into SQL: wsl_db_name leaves nothing outside [a-z0-9_] in it.
     DB="$(wsl_db_name "$NAME")" || fatal "cannot derive the database name for ${NAME}."
 }
@@ -162,25 +163,23 @@ sync_clone() {
     ok "clone at $(git -C "$DIR" rev-parse --short HEAD) (windows/${BRANCH})"
 }
 
+# clone_fresh: init and fetch, not git clone, which writes no reflog for the remote-tracking
+# refs it creates (from_windows needs the first tip of windows/<branch> there). The clone is
+# built aside in $PARTIAL and moved to $DIR only once complete, so a failed or interrupted
+# build never sits where create and remove look; the next create clears it.
 clone_fresh() {
     local origin_url
     origin_url="$(git -C "$SOURCE" remote get-url origin)" || fatal "the source has no origin remote."
     mkdir -p "$CLONES_ROOT" || fatal "cannot create ${CLONES_ROOT}."
-    # init and fetch, not clone: git clone writes no reflog for the remote-tracking refs it
-    # creates, and from_windows needs the first tip of windows/<branch> in that reflog.
-    # Any step failing after init removes the half-made clone, as git clone does; left in
-    # place, its unborn HEAD would stop both create and remove.
-    git init -q "$DIR" || fatal "cannot create ${DIR}."
-    git -C "$DIR" remote add windows "$SOURCE" || fresh_failed "cannot add the windows remote to ${DIR}."
-    git -C "$DIR" fetch -q windows || fresh_failed "cannot fetch ${SOURCE} into ${DIR}."
-    git -C "$DIR" remote add origin "$origin_url" || fresh_failed "cannot add origin to ${DIR}."
-    git -C "$DIR" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fresh_failed "cannot check out ${BRANCH} in ${DIR}."
+    rm -rf "$PARTIAL"
+    [[ ! -e "$PARTIAL" ]] || fatal "cannot clear the earlier partial clone ${PARTIAL}."
+    git init -q "$PARTIAL" || fatal "cannot create ${PARTIAL}."
+    git -C "$PARTIAL" remote add windows "$SOURCE" || fatal "cannot add the windows remote to ${PARTIAL}."
+    git -C "$PARTIAL" fetch -q windows || fatal "cannot fetch ${SOURCE} into ${PARTIAL}; run create again."
+    git -C "$PARTIAL" remote add origin "$origin_url" || fatal "cannot add origin to ${PARTIAL}."
+    git -C "$PARTIAL" checkout -q -b "$BRANCH" --track "windows/$BRANCH" || fatal "cannot check out ${BRANCH} in ${PARTIAL}."
+    mv "$PARTIAL" "$DIR" || fatal "cannot move ${PARTIAL} to ${DIR}."
     ok "cloned ${BRANCH} into ${DIR}"
-}
-
-fresh_failed() {
-    rm -rf "$DIR"
-    fatal "$1 The half-made clone was removed; run create again."
 }
 
 # write_env: the source's .env, pointed at the clone's database, with the WSL build env.
@@ -256,6 +255,8 @@ cmd_create() {
         clone_branch
         [[ "$BRANCH" == "$want" ]] || blocked "${DIR} has ${BRANCH} checked out, not ${want}. Remove it first: bash ${SCRIPT_DIR}/wsl-clone.sh remove ${NAME}"
         sync_clone
+    elif [[ -e "$DIR" ]]; then
+        blocked "${DIR} exists and is not a clone. Move it aside; create does not overwrite it."
     else
         clone_fresh
     fi
@@ -432,8 +433,8 @@ cmd_remove() {
         ok "no clone at ${DIR}"
     fi
     drop_db
-    rm -rf "$DIR"
-    [[ ! -e "$DIR" ]] || blocked "${DIR} is still there after rm -rf."
+    rm -rf "$DIR" "$PARTIAL"
+    [[ ! -e "$DIR" && ! -e "$PARTIAL" ]] || blocked "${DIR} or ${PARTIAL} is still there after rm -rf."
     ok "removed ${DIR}"
     # Hand the freed blocks back to the vhdx, so a sparse disk shrinks on C:.
     if [[ -n "$DISTRO" ]] && wsl.exe -d "$DISTRO" -u root fstrim -v /; then

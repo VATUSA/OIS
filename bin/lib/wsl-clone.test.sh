@@ -734,10 +734,33 @@ mkdir -p "$WORK/nofetch"
 REAL_GIT="$(command -v git)"
 printf '#!/bin/bash\nfor a in "$@"; do [[ "$a" == fetch ]] && exit 1; done\nexec "%s" "$@"\n' "$REAL_GIT" > "$WORK/nofetch/git"
 chmod +x "$WORK/nofetch/git"
+PARTIAL="$OIS_WSL_CLONES/.$NAME.partial"
 TEST_PATH="$WORK/nofetch:$WORK/bin:$PATH" wsl_clone create "$BR"
-[[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a failed first fetch removes the half-made clone" "half-made clone was removed" || bad "first fetch fails: rc $RC, clone $([[ -e $CLONE ]] && echo left): $OUT"
+[[ $RC -ne 0 && ! -e "$CLONE" ]] && has "a failed first fetch leaves nothing at the clone path" "run create again" || bad "first fetch fails: rc $RC, clone $([[ -e $CLONE ]] && echo left): $OUT"
+[[ -d "$PARTIAL/.git" ]] && ok "...only the partial clone beside it" || bad "no partial clone left to clear"
 wsl_clone create "$BR"
 [[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "...so create succeeds on retry" || bad "retry after failed fetch: rc $RC: $OUT"
+[[ ! -e "$PARTIAL" ]] && ok "...and the partial clone is gone" || bad "partial clone left after a retry"
+
+echo "== an interrupted build =="
+setup interrupted
+PARTIAL="$OIS_WSL_CLONES/.$NAME.partial"
+# What a build killed mid-fetch leaves: an initialized repo with an unborn HEAD, plus junk.
+mkdir -p "$OIS_WSL_CLONES" && git init -q "$PARTIAL" && touch "$PARTIAL/junk"
+wsl_clone create "$BR"
+[[ $RC -eq 0 && "$(git -C "$CLONE" rev-parse HEAD)" == "$(git -C "$WT" rev-parse HEAD)" ]] && ok "create succeeds over a partial clone an interrupted build left" || bad "after interrupt: rc $RC: $OUT"
+[[ ! -e "$PARTIAL" && ! -e "$CLONE/junk" ]] && ok "...clearing it first" || bad "partial left or reused"
+git -C "$CLONE" push -q origin "$BR"
+git init -q "$PARTIAL"
+wsl_clone remove "$NAME"
+[[ $RC -eq 0 && ! -e "$CLONE" && ! -e "$PARTIAL" ]] && ok "remove takes a leftover partial clone too" || bad "remove partial: rc $RC: $OUT"
+
+echo "== a non-clone directory at the clone path =="
+setup foreign-dir
+mkdir -p "$CLONE" && printf 'mine\n' > "$CLONE/keep.txt"
+wsl_clone create "$BR"
+[[ $RC -ne 0 ]] && has "create refuses a directory that is not a clone" "exists and is not a clone" || bad "foreign dir: rc $RC: $OUT"
+[[ -f "$CLONE/keep.txt" && ! -e "$CLONE/.git" ]] && ok "...and leaves its contents alone" || bad "foreign dir contents changed"
 
 echo
 echo "wsl-clone: $PASS passed, $FAIL failed, $SKIP skipped"
