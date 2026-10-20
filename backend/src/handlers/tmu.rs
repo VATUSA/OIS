@@ -2622,8 +2622,6 @@ mod repost_tests {
         );
     }
 
-    /// No channel mapped means "don't post" everywhere else in this file, and an edit is no different
-    /// — in particular it must not fail the edit.
     /// No channel mapped means "don't post" everywhere else in this file, and an edit is no different:
     /// it must not fail the edit. It must not be silent either, or a channel that went quiet by
     /// accident looks exactly like one that was never configured (#869). The message is held against
