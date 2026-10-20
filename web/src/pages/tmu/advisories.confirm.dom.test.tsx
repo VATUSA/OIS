@@ -56,7 +56,15 @@ const DRAFT: Advisory = {
 
 async function mount() {
   const qc = new QueryClient({
-    defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}},
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnMount: false,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+      },
+    },
   });
   qc.setQueryData(["advisories"], [DRAFT]);
   qc.setQueryData(["me"], ME);
@@ -87,7 +95,7 @@ const toasts = () => [...document.querySelectorAll('[role="status"]')].map((t) =
 /** The query cache notifies observers on a `setTimeout(0)`, which `act` alone does not wait for. */
 const settle = () => act(() => new Promise<void>((r) => setTimeout(r, 0)));
 
-describe("Discard on a draft advisory confirms on the second click (VATUSA/OIS#824)", () => {
+describe("Discard on a draft advisory confirms on the second click (#824)", () => {
   // The bug: the first click's warning toast re-rendered the tab, the columns rebuilt with a new
   // `cell` function, TanStack Table mounted it as a new component, and the armed button came back
   // idle. The second click armed it again and no DELETE was sent.
@@ -126,7 +134,7 @@ describe("Discard on a draft advisory confirms on the second click (VATUSA/OIS#8
   });
 });
 
-describe("A failed discard says why (VATUSA/OIS#824)", () => {
+describe("A failed discard says why (#824)", () => {
   async function failWith(status: number) {
     del.mockResolvedValue({data: undefined, error: {error: "x"}, response: {status}});
     const {host} = await mount();

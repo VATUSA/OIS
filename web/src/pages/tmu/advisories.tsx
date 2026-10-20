@@ -46,7 +46,7 @@ export function AdvisoriesTab() {
   const create = useCreateAdvisory();
   // `.mutate` is stable; the mutation result object is new on every render. The columns below depend
   // on these, and a rebuilt `cell` function remounts the cell, so an armed ConfirmButton would come
-  // back idle before its second click (VATUSA/OIS#824).
+  // back idle before its second click (#824).
   const publish = usePublishAdvisory().mutate;
   const cancel = useCancelAdvisory().mutate;
   const del = useDeleteAdvisory().mutate;

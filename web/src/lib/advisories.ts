@@ -18,6 +18,28 @@ export type RerouteValidBasis = components["schemas"]["RerouteValidBasis"];
 /** `kind` values the UI knows how to build a form for. Anything else is raw-only. */
 export const ADVISORY_KIND_REROUTE = "reroute";
 
+type StatusError = Error & { status?: number };
+
+/** The thrown error carries the HTTP status, so `onError` can toast the reason. */
+function statusError(message: string, response: Response | undefined): StatusError {
+  const err: StatusError = new Error(message);
+  err.status = response?.status;
+  return err;
+}
+
+/**
+ * The publish, cancel and delete handlers answer 403 outside the caller's facility scope, 404 for an
+ * advisory that no longer exists, and 409 when its status does not allow the action.
+ */
+function reasonFor(
+  error: StatusError,
+  messages: { 403: string; 404: string; 409: string; other: string },
+): string {
+  return error.status === 403 || error.status === 404 || error.status === 409
+    ? messages[error.status]
+    : messages.other;
+}
+
 export function useAdvisories({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     enabled,
@@ -72,17 +94,26 @@ export function usePublishAdvisory() {
   const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await ois.POST("/api/v1/tmu/advisories/{id}/publish", {
+      const { data, error, response } = await ois.POST("/api/v1/tmu/advisories/{id}/publish", {
         params: { path: { id } },
       });
-      if (error || !data) throw new Error("publish failed");
+      if (error || !data) throw statusError("publish failed", response);
       return data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["advisories"] });
       toast.success("Advisory published");
     },
-    onError: () => toast.error("Couldn’t publish the advisory"),
+    // `publish_advisory` (backend/src/handlers/tmu.rs) answers 409 when the advisory is not a draft.
+    onError: (error: StatusError) =>
+      toast.error(
+        reasonFor(error, {
+          403: "You can’t publish advisories for this facility",
+          404: "That advisory no longer exists",
+          409: "Only a draft can be published",
+          other: "Couldn’t publish the advisory",
+        }),
+      ),
   });
 }
 
@@ -91,17 +122,26 @@ export function useCancelAdvisory() {
   const toast = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await ois.POST("/api/v1/tmu/advisories/{id}/cancel", {
+      const { data, error, response } = await ois.POST("/api/v1/tmu/advisories/{id}/cancel", {
         params: { path: { id } },
       });
-      if (error || !data) throw new Error("cancel failed");
+      if (error || !data) throw statusError("cancel failed", response);
       return data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["advisories"] });
       toast.success("Advisory cancelled");
     },
-    onError: () => toast.error("Couldn’t cancel the advisory"),
+    // `cancel_advisory` (backend/src/handlers/tmu.rs) answers 409 when the advisory is already cancelled.
+    onError: (error: StatusError) =>
+      toast.error(
+        reasonFor(error, {
+          403: "You can’t cancel advisories for this facility",
+          404: "That advisory no longer exists",
+          409: "That advisory is already cancelled",
+          other: "Couldn’t cancel the advisory",
+        }),
+      ),
   });
 }
 
@@ -113,11 +153,7 @@ export function useDeleteAdvisory() {
       const { error, response } = await ois.DELETE("/api/v1/tmu/advisories/{id}", {
         params: { path: { id } },
       });
-      if (error) {
-        const err = new Error("delete failed") as Error & { status?: number };
-        err.status = response?.status;
-        throw err;
-      }
+      if (error) throw statusError("delete failed", response);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["advisories"] });
@@ -126,17 +162,15 @@ export function useDeleteAdvisory() {
     // `delete_advisory` (backend/src/handlers/tmu.rs) answers 403 when the draft is outside the
     // caller's facility scope, 404 when it is gone, and 409 when it is no longer a draft: a published
     // advisory is a document that went out, so it is never deleted.
-    onError: (error: Error & { status?: number }) => {
+    onError: (error: StatusError) =>
       toast.error(
-        error.status === 403
-          ? "You can’t discard drafts for this facility"
-          : error.status === 404
-            ? "That draft no longer exists"
-            : error.status === 409
-              ? "Only a draft can be discarded"
-              : "Couldn’t discard the draft",
-      );
-    },
+        reasonFor(error, {
+          403: "You can’t discard drafts for this facility",
+          404: "That draft no longer exists",
+          409: "Only a draft can be discarded",
+          other: "Couldn’t discard the draft",
+        }),
+      ),
   });
 }
 

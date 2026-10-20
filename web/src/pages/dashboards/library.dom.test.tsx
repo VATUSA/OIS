@@ -47,7 +47,15 @@ const LIBRARY: DashboardLibrary = {
 
 async function mount() {
   const qc = new QueryClient({
-    defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}},
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnMount: false,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+      },
+    },
   });
   qc.setQueryData(["dashboards"], LIBRARY);
   const host = document.createElement("div");
@@ -80,7 +88,7 @@ const toasts = () => [...document.querySelectorAll('[role="status"]')].map((t) =
 /** The query cache notifies observers on a `setTimeout(0)`, which `act` alone does not wait for. */
 const settle = () => act(() => new Promise<void>((r) => setTimeout(r, 0)));
 
-describe("Deleting a board from the list view confirms on the second click (VATUSA/OIS#824)", () => {
+describe("Deleting a board from the list view confirms on the second click (#824)", () => {
   // The list view's columns were rebuilt on every render, so any re-render of the page between the
   // two clicks (here a refetch that renamed the board) remounted the armed button.
   it("sends the DELETE when the library refetches between the two clicks", async () => {

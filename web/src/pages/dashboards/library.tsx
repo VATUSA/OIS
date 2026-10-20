@@ -1,4 +1,4 @@
-import {useCallback, useMemo, useRef, useState} from "react";
+import {createContext, useCallback, useContext, useMemo, useRef, useState} from "react";
 import {Link, useNavigate} from "@tanstack/react-router";
 import {
   Button,
@@ -138,6 +138,22 @@ function BoardCard({
 }
 
 const NO_COLLECTIONS: DashboardCollection[] = [];
+
+/**
+ * The list view's row menu reads the collections from here, not from a column closure: a `cell`
+ * function rebuilt when the collections change would remount the cell and reset an armed
+ * ConfirmButton between its two clicks (#824).
+ */
+const LibraryCollections = createContext<DashboardCollection[]>(NO_COLLECTIONS);
+
+function BoardRowMenu({ board, ...actions }: BoardActions & { board: DashboardSummary }) {
+  const collections = useContext(LibraryCollections);
+  return (
+    <div className="flex justify-end gap-1">
+      <BoardMenu board={board} collections={collections} {...actions} />
+    </div>
+  );
+}
 
 const GRID = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5";
 
@@ -279,7 +295,7 @@ export function BoardLibraryPage() {
   usePageHeader({ subtitle: "Your saved boards.", count: data ? boards.length : null, actions });
 
   // Stable, because the list view's columns depend on it: a rebuilt `cell` function remounts the
-  // cell, which would reset an armed ConfirmButton between its two clicks (VATUSA/OIS#824).
+  // cell, which would reset an armed ConfirmButton between its two clicks (#824).
   // `.mutate` is stable; `renameBoard` is not, so it goes through the handlers ref.
   const deleteBoard = del.mutate;
   const moveBoard = update.mutate;
@@ -298,6 +314,19 @@ export function BoardLibraryPage() {
 
   const ungrouped = boards.filter((b) => !b.collection_id);
   const collectionName = useMemo(() => new Map(collections.map((c) => [c.id, c.name])), [collections]);
+
+  // Its own memo on `actionsFor` alone, so a collections change rebuilds the other columns but keeps
+  // this `cell` function, and the armed Delete inside it.
+  const actionsColumn = useMemo<DataColumn<DashboardSummary>>(
+    () => ({
+      id: "actions",
+      header: "",
+      enableSorting: false,
+      align: "right",
+      cell: (c) => <BoardRowMenu board={c.row.original} {...actionsFor(c.row.original)} />,
+    }),
+    [actionsFor],
+  );
 
   const columns = useMemo<DataColumn<DashboardSummary>[]>(
     () => [
@@ -336,24 +365,17 @@ export function BoardLibraryPage() {
         icon: Share2,
         cell: (c) => (c.row.original.share_slug ? <SharedPill /> : <span className="text-ink-3">Private</span>),
       },
-      {
-        id: "actions",
-        header: "",
-        enableSorting: false,
-        align: "right",
-        cell: (c) => (
-          <div className="flex justify-end gap-1">
-            <BoardMenu board={c.row.original} collections={collections} {...actionsFor(c.row.original)} />
-          </div>
-        ),
-      },
+      actionsColumn,
     ],
-    [collections, collectionName, actionsFor],
+    [collectionName, actionsColumn],
   );
 
   return (
+    <LibraryCollections.Provider value={collections}>
     <div className="flex w-full flex-col gap-6">
-      <QueryState isLoading={isLoading} isError={isError} onRetry={() => refetch()} loading="Loading your boards…">
+      {/* A failed background refetch keeps the boards on screen: only an error with nothing loaded
+          replaces them, so an armed ConfirmButton is not unmounted mid-confirm (#824). */}
+      <QueryState isLoading={isLoading} isError={isError && !data} onRetry={() => refetch()} loading="Loading your boards…">
         {boards.length === 0 && collections.length === 0 ? (
           <EmptyState
             icon={LayoutDashboard}
@@ -434,5 +456,6 @@ export function BoardLibraryPage() {
         <FacilityCombobox autoFocus onSelect={onFacilityTemplate} />
       </Modal>
     </div>
+    </LibraryCollections.Provider>
   );
 }

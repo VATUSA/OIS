@@ -50,7 +50,15 @@ const KEYS = ["admin-api-keys", null];
 
 async function mount() {
   const qc = new QueryClient({
-    defaultOptions: {queries: {retry: false, refetchOnMount: false, staleTime: Infinity}},
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnMount: false,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+      },
+    },
   });
   qc.setQueryData(KEYS, [KEY]);
   const host = document.createElement("div");
@@ -80,7 +88,7 @@ const toasts = () => [...document.querySelectorAll('[role="status"]')].map((t) =
 /** The query cache notifies observers on a `setTimeout(0)`, which `act` alone does not wait for. */
 const settle = () => act(() => new Promise<void>((r) => setTimeout(r, 0)));
 
-describe("Deleting a key from the admin table confirms on the second click (VATUSA/OIS#824)", () => {
+describe("Deleting a key from the admin table confirms on the second click (#824)", () => {
   // Same failure as the advisories tab: the columns depended on the whole rate-limit mutation
   // result, so the warning toast's re-render rebuilt them and remounted the armed button.
   it("sends the DELETE after the warning toast has rendered", async () => {

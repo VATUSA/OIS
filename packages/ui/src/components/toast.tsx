@@ -98,7 +98,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   // Stable across renders: a new object here would re-render every `useToast` consumer on each push,
   // and a table whose columns depend on one would remount its cells, resetting an armed
-  // ConfirmButton between its two clicks (VATUSA/OIS#824).
+  // ConfirmButton between its two clicks (#824).
   const value = React.useMemo(() => ({ push }), [push]);
 
   return (

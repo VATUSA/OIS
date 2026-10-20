@@ -19,7 +19,7 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-describe("ToastProvider (VATUSA/OIS#824)", () => {
+describe("ToastProvider (#824)", () => {
   // Pushing a toast changes only the provider's own list. If the context value were a new object on
   // every render, every `useToast` consumer would re-render on each toast, and a page whose table
   // columns depend on anything derived from it would remount its cells, so an armed ConfirmButton
