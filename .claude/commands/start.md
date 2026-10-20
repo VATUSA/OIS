@@ -158,8 +158,8 @@ Nothing else in this project creates a branch.
    Redirect its output to a scratchpad file and read it afterwards. It provisions what a fresh
    worktree lacks (`.env`, `node_modules`, its own `target/` seeded from the primary checkout's,
    and `sccache`, which it prints) and ends by running `bin/verify-worktree.sh`. The git hooks are per clone
-   (`core.hooksPath=.githooks`); if verify reports them missing, run `just setup` once in the
-   primary checkout.
+   (`core.hooksPath=.githooks`); if verify reports them missing, or reports an absolute
+   `core.hooksPath`, run `just setup` once in the primary checkout.
 
 5. **Gate on the result.** Setup must exit 0 and its verify run must pass. Anything else means
    the worktree is not usable: read the output, fix the cause, re-run sub-step 4 (it is

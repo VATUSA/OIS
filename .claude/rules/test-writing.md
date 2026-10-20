@@ -226,6 +226,9 @@ already cost a false start:
   the cache, so `await act(...)` before reading races the rollback. Dispatch in a synchronous `act`
   and read the cache immediately, and run a new DOM test against the full package suite several
   times: it can pass alone and fail one run in two beside the rest.
+- **A Radix menu item skips `onSelect` when the click is already default-prevented** (#823). To stop
+  jsdom navigating on a link inside a menu item, call `preventDefault` from a `document` click
+  listener (`{ once: true }`), never from one on the item or the link.
 - jsdom has no layout engine: stub `Element.prototype.scrollIntoView = () => {}` where the component
   scrolls, and leave geometry to the running stack (`test-quality.md` → "jsdom vs the running stack
   — the decision rule").
