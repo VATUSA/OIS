@@ -243,7 +243,7 @@ fn apt_dat_from_blob(blob: &str) -> Result<String, String> {
     let mut zip =
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("not a zip: {e}"))?;
     let name = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
+        .filter_map(|i| zip.by_index(i).ok()?.name().ok().map(|n| n.into_owned()))
         .find(|n| n.to_ascii_lowercase().ends_with(".dat"))
         .ok_or_else(|| "pack contains no .dat".to_string())?;
     let mut text = String::new();
@@ -516,5 +516,54 @@ mod tests {
                 "{bad} is not an ICAO code letter"
             );
         }
+    }
+
+    /// A scenery pack zipped the way the Gateway serves it, base64'd: (entry name, contents).
+    fn pack(entries: &[(&str, &str)]) -> String {
+        use base64::Engine;
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, body) in entries {
+                writer.start_file(*name, opts).unwrap();
+                writer.write_all(body.as_bytes()).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        base64::engine::general_purpose::STANDARD.encode(buf)
+    }
+
+    #[test]
+    fn apt_dat_from_blob_returns_the_upper_case_dat_entry_after_a_non_dat_entry() {
+        let dat = "I\n1100 Version\n\n1 17 1 0 KXXX Test Field\n";
+        let blob = pack(&[("README.txt", "not the airport"), ("KXXX.DAT", dat)]);
+        assert_eq!(apt_dat_from_blob(&blob).unwrap(), dat);
+    }
+
+    #[test]
+    fn apt_dat_from_blob_errs_when_the_pack_holds_no_dat_entry() {
+        let blob = pack(&[("README.txt", "not the airport"), ("KXXX.dat.bak", "stale")]);
+        assert_eq!(
+            apt_dat_from_blob(&blob).unwrap_err(),
+            "pack contains no .dat"
+        );
+    }
+
+    #[test]
+    fn apt_dat_from_blob_errs_on_a_blob_that_is_not_base64() {
+        let err = apt_dat_from_blob("not*base64!").unwrap_err();
+        assert!(err.starts_with("blob is not base64"), "{err}");
+    }
+
+    #[test]
+    fn apt_dat_from_blob_errs_on_base64_that_is_not_a_zip() {
+        use base64::Engine;
+        let blob =
+            base64::engine::general_purpose::STANDARD.encode(b"plain text, no zip signature");
+        let err = apt_dat_from_blob(&blob).unwrap_err();
+        assert!(err.starts_with("not a zip"), "{err}");
     }
 }

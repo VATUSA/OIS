@@ -2,14 +2,29 @@
 version = 2
 yanked = "deny"
 # Ignored advisories, with the reason each one is here. Keep this list short and revisit it — an
-# entry only belongs here while we genuinely cannot act on it.
+# entry only belongs here while we genuinely cannot act on it. cargo-deny warns when an ignored
+# advisory no longer matches anything in Cargo.lock; delete the entry then.
 #
-# All six are `unmaintained` notices (no known vulnerability, no fix available) on crates we never
-# depend on directly: they arrive transitively through the Tauri desktop shell (desktop/src-tauri),
-# so dropping them is upstream's call, not ours.
+# Unmaintained notices (no known vulnerability, no fix available) on crates we never depend on
+# directly, all under the Tauri desktop shell (desktop/src-tauri). Re-check on each Tauri bump.
 #   - proc-macro-error   <- glib-macros, i.e. the Linux-only GTK stack under tauri
 #   - the unic-* family  <- urlpattern <- tauri-utils
-# Re-check on each Tauri bump and delete whatever no longer applies.
+#
+# zip extraction advisories (0367-0369), patched only in zip >= 9. The backend's own zip is on 9;
+# these entries cover the two older copies that dependents pin and have not yet released past:
+#   - zip 3.x <- utoipa-swagger-ui 9 (build-dependency). Its build.rs unpacks the Swagger UI
+#     archive itself and never calls `ZipArchive::extract` or `ZipStreamReader::extract`, the APIs
+#     the advisories name; it runs only at build time, on the archive it downloads from GitHub.
+#   - zip 4.x <- tauri-plugin-updater 2 (a Windows-only dependency). 0367 and 0369 are Unix
+#     permission behaviors. For 0368 the plugin calls `ZipArchive::extract` only after `download`
+#     has checked the bytes' minisign signature against the `pubkey` in tauri.conf.json, so only
+#     an archive we signed reaches it.
+#
+# zbus wire crates (0370-0372), unmaintained since their merge into zbus 6. They arrive through
+# zbus 5 <- notify-rust and secret-service (keyring), which compile them only on Linux and the BSDs.
+#
+# Revisit the zip and zbus entries by 2026-11-19, or at the next utoipa-swagger-ui,
+# tauri-plugin-updater, notify-rust or keyring release, whichever comes first.
 ignore = [
     "RUSTSEC-2024-0370",  # proc-macro-error
     "RUSTSEC-2025-0081",  # unic-char-property
@@ -17,6 +32,12 @@ ignore = [
     "RUSTSEC-2025-0080",  # unic-common
     "RUSTSEC-2025-0100",  # unic-ucd-ident
     "RUSTSEC-2025-0098",  # unic-ucd-version
+    { id = "RUSTSEC-2026-0367", reason = "zip 3/4 SUID bits on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. Revisit by 2026-11-19 or the next release of either" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 3/4 symlink targets on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater extracts only a minisign-verified bundle. Revisit by 2026-11-19 or the next release of either" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 3/4 permissions through symlinks on extract: utoipa-swagger-ui build.rs does not call extract; tauri-plugin-updater's zip is Windows-only. Revisit by 2026-11-19 or the next release of either" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
 ]
 
 [licenses]
