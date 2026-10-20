@@ -14,7 +14,8 @@ yanked = "deny"
 # these entries cover the two older copies that dependents pin and have not yet released past:
 #   - zip 3.x <- utoipa-swagger-ui 9 (build-dependency). Its build.rs unpacks the Swagger UI
 #     archive itself and never calls `ZipArchive::extract` or `ZipStreamReader::extract`, the APIs
-#     the advisories name; it runs only at build time, on the archive it downloads from GitHub.
+#     the advisories name. It does copy each entry's Unix mode itself, but only at build time, on
+#     the swagger-ui release archive it downloads from GitHub.
 #   - zip 4.x <- tauri-plugin-updater 2 (a Windows-only dependency). 0367 and 0369 are Unix
 #     permission behaviors. For 0368 the plugin calls `ZipArchive::extract` only after `download`
 #     has checked the bytes' minisign signature against the `pubkey` in tauri.conf.json, so only

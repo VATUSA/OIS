@@ -518,9 +518,8 @@ mod tests {
         }
     }
 
-    /// A scenery pack zipped the way the Gateway serves it, base64'd: (entry name, contents).
-    fn pack(entries: &[(&str, &str)]) -> String {
-        use base64::Engine;
+    /// A synthetic zip of (entry name, contents), deflated.
+    fn zip_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
         use std::io::Write;
         let mut buf = Vec::new();
         {
@@ -533,7 +532,27 @@ mod tests {
             }
             writer.finish().unwrap();
         }
-        base64::engine::general_purpose::STANDARD.encode(buf)
+        buf
+    }
+
+    /// The base64'd zip framing `apt_dat_from_blob` reads.
+    fn pack(entries: &[(&str, &str)]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(zip_bytes(entries))
+    }
+
+    /// Rewrites the compression method of every local and central header to one zip cannot
+    /// read (99), so `by_index` refuses each entry.
+    fn with_unreadable_entries(mut bytes: Vec<u8>) -> Vec<u8> {
+        for i in 0..bytes.len().saturating_sub(4) {
+            let method_at = match &bytes[i..i + 4] {
+                [0x50, 0x4b, 0x03, 0x04] => i + 8,
+                [0x50, 0x4b, 0x01, 0x02] => i + 10,
+                _ => continue,
+            };
+            bytes[method_at..method_at + 2].copy_from_slice(&99u16.to_le_bytes());
+        }
+        bytes
     }
 
     #[test]
@@ -546,6 +565,20 @@ mod tests {
     #[test]
     fn apt_dat_from_blob_errs_when_the_pack_holds_no_dat_entry() {
         let blob = pack(&[("README.txt", "not the airport"), ("KXXX.dat.bak", "stale")]);
+        assert_eq!(
+            apt_dat_from_blob(&blob).unwrap_err(),
+            "pack contains no .dat"
+        );
+    }
+
+    #[test]
+    fn apt_dat_from_blob_skips_a_dat_entry_zip_cannot_open() {
+        use base64::Engine;
+        let readable = zip_bytes(&[("KXXX.dat", "1 17 1 0 KXXX\n")]);
+        let control = base64::engine::general_purpose::STANDARD.encode(&readable);
+        assert_eq!(apt_dat_from_blob(&control).unwrap(), "1 17 1 0 KXXX\n");
+        let bytes = with_unreadable_entries(readable);
+        let blob = base64::engine::general_purpose::STANDARD.encode(bytes);
         assert_eq!(
             apt_dat_from_blob(&blob).unwrap_err(),
             "pack contains no .dat"
