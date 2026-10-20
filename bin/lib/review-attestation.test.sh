@@ -99,6 +99,10 @@ expect 1 "an intent row carried with no evidence"
 write_complete; printf '| Scope | 1 | Checked | Carried-from 0123abc: AC 2 |\n' > "$ATT/intent.md"
 expect 0 "an intent row carried with its evidence"
 
+printf 'code\trules/a.md\r\ntests\trules/b.md\r\nintent\t-\r\nac\t@ac\r\n' > "$WORK/lenses.tsv"
+write_complete; expect 0 "a CRLF lens map (a Windows checkout under core.autocrlf) reads as LF"
+rm "$ATT/tests.md"; expect 1 "...and a CRLF map still reports a missing attestation"
+
 printf '# a comment line\n\ncode\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
 write_complete; expect 0 "comment and blank lines in the lens map are skipped"
 printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
