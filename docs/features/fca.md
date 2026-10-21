@@ -14,9 +14,8 @@ Paths below are relative to `backend/src/` unless they start with `web/` or `bac
 
 ```
 VATSIM snapshot (handlers/flow.rs::feed_view :61)
-  ├─ pilots   ─▶ fca::route_path(live lat/lon/hdg/gs) ─┐
-  └─ prefiles ─▶ prefile_position(dep airport) ─▶ route_path(gs 0)
-                                                      ▼
+  └─ pilots with a flight plan ─▶ fca::route_path(live lat/lon/hdg/gs)
+     (prefiles are not candidates, #834)              ▼
         fca_crossing_for (flow.rs:202): excluded? ─▶ filters ─▶ fca::crosses ─▶ scope
                                                       ▼  crossing + along_nm
         predict::eta_along_route ─▶ eta, crossing groundspeed      (ETA model: #814)
@@ -77,8 +76,8 @@ surface uses (#360). In order:
 4. **ARTCC scope** on the crossing point, `passes_scope` (`handlers/flow.rs:109`). An empty scope,
    or boundary data that failed to load, means no restriction (`:110`).
 
-Callers: `fca_counts` (`handlers/flow.rs:712`), `build_flight_advisory` (`:1085`), and both loops
-of `build_candidates` (`:1871`, `:1990`).
+Callers: `fca_counts` (`handlers/flow.rs:712`), `build_flight_advisory` (`:1085`), and
+`build_candidates`, whose prefile loop (`:1990`) #834 removed, leaving the pilot loop (`:1871`).
 
 `FcaBody.dir` (any/N/S/E/W) is stored (`repos/flow.rs:154`) and read nowhere in the backend.
 
@@ -107,7 +106,7 @@ short-circuit. `dir`.
 - **The altitude band and the ETA parse the filed altitude differently.** `filed_altitude_ft` reads
   `"VFR"` as unknown, so the flight passes the band. `trajectory::parse_alt_ft`
   (`feed/trajectory.rs:19-29`) reads the same string as 35,000 ft, and `build_candidates` times the
-  flight at that cruise altitude (`handlers/flow.rs:1884`, `:1996`). Both parsers concatenate every
+  flight at that cruise altitude (`handlers/flow.rs:1884`; `:1996` was the prefile loop #834 removed). Both parsers concatenate every
   digit, so `"FL350/370"` reads as 350,370 ft, which is out of every band. Added to #813.
 - **A ground aircraft's field elevation counts as its current altitude in the band.** Live pilots
   pass `Some(p.altitude)` whatever their phase (`handlers/flow.rs:1877`), and only `0` is dropped
@@ -146,10 +145,9 @@ short-circuit. `dir`.
 8. `frozen_ms` is the release's CTA when `flow.fca_release` holds a row for this callsign
    (`:1928-1933`).
 
-**Prefiles** (`handlers/flow.rs:1969`) take the departure airport as their position
-(`prefile_position`, `:73`, skipped when it does not resolve, #213). They are checked against the
-band on filed altitude only (`None` for current), always get the allowance, are never airborne,
-and carry status `proposed`.
+**Prefiles** are not candidates (#834). Until #834 a second loop added every prefile as a
+`proposed` row, so a prefile that lingered after its pilot connected listed the aircraft twice, and
+an unconnected prefile took a slot that connected departures metered behind.
 
 **Release map.** `load_releases` (`handlers/flow.rs:2191`) reads every row for the FCA by callsign
 (`repos/flow.rs:525-535`). There is no time filter.
@@ -167,8 +165,9 @@ and carry status `proposed`.
 | `mark_release` | `handlers/flow.rs:2577` | empty |
 | `clear_release` | `handlers/flow.rs:2693` | empty |
 
-**Tests.** `mod prefile_skip_integration_tests` (`handlers/flow.rs:3359`) and
-`mod mit_cross_speed_wiring_tests` (`:4072`), which covers both loops. `mod fca_inclusion_tests`
+**Tests.** `mod prefile_skip_integration_tests` and `mod mit_cross_speed_wiring_tests` in
+`handlers/flow.rs`, the latter covering an airborne and a ground pilot, and
+`handlers/flow_prefile_candidate_tests.rs` through the router (#834). `mod fca_inclusion_tests`
 (`:4496`) pins the board to the shared decision.
 
 **Untested branches.** The pinned time a release gives: router tests send a non-empty release map
@@ -182,15 +181,16 @@ plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
   shows the split. The doc comment on `assigned` (`handlers/flow.rs:1842-1845`) calls it "the same
   map `list_idst` reads", but only `list_idst` passes it. A departure with an assigned runway gets
   one ETA on IDST and another on the FCA page and from RDY. **Owned by #813** (its input 5).
-- **The same callsign as a pilot and a prefile gives two candidates.** **Owned by #834** (path 1).
+- **The same callsign as a pilot and a prefile gave two candidates.** Fixed by #834, which stops
+  treating any prefile as a candidate. A departure crossing two FCAs still has a row in each (#862).
 - **A disabled FCA still meters and still takes releases.** `fca_counts`, `build_flight_advisory`
   and `list_idst` skip a disabled FCA (`handlers/flow.rs:683`, `:1080`, `:2390`). `metered_flights`
   checks only the point count (`:2212`), and `mark_release` checks no flag at all. A disabled FCA
   therefore shows a full board next to a badge of 0 and accepts RDY and SET. Its releases do not
   count in `locked_wheels_up` (`repos/flow.rs:556`). Filed as #846.
 - **The flight advisory ignores prefiles.** `build_flight_advisory` looks only at the
-  snapshot's pilots (`handlers/flow.rs:951-955`) and answers `found: false` otherwise, while the
-  board meters prefiles and can hold a release for one.
+  snapshot's pilots (`handlers/flow.rs:951-955`) and answers `found: false` otherwise. Since #834
+  the board does not meter prefiles either.
 - *Checked, not filed.* `gs >= 50` counts a takeoff roll as airborne. The threshold is one of the
   disagreeing inputs **#813** already lists (its input 3).
 
@@ -349,9 +349,9 @@ release authority, scope and provenance; `mod release_swap_tests` (`handlers/flo
 | Read | Line | Gate | What it computes |
 | --- | --- | --- | --- |
 | `GET /api/v1/flow/fcas` | `handlers/flow.rs:348` | public (#586) | `list_fcas`: not deleted, not an unpublished event FCA (`repos/flow.rs:24`) |
-| `GET /api/v1/flow/counts` | `handlers/flow.rs:662` | public | per enabled FCA, pilots and prefiles through `fca_crossing_for`. No ETA, no metering |
+| `GET /api/v1/flow/counts` | `handlers/flow.rs:662` | public | per enabled FCA, connected pilots through `fca_crossing_for` (no prefiles since #834). No ETA, no metering |
 | `GET /api/v1/flow/fcas/{id}/traffic` | `handlers/flow.rs:2276` | public for listed FCAs; unpublished event FCA needs `events.plan.read`; a deleted one needs a sign-in | `metered_flights`: full board, with releases and their versions |
-| `GET /api/v1/flow/idst` | `handlers/flow.rs:2345` | `flow.fca.read` | every enabled FCA metered with the runway map, then ground and proposed rows at airports in scope (`:2442-2445`), with an advisory EDCT for unreleased rows (`:2450-2457`) |
+| `GET /api/v1/flow/idst` | `handlers/flow.rs:2345` | `flow.fca.read` | every enabled FCA metered with the runway map, then ground rows at airports in scope (`:2442-2445`), with an advisory EDCT for unreleased rows (`:2450-2457`) |
 | `GET /api/v1/stats/hist/fcas` | `handlers/stats.rs:871` | `stats.data.read` | `list_fcas_at` (`repos/flow.rs:35`): FCA definitions only, no crossings |
 
 All of them share one inclusion rule. They do not share one ETA: see the runway map in area 2.
@@ -363,21 +363,23 @@ planner, because both read `list_fcas`. This matches #586 and #746 as built.
 
 **Tests.** `mod fca_traffic_visibility_tests` (`handlers/flow.rs:5939`). IDST has router tests
 for provenance (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`) and for its advisory
-EDCT: `idst_proposes_the_same_edct_a_release_stores` (`:3971`), its connected-pilot twin (`:3977`)
-and `idst_gives_a_pilot_and_a_prefile_sharing_a_callsign_their_own_allowance` (`:3987`). No test
-covers the `fca_counts` handler or `hist_fcas`.
+EDCT: `idst_proposes_the_same_edct_a_release_stores` and
+`idst_gives_a_rolling_pilot_its_own_runway_tier_allowance`. The `fca_counts`
+handler is covered through the router by `handlers/flow_prefile_candidate_tests.rs` (#834). No test
+covers `hist_fcas`.
 
 ### Findings, area 5
 
-- **The badge and the board disagree.** The count includes prefiles. The detail panel hides
-  `proposed` rows (`web/src/pages/fca/detail.tsx:221`). Counts skip a disabled FCA while traffic
-  serves it (area 2). The comment at `handlers/flow.rs:710-711` ("a badge count can never disagree
-  with the board") holds for the backend list, not for what the page shows. Filed as #853.
+- **The badge and the board disagree.** The count included prefiles, and the detail panel hid
+  `proposed` rows (`web/src/pages/fca/detail.tsx:221`); #834 removed prefiles from both the count and
+  the board. Counts still skip a disabled FCA while traffic serves it (area 2), so the comment at
+  `handlers/flow.rs:710-711` ("a badge count can never disagree with the board") holds for an enabled
+  FCA only. Filed as #853; the disabled-FCA gap is #846.
 - **Historical FCAs are filtered by their state now.** `list_fcas_at` applies the current
   `event_status` and the current `enabled` flag (`repos/flow.rs:33-38`). An event FCA that was
   live during the replayed window and is archived now is missing from the replay. One published
   now appears before it was published. Filed as #852, with the web half below.
-- IDST rows for one aircraft under two FCAs: **owned by #834** (path 2).
+- IDST rows for one aircraft under two FCAs: **owned by #862** (path 2 of #834).
 
 ## 6. Web
 
@@ -428,7 +430,8 @@ defect below and has to change with its fix.
   `HistoricalProvider`, `useFcas` reads the instant (`web/src/lib/fca.ts:158`) and switches to
   `/stats/hist/fcas` (`:169-175`). `useFcaCounts` and `useFcaTraffic` ignore it. The dashboard FCA
   widget joins the two (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
-- Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2).
+- Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2). Since
+  #834 a prefile is never a candidate, so it is never in the order.
 
 ## Determination for #812 (recommendation, for the operator to confirm)
 

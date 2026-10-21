@@ -4,7 +4,17 @@
 # nightly-only and compile-speed only — it changes nothing about the built artifacts.
 #
 # NOTE: a `[target.*] rustflags` block fully OVERRIDES `[build] rustflags` (they do not merge), so the
-# Linux block below repeats `-Zthreads` alongside its linker flag.
+# Linux and Windows blocks below repeat `-Zthreads`. Falling back to stable
+# means removing `-Zthreads` from all three blocks.
+#
+# To lower rustc's parallelism (a memory-capped machine), set the target block's rustflags env var
+# and build fewer crates at once. Cargo appends the env value after this file's list and rustc takes
+# the last `-Zthreads`, so the mold flag stays. This trims parallel work; the single largest rustc,
+# compiling ois-backend, peaks at nearly the same memory either way.
+#   CARGO_BUILD_JOBS=4 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Zthreads=1"
+#   CARGO_BUILD_JOBS=4 CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-Zthreads=1"
+# Plain `RUSTFLAGS` replaces every list here, so on Linux it drops the mold flag;
+# `CARGO_BUILD_RUSTFLAGS` has no effect on Linux or Windows, because a target block wins over `[build]`.
 
 [build]
 rustflags = ["-Zthreads=8"]
@@ -15,3 +25,10 @@ rustflags = ["-Zthreads=8"]
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-Zthreads=8", "-Clink-arg=-fuse-ld=mold"]
+
+# Windows: link with rust-lld, which ships with the rustup toolchain, instead of MSVC's `link.exe`.
+# This applies to every profile, so it also links the release installer that
+# .github/workflows/release.yml builds.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-Zthreads=8"]

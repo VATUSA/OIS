@@ -351,9 +351,10 @@ export function AircraftProfilesPage() {
         />
       )}
 
+      {/* A failed background refetch keeps the loaded rows, and any armed ConfirmButton, on screen (#824). */}
       <QueryState
         isLoading={profiles.isLoading}
-        isError={profiles.isError}
+        isError={profiles.isError && !profiles.data}
         onRetry={() => profiles.refetch()}
         className="rounded-md border border-line"
       >
