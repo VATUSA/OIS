@@ -36,7 +36,7 @@ const shortDate = (iso: string) => new Date(iso).toLocaleDateString();
 export function AdminApiKeys() {
   const { data: me } = useMe();
   const canRevoke = hasPermission(me, "api_keys.key.delete");
-  const setLimit = useAdminSetKeyRateLimit();
+  const setLimit = useAdminSetKeyRateLimit().mutate;
   const [cidInput, setCidInput] = useState("");
   const [ownerCid, setOwnerCid] = useState<number | undefined>(undefined);
   const [activityFor, setActivityFor] = useState<ApiKey | null>(null);
@@ -125,7 +125,7 @@ export function AdminApiKeys() {
             label={c.row.original.name}
             value={c.row.original.rate_limit_per_min}
             editable={canRevoke}
-            onSave={(perMin) => setLimit.mutate({id: c.row.original.id, perMin})}
+            onSave={(perMin) => setLimit({id: c.row.original.id, perMin})}
           />
         ),
       },

@@ -40,8 +40,8 @@ FCA metering sized MIT gaps with cruise groundspeed, but a metering fix such as 
 descent at ~280 kt, so a 20 MIT flow landed departures ~12 nm apart (#355). `eta_along_route` already
 built the profile and discarded the speed. Proof: commits a3dec589, 80d643e2;
 `eta_along_route_reports_the_descent_speed_at_a_low_crossing_fix` (`feed/predict.rs`) and
-`mit_cross_speed_wiring_tests` (`handlers/flow.rs`), which mutates the live-pilot and prefile sites
-independently after a fixture with no prefile let a revert of that site pass the suite.
+`mit_cross_speed_wiring_tests` (`handlers/flow.rs`), which covers an airborne and a ground pilot
+after a fixture with no prefile let a revert of the prefile site (removed in #834) pass the suite.
 
 ## Space a release against where the others will actually cross
 

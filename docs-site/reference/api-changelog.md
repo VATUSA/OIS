@@ -20,6 +20,20 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   RAP, which has no stations. A caller reading `winds_stations` must read `winds_source` instead.
   `FcaFlightDebug.headwind` is the mean headwind over the remaining route, each point read at the
   profile's altitude there. (#836)
+- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and
+  `GET /api/v1/flow/counts`** list and count connected pilots with a flight plan only. A prefile is no
+  longer an FCA candidate, so `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always
+  `ground`; neither carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404`
+  for a callsign that is only prefiled. A release already stored for a prefiled callsign is kept but
+  appears on no FCA surface (IDST `released`, the traffic list, metering) until that pilot connects;
+  `GET /api/v1/tmu/departures/{dep}` and sector demand still read it as the flight's locked wheels-up
+  (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
+  count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
+  prefiled flights must wait for the pilot to connect. (#834)
+- **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
+  `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
+  `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory
+  outside the caller's facility scope; the OpenAPI document now lists both. Nothing changes for a caller.
 - **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
   `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
   flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min

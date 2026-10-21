@@ -241,7 +241,7 @@ releases for FCA crossings (a native port of vatflow's idst view).
   to the union of member airport ICAOs. Empty scope → empty board.
 - **Response** — `IdstResponse { unscheduled, released, metered_count, as_of }`. Each
   `IdstFlight` is one `(metering FCA, ground departure in scope)` row: `callsign`, `dep`,
-  `arr`, `aircraft_type`, `status` (`ground`/`proposed`), `fca_id`/`fca_name`, `seq`,
+  `arr`, `aircraft_type`, `status` (always `ground`; prefiles are not listed, #834), `fca_id`/`fca_name`, `seq`,
   `delay_min`, `cross_time` (metered CTA), `edct`, `released`, and `released_by_machine` — the
   tool's name when a service account or API key issued the release, null when a person did
   (#585). The console shows it as "RLSD 1412z · via vTBFM".

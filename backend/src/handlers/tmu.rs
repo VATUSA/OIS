@@ -1263,6 +1263,125 @@ mod tests {
         assert!(status_of(&pool, &id).await.is_none());
     }
 
+    /// The web toasts "no longer exists" on a 404 from publish, cancel and delete, and the OpenAPI
+    /// annotations list it (#824).
+    #[sqlx::test]
+    async fn an_unknown_advisory_id_answers_404_on_publish_cancel_and_delete(pool: PgPool) {
+        let neighbor = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let unknown = uuid::Uuid::new_v4();
+
+        for (method, uri) in [
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{unknown}/publish"),
+            ),
+            (
+                http::Method::POST,
+                format!("/api/v1/tmu/advisories/{unknown}/cancel"),
+            ),
+            (
+                http::Method::DELETE,
+                format!("/api/v1/tmu/advisories/{unknown}"),
+            ),
+        ] {
+            assert_eq!(
+                send(&state, method.clone(), &uri, &cookie, None).await,
+                http::StatusCode::NOT_FOUND,
+                "{method} {uri}"
+            );
+        }
+        assert_eq!(status_of(&pool, &neighbor).await.as_deref(), Some("draft"));
+
+        // Positive control: the same principal reaches a real advisory.
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &format!("/api/v1/tmu/advisories/{neighbor}/publish"),
+                &cookie,
+                None,
+            )
+            .await,
+            http::StatusCode::OK
+        );
+    }
+
+    /// The web toasts each 409 by what refused it: publish and discard need a draft, and cancel
+    /// refuses an advisory already cancelled (#824).
+    #[sqlx::test]
+    async fn an_advisory_in_the_wrong_status_answers_409(pool: PgPool) {
+        let draft = seed_draft_for(&pool, "ZDC").await;
+        let published = seed_draft_for(&pool, "ZDC").await;
+        let cancelled = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        grant(&pool, &user, "tmu.adv.publish", None).await;
+        grant(&pool, &user, "tmu.adv.update", None).await;
+        let publish = |id: &str| format!("/api/v1/tmu/advisories/{id}/publish");
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &publish(&published),
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        let cancel = |id: &str| format!("/api/v1/tmu/advisories/{id}/cancel");
+        assert_eq!(
+            send(
+                &state,
+                http::Method::POST,
+                &cancel(&cancelled),
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::OK
+        );
+
+        let cases = [
+            (http::Method::POST, publish(&published)),
+            (http::Method::POST, publish(&cancelled)),
+            (http::Method::POST, cancel(&cancelled)),
+            (
+                http::Method::DELETE,
+                format!("/api/v1/tmu/advisories/{published}"),
+            ),
+        ];
+        for (method, uri) in cases {
+            assert_eq!(
+                send(&state, method.clone(), &uri, &cookie, None).await,
+                http::StatusCode::CONFLICT,
+                "{method} {uri}"
+            );
+        }
+        assert_eq!(
+            status_of(&pool, &published).await.as_deref(),
+            Some("published")
+        );
+        assert_eq!(
+            status_of(&pool, &cancelled).await.as_deref(),
+            Some("cancelled")
+        );
+        // Positive control: a draft in the same state of the world is still deletable.
+        assert_eq!(
+            send(
+                &state,
+                http::Method::DELETE,
+                &format!("/api/v1/tmu/advisories/{draft}"),
+                &cookie,
+                None
+            )
+            .await,
+            http::StatusCode::NO_CONTENT
+        );
+    }
+
     /// #457 AC1. `tmu.adv.*` were seeded in 0008_tmu.sql and dead ever since, because nothing could
     /// gate on them. These go through the real router so `RequirePermission` is on the tested path —
     /// it holds a private field, so a handler cannot be called directly to check its gate.
@@ -2177,7 +2296,7 @@ pub async fn update_advisory(
     post, path = "/api/v1/tmu/advisories/{id}/publish", tag = "tmu",
     security(("session" = ["tmu.adv.publish"]), ("api_key" = ["tmu.adv.publish"]), ("service_account" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
-    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn publish_advisory(
     State(state): State<AppState>,
@@ -2223,7 +2342,7 @@ pub async fn publish_advisory(
     post, path = "/api/v1/tmu/advisories/{id}/cancel", tag = "tmu",
     security(("session" = ["tmu.adv.publish"]), ("api_key" = ["tmu.adv.publish"]), ("service_account" = ["tmu.adv.publish"])),
     params(("id" = String, Path)),
-    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 409))
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn cancel_advisory(
     State(state): State<AppState>,
@@ -2268,7 +2387,7 @@ pub async fn cancel_advisory(
     delete, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
     security(("session" = ["tmu.adv.update"]), ("api_key" = ["tmu.adv.update"]), ("service_account" = ["tmu.adv.update"])),
     params(("id" = String, Path)),
-    responses((status = 204), (status = 401), (status = 409))
+    responses((status = 204), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn delete_advisory(
     State(state): State<AppState>,
