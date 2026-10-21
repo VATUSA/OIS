@@ -38,6 +38,40 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-21-sidebar-flyouts",
+    date: "2026-10-21",
+    title: "Sidebar group menus, and one row per flight on IDST",
+    sections: [
+      {
+        heading: "Navigation",
+        highlights: [
+          "The collapsed sidebar now shows one icon per group (Advisories, Operations, Planning, Historical, Admin and User) instead of an icon for every page. Click a group's icon, or press Enter or Space, to open a menu of its pages. The group you are in is highlighted.",
+        ],
+      },
+      {
+        heading: "Flow and FCAs",
+        highlights: [
+          "An FCA now counts only connected pilots with a flight plan. A prefile left in the feed after its pilot connected no longer puts the flight on IDST twice or adds it to the count badge again.",
+          "A prefile with no connected pilot no longer takes a metering slot, so it cannot push a real departure's release later.",
+        ],
+      },
+      {
+        heading: "Advisories",
+        highlights: [
+          "Discard, Publish and Cancel on the TMU advisories tab work on the second click again. Before, the second click only re-armed the button, so a draft could not be deleted.",
+          "When one of those actions fails, the message now says why: outside your facility, no longer exists, or the advisory is in the wrong state.",
+        ],
+      },
+      {
+        heading: "Security",
+        highlights: [
+          "Updates the certificate-checking libraries behind every outbound connection, so a certificate issued through a distrusted authority is refused.",
+          "Moves the server to a version of its zip library with the published security fixes.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-16-wheels-up-releases",
     date: "2026-10-16",
     title: "Sector data loads itself, and release times are wheels-up",
