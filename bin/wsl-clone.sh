@@ -137,7 +137,8 @@ native_tool() {
 }
 
 # from_windows: the clone's HEAD is a commit windows/$BRANCH has pointed at (that ref's
-# reflog), so every commit in the clone came from the Windows checkout and none was made here.
+# reflog), so the checked-out branch's commits came from the Windows checkout. Other local
+# branches and stashes in the clone are not checked.
 from_windows() {
     local head
     head="$(git -C "$DIR" rev-parse HEAD 2>/dev/null)" || return 1
@@ -405,8 +406,8 @@ drop_db() {
     ok "database ${DB} dropped"
 }
 
-# The clone may go when it holds nothing of its own: its HEAD is on origin (its pushed branch,
-# or origin/next), or came from the Windows checkout and it made no commits (from_windows).
+# The clone may go when its checked-out branch holds nothing of its own: its HEAD is on origin
+# (its pushed branch, or origin/next), or came from the Windows checkout (from_windows).
 check_saved() {
     local status
     status="$(git -C "$DIR" status --porcelain)" || blocked "git status failed in ${DIR}, so its changes are unknown."
