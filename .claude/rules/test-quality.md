@@ -131,6 +131,9 @@ is reused wherever it is needed.
   for a green run on a clean, committed HEAD that did not move during the run. With arguments,
   `bin/run-tests.sh` passes them through to a targeted run and never stamps. Writing a marker
   yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)").
+  **Run it as the whole command line** (`cd <worktree> && just test`, backgrounded, then read the
+  task output): `marker-audit.sh` keeps a marker only from a bare stamper call, so a redirect, pipe,
+  `echo` or `tail` on the line deletes a green run's marker (#891).
 - **A gate counts once per SHA, wherever it ran.** For the exact SHA under review, either of these
   is the full gate: a tests marker in this checkout, or green CI check-runs on that SHA, every
   check-run concluded `success` (the check-runs are the job list, never a copied one):

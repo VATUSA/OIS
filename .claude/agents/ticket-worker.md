@@ -28,7 +28,7 @@ Under the ticket loop you may run `/start` (its worktree and branch), `/review-b
 
 A slash command named here means its file: when you cannot run `/ship` as a command, follow `.claude/commands/ship.md` step by step (likewise `start.md`, `code-review.md`, `review-before-shipping.md`, `cleanup.md`). Never improvise the procedure from memory.
 
-Use absolute paths. The session cwd is shared with the orchestrator and pins to whoever entered a worktree last. `EnterWorktree` refuses a subagent, so follow the subagent fallback in `/start` Step 2.3: run every git, gh and stamper command as `cd <absolute worktree path> && <command>`, and never wrap a push or a stamp in a script to get past a gate.
+Use absolute paths. The session cwd is shared with the orchestrator and pins to whoever entered a worktree last. `EnterWorktree` refuses a subagent, so follow the subagent fallback in `/start` Step 2.3: run every git, gh and stamper command as `cd <absolute worktree path> && <command>`, with nothing else on the line (`test-quality.md` → "A gate counts once per SHA"), and never wrap a push or a stamp in a script to get past a gate.
 
 ## Phase A: Intake (first dispatch)
 
@@ -41,7 +41,7 @@ You receive an issue number the operator already picked. That pick is the yes/no
 5. If it has a PR, read its description and every comment before planning (`gh pr view <n> --repo VATUSA/OIS --json body,comments,reviews`, then `gh api --paginate repos/VATUSA/OIS/pulls/<n>/comments` for inline threads), and again after a summary. Your evidence comment's records and its `Operator decisions and rejected findings` are context the issue thread lacks.
 6. If it claims to fix technical debt but doesn't improve operability, present findings and why, and let the operator decide whether to abandon.
 7. Capture the acceptance criteria. AI-generated issues cause bloat and requirements poisoning, so the operator confirms which ACs to fulfil. Present each with its cost (diff size and risk); recommend the issue's own ACs and mark additions you inferred as optional. Name any AC an earlier version of the body or thread had that the current one dropped. Check each AC's absolutes (`never`, `every`, `only`, a quoted label) against `origin/next` before presenting it; word an AC as behavior, not exact copy, and write any AC about output from what the code actually produces.
-8. Invoke `/start`. Recover an existing branch or worktree rather than repeating work. Re-read any `.claude/rules/` or skills the worktree's copy changed.
+8. Invoke `/start`. Recover an existing branch or worktree rather than repeating work. Re-read any `.claude/rules/` or skills the worktree's copy changed. On a Windows host, put the ship route in the `plan-ready` questions (`ticket-lifecycle.md` → "Worktrees"), not after the build.
 9. Draft the plan: the confirmed ACs, the issue link, what changes and why, the researchers' `file:line` evidence, how each AC is tested. Stay strictly inside the ticket's scope (description, relevant comments, PR feedback, the reviewer's return comment).
 
 Return `STATUS: plan-ready` with the ACs and the plan. **Write no production code before the orchestrator relays plan approval.**
