@@ -1,0 +1,33 @@
+
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss
+    NatIpAddress    REG_SZ    172.19.5.118
+    DefaultDistribution    REG_SZ    {bf97ba49-2f87-4e72-b74d-0094544fc778}
+    OOBEComplete    REG_DWORD    0x1
+
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss\{9fcaece4-1d55-48ac-b7a9-08366c9a7688}
+    State    REG_DWORD    0x1
+    DistributionName    REG_SZ    docker-desktop
+    Version    REG_DWORD    0x2
+    BasePath    REG_SZ    \\?\C:\Users\Matthew\AppData\Local\Docker\wsl\main
+    Flags    REG_DWORD    0xf
+    DefaultUid    REG_DWORD    0x0
+    RunOOBE    REG_DWORD    0x0
+    VhdFileName    REG_SZ    ext4.vhdx
+    Modern    REG_DWORD    0x1
+    DockerDesktopBuildNumber    REG_SZ    242831
+
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss\{bf97ba49-2f87-4e72-b74d-0094544fc778}
+    State    REG_DWORD    0x1
+    DistributionName    REG_SZ    Ubuntu
+    Version    REG_DWORD    0x2
+    BasePath    REG_SZ    C:\Users\Matthew\AppData\Local\wsl\{bf97ba49-2f87-4e72-b74d-0094544fc778}
+    Flags    REG_DWORD    0xf
+    DefaultUid    REG_DWORD    0x3e8
+    RunOOBE    REG_DWORD    0x0
+    VhdFileName    REG_SZ    ext4.vhdx
+    Flavor    REG_SZ    ubuntu
+    OsVersion    REG_SZ    26.04
+    Modern    REG_DWORD    0x1
+    ShortcutPath    REG_SZ    C:\Users\Matthew\AppData\Roaming\Microsoft\Windows\Start Menu\Ubuntu.lnk
+    TerminalProfilePath    REG_SZ    C:\Users\Matthew\AppData\Local\Microsoft\Windows Terminal\Fragments\Microsoft.WSL\{4fd11b96-887f-5b7d-ab9f-baff50affbf6}.json
+
