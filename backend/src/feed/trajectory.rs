@@ -1347,6 +1347,33 @@ mod tests {
         }
     }
 
+    /// On a hop too short to cruise, `triangle_peak` searches for the altitude where the climb and
+    /// the descent meet, and the profile then flies both legs to it. The search times the descent
+    /// on the schedule the profile flies, capped at the cruise speed (#836), so the two legs meet at
+    /// one point. Searching on the uncapped schedule finds a lower peak whose capped descent ends
+    /// short of the climb, and the profile levels off between them.
+    #[test]
+    fn a_short_hop_climbs_and_descends_to_one_peak() {
+        let vp = VerticalProfile::build(
+            0.0,
+            60.0,
+            0.0,
+            35_000.0,
+            260.0,
+            &AircraftProfile::default(),
+            RouteWind::still(),
+        );
+        let step = 0.01;
+        let alts: Vec<f64> = (0..=6_000).map(|i| vp.alt_at(i as f64 * step)).collect();
+        let peak = alts.iter().copied().fold(f64::MIN, f64::max);
+        assert!(peak < 30_000.0, "a triangle hop, peak {peak:.0} ft");
+        let level_nm = alts.iter().filter(|&&a| a > peak - 1.0).count() as f64 * step;
+        assert!(
+            level_nm < 0.5,
+            "the profile holds its {peak:.0} ft peak for {level_nm:.2} nm"
+        );
+    }
+
     /// The profile must never predict an aircraft flying faster than it cruises, at any point.
     /// This is the invariant the old `ground_speed_at` cap enforced as a workaround; now it holds
     /// in the samples themselves, so it is true for `time_between` (and therefore every ETA) too.
