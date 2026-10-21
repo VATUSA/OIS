@@ -329,11 +329,13 @@ points above, nothing more:
   through a login shell, where fnm puts Linux `node` and `pnpm` on `PATH`:
   ```bash
   wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh create <branch>'
-  #   ... gate <branch>   fast-forward from the Windows branch, preflight, then just test (stamps)
+  #   ... gate <branch>   catch up with the Windows branch, preflight, then just test (stamps)
   #   ... push <branch>   only with the clone's tests marker for HEAD
   #   ... pr <branch> [gh pr create args]   also needs the Windows worktree's review marker
   ```
-  Commit in the Windows worktree, never in the clone. These subcommands are the one exception to
+  Commit in the Windows worktree, never in the clone. `create` and `gate` catch up by
+  fast-forward, or, when the branch was amended, squashed or rebased, by resetting a clean clone to
+  the new tip; a commit made in the clone is refused. These subcommands are the one exception to
   "never wrap a push or a stamp": `gate` runs the real `just test`, and `push` and `pr` check the
   markers the gates would; none of them works on `main` or `next`. A worktree's `/mnt/c` copy runs
   only with `OIS_WSL_SOURCE=/mnt/c/<primary>`: Linux git cannot open a Windows-created worktree (its

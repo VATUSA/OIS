@@ -78,7 +78,7 @@ Both paths drop the worktree's throwaway database (and read it back), remove the
 wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh remove <branch>'
 ```
 
-It refuses a dirty clone or one whose HEAD origin does not hold, as teardown does, then drops the clone's `ois_wsl_` database (read back), deletes `~/ois-wsl/<name>` and runs `fstrim` as root. With no clone it still drops the database. Exit 1 after "removed" means fstrim did not run: run the command it prints from Windows.
+It refuses a dirty clone, and a clone holding a commit made in it that origin does not hold, as teardown does. An unpushed clone whose HEAD came from `windows/<branch>` holds nothing of its own, so it is taken. It then drops the clone's `ois_wsl_` database (read back), deletes `~/ois-wsl/<name>` and any leftover `~/ois-wsl/.<name>.partial`, and runs `fstrim` as root. With no clone it still drops the database. Exit 1 after "removed" means fstrim did not run: run the command it prints from Windows.
 
 ## Step 5: Verify and report
 
