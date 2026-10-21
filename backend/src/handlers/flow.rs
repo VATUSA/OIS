@@ -4354,13 +4354,15 @@ mod mit_cross_speed_wiring_tests {
 
     use chrono::Utc;
 
-    use super::{ExclusionSet, ReleaseMap, build_candidates};
+    use super::{ExclusionSet, ReleaseMap, build_candidates, fca_crossing_for};
     use crate::feed::airports::{Airport, AirportDb};
     use crate::feed::{
         airspace::Boundaries,
+        fca,
         nav::NavData,
+        predict,
         runway_db::RunwayDb,
-        trajectory::ProfileTable,
+        trajectory::{self, ProfileTable, RouteWind},
         vatsim::{FlightPlan, Pilot, VatsimData},
         winds::Winds,
     };
@@ -4716,10 +4718,10 @@ mod mit_cross_speed_wiring_tests {
         }
     }
 
-    // ---- #836: FCA metering reads the per-segment wind at both candidate sites (AC5) ----------
+    // ---- #836: FCA metering reads the per-segment wind for both flight states (AC5) ----------
     //
-    // The live-pilot loop and the prefile loop each lay `winds.along(&path, route_len)` on their
-    // own profile. Fixture: arrival_at_cruise() (AAL1 airborne at FL350, AAL2 prefile, both direct
+    // The candidate loop lays `winds.along(&path, route_len)` on each pilot's own profile.
+    // Fixture: arrival_at_cruise() (AAL1 airborne at FL350, AAL2 parked at KJFK, both direct
     // KJFK→KDCA).
 
     /// 80 kt from 225° (on the nose of the SW-bound route) at and above 30,000 ft, calm at and
@@ -4740,7 +4742,7 @@ mod mit_cross_speed_wiring_tests {
         )
     }
 
-    /// `(callsign → (eta, cross_speed, debug headwind))` for both candidate loops.
+    /// `(callsign → (eta, cross_speed, debug headwind))` for both candidates.
     fn candidates(
         fca: &FcaBody,
         winds: &Winds,
@@ -4763,7 +4765,7 @@ mod mit_cross_speed_wiring_tests {
             now,
             true,
         );
-        assert_eq!(flights.len(), 2, "both loops must produce their candidate");
+        assert_eq!(flights.len(), 2, "both pilots must be candidates");
         flights
             .iter()
             .zip(&metas)
@@ -4774,15 +4776,16 @@ mod mit_cross_speed_wiring_tests {
             .collect()
     }
 
-    // AC5: the crossing ETA at both sites.
+    // AC5: the crossing ETA for both flight states.
     #[test]
-    fn both_candidate_loops_time_their_crossing_in_the_route_wind() {
+    fn both_candidates_time_their_crossing_in_the_route_wind() {
         let now = Utc::now();
         let gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
         let windy = candidates(&gate, &cruise_headwind(), now);
         let still = candidates(&gate, &Winds::default(), now);
-        for (site, cs) in [("live pilot", "AAL1"), ("prefile", "AAL2")] {
-            // The live pilot's anchoring (#313) takes back part of the headwind, so its move is smaller.
+        for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
+            // The airborne pilot's anchoring (#313) takes back part of the headwind, so its move is
+            // smaller.
             let moved = (windy[cs].0 - still[cs].0).num_seconds().abs();
             assert!(moved > 10, "{site}: the wind moves the crossing {moved} s");
         }
@@ -4791,23 +4794,23 @@ mod mit_cross_speed_wiring_tests {
     // AC5: MIT ÷ cross_speed sizes the gap; cross_speed is the groundspeed at the fix, in the wind
     // there.
     #[test]
-    fn both_candidate_loops_size_the_gap_on_the_wind_at_the_fix() {
+    fn both_candidates_size_the_gap_on_the_wind_at_the_fix() {
         let now = Utc::now();
-        // ~130 nm from KDCA: the live pilot crosses at cruise, the prefile (~65 nm out of KJFK)
-        // while still climbing through the sheared levels.
+        // ~130 nm from KDCA: the airborne pilot crosses at cruise, the ground pilot (~65 nm out of
+        // KJFK) while still climbing through the sheared levels.
         let gate = mit_fca_at_lon(-75.0, 39.0, 41.0);
         let windy = candidates(&gate, &cruise_headwind(), now);
         let still = candidates(&gate, &Winds::default(), now);
-        let prefile = still["AAL2"].1 - windy["AAL2"].1;
+        let ground = still["AAL2"].1 - windy["AAL2"].1;
         assert!(
-            prefile > 20.0 && prefile < 80.0,
-            "prefile crosses {prefile} kt slower"
+            ground > 20.0 && ground < 80.0,
+            "the ground pilot crosses {ground} kt slower"
         );
-        // The live pilot is anchored to its observed 440 kt (#313), clamped at +15 %, so part of
-        // the headwind is taken back: (440 − 80) × 1.15 = 414 kt.
+        // The airborne pilot is anchored to its observed 440 kt (#313), clamped at +15 %, so part
+        // of the headwind is taken back: (440 − 80) × 1.15 = 414 kt.
         assert!(
             (windy["AAL1"].1 - 414.0).abs() < 2.0,
-            "live pilot crosses at {}",
+            "the airborne pilot crosses at {}",
             windy["AAL1"].1
         );
         assert!((still["AAL1"].1 - 440.0).abs() < 2.0);
@@ -4820,13 +4823,129 @@ mod mit_cross_speed_wiring_tests {
         let gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
         let windy = candidates(&gate, &cruise_headwind(), now);
         let still = candidates(&gate, &Winds::default(), now);
-        for (site, cs) in [("live pilot", "AAL1"), ("prefile", "AAL2")] {
+        for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
             let hw = windy[cs]
                 .2
                 .unwrap_or_else(|| panic!("{site}: no debug headwind"));
             // The climb and descent pass through calmer air than the 80 kt at cruise.
             assert!(hw > 0 && hw < 80, "{site}: mean {hw} kt");
             assert_eq!(still[cs].2, None, "{site}: still air has no headwind");
+        }
+    }
+
+    /// What `predict::eta_along_route` predicts for `cs`'s crossing of `fca` in the wind `wind`
+    /// builds from the route path and its length: the inputs the candidate loop hands it, with the
+    /// loop's own ground allowance, which no wind reaches. `(eta, groundspeed at the fix)`.
+    fn crossing_in(
+        fca: &FcaBody,
+        cs: &str,
+        wind: impl Fn(&[[f64; 2]], f64) -> RouteWind,
+        allowance_sec: f64,
+        now: chrono::DateTime<Utc>,
+    ) -> (chrono::DateTime<Utc>, f64) {
+        let data = arrival_at_cruise();
+        let p = data.pilots.iter().find(|p| p.callsign == cs).unwrap();
+        let fp = p.flight_plan.as_ref().unwrap();
+        let (nav, ap) = (NavData::load(), airports());
+        let path = fca::route_path(
+            &nav,
+            &ap,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+        )
+        .unwrap();
+        let cross = fca_crossing_for(
+            fca,
+            &Boundaries::default(),
+            &ExclusionSet::new(),
+            cs,
+            fp,
+            Some(p.altitude),
+            &path,
+        )
+        .unwrap();
+        let profiles = ProfileTable::default();
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
+        let cruise = trajectory::parse_alt_ft(&fp.altitude);
+        let cruise_tas = trajectory::capped_cruise_tas(FILED_TAS, cruise, profile);
+        let route_len = predict::path_len_nm(&path);
+        let pred = predict::eta_along_route(
+            p.groundspeed >= 50,
+            route_len,
+            cross.along_nm,
+            p.altitude as f64,
+            p.groundspeed as f64,
+            cruise,
+            cruise_tas,
+            &ap,
+            &fp.arrival,
+            profile,
+            wind(&path, route_len),
+            allowance_sec,
+            now,
+        );
+        (pred.eta, pred.gs_kt)
+    }
+
+    // AC5 at the call site: each crossing ETA and `cross_speed` is exactly `eta_along_route` over
+    // `winds.along`, and the wind the loop flew before #836 (one route mean at filed cruise,
+    // `Winds::route_mean`) crosses the descent gate at another time.
+    #[test]
+    fn the_candidate_loop_times_each_crossing_on_the_wind_along_its_route() {
+        let now = Utc::now();
+        let winds = cruise_headwind();
+        let descent_gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
+        for gate in [&descent_gate, &mit_fca_at_lon(-75.0, 39.0, 41.0)] {
+            let (flights, metas) = build_candidates(
+                gate,
+                &arrival_at_cruise(),
+                &airports(),
+                &NavData::load(),
+                &Boundaries::default(),
+                &winds,
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &ExclusionSet::new(),
+                &Default::default(),
+                now,
+                false,
+            );
+            for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
+                let i = flights.iter().position(|f| f.callsign == cs).unwrap();
+                let allowance = metas[i].ground_allowance_ms as f64 / 1000.0;
+                let (eta, gs) = crossing_in(gate, cs, |p, len| winds.along(p, len), allowance, now);
+                assert_eq!(flights[i].eta, Some(eta), "{site}: crossing ETA");
+                assert_eq!(metas[i].cross_speed, gs, "{site}: crossing speed");
+                assert!(
+                    gs > 120.0,
+                    "{site}: {gs} kt, so the 120 kt floor is not in play"
+                );
+            }
+        }
+        let cruise = trajectory::parse_alt_ft(&jfk_dca_plan().altitude);
+        for cs in ["AAL1", "AAL2"] {
+            let along = crossing_in(&descent_gate, cs, |p, len| winds.along(p, len), 0.0, now);
+            let mean = crossing_in(
+                &descent_gate,
+                cs,
+                |p, _| winds.route_mean(p, cruise),
+                0.0,
+                now,
+            );
+            let apart = (along.0 - mean.0).num_seconds().abs();
+            assert!(
+                apart > 10,
+                "{cs}: the route mean crosses {apart} s from the route wind"
+            );
         }
     }
 }

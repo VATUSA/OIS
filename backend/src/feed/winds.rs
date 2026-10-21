@@ -425,6 +425,25 @@ impl Winds {
         )
     }
 
+    /// The wind every caller flew before #836: one mean headwind over the path's segment midpoints
+    /// at a single altitude, applied to the whole profile. A caller's revert test compares against
+    /// it, and a revert mutation puts it back at the call site.
+    pub(crate) fn route_mean(&self, path: &[[f64; 2]], alt_ft: f64) -> RouteWind {
+        let hws: Vec<f64> = path
+            .windows(2)
+            .filter_map(|s| {
+                let course = bearing_deg(s[0][0], s[0][1], s[1][0], s[1][1]);
+                let (lat, lon) = ((s[0][0] + s[1][0]) / 2.0, (s[0][1] + s[1][1]) / 2.0);
+                self.point_headwind(lat, lon, course, alt_ft)
+            })
+            .collect();
+        if hws.is_empty() {
+            RouteWind::still()
+        } else {
+            RouteWind::uniform(hws.iter().sum::<f64>() / hws.len() as f64)
+        }
+    }
+
     /// An FB field of one station with one level.
     pub(crate) fn test_station(lat: f64, lon: f64, alt_ft: i32, dir: f64, spd: f64) -> Self {
         Self {
