@@ -172,6 +172,11 @@ client address a test sees because no proxy appended a hop; in production the
 `TRUSTED_PROXY_HOPS` chain decides (`backend/src/config.rs`, #588). Build the missing hops into the
 request before believing an attack test.
 
+**A mocked Tauri API call cannot fail on a missing capability.** The web tests `vi.mock` the
+`@tauri-apps/*` modules, and at runtime a call the window's capability file does not grant is
+refused and only logs. A new Tauri API call gets a guard test that its capability file
+(`desktop/src-tauri/capabilities/*.json`) grants the permission to the windows that call it (#841).
+
 **A source-scan test treats "cannot inspect" as a finding.** Count a file it cannot read as
 failing, and add a count assertion that goes red if the glob stops matching. An assertion wrapped
 in `if (anchor !== -1)` passes silently wherever the anchor is missing: assert the anchor first.

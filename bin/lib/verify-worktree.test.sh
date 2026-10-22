@@ -146,6 +146,13 @@ has "no core.hooksPath fails and names just setup" "FAIL git hooks not installed
 [ "$RC" -ne 0 ] && ok "...and the health check exits non-zero" || bad "no hooks exit $RC"
 g config core.hooksPath /dev/null; verify
 has "another core.hooksPath fails" "FAIL git hooks not installed (core.hooksPath is '/dev/null'"
+mkdir -p "$MAIN/.githooks" "$WORK/elsewhere/.githooks"
+g config core.hooksPath "$MAIN/.githooks"; verify
+has "an absolute path to the primary checkout's .githooks passes" "PASS git hooks installed (core.hooksPath=$MAIN/.githooks, the primary checkout's .githooks)"
+g config core.hooksPath "$WORK/elsewhere/.githooks"; verify
+has "an absolute path to another .githooks fails" "FAIL git hooks not installed (core.hooksPath is '$WORK/elsewhere/.githooks'"
+g config core.hooksPath "$WT/.githooks"; verify
+has "an absolute path to the worktree's own .githooks fails" "FAIL git hooks not installed (core.hooksPath is '$WT/.githooks'"
 g config core.hooksPath .githooks; verify
 has "core.hooksPath=.githooks passes" "PASS git hooks installed"
 
