@@ -136,7 +136,8 @@ const NAV_REFRESH_JOB: &str = "nav_refresh";
 /// How often to refresh winds aloft: RAP publishes a new cycle every hour.
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const WINDS_REFRESH_JOB: &str = "winds_refresh";
-/// The most one RAP fetch (an index and 30 range reads) may take before the pass gives up on it.
+/// The most one RAP fetch may take before the pass gives up on it: every candidate file it falls
+/// through (up to 8), each an index and 30 range reads.
 const RAP_FETCH_BUDGET: Duration = Duration::from_secs(120);
 /// When RAP does not answer, a field loaded this recently is kept; an older one is dropped for still
 /// air rather than timing flights on winds hours out of date (#836).

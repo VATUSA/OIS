@@ -735,6 +735,34 @@ mod tests {
         assert!(turned, "the fixture must exercise the turn");
     }
 
+    // Every cell, the grid's edge rows and columns included, matches the independent rotation.
+    #[test]
+    fn every_cells_wind_matches_the_independent_rotation() {
+        let grid = build_grid(vec![UV.to_vec()]).unwrap();
+        let n = LATIN1_DEG.to_radians().sin();
+        let mut sums: std::collections::HashMap<(i64, i64), (f64, f64, f64)> = Default::default();
+        for (pu, pv) in raw(UV, UGRD).iter().zip(&raw(UV, VGRD)) {
+            let a = (n * (pu.1 - LOV_DEG)).to_radians();
+            let e = sums
+                .entry((pu.0.round() as i64, pu.1.round() as i64))
+                .or_default();
+            e.0 += pu.2 * a.cos() + pv.2 * a.sin();
+            e.1 += -pu.2 * a.sin() + pv.2 * a.cos();
+            e.2 += 1.0;
+        }
+        for (&(lat, lon), &(su, sv, k)) in &sums {
+            let (eu, ev) = (-su / k * KT_PER_MS, -sv / k * KT_PER_MS);
+            let (gu, gv) = (
+                at(&grid, &grid.u, lat as f64, lon as f64) as f64,
+                at(&grid, &grid.v, lat as f64, lon as f64) as f64,
+            );
+            assert!(
+                (gu - eu).abs() < 1.5 && (gv - ev).abs() < 1.5,
+                "({lat},{lon}): grid ({gu},{gv}) vs independent ({eu:.1},{ev:.1})"
+            );
+        }
+    }
+
     // Positive control for the rotation test: on the central meridian α ≈ 0.
     #[test]
     fn winds_on_the_central_meridian_are_left_unturned() {
