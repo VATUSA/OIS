@@ -40,8 +40,8 @@ These are the four limits the issue named, checked against the code on `next` be
    Callers disagreed on the altitude: `predict::arrival_eta` (`predict.rs:245,250`),
    `build_candidates` (`handlers/flow.rs:1887,2000`) and `fix_predictions` (`:1623`) passed the
    filed cruise altitude, while `project_traffic` (`:1489`) passed the aircraft's current altitude
-   and `sector_tracks` (`:269-270`) the current altitude when airborne and filed cruise on the
-   ground. A climbing departure was timed with its cruise headwind from the
+   and `sector_tracks` (`feed/sector_tracks.rs:269-270`) the current altitude when airborne and
+   filed cruise on the ground. A climbing departure was timed with its cruise headwind from the
    runway up, and one flight could carry two different headwinds on two pages.
 3. **Temperatures dropped.** `decode_fb` (`:251`) read only the first four digits of a group, so a
    Mach cruise ran on the ISA speed of sound (`trajectory::mach_to_tas`, `:123`). At FL350 each
