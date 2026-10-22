@@ -173,8 +173,8 @@ client address a test sees because no proxy appended a hop; in production the
 request before believing an attack test.
 
 **A mocked Tauri API call cannot fail on a missing capability.** The web tests `vi.mock` the
-`@tauri-apps/*` modules, and at runtime a call the window's capability file does not grant is
-refused and only logs. A new Tauri API call gets a guard test that its capability file
+`@tauri-apps/*` modules, and at runtime a call the window's capability file does not grant
+rejects, which a caller that catches it only logs. A new Tauri API call gets a guard test that its capability file
 (`desktop/src-tauri/capabilities/*.json`) grants the permission to the windows that call it (#841).
 
 **A source-scan test treats "cannot inspect" as a finding.** Count a file it cannot read as

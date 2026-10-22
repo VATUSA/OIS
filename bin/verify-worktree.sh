@@ -240,7 +240,8 @@ fi
 # .githooks/ (pre-commit, commit-msg, pre-push) runs only once core.hooksPath points at
 # it, and nothing else notices when it does not: commits then skip the attribution and
 # migration checks and pushes skip clippy and the suites. An absolute path to the primary
-# checkout's .githooks runs the same hooks, so it passes too.
+# checkout's .githooks passes too: every checkout then runs the primary's copy of the hooks,
+# which still judge the checkout being committed or pushed.
 HOOKS_PATH="$(git config core.hooksPath 2>/dev/null)"
 PRIMARY_HOOKS="$(cd "$GIT_COMMON_PATH/../.githooks" 2>/dev/null && pwd -P)"
 if [[ "$HOOKS_PATH" == ".githooks" ]]; then
