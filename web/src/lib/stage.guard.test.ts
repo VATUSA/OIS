@@ -62,6 +62,15 @@ describe("STAGE build wiring (#841)", () => {
     expect(turbo.globalDependencies).toContain("STAGE");
   });
 
+  it("grants the main window core:window:allow-set-title, without which stageMainWindowTitle only warns", async () => {
+    const capability = JSON.parse(await readFile(resolve(ROOT, "desktop/src-tauri/capabilities/default.json"), "utf8")) as {
+      windows: string[];
+      permissions: unknown[];
+    };
+    expect(capability.windows).toContain("main");
+    expect(capability.permissions).toContain("core:window:allow-set-title");
+  });
+
   it("constructs WebviewWindow only in web/src/lib/popout.ts, the one place window titles are staged", async () => {
     const files = await sources(resolve(WEB, "src"));
     // Positive control: a scan that found no files would pass with nothing scanned.

@@ -4,7 +4,7 @@
  * both build configs import it.
  */
 
-export const STAGES = ["alpha", "beta", "rc", "stable"] as const;
+const STAGES = ["alpha", "beta", "rc", "stable"] as const;
 export type Stage = (typeof STAGES)[number];
 
 const LABEL: Record<Stage, string> = { alpha: "Alpha", beta: "Beta", rc: "RC", stable: "" };
@@ -51,7 +51,6 @@ export function stageTone(stage: Stage): (typeof TONE)[Stage] {
 export function stagedTitle(title: string, stage: Stage): string {
   if (stage === "stable") return title;
   const tag = `(${LABEL[stage]})`;
-  if (title === "OIS") return `OIS ${tag}`;
   if (title.startsWith("OIS · ")) return `OIS ${tag}${title.slice(3)}`;
   return `${title} ${tag}`;
 }

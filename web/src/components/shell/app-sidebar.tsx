@@ -320,7 +320,7 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/** The one global sidebar: chrome row, identity, ⌘K, every permitted section, then Docs/theme/clock. */
+/** The one global sidebar: chrome row, stage row, identity, ⌘K, every permitted section, then Docs/theme/clock. */
 export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const pathname = usePathname();
   return (

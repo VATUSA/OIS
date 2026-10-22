@@ -406,9 +406,9 @@ Four independent axes — they are not the same number:
   deployed app. It already flows to the backend binary (`backend/build.rs`, baked in as
   `OIS_VERSION`) and the web footer/image tags (`web/vite.config.ts`, `build-images.yml`);
   `backend/Cargo.toml`, `web/package.json`, `desktop/package.json`, `desktop/src-tauri/Cargo.toml`
-  and `desktop/src-tauri/tauri.conf.json` mirror it manually on each bump. Of those, only
-  `tauri.conf.json` is read: the desktop updater compares it, and `release.yml` rewrites it from the
-  release tag. The rest are Cargo/npm's required version string. Pre-1.0 (`0.y.z`) means
+  and `desktop/src-tauri/tauri.conf.json` mirror it manually on each bump. `tauri.conf.json` is the desktop bundle version the updater
+  compares (`release.yml` rewrites it from the release tag), and `backend/Cargo.toml` becomes the
+  OpenAPI `info.version`; the rest are Cargo/npm's required version string. Pre-1.0 (`0.y.z`) means
   no stability guarantee — anything, including the API shape, may change between `0.y` releases.
   Reaching `1.0.0` is a deliberate commitment: we stand behind `/api/v1` and won't break it.
 - **Release stage** — the root `STAGE` file (#841), one of `alpha`, `beta`, `rc` or `stable`, kept
@@ -416,7 +416,7 @@ Four independent axes — they are not the same number:
   suffix, and Tauri's MSI bundler rejects non-numeric ones). `web/vite.config.ts` and
   `docs-site/.vitepress/config.mts` read it through `parseStage` (`web/src/lib/stage.ts`); a missing,
   blank or unknown value fails both builds. Anything but `stable` shows a chip beside the OIS name
-  (sidebar, landing hero, footer), in the docs nav and in desktop window titles (`OIS (Alpha)`);
+  (sidebar, landing hero) and the footer version, in the docs nav and in desktop window titles (`OIS (Alpha)`);
   `stable` hides it. The image builds get it through `COPY . .`, and `turbo.json` lists it in
   `globalDependencies` so a change rebuilds.
 - **API contract version** — the `/api/v1` URL path. Decoupled from the product version; only

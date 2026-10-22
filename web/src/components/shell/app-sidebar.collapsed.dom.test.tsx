@@ -396,12 +396,12 @@ describe("AppSidebar release stage chip (#841)", () => {
     expect(chip(title)).not.toBeNull();
   });
 
-  for (const path of ["/advisories", "/ops/tmu", "/admin/access"]) {
-    it(`shows the chip in the header on ${path} for a signed-in member`, async () => {
-      await renderAt(path, user("flow.fca.read", "access.users.read"), "expanded");
-      expect(chip(stageRow()!)!.textContent).toBe("Alpha");
-    });
-  }
+  // The header does not vary by route (AppShell renders this one sidebar on every signed-in page),
+  // so one page outside Advisories is enough to show it is not tied to the route above.
+  it("shows the chip in the header on /admin/access for a member with permissions", async () => {
+    await renderAt("/admin/access", user("flow.fca.read", "access.users.read"), "expanded");
+    expect(chip(stageRow()!)!.textContent).toBe("Alpha");
+  });
 
   it("keeps the wordmark and drops the chip in the expanded header when the stage is stable", async () => {
     build.stage = "stable";

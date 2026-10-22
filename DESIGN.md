@@ -142,7 +142,8 @@ area and any rounding of its corners, so the page reserves no room for them and 
 `border-radius` for the window. "Flush, no outer rounding" is a rule about *this stylesheet*, inside the
 native frame. It holds:
 
-- **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), the
+- **Sidebar** (`--panel`, collapsible): a chrome row (back · forward · recent pages / collapse), an
+  "OIS" wordmark with the release-stage chip (just the chip when collapsed, nothing at `stable`), the
   identity (avatar + name + mono CID), a pill **⌘K** search, then **every section the user can use**
   — Home, Advisories, Operations, Planning, Historical, Admin, and a **User** group (Profile, Settings,
   API keys, Sign out) — and Docs / theme / Zulu clock at the foot. No dropdown menus for navigation, except when the sidebar is collapsed: each group is then one icon that opens a flyout of its items to the right (#823). It is the only navigation: there is no top bar.

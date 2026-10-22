@@ -137,6 +137,7 @@ beforeEach(() => {
 afterEach(() => {
   delete window.__TAURI_INTERNALS__;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("popoutLabel", () => {
@@ -615,6 +616,5 @@ describe("main window title (#841)", () => {
     await expect(stageMainWindowTitle()).resolves.toBeUndefined();
 
     expect(warn).toHaveBeenCalledWith("OIS: could not put the release stage in the main window title", expect.any(Error));
-    warn.mockRestore();
   });
 });
