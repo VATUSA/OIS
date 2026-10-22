@@ -271,13 +271,15 @@ pub async fn update_tmi(
     //
     // Enqueued in the same tx as the edit, for the reason `publish_tmi` does it: an edit that commits
     // without its job is this bug again, and a job without its edit posts a line the row never had.
-    if tmi.status == "published"
-        && edit.line_changed
-        && let Some(channel_id) = &channel
-    {
-        let job = tmi_publish_job(channel_id, &tmi);
-        integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
-            .await?;
+    if tmi.status == "published" && edit.line_changed {
+        if let Some(channel_id) = &channel {
+            let job = tmi_publish_job(channel_id, &tmi);
+            integration_repo::enqueue_job(&mut tx, "tmi_publish", &job, Some("tmi"), Some(&tmi.id))
+                .await?;
+        } else {
+            // Inside the guard: an edit that would not post anyway has nothing to report.
+            skipped_post(NTML_CHANNEL, "edit", &tmi.id);
+        }
     }
     tx.commit().await.map_err(|_| ApiError::Internal)?;
 
@@ -2502,13 +2504,133 @@ mod repost_tests {
         .await
     }
 
+    /// Records every `tracing` event a request emits, so a test can assert on the skip WARN.
+    ///
+    /// `#[sqlx::test]` runs a current-thread runtime and `send` drives the production router in-task,
+    /// so a subscriber attached to the request future with `WithSubscriber` sees the handler's events
+    /// and reqlog's per-request line (`reqlog.rs`'s `the_middleware_actually_obeys_the_rule` is the
+    /// precedent). The reqlog INFO line is the positive control that capture was live.
+    mod capture {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        use sqlx::PgPool;
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        /// One event emitted while the request was in flight.
+        #[derive(Debug, Clone)]
+        pub(super) struct Captured {
+            pub(super) level: tracing::Level,
+            pub(super) target: String,
+            /// The formatted message, e.g. ``tmu: no Discord channel mapped for `tmu-ntml`; …``.
+            pub(super) message: String,
+            /// Every other field, string values unquoted (`tmi` → the TMI id).
+            pub(super) fields: BTreeMap<String, String>,
+        }
+
+        struct Recorder(Arc<Mutex<Vec<Captured>>>);
+
+        #[derive(Default)]
+        struct Visitor {
+            message: String,
+            fields: BTreeMap<String, String>,
+        }
+
+        impl tracing::field::Visit for Visitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = value.to_owned();
+                } else {
+                    self.fields
+                        .insert(field.name().to_owned(), value.to_owned());
+                }
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                } else {
+                    self.fields
+                        .insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut visitor = Visitor::default();
+                event.record(&mut visitor);
+                let metadata = event.metadata();
+                self.0
+                    .lock()
+                    .expect("the recorder's mutex is only held for a push")
+                    .push(Captured {
+                        level: *metadata.level(),
+                        target: metadata.target().to_owned(),
+                        message: visitor.message,
+                        fields: visitor.fields,
+                    });
+            }
+        }
+
+        /// `super::patch`, with every event the request emitted.
+        pub(super) async fn patch_capturing(
+            pool: PgPool,
+            tmi_id: &str,
+            body: serde_json::Value,
+        ) -> (http::StatusCode, Vec<Captured>) {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(Recorder(Arc::clone(&events)));
+            let status = super::patch(pool, tmi_id, body)
+                .with_subscriber(subscriber)
+                .await;
+            let captured = events
+                .lock()
+                .expect("the recorder's mutex is only held for a push")
+                .clone();
+            (status, captured)
+        }
+
+        /// The `skipped_post` WARNs among `events`, matched on the message's fixed prefix so a test
+        /// asserting there are none cannot pass on a reworded call.
+        pub(super) fn skip_warnings(events: &[Captured]) -> Vec<&Captured> {
+            events
+                .iter()
+                .filter(|e| e.message.starts_with("tmu: no Discord channel mapped"))
+                .collect()
+        }
+
+        /// Positive control: reqlog's per-request INFO line, proving the capture saw the request.
+        pub(super) fn saw_the_request(events: &[Captured]) -> bool {
+            events
+                .iter()
+                .any(|e| e.level == tracing::Level::INFO && e.target == "ois_backend::reqlog")
+        }
+    }
+
+    /// Also the mapped side of the skip WARN (#869): a post that is queued reports no skip.
     #[sqlx::test]
     async fn editing_a_published_tmi_enqueues_a_revised_row(pool: PgPool) {
         map_tmu_channel(&pool).await;
         let id = seed_tmi(&pool, "published").await;
 
-        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        let (status, events) = capture::patch_capturing(
+            pool.clone(),
+            &id,
+            serde_json::json!({ "restriction": "JFK arrivals via CAMRN 30MIT" }),
+        )
+        .await;
         assert_eq!(status, http::StatusCode::OK);
+        assert!(capture::saw_the_request(&events), "capture was not live");
+        assert!(
+            capture::skip_warnings(&events).is_empty(),
+            "a mapped edit posts, so it must not report a skipped post: {events:?}"
+        );
 
         // The new text, not merely "a job exists" — a job carrying the pre-edit line would leave the
         // channel just as wrong while looking like the fix worked.
@@ -2619,15 +2741,91 @@ mod repost_tests {
         );
     }
 
-    /// No channel mapped means "don't post" everywhere else in this file, and an edit is no different
-    /// — in particular it must not fail the edit.
+    /// No channel mapped means "don't post" everywhere else in this file, and an edit is no different:
+    /// it must not fail the edit. It must not be silent either, or a channel that went quiet by
+    /// accident looks exactly like one that was never configured (#869). The message is held against
+    /// a literal so it stays the WARN an unmapped publish or cancel logs.
     #[sqlx::test]
-    async fn an_edit_with_no_channel_mapped_enqueues_nothing(pool: PgPool) {
+    async fn an_unmapped_edit_to_a_published_line_warns_once_and_enqueues_nothing(pool: PgPool) {
         let id = seed_tmi(&pool, "published").await;
 
-        let status = patch_restriction(pool.clone(), &id, "JFK arrivals via CAMRN 30MIT").await;
+        let (status, events) = capture::patch_capturing(
+            pool.clone(),
+            &id,
+            serde_json::json!({ "restriction": "JFK arrivals via CAMRN 30MIT" }),
+        )
+        .await;
         assert_eq!(status, http::StatusCode::OK);
+        assert!(queued_ntml_lines(&pool, &id).await.is_empty());
 
+        assert!(
+            capture::saw_the_request(&events),
+            "capture was not live: {events:?}"
+        );
+        let skips = capture::skip_warnings(&events);
+        assert_eq!(skips.len(), 1, "exactly one skip WARN, got {events:?}");
+        let skip = skips[0];
+        assert_eq!(skip.level, tracing::Level::WARN);
+        assert_eq!(skip.target, "ois_backend::handlers::tmu");
+        assert_eq!(
+            skip.message,
+            "tmu: no Discord channel mapped for `tmu-ntml`; TMI edit not posted"
+        );
+        assert_eq!(skip.fields.get("tmi"), Some(&id));
+        assert_eq!(
+            skip.fields.get("channel").map(String::as_str),
+            Some("tmu-ntml")
+        );
+    }
+
+    /// A draft was never in the channel and a cancelled TMI has had its say, so an edit to either
+    /// would not post with a channel mapped; without one it has nothing to report. The edit changes
+    /// the line, so only the status keeps it from posting.
+    #[sqlx::test]
+    async fn an_unmapped_edit_to_a_draft_or_cancelled_tmi_logs_no_skip(pool: PgPool) {
+        for status in ["draft", "cancelled"] {
+            let id = seed_tmi(&pool, status).await;
+
+            let (code, events) = capture::patch_capturing(
+                pool.clone(),
+                &id,
+                serde_json::json!({ "restriction": "JFK arrivals via CAMRN 30MIT" }),
+            )
+            .await;
+            assert_eq!(code, http::StatusCode::OK, "{status}");
+            assert!(queued_ntml_lines(&pool, &id).await.is_empty(), "{status}");
+            assert!(
+                capture::saw_the_request(&events),
+                "{status}: capture was not live"
+            );
+            assert!(
+                capture::skip_warnings(&events).is_empty(),
+                "a {status} edit would not post, so it must not report a skipped post: {events:?}"
+            );
+        }
+    }
+
+    /// An edit that leaves the line as it was would not post, so it reports no skip. Both shapes from
+    /// `an_edit_that_changes_nothing_enqueues_nothing`: an empty body, and the line resent as it is.
+    #[sqlx::test]
+    async fn an_unmapped_edit_that_leaves_the_line_unchanged_logs_no_skip(pool: PgPool) {
+        let id = seed_tmi(&pool, "published").await;
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "restriction": "JFK arrivals via CAMRN 20MIT" }),
+        ] {
+            let (status, events) = capture::patch_capturing(pool.clone(), &id, body.clone()).await;
+            assert_eq!(status, http::StatusCode::OK, "{body}");
+            assert!(
+                capture::saw_the_request(&events),
+                "{body}: capture was not live"
+            );
+            assert!(
+                capture::skip_warnings(&events).is_empty(),
+                "{body} leaves the line unchanged, so it must not report a skipped post: {events:?}"
+            );
+        }
         assert!(queued_ntml_lines(&pool, &id).await.is_empty());
     }
 }

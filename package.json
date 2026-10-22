@@ -32,7 +32,9 @@
       ]
     },
     "overrides": {
-      "minimatch@5>brace-expansion": "^2.1.6"
+      "minimatch@5>brace-expansion": "^2.1.6",
+      "vitepress>vite": "^6.4.4",
+      "@vitejs/plugin-vue>vite": "^6.4.4"
     }
   }
 }

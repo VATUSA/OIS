@@ -3540,6 +3540,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nonzero_ext"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3913,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "ois-backend"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3950,7 +3962,7 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
- "zip 8.6.0",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -3974,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "ois-desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "flate2",
  "keyring",
@@ -8329,14 +8341,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap 2.14.0",
  "memchr",
+ "nix",
  "typed-path",
  "zopfli",
 ]
