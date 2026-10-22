@@ -151,6 +151,11 @@ g config core.hooksPath ../../../../main/.githooks; verify
 has "a relative path that reaches the primary's .githooks from the worktree fails" "FAIL git hooks not installed (core.hooksPath is '../../../../main/.githooks'"
 g config core.hooksPath "$MAIN/.githooks"; verify
 has "an absolute path to the primary checkout's .githooks passes" "PASS git hooks installed (core.hooksPath=$MAIN/.githooks, the primary checkout's .githooks)"
+# From the primary checkout reached through a symlink, git reports a relative .git, so the
+# primary's path must be resolved physically to match.
+ln -s "$MAIN" "$WORK/main-link"
+OUT="$(cd "$WORK/main-link" && PATH="$WORK/bin:$PATH" bash "$SCRIPT" 2>&1 | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+has "the primary checkout through a symlink passes" "PASS git hooks installed (core.hooksPath=$MAIN/.githooks, the primary checkout's .githooks)"
 g config core.hooksPath "$WORK/elsewhere/.githooks"; verify
 has "an absolute path to another .githooks fails" "FAIL git hooks not installed (core.hooksPath is '$WORK/elsewhere/.githooks'"
 g config core.hooksPath "$WT/.githooks"; verify
