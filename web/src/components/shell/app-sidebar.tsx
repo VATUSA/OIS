@@ -38,6 +38,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import {ReleaseStageChip} from "@/components/release-stage-chip";
 import {SignInButton} from "@/components/sign-in-button";
 import {openWhatsNew} from "@/components/whats-new";
 import {ZuluClock} from "@/components/zulu-clock";
@@ -111,6 +112,26 @@ function ChromeRow({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
       <ChromeButton label="Collapse sidebar" onClick={onToggle}>
         <PanelLeft />
       </ChromeButton>
+    </div>
+  );
+}
+
+/**
+ * The OIS wordmark and the release-stage chip (#841), below the chrome row so that row still leads
+ * the header. Collapsed, the rail has room only for the compact chip.
+ */
+function StageRow({ collapsed }: { collapsed: boolean }) {
+  if (collapsed) {
+    return (
+      <div data-stage-row className="flex justify-center empty:hidden">
+        <ReleaseStageChip compact />
+      </div>
+    );
+  }
+  return (
+    <div data-stage-row className="flex items-center gap-2 px-1.5">
+      <span className="text-sm font-bold tracking-tight text-ink">OIS</span>
+      <ReleaseStageChip />
     </div>
   );
 }
@@ -309,6 +330,7 @@ export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onTogg
       header={
         <>
           <ChromeRow collapsed={collapsed} onToggle={onToggle} />
+          <StageRow collapsed={collapsed} />
           <Identity collapsed={collapsed} />
           <SearchPill collapsed={collapsed} />
         </>
@@ -329,7 +351,18 @@ export function MobileNavButton() {
       <Button size="icon" variant="ghost" aria-label="Menu" className="size-8 md:hidden" onClick={() => setOpen(true)}>
         <Menu className="size-5" />
       </Button>
-      <Modal open={open} onClose={close} placement="left" title="OIS">
+      <Modal
+        open={open}
+        onClose={close}
+        placement="left"
+        aria-label="OIS"
+        title={
+          <span className="flex items-center gap-2">
+            OIS
+            <ReleaseStageChip />
+          </span>
+        }
+      >
         <nav className="flex flex-col gap-3" onClick={(e) => (e.target as HTMLElement).closest("a") && close()}>
           <Identity collapsed={false} />
           <SearchPill collapsed={false} />
