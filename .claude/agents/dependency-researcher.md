@@ -33,7 +33,7 @@ else that edits a manifest or lockfile. Never commit or push.
 - **npm** is checked by `pnpm audit --audit-level=high` in CI. Accepted advisories live in the root
   `package.json` under `pnpm.auditConfig`. Nothing checks npm licenses, so check them yourself
   against the same allow list.
-- **Toolchain**: Rust edition 2024 and MSRV 1.85 (`AGENTS.md` § Project overview). A crate whose
+- **Toolchain**: Rust edition 2024 and MSRV 1.92 (`AGENTS.md` § Project overview). A crate whose
   MSRV is above that needs the bump called out.
 
 ## Evaluate

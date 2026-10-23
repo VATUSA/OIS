@@ -36,7 +36,7 @@ Two workspace managers coexist: a Cargo workspace (`backend`, `discord`, `crates
 per-feature specs); user docs are a VitePress site in `docs-site/`. The backlog is
 `docs/IDEAS.md`; the phased plan is `docs/PLAN.md`.
 
-Rust: edition 2024, MSRV 1.85, **nightly** toolchain (for `-Zthreads` — no nightly *language*
+Rust: edition 2024, MSRV 1.92, **nightly** toolchain (for `-Zthreads` — no nightly *language*
 features, so `stable` remains a valid fallback). Build settings live in `.cargo/config.toml`
 (`-Zthreads=8`; mold on Linux, rust-lld on Windows) and the root `Cargo.toml`'s `[profile.dev]`
 (file:line only for workspace crates, no debug info for dependencies, so a debugger shows no
