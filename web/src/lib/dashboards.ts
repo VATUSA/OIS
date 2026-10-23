@@ -23,7 +23,7 @@ export function useDashboards({ enabled = true }: { enabled?: boolean } = {}) {
     queryKey: ["dashboards"],
     queryFn: async (): Promise<DashboardLibrary> => {
       const { data, error } = await ois.GET("/api/v1/dashboards");
-      if (error || !data) return { dashboards: [], collections: [] };
+      if (error || !data) throw new Error("dashboards failed to load");
       return data;
     },
     staleTime: 10_000,

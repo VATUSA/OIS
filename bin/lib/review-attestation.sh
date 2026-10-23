@@ -217,7 +217,9 @@ check_attestation() {
         done <<EOF
 $(attest_headings "$sha" "$file" "$root")
 EOF
-    done < "$map"
+    # CRs stripped: a Windows checkout under core.autocrlf holds the map CRLF, and a file column
+    # ending in a CR names no file at the SHA.
+    done < <(tr -d '\r' < "$map")
 
     [ "$gaps" -eq 0 ]
 }

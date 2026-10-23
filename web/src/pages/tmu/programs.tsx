@@ -687,9 +687,10 @@ export function ProgramsTab() {
     <div className="flex flex-col gap-6">
       {canEdit && <SetProgramForm />}
 
+      {/* A failed background refetch keeps the loaded rows, and any armed ConfirmButton, on screen (#824). */}
       <QueryState
         isLoading={!programs.data}
-        isError={programs.isError}
+        isError={programs.isError && !programs.data}
         onRetry={() => programs.refetch()}
         error="Couldn't load programs."
       >
