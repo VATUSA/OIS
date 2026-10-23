@@ -326,7 +326,9 @@ points above, nothing more:
   on CRLF or `\` paths in files no branch touches (#875), and codegen fails under cmd.exe (#873), so
   `bin/pre-push` and `test-run-gate.sh` block the push and `gh pr create`. Gate, push and open the
   PR from the WSL clone `bin/wsl-clone.sh` manages (#872), run from the primary checkout's copy
-  through a login shell, where fnm puts Linux `node` and `pnpm` on `PATH`:
+  through `bash -lic`, the only shell where fnm puts Linux `node` and `pnpm` ahead of the Windows
+  shims. `create` refuses without them; `gate` does not check, and every pnpm step then exits 127
+  with no marker written:
   ```bash
   wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh create <branch>'
   #   ... gate <branch>   catch up with the Windows branch, preflight, then just test (stamps)
@@ -337,10 +339,13 @@ points above, nothing more:
   fast-forward, or, when the branch was amended, squashed or rebased, by resetting a clean clone to
   the new tip; a commit made in the clone is refused. These subcommands are the one exception to
   "never wrap a push or a stamp": `gate` runs the real `just test`, and `push` and `pr` check the
-  markers the gates would; none of them works on `main` or `next`. A worktree's `/mnt/c` copy runs
-  only with `OIS_WSL_SOURCE=/mnt/c/<primary>`: Linux git cannot open a Windows-created worktree (its
-  `.git` names a `C:/` path) and lists every Windows worktree as prunable, so never `git gc` or
-  `git worktree prune` the Windows repo from WSL.
+  markers the gates would; none of them works on `main` or `next`. The push gates cannot see inside
+  `wsl.exe`, so a worker pushes only through `push`, and a reviewer's fix-forward push goes to the
+  operator as a literal command for their own PowerShell, with no `!` prefix:
+  `wsl.exe -d Ubuntu -- bash -lc 'cd ~/ois-wsl/<name> && git -c core.hooksPath=.githooks push origin HEAD:<pr-branch>'`.
+  Run WSL-side `bin/` scripts from the primary checkout's `/mnt/c` path, never a worktree's: Linux
+  git cannot open a Windows worktree (its `.git` says `gitdir: C:/...`) and marks every Windows
+  worktree prunable, so never `git gc` or `git worktree prune` the Windows repo from WSL.
 - **The WSL build env applies only in the clone.** `bin/lib/wsl.sh` writes `CARGO_BUILD_JOBS=1` and
   `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=1` into the clone's `.env`, which
   `just test` and `bin/pre-push` load; cargo appends it after the config's `-Zthreads=8` and mold

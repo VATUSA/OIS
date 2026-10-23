@@ -142,7 +142,10 @@ Nothing else in this project creates a branch.
    command as exactly
    `cd <absolute worktree path> && <command>`, the path starting with `/` (Git Bash on Windows:
    `/c/Users/...`; the gates refuse `C:/...` and relative paths). The gates accept that form for
-   `just test`, `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`. Never wrap a
+   `just test`, `bash bin/review-marker.sh KIND SHA`, `git push origin <branch>` and `gh pr create`.
+   On Windows the commit gates want the opposite: `cd C:/... && git commit -F C:/...`, since
+   `migration-gate.sh` and `attribution-gate.sh` refuse `/c/...`; a session isolated in the
+   worktree pushes with a plain `git push origin <branch>` from it. Never wrap a
    push or a stamp in a script to get past a gate: the gates cannot see inside it. The one exception
    is `bin/wsl-clone.sh gate|push|pr` on a Windows host: `gate` runs the real `just test`, and
    `push` and `pr` check the markers the gates would (`ticket-lifecycle.md` → "A Windows host").
