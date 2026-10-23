@@ -110,6 +110,9 @@ An operation must never report success on a path that failed.
   `NULL` pushback meant both "this departure did not push" and "the push was not detected"; counting
   every `NULL` as zero taught a hub a 0 s pushback. Before a predicate stands in for a cause, list
   every way the value is reached, store the causes apart where you can, and write one test per cause.
+  A sync or cleanup guard on git ancestry ("HEAD is not in the source") also fires when the source
+  branch is rewritten; tell commits made here from commits the source dropped (the remote-tracking
+  reflog) and test amend, squash and rebase (#872).
 - **A "nothing dropped silently" check covers every level the data is grouped into.** Code that
   builds parents from child rows loses a childless parent at each level. One report and one test per
   level, each seeding a childless record beside a sibling that has children.
