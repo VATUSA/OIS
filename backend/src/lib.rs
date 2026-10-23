@@ -63,7 +63,6 @@ pub async fn run() -> color_eyre::Result<()> {
     );
     jobs::spawn_winds_refresh(
         state.jobs.clone(),
-        state.feed.clone(),
         state.winds.clone(),
         state.winds_refreshed.clone(),
         state.db.clone(),

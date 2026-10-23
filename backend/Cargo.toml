@@ -67,6 +67,9 @@ base64 = "0.22"
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
 governor = "0.10.4"
+# Decodes NOAA RAP winds aloft (GRIB2, JPEG2000-packed) for feed/rap.rs (#836). Pure Rust: the
+# default features pull in C OpenJPEG and libaec, so only the hayro JPEG2000 decoder is enabled.
+grib = { version = "0.19.1", default-features = false, features = ["jpeg2000-unpack-with-hayro"] }
 # Streams a large query row by row instead of `fetch_all` (#776). Already in the tree via axum/sqlx.
 futures-util = { version = "0.3", default-features = false }
 

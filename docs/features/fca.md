@@ -136,7 +136,8 @@ short-circuit. `dir`.
 3. `route_path` with the live position, heading and groundspeed (`:1855`). No path: skipped.
 4. `fca_crossing_for` with the current altitude (`:1871`). Skipped before either push, because the
    two lists are consumed as parallel slices (`:1868-1870`).
-5. ETA inputs: profile, cruise altitude, capped TAS, and route headwind (`:1882-1887`). A ground
+5. ETA inputs: profile, cruise altitude, capped TAS, and the wind along the route (`:1882-1887`;
+   read at each point's altitude since #836). A ground
    aircraft also gets a ground allowance from `feed_flow::resolve_ground_allowance`
    (`:1892-1906`), with the runway from `assigned` when there is one.
 6. `predict::eta_along_route` (`:1907`). The ETA model is #814's subject.

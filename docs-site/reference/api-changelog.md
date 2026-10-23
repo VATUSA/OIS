@@ -14,6 +14,13 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
+  is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
+  RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
+  RAP, which has no stations. A caller reading `winds_stations` must read `winds_source` instead.
+  `FcaFlightDebug.headwind` is the mean headwind over the remaining route, each point read at the
+  profile's altitude there. `winds_refreshed` no longer means a field is in use: after failed
+  refreshes drop to still air it keeps the time the last field loaded, so read `winds_source`. (#836)
 - **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and
   `GET /api/v1/flow/counts`** list and count connected pilots with a flight plan only. A prefile is no
   longer an FCA candidate, so `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always

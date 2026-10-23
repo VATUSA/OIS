@@ -1800,8 +1800,10 @@ export interface paths {
         put?: never;
         /**
          * Force an immediate nav + winds refresh, then return the updated status. Failures are
-         *     logged and leave the current data in place — the response still carries the resulting status, so
-         *     the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+         *     logged and leave the current data in place, except that winds drop to still air once the last
+         *     field loaded is more than 3 h old. The response still carries the resulting status, so the
+         *     caller compares it (cycle age, `winds_refreshed`, `winds_source`) to tell a real refresh from a
+         *     fallback.
          * @description One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
          *     to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
          */
@@ -4737,10 +4739,17 @@ export interface components {
             procedures: number;
             /**
              * Format: date-time
-             * @description Last successful winds fetch (null = still air, not yet fetched).
+             * @description When a RAP field last loaded; null when none has since startup. Still air after failed
+             *     refreshes keeps the time of the last field: `winds_source` says what is in use.
              */
             winds_refreshed?: string | null;
-            winds_stations: number;
+            /** @description Where the wind field in use came from: NOAA RAP, or none (still air). */
+            winds_source: components["schemas"]["WindsSource"];
+            /**
+             * Format: date-time
+             * @description The time the RAP field is valid for (null in still air).
+             */
+            winds_valid_at?: string | null;
         };
         /** @description Whether an event needs national DCC support. */
         DccRequestBody: {
@@ -5397,7 +5406,8 @@ export interface components {
             cruise_tas: number;
             /**
              * Format: int64
-             * @description Mean route headwind (kt) applied (+ head / − tail); null = still air.
+             * @description Mean headwind (kt) over the remaining route, each point read at the profile's altitude there
+             *     (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
              */
             headwind?: number | null;
             /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
@@ -7753,6 +7763,11 @@ export interface components {
             known_vatusa_roles: string[];
             mappings: components["schemas"]["VatusaRoleMappingBody"][];
         };
+        /**
+         * @description Where the live wind field came from, for the data-status view.
+         * @enum {string}
+         */
+        WindsSource: "rap" | "none";
     };
     responses: never;
     parameters: never;

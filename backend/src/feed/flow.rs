@@ -15,7 +15,7 @@ use super::nav::NavData;
 use super::predict;
 use super::runway_db::RunwayDb;
 use super::taxi_estimate;
-use super::trajectory;
+use super::trajectory::{self, RouteWind};
 use super::vatsim::VatsimData;
 use super::winds::Winds;
 use crate::models::AirportGateBody;
@@ -831,7 +831,7 @@ fn ground_estimate(
                 airports,
                 &fp.arrival,
                 profile,
-                None,
+                RouteWind::still(),
             );
             let ft_min = vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0;
             (300.0, ft_min, allowance)
@@ -2560,6 +2560,238 @@ mod tests {
             "a 5431 ft field shortens the synthetic descent, so the flight time must come in below \
              a sea-level one — got {high_min:.2} min vs {sea_min:.2} min"
         );
+    }
+
+    // ---- #836: airport-flow demand reads the per-segment wind (AC5) ---------------------------
+    //
+    // `Winds::test_shear()`: 80 kt from 225° (on the nose of a south-west KJFK→KDCA course) at and
+    // above 30,000 ft east of 75.5°W, calm elsewhere.
+
+    fn jfk_dca() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KDCA".to_string(), Airport::at(38.8521, -77.0377)),
+        ])
+    }
+
+    fn ladder(data: &VatsimData, winds: &Winds, cs: &str) -> DateTime<Utc> {
+        compute(
+            "KDCA",
+            None,
+            data,
+            &jfk_dca(),
+            &NavData::load(),
+            winds,
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        )
+        .flights
+        .into_iter()
+        .find(|f| f.callsign == cs)
+        .and_then(|f| f.eta)
+        .expect("ladder ETA")
+    }
+
+    /// The coastal B738 of `ladder_and_runway_ete_agree_on_the_resolved_route`.
+    fn coastal() -> VatsimData {
+        let mut p = pilot(
+            "AAL1",
+            40.2,
+            -74.0,
+            24_000,
+            400,
+            fp("KJFK", "KDCA", "RBV WHITE SIE"),
+        );
+        p.heading = 220;
+        VatsimData {
+            pilots: vec![p],
+            ..Default::default()
+        }
+    }
+
+    // AC5: the airborne arrival site.
+    #[test]
+    fn compute_times_an_airborne_arrival_in_the_route_wind() {
+        let data = coastal();
+        let shear = Winds::test_shear();
+        let windy = ladder(&data, &shear, "AAL1");
+        let still = ladder(&data, &Winds::default(), "AAL1");
+        assert!(
+            (windy - still).num_seconds() > 30,
+            "{} s",
+            (windy - still).num_seconds()
+        );
+        let direct = predict::arrival_eta(
+            &NavData::load(),
+            &jfk_dca(),
+            &shear,
+            &trajectory::AircraftProfile::default(),
+            &predict::ArrivalInput {
+                dep: "KJFK",
+                arr: "KDCA",
+                route: "RBV WHITE SIE",
+                pos: [40.2, -74.0],
+                alt_ft: 24_000.0,
+                gs: 400,
+                hdg: 220,
+                arr_ll: [38.8521, -77.0377],
+                cruise_ft: trajectory::parse_alt_ft(
+                    &data.pilots[0].flight_plan.as_ref().unwrap().altitude,
+                ),
+                cruise_tas: trajectory::capped_cruise_tas(
+                    parse_tas(&data.pilots[0].flight_plan.as_ref().unwrap().cruise_tas),
+                    trajectory::parse_alt_ft(
+                        &data.pilots[0].flight_plan.as_ref().unwrap().altitude,
+                    ),
+                    &trajectory::AircraftProfile::default(),
+                ),
+            },
+            0.0,
+            t0(),
+        );
+        assert_eq!(windy, direct.eta);
+    }
+
+    // AC5: the ground / prefile site (`ground_estimate` -> `arrival_eta`).
+    #[test]
+    fn compute_times_a_proposed_departure_in_the_route_wind() {
+        let parked = pilot(
+            "DAL2",
+            40.6413,
+            -73.7781,
+            0,
+            0,
+            fp("KJFK", "KDCA", "RBV WHITE SIE"),
+        );
+        let data = VatsimData {
+            pilots: vec![parked],
+            prefiles: vec![Prefile {
+                callsign: "UAL3".into(),
+                flight_plan: Some(fp("KJFK", "KDCA", "RBV WHITE SIE")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let shear = Winds::test_shear();
+        for cs in ["DAL2", "UAL3"] {
+            let windy = ladder(&data, &shear, cs);
+            let still = ladder(&data, &Winds::default(), cs);
+            assert!(
+                (windy - still).num_seconds() > 20,
+                "{cs}: {} s",
+                (windy - still).num_seconds()
+            );
+        }
+        // The estimate is the shared predictor's, from the departure field.
+        let plan = fp("KJFK", "KDCA", "RBV WHITE SIE");
+        let est = |w: &Winds| {
+            ground_estimate(
+                &NavData::load(),
+                "KJFK",
+                Some((38.8521, -77.0377)),
+                &plan,
+                &jfk_dca(),
+                w,
+                &trajectory::AircraftProfile::default(),
+                None,
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                t0(),
+            )
+        };
+        let pred = predict::arrival_eta(
+            &NavData::load(),
+            &jfk_dca(),
+            &shear,
+            &trajectory::AircraftProfile::default(),
+            &predict::ArrivalInput {
+                dep: "KJFK",
+                arr: "KDCA",
+                route: "RBV WHITE SIE",
+                pos: [40.6413, -73.7781],
+                alt_ft: 0.0,
+                gs: 0,
+                hdg: 0,
+                arr_ll: [38.8521, -77.0377],
+                cruise_ft: trajectory::parse_alt_ft(&plan.altitude),
+                cruise_tas: trajectory::capped_cruise_tas(
+                    parse_tas(&plan.cruise_tas),
+                    trajectory::parse_alt_ft(&plan.altitude),
+                    &trajectory::AircraftProfile::default(),
+                ),
+            },
+            resolve_ground_allowance_sec(
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                "KJFK",
+                Some("B738"),
+                None,
+                None,
+            ),
+            t0(),
+        );
+        let (_, ft_min, _) = est(&shear);
+        assert!(((pred.eta - t0()).num_seconds() as f64 - ft_min * 60.0).abs() <= 1.0);
+    }
+
+    // By design: with no arrival coordinates there is no route to read wind along.
+    #[test]
+    fn the_synthetic_300_nm_estimate_flies_still_air() {
+        let plan = fp("KJFK", "KDCA", "");
+        let est = |w: &Winds| {
+            ground_estimate(
+                &NavData::default(),
+                "KJFK",
+                None,
+                &plan,
+                &jfk_dca(),
+                w,
+                &trajectory::AircraftProfile::default(),
+                None,
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                t0(),
+            )
+        };
+        let (nm, windy, allowance) = est(&Winds::test_shear());
+        assert_eq!(nm, 300.0, "positive control: the fallback branch ran");
+        // The airborne minutes the model gives this plan over 300 nm in still air, a literal so a
+        // wind applied on this path moves the result.
+        let airborne = windy - allowance / 60.0;
+        assert!((airborne - 47.382).abs() < 0.01, "{airborne}");
+    }
+
+    // AC5 cross-surface: ladder and runway ETE agree when the wind is not uniform.
+    #[test]
+    fn ladder_and_runway_ete_agree_under_a_sheared_wind() {
+        let data = coastal();
+        let shear = Winds::test_shear();
+        let eta = ladder(&data, &shear, "AAL1");
+        let ete = crate::feed::runway::collect_arrivals(
+            "KDCA",
+            &data,
+            &jfk_dca(),
+            &NavData::load(),
+            &shear,
+            &trajectory::ProfileTable::default(),
+            t0(),
+            600,
+        )
+        .into_iter()
+        .find(|a| a.cs == "AAL1")
+        .expect("runway ETE")
+        .eta_ms;
+        assert_eq!(eta.timestamp_millis(), ete);
+        let still = ladder(&data, &Winds::default(), "AAL1");
+        assert!((eta - still).num_seconds() > 30);
     }
 
     /// #815: the synthetic 300 nm fallback returns the ground allowance it timed, so a departure

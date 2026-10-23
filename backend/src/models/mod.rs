@@ -2671,7 +2671,8 @@ pub struct FcaFlightDebug {
     pub cross_speed: i64,
     /// Filed cruise altitude (ft) used.
     pub cruise_alt: i64,
-    /// Mean route headwind (kt) applied (+ head / − tail); null = still air.
+    /// Mean headwind (kt) over the remaining route, each point read at the profile's altitude there
+    /// (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
     pub headwind: Option<i64>,
     /// Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
     /// source of ETA/track error.
@@ -2872,9 +2873,13 @@ pub struct DataStatus {
     pub nav_cycles_behind: Option<u32>,
     /// Last healthy nav refresh — live FAA source at the current cycle (null = none since startup).
     pub nav_refreshed: Option<DateTime<Utc>>,
-    pub winds_stations: usize,
-    /// Last successful winds fetch (null = still air, not yet fetched).
+    /// When a RAP field last loaded; null when none has since startup. Still air after failed
+    /// refreshes keeps the time of the last field: `winds_source` says what is in use.
     pub winds_refreshed: Option<DateTime<Utc>>,
+    /// Where the wind field in use came from: NOAA RAP, or none (still air).
+    pub winds_source: crate::feed::winds::WindsSource,
+    /// The time the RAP field is valid for (null in still air).
+    pub winds_valid_at: Option<DateTime<Utc>>,
 }
 
 /// A lightweight live-traffic record for plotting on the FCA + facility maps. Carries just enough of
