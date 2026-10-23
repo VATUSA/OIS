@@ -694,7 +694,7 @@ before you report the issue back to the user:
 
 ```bash
 gh issue create --repo VATUSA/OIS --title "..." --body-file issue.md \
-  --label "type:bug,area:flow"
+  --label "type:bug,area:flow"     # no --assignee: never self-assign
 
 gh project item-add 7 --owner VATUSA --url https://github.com/VATUSA/OIS/issues/<n>
 ```

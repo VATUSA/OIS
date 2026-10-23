@@ -320,6 +320,70 @@ points above, nothing more:
   `branch-ancestry-gate.sh` blocks merging or rebasing any other ref. If you need another branch's
   changes, they go to `next` first.
 
+## A Windows host
+
+- **`just test` cannot stamp a tests marker on Windows.** Seven nextest and seven vitest tests fail
+  on CRLF or `\` paths in files no branch touches (#875), and codegen fails under cmd.exe (#873), so
+  `bin/pre-push` and `test-run-gate.sh` block the push and `gh pr create`. Gate, push and open the
+  PR from the WSL clone `bin/wsl-clone.sh` manages (#872), run from the primary checkout's copy
+  through `bash -lic`, the only shell where fnm puts Linux `node` and `pnpm` ahead of the Windows
+  shims. `create` refuses without them; `gate` does not check, and every pnpm step then exits 127
+  with no marker written:
+  ```bash
+  wsl.exe -d Ubuntu -- bash -lic 'bash /mnt/c/<primary>/bin/wsl-clone.sh create <branch>'
+  #   ... gate <branch>   catch up with the Windows branch, preflight, then just test (stamps)
+  #   ... push <branch>   only with the clone's tests marker for HEAD
+  #   ... pr <branch> [gh pr create args]   also needs the Windows worktree's review marker
+  ```
+  Commit in the Windows worktree, never in the clone. `create` and `gate` catch up by
+  fast-forward, or, when the branch was amended, squashed or rebased, by resetting a clean clone to
+  the new tip; a commit made in the clone is refused. These subcommands are the one exception to
+  "never wrap a push or a stamp": `gate` runs the real `just test`, and `push` and `pr` check the
+  markers the gates would; none of them works on `main` or `next`. The push gates cannot see inside
+  `wsl.exe`, so a worker pushes only through `push`, and a reviewer's fix-forward push goes to the
+  operator as a literal command for their own PowerShell, with no `!` prefix:
+  `wsl.exe -d Ubuntu -- bash -lc 'cd ~/ois-wsl/<name> && git -c core.hooksPath=.githooks push origin HEAD:<pr-branch>'`.
+  Run WSL-side `bin/` scripts from the primary checkout's `/mnt/c` path, never a worktree's: Linux
+  git cannot open a Windows worktree (its `.git` says `gitdir: C:/...`) and marks every Windows
+  worktree prunable, so never `git gc` or `git worktree prune` the Windows repo from WSL.
+- **The WSL build env applies only in the clone.** `bin/lib/wsl.sh` writes `CARGO_BUILD_JOBS=1` and
+  `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zthreads=1` into the clone's `.env`, which
+  `just test` and `bin/pre-push` load; cargo appends it after the config's `-Zthreads=8` and mold
+  stays. Windows and Linux checkouts keep the config's settings. One `ois_backend` rustc still peaks
+  near 8.5 GB whatever `-Zthreads` is, and two in parallel have hung the VM.
+- **When the WSL gate cannot run either** (the VM is reaped or out of memory), return the push and
+  the PR to the user as literal commands for their own terminal: `git push --no-verify` under the
+  confirmed-pre-existing exception, then `gh pr create`. Green CI on the head is the Linux gate.
+- **Run long WSL work under a long-lived, backgrounded `wsl.exe`.** A `setsid`/`nohup` job started
+  through a short `wsl.exe` call dies when that call returns.
+- **A stopped mutation run can leave its mutant on disk**: stopping the task skips `bin/mutate.sh`'s
+  restore. Run `git diff` first and restore from the `mutate.*` copy. `git checkout --` under
+  `core.autocrlf` rewrites the file CRLF, and multi-line OLD patterns then stop matching. Stopping
+  the task can also leave `bin/mutate.sh` and its cargo children running and still mutating: find
+  them (`Get-CimInstance Win32_Process` with a command line matching `mutate`) and `taskkill /T` each
+  before the next run.
+- **WSL's `df` reports its virtual disk, not C:.** Ubuntu's `ext4.vhdx` grows on C: and does not
+  shrink; a second cold `target/` filled C: and remounted the distro read-only mid-gate (#872).
+  `create` and `gate` stop below 20 GiB free on C: or 9 GiB of WSL MemAvailable (`bin/lib/wsl.sh`;
+  `wsl-clone.sh preflight` prints both). Budget about 15 GB per cold `target/`, and take a `next`
+  baseline from CI on its SHA. `wsl-clone.sh remove <branch>` (`/cleanup`) drops the clone's
+  database, deletes the clone and runs `fstrim` as root, which hands the space back only on a sparse
+  disk. `create` warns when it is not; to set it: `docker desktop stop` (Docker restarts WSL
+  otherwise), `wsl --shutdown`, then `wsl --manage Ubuntu --set-sparse true`.
+- **A Windows worktree's own `target/` can hold 27 GiB.** Once its gate is going to WSL, `cargo
+  clean` it before the WSL build.
+- **Windows git here sets `user.email` but no `user.name`**, so commits are authored `unknown`.
+  Check `git config user.name` resolves before the first commit.
+- **Scripts that false-fail on a CRLF checkout (#873):** `bin/verify-worktree.sh`'s lockfile check
+  and its hooks check (an absolute `core.hooksPath` to the primary's `.githooks` is correct),
+  and `review-attestation.sh check`, which passes with `REVIEW_LENSES_MAP` pointed at an LF copy of
+  `.claude/review-lenses.tsv`. `codegen` fails under cmd.exe; in `packages/api-client` run
+  `pnpm exec openapi-typescript <spec> -o src/generated/schema.d.ts`.
+- **Stopping a backgrounded web server leaves its node processes holding the port.** Find the port's
+  owner (`Get-NetTCPConnection -LocalPort 5173`) and stop it after the task.
+- **After `git worktree move`, run `pnpm install --frozen-lockfile --force`**: `node_modules` junctions
+  still point at the old directory. The throwaway database keeps the old admin name.
+
 ## Stage on purpose
 
 - Stage explicit paths. Never `git add -A`, `git add .` or `git add --all`: they commit unmerged
