@@ -9,25 +9,27 @@
 //! Only airborne instants are replayed, so the ground branch (the taxi allowance #814 is removing)
 //! never enters the score.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use super::{is_held_out, samples::CRUISE_BAND_FT, samples::MAX_RATE_GAP_SEC, type_and_wake};
+use super::{
+    is_held_out,
+    samples::{CRUISE_BAND_FT, MAX_RATE_GAP_SEC, WindsTimeline},
+    type_and_wake,
+};
 use crate::{
     errors::ApiError,
     feed::{
         airports::AirportDb,
-        fca,
         flow::gc_dist,
         nav::NavData,
         predict::{self, ArrivalInput},
         trajectory::{self, AircraftProfile, ProfileTable},
         winds::Winds,
     },
-    repos::{
-        profile_history::{self, HistFlight, HistPosition},
-        stats as stats_repo,
-    },
+    repos::profile_history::{self, HistFlight, HistPlan, HistPosition},
 };
 
 /// The replay instant is the first position this far (ft) above the take-off roll.
@@ -113,32 +115,11 @@ pub fn arrival_input<'a>(
     }
 }
 
-/// The route length (nm) and route headwind `arrival_eta` times an aircraft against: the resolved
-/// filed route when it resolves, else the great circle to the field. The same two public calls
-/// `arrival_eta` makes, so a TOD timed on them sits on the route the arrival ETA was timed on;
-/// `tod_eta_matches_arrival_eta_at_the_field` fails the moment the two disagree.
-fn route_context(
-    nav: &NavData,
-    airports: &AirportDb,
-    winds: &Winds,
-    ac: &ArrivalInput,
-) -> (f64, Option<f64>) {
-    let [lat, lon] = ac.pos;
-    match fca::route_path(
-        nav, airports, ac.dep, ac.arr, ac.route, lat, lon, ac.hdg, ac.gs,
-    ) {
-        Some(path) => (
-            predict::path_len_nm(&path),
-            winds.route_headwind(&path, ac.cruise_ft),
-        ),
-        None => (
-            gc_dist(lat, lon, ac.arr_ll[0], ac.arr_ll[1]),
-            winds.route_headwind(&[ac.pos, ac.arr_ll], ac.cruise_ft),
-        ),
-    }
-}
-
-/// The ETA `along_nm` ahead of the aircraft on the route `arrival_eta` would time it on.
+/// The ETA `along_nm` ahead of the aircraft on the route `arrival_eta` times it on: the same
+/// [`predict::arrival_route`], the same [`Winds::along`] over it and the same
+/// [`predict::eta_along_route`], with the target short of the field. At `along_nm` = the route
+/// length it is `arrival_eta`'s ETA; `tod_eta_matches_arrival_eta_at_the_field` fails the moment the
+/// two disagree.
 pub fn eta_at_along(
     nav: &NavData,
     airports: &AirportDb,
@@ -148,11 +129,12 @@ pub fn eta_at_along(
     along_nm: f64,
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
-    let (route_nm, headwind) = route_context(nav, airports, winds, ac);
+    let route = predict::arrival_route(nav, airports, ac);
+    let wind = winds.along(&route.path, route.route_nm);
     predict::eta_along_route(
-        ac.gs >= super::samples::AIRBORNE_GS_KT as i64,
-        route_nm,
-        along_nm.clamp(0.0, route_nm),
+        route.airborne,
+        route.route_nm,
+        along_nm.clamp(0.0, route.route_nm),
         ac.alt_ft,
         ac.gs as f64,
         ac.cruise_ft,
@@ -160,7 +142,7 @@ pub fn eta_at_along(
         airports,
         ac.arr,
         profile,
-        headwind,
+        wind,
         0.0,
         now,
     )
@@ -187,9 +169,9 @@ pub fn predict_case(
     let arrival = predict::arrival_eta(nav, airports, winds, profile, &ac, 0.0, now).eta;
     // How far along the route the TOD fix lies: the route still to fly from here, less the route
     // still to fly from the TOD fix, both resolved the way arrival_eta resolves them.
-    let (here_nm, _) = route_context(nav, airports, winds, &ac);
+    let here_nm = predict::arrival_route(nav, airports, &ac).route_nm;
     let at_tod = arrival_input(plan, &obs.tod, profile);
-    let (tod_nm, _) = route_context(nav, airports, winds, &at_tod);
+    let tod_nm = predict::arrival_route(nav, airports, &at_tod).route_nm;
     let tod = eta_at_along(nav, airports, winds, profile, &ac, here_nm - tod_nm, now);
     Prediction { arrival, tod }
 }
@@ -239,55 +221,68 @@ pub struct Scored {
     pub b: CaseError,
 }
 
-/// Replay the held-out flights wholly inside `[from, to)` under both sets.
-#[allow(clippy::too_many_arguments)]
+/// What a backtest replays against: the static reference data and the two profile sets.
+pub struct Replay<'a> {
+    pub nav: &'a NavData,
+    pub airports: &'a AirportDb,
+    pub set_a: &'a ProfileTable,
+    pub set_b: &'a ProfileTable,
+    /// The types set B changed.
+    pub b_types: &'a BTreeSet<String>,
+}
+
+/// Replay the held-out flights wholly inside `[from, to)` under both sets. Flights are read in
+/// batches of [`super::FLIGHTS_PER_BATCH`], each batch's positions, plan revisions and winds in one
+/// query apiece. Returns the scored flights and the number held out.
 pub async fn run(
     pool: &PgPool,
-    nav: &NavData,
-    airports: &AirportDb,
-    set_a: &ProfileTable,
-    set_b: &ProfileTable,
-    b_types: &std::collections::BTreeSet<String>,
+    replay: &Replay<'_>,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<(Vec<Scored>, usize), ApiError> {
     let flights = profile_history::flights(pool, from, to).await?;
+    let held: Vec<&HistFlight> = flights
+        .iter()
+        .filter(|f| is_held_out(f.session_id))
+        .collect();
     let mut scored = Vec::new();
-    let mut held_out = 0;
-    for f in flights.iter().filter(|f| is_held_out(f.session_id)) {
-        held_out += 1;
-        if let Some(s) = score_flight(pool, nav, airports, set_a, set_b, b_types, f).await? {
-            scored.push(s);
+    for batch in held.chunks(super::FLIGHTS_PER_BATCH) {
+        let ids: Vec<i64> = batch.iter().map(|f| f.session_id).collect();
+        let positions = profile_history::positions(pool, &ids).await?;
+        let plans = profile_history::plans(pool, &ids).await?;
+        let (start, end) = super::batch_span(batch.iter().copied());
+        let winds = profile_history::winds_covering(pool, start, end).await?;
+        let timeline = WindsTimeline(&winds);
+        for f in batch {
+            let pos = positions.get(&f.session_id).map_or(&[][..], Vec::as_slice);
+            let revs = plans.get(&f.session_id).map_or(&[][..], Vec::as_slice);
+            if let Some(s) = score_flight(replay, f, pos, revs, &timeline) {
+                scored.push(s);
+            }
         }
     }
-    Ok((scored, held_out))
+    Ok((scored, held.len()))
 }
 
-async fn score_flight(
-    pool: &PgPool,
-    nav: &NavData,
-    airports: &AirportDb,
-    set_a: &ProfileTable,
-    set_b: &ProfileTable,
-    b_types: &std::collections::BTreeSet<String>,
+/// Score one held-out flight, or None when it cannot be scored (unknown destination, or
+/// [`observe`] finds no replay instant, descent or landing to time).
+fn score_flight(
+    replay: &Replay,
     f: &HistFlight,
-) -> Result<Option<Scored>, ApiError> {
-    let Some(arr) = airports.get(&f.arrival.to_ascii_uppercase()) else {
-        return Ok(None);
-    };
-    let positions = profile_history::positions(pool, f.session_id).await?;
-    let Some(obs) = observe(&positions, [arr.lat, arr.lon]) else {
-        return Ok(None);
-    };
+    positions: &[HistPosition],
+    revisions: &[HistPlan],
+    winds: &WindsTimeline,
+) -> Option<Scored> {
+    let arr = replay.airports.get(&f.arrival.to_ascii_uppercase())?;
+    let obs = observe(positions, [arr.lat, arr.lon])?;
     // The plan in force at the replay instant (revisions are kept in stats.flight_plan); TAS has no
     // revision history, so it comes from the flight row.
-    let rev = profile_history::plan_at(pool, f.session_id, obs.snapshot.ts).await?;
+    let rev = profile_history::plan_at(revisions, obs.snapshot.ts);
     let route = rev
-        .as_ref()
         .and_then(|r| r.route.clone())
         .or_else(|| f.route.clone())
         .unwrap_or_default();
-    let cruise_alt = rev.as_ref().and_then(|r| r.cruise_alt).or(f.cruise_alt);
+    let cruise_alt = rev.and_then(|r| r.cruise_alt).or(f.cruise_alt);
     let plan = Plan {
         dep: &f.departure,
         arr: &f.arrival,
@@ -296,23 +291,23 @@ async fn score_flight(
         filed_tas: f.cruise_tas.unwrap_or(0) as f64,
         arr_ll: [arr.lat, arr.lon],
     };
-    let winds = stats_repo::winds_at(pool, obs.snapshot.ts)
-        .await?
-        .unwrap_or_default();
+    // The same freshness rule training uses: past WINDS_MAX_AGE_SEC the replay flies still air.
+    let still = Winds::default();
+    let field = winds.at(obs.snapshot.ts).unwrap_or(&still);
     let (ty, wake) = type_and_wake(f);
     let err = |profile: &AircraftProfile| {
-        let p = predict_case(nav, airports, &winds, profile, &plan, &obs);
+        let p = predict_case(replay.nav, replay.airports, field, profile, &plan, &obs);
         CaseError {
             tod_sec: (p.tod - obs.tod.ts).num_milliseconds() as f64 / 1000.0,
             arrival_sec: (p.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0,
         }
     };
-    Ok(Some(Scored {
-        in_b: b_types.contains(&ty),
-        a: err(set_a.resolve(&ty, &wake)),
-        b: err(set_b.resolve(&ty, &wake)),
+    Some(Scored {
+        in_b: replay.b_types.contains(&ty),
+        a: err(replay.set_a.resolve(&ty, &wake)),
+        b: err(replay.set_b.resolve(&ty, &wake)),
         ty,
-    }))
+    })
 }
 
 /// Set A is the catalog as stored (`flow.aircraft_profile` rows); set B is set A with every type the
@@ -617,5 +612,313 @@ mod tests {
         assert_eq!(s.bias, 0.0);
         // abs sorted 30, 60, 90, 120: p90 at rank 2.7 → 90 + 0.7·30 = 111.
         assert!((s.p90_abs - 111.0).abs() < 1e-9);
+    }
+
+    // ---- #828: the backtest times on `predict::arrival_route` and refuses stale winds ----------
+    //
+    /// 80 kt from 225° (on the nose of a south-westbound KJFK→KDCA flight) at every level over
+    /// 37–42°N, 79–72°W.
+    fn headwind_field() -> Winds {
+        Winds::test_grid(
+            (37.0, -79.0),
+            (6, 8),
+            &[3_000.0, 18_000.0, 30_000.0],
+            t0(),
+            |_, _, _| (-57, -57, -20),
+        )
+    }
+
+    /// Under a per-segment RAP field, on a route that resolves and on one that does not, the
+    /// backtest's own timing to the field is `predict::arrival_eta`'s to the second. Positive
+    /// control: the field moves the ETA by more than 30 s against still air.
+    #[test]
+    fn tod_eta_matches_arrival_eta_at_the_field_under_a_sheared_rap_field() {
+        let nav = NavData::load();
+        let ap = airports();
+        let field = Winds::test_shear();
+        let profile = AircraftProfile::default();
+        for route in ["RBV WHITE SIE", ""] {
+            let p = plan(route);
+            let ac = arrival_input(&p, &pos(0, 40.2, -74.0, 31_000, 450), &profile);
+            let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, 0.0, t0());
+            let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
+            assert_eq!(ours, live.eta, "route {route:?}");
+            let still =
+                predict::arrival_eta(&nav, &ap, &Winds::default(), &profile, &ac, 0.0, t0());
+            assert!(
+                (live.eta - still.eta).num_seconds().abs() > 30,
+                "route {route:?}"
+            );
+        }
+    }
+
+    /// From the ground (a branch the backtest never replays, since it starts airborne), the
+    /// backtest's timing still equals `arrival_eta`'s: same route, same ground handling, no ground
+    /// allowance on either side.
+    #[test]
+    fn tod_eta_matches_arrival_eta_from_the_ground() {
+        let nav = NavData::default();
+        let ap = airports();
+        let field = headwind_field();
+        let profile = AircraftProfile::default();
+        let p = plan("");
+        let ac = arrival_input(&p, &pos(0, 40.64, -73.78, 20, 0), &profile);
+        let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, 0.0, t0());
+        let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
+        assert_eq!(ours, live.eta);
+    }
+
+    /// The backtest resolves a route only through `predict::arrival_route`: no private copy of the
+    /// resolution (AC4, "not a copy of the formula"). A source scan, because the property is an
+    /// absence that no call can show.
+    #[test]
+    fn the_backtest_resolves_routes_only_through_predict_arrival_route() {
+        let src = include_str!("backtest.rs");
+        let prod = &src[..src.find("#[cfg(test)]").expect("the test module marker")];
+        let code: String = prod
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(code.contains("predict::arrival_route("), "anchor missing");
+        for copy in ["route_path(", "path_len_nm(", "GROUND_ROUTE_FACTOR"] {
+            assert!(
+                !code.contains(copy),
+                "backtest.rs resolves routes itself: {copy}"
+            );
+        }
+    }
+
+    /// One stored flight: its row (`route` filed on the flight) and its positions.
+    async fn seed(pool: &PgPool, session_id: i64, route: &str, positions: &[HistPosition]) {
+        let (first, last) = (positions[0].ts, positions[positions.len() - 1].ts);
+        sqlx::query(
+            "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, \
+                last_seen, status, departure, arrival, aircraft_short, aircraft_faa, cruise_tas, \
+                cruise_alt, route) \
+             values ($1, 1, 'TEST', $2, $2, $3, 'completed', 'KJFK', 'KDCA', 'B738', 'B738/L', \
+                440, 24000, $4)",
+        )
+        .bind(session_id)
+        .bind(first)
+        .bind(last)
+        .bind(route)
+        .execute(pool)
+        .await
+        .unwrap();
+        for p in positions {
+            sqlx::query(
+                "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, \
+                    heading) values ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(session_id)
+            .bind(p.ts)
+            .bind(p.lat)
+            .bind(p.lon)
+            .bind(p.altitude)
+            .bind(p.groundspeed)
+            .bind(p.heading)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn seed_winds(pool: &PgPool, ts: DateTime<Utc>, w: &Winds) {
+        sqlx::query("insert into stats.winds (ts, data) values ($1, $2)")
+            .bind(ts)
+            .bind(sqlx::types::Json(w))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// `backtest::run` over the window around [`flight`], with set A and set B both the default
+    /// profile (so `a` and `b` agree), on `nav`.
+    async fn run_all(pool: &PgPool, nav: &NavData) -> (Vec<Scored>, usize) {
+        let ap = airports();
+        let table = ProfileTable::new(AircraftProfile::default(), HashMap::new(), HashMap::new());
+        let none = BTreeSet::new();
+        let replay = Replay {
+            nav,
+            airports: &ap,
+            set_a: &table,
+            set_b: &table,
+            b_types: &none,
+        };
+        run(
+            pool,
+            &replay,
+            t0() - Duration::hours(1),
+            t0() + Duration::hours(3),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The arrival error `predict_case` gives `positions` under `winds` and `route`.
+    fn expected(nav: &NavData, winds: &Winds, route: &str, positions: &[HistPosition]) -> f64 {
+        let obs = observe(positions, [38.85, -77.04]).unwrap();
+        let mut p = plan(route);
+        p.cruise_ft = 24_000.0;
+        let pred = predict_case(
+            nav,
+            &airports(),
+            winds,
+            &AircraftProfile::default(),
+            &p,
+            &obs,
+        );
+        (pred.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0
+    }
+
+    /// The backtest applies training's winds freshness rule: a snapshot 130 min before the replay
+    /// instant is ignored (still air), one 110 min before it is flown.
+    #[sqlx::test]
+    async fn the_backtest_flies_still_air_past_a_stale_winds_snapshot_and_the_field_within_two_hours(
+        pool: PgPool,
+    ) {
+        let nav = NavData::default();
+        let f = flight();
+        seed(&pool, 5, "", &f).await;
+        let snap = observe(&f, [38.85, -77.04]).unwrap().snapshot.ts;
+        let field = headwind_field();
+        seed_winds(&pool, snap - Duration::minutes(130), &field).await;
+        let (stale, _) = run_all(&pool, &nav).await;
+        assert_eq!(
+            stale[0].a.arrival_sec,
+            expected(&nav, &Winds::default(), "", &f)
+        );
+
+        seed_winds(&pool, snap - Duration::minutes(110), &field).await;
+        let (fresh, _) = run_all(&pool, &nav).await;
+        assert_eq!(fresh[0].a.arrival_sec, expected(&nav, &field, "", &f));
+        assert!((fresh[0].a.arrival_sec - stale[0].a.arrival_sec).abs() > 30.0);
+    }
+
+    /// Each held-out flight replays on the plan revision in force at its own replay instant (a
+    /// revision filed later is not used), and a flight with no revision on its `stats.flight` route.
+    #[sqlx::test]
+    async fn each_held_out_flight_is_replayed_on_the_plan_revision_in_force_at_its_own_snapshot(
+        pool: PgPool,
+    ) {
+        let nav = NavData::load();
+        let f = flight();
+        let snap = observe(&f, [38.85, -77.04]).unwrap().snapshot.ts;
+        seed(&pool, 5, "", &f).await;
+        let later: Vec<_> = f
+            .iter()
+            .map(|p| HistPosition {
+                ts: p.ts + Duration::seconds(7),
+                ..p.clone()
+            })
+            .collect();
+        seed(&pool, 10, "RBV WHITE SIE", &later).await;
+        for (at, route) in [
+            (snap - Duration::minutes(5), "RBV WHITE SIE"),
+            (snap + Duration::minutes(5), ""),
+        ] {
+            sqlx::query(
+                "insert into stats.flight_plan (session_id, effective_from, route, cruise_alt) \
+                 values (5, $1, $2, 24000)",
+            )
+            .bind(at)
+            .bind(route)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let (scored, held) = run_all(&pool, &nav).await;
+        assert_eq!((held, scored.len()), (2, 2));
+        let resolved = expected(&nav, &Winds::default(), "RBV WHITE SIE", &f);
+        assert_ne!(
+            resolved,
+            expected(&nav, &Winds::default(), "", &f),
+            "routes must differ"
+        );
+        assert_eq!(
+            scored[0].a.arrival_sec, resolved,
+            "flight 5: the revision in force"
+        );
+        assert_eq!(
+            scored[1].a.arrival_sec,
+            expected(&nav, &Winds::default(), "RBV WHITE SIE", &later),
+            "flight 10: no revision, the flight row's route"
+        );
+    }
+
+    /// Two held-out flights whose positions interleave in time, beside a training flight: each is
+    /// scored on its own track, and the training flight is not scored.
+    #[sqlx::test]
+    async fn run_scores_each_held_out_flight_on_its_own_positions(pool: PgPool) {
+        let nav = NavData::default();
+        let five = flight();
+        let mut ten: Vec<_> = flight()
+            .into_iter()
+            .map(|p| HistPosition {
+                ts: p.ts + Duration::seconds(7),
+                ..p
+            })
+            .collect();
+        ten[3].altitude = 2_500;
+        ten[4].ts += Duration::seconds(300);
+        seed(&pool, 5, "", &five).await;
+        seed(&pool, 10, "", &ten).await;
+        seed(&pool, 1, "", &flight()).await;
+        let (scored, held) = run_all(&pool, &nav).await;
+        assert_eq!(held, 2);
+        assert_eq!(scored.len(), 2);
+        let (e5, e10) = (
+            expected(&nav, &Winds::default(), "", &five),
+            expected(&nav, &Winds::default(), "", &ten),
+        );
+        assert_ne!(e5, e10, "the two tracks must score differently");
+        assert_eq!(
+            [scored[0].a.arrival_sec, scored[1].a.arrival_sec],
+            [e5, e10]
+        );
+    }
+
+    /// The report's rows, worked by hand from two flights: A errs (+60 TOD, -120 arrival) and
+    /// (-30, +90); B errs (+10, -20) and (+30, -40); only the second flight's type is in B.
+    #[test]
+    fn the_report_gives_mae_bias_and_p90_for_both_sets_and_both_points() {
+        let e = |tod_sec, arrival_sec| CaseError {
+            tod_sec,
+            arrival_sec,
+        };
+        let scored = vec![
+            Scored {
+                ty: "B738".into(),
+                in_b: false,
+                a: e(60.0, -120.0),
+                b: e(10.0, -20.0),
+            },
+            Scored {
+                ty: "B77W".into(),
+                in_b: true,
+                a: e(-30.0, 90.0),
+                b: e(30.0, -40.0),
+            },
+        ];
+        let r = report(&scored, 5, "A", "B");
+        assert!(r.contains("5 held-out flights, 2 scored"), "{r}");
+        assert!(r.contains("## All scored flights (2 flights)"), "{r}");
+        assert!(
+            r.contains("## Flights of types the new set profiles (1 flights)"),
+            "{r}"
+        );
+        // All flights. A TOD: |60|,|30| → MAE 45, bias +15, p90 = 30 + 0.9·30 = 57.
+        for row in [
+            "| A | TOD | 45 | +15 | 57 |",
+            "| A | arrival | 105 | -15 | 117 |",
+            "| B | TOD | 20 | +20 | 28 |",
+            "| B | arrival | 30 | -30 | 38 |",
+            // The B-typed flight alone.
+            "| A | TOD | 30 | -30 | 30 |",
+            "| B | arrival | 40 | -40 | 40 |",
+        ] {
+            assert!(r.contains(row), "missing {row}\n{r}");
+        }
     }
 }

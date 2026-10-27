@@ -80,15 +80,15 @@ fn accumulation_order_does_not_change_the_output() {
     );
 }
 
-/// One synthetic B738 flight starting at `start`: a 15-second-tick climb at 2,000 fpm to 10,000 ft
-/// and 1,500 fpm to 12,000 ft, ten minutes level, then a 1,800 fpm descent.
-fn track(start: DateTime<Utc>) -> Vec<(DateTime<Utc>, f32, f32, i32, i16)> {
+/// One synthetic flight starting at `start`: a 15-second-tick climb at `low_fpm` to 10,000 ft and
+/// 1,500 fpm to 12,000 ft, ten minutes level at 300 kt over the ground, then a 1,800 fpm descent.
+fn track(start: DateTime<Utc>, low_fpm: i32) -> Vec<(DateTime<Utc>, f32, f32, i32, i16)> {
     let mut v = vec![];
     let (mut t, mut lon, mut alt) = (start, -100.0_f32, 1_000);
     let mut push = |t: DateTime<Utc>, lon: f32, alt: i32, gs: i16| v.push((t, 40.0, lon, alt, gs));
     while alt < 12_000 {
         push(t, lon, alt, 250);
-        alt += if alt < 10_000 { 500 } else { 375 };
+        alt += if alt < 10_000 { low_fpm / 4 } else { 375 };
         t += Duration::seconds(15);
         lon += 0.02;
     }
@@ -107,17 +107,24 @@ fn track(start: DateTime<Utc>) -> Vec<(DateTime<Utc>, f32, f32, i32, i16)> {
 }
 
 async fn seed_flight(pool: &PgPool, session_id: i64, start: DateTime<Utc>) {
-    let pts = track(start);
+    seed_typed(pool, session_id, start, "B738", 2_000).await;
+}
+
+/// A flight of type `ty` on [`track`], climbing at `low_fpm` below 10,000 ft.
+async fn seed_typed(pool: &PgPool, session_id: i64, start: DateTime<Utc>, ty: &str, low_fpm: i32) {
+    let pts = track(start, low_fpm);
     let end = pts.last().unwrap().0;
     sqlx::query(
         "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, last_seen, \
             status, departure, arrival, aircraft_short, aircraft_faa, cruise_tas, cruise_alt, route) \
-         values ($1, 1, 'TEST', $2, $2, $3, 'completed', 'KAAA', 'KBBB', 'B738', 'B738/L', 450, \
+         values ($1, 1, 'TEST', $2, $2, $3, 'completed', 'KAAA', 'KBBB', $4, $5, 450, \
             12000, 'DCT')",
     )
     .bind(session_id)
     .bind(start)
     .bind(end)
+    .bind(ty)
+    .bind(format!("{ty}/L"))
     .execute(pool)
     .await
     .unwrap();
@@ -179,4 +186,67 @@ async fn the_builder_is_repeatable_and_skips_held_out_flights(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(none.source.flights_read, 0);
+}
+
+// ---- #828 plan D: one streamed position query, winds loaded once, output unchanged ------------
+//
+/// A snapshot of `w` at `ts`.
+async fn seed_winds(pool: &PgPool, ts: DateTime<Utc>, w: &crate::feed::winds::Winds) {
+    sqlx::query("insert into stats.winds (ts, data) values ($1, $2)")
+        .bind(ts)
+        .bind(sqlx::types::Json(w))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// The same "from" wind vector `(u, v)` (kt) at every level over 38–42°N, 104–94°W.
+fn field(u: i16, v: i16) -> crate::feed::winds::Winds {
+    crate::feed::winds::Winds::test_grid(
+        (38.0, -104.0),
+        (5, 11),
+        &[3_000.0, 10_000.0, 18_000.0],
+        t0(),
+        move |_, _, _| (u, v, -10),
+    )
+}
+
+/// Two flights whose ticks interleave 3 s apart, read in one batch: each type's rate comes from
+/// its own positions.
+#[sqlx::test]
+async fn interleaved_flights_each_measure_their_own_rates(pool: PgPool) {
+    seed_typed(&pool, 1, t0(), "B738", 2_000).await;
+    seed_typed(&pool, 2, t0() + Duration::seconds(3), "A320", 1_200).await;
+    let set = build(&pool, t0() - Duration::hours(1), t0() + Duration::hours(2))
+        .await
+        .unwrap();
+    assert_eq!(set.types["B738"].fields["climb_fpm_lo"].median, 2_000.0);
+    assert_eq!(set.types["A320"].fields["climb_fpm_lo"].median, 1_200.0);
+}
+
+/// One batch spans two winds snapshots: a flight at t0 flies the calm one, a flight three hours on
+/// the 50 kt easterly (a headwind eastbound), each at its own time.
+#[sqlx::test]
+async fn a_flight_late_in_the_window_uses_the_winds_snapshot_in_force_at_its_own_time(
+    pool: PgPool,
+) {
+    seed_winds(&pool, t0() - Duration::minutes(30), &field(0, 0)).await;
+    seed_winds(&pool, t0() + Duration::hours(3), &field(50, 0)).await;
+    seed_typed(&pool, 1, t0(), "B738", 2_000).await;
+    seed_typed(&pool, 2, t0() + Duration::minutes(190), "A320", 2_000).await;
+    let set = build(&pool, t0() - Duration::hours(1), t0() + Duration::hours(5))
+        .await
+        .unwrap();
+    assert_eq!(set.types["B738"].fields["cruise_tas"].median, 300.0);
+    assert_eq!(set.types["A320"].fields["cruise_tas"].median, 350.0);
+}
+
+/// The snapshot in force when the window opens sits before `from`, and still covers its flights.
+#[sqlx::test]
+async fn a_flight_at_the_start_of_the_window_uses_the_snapshot_from_before_it(pool: PgPool) {
+    let from = t0();
+    seed_winds(&pool, from - Duration::minutes(20), &field(0, 0)).await;
+    seed_flight(&pool, 1, from + Duration::minutes(1)).await;
+    let set = build(&pool, from, from + Duration::hours(2)).await.unwrap();
+    assert_eq!(set.types["B738"].fields["cruise_tas"].median, 300.0);
 }

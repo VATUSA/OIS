@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use crate::feed::{
     fca::bearing_deg,
     flow::gc_dist,
-    trajectory::{MAX_PLAUSIBLE_TAS, ias_to_tas, mach_to_tas},
+    trajectory::{MAX_PLAUSIBLE_TAS, ias_to_tas, isa_temp_k, mach_to_tas_at},
     winds::Winds,
 };
 use crate::repos::profile_history::HistPosition;
@@ -43,8 +43,9 @@ pub const LOW_BAND_FT: f64 = 10_000.0;
 /// At or above this altitude a climb, cruise or descent speed is recorded as a Mach number instead
 /// of an indicated airspeed: the IAS/Mach crossover of a jet sits around FL280–FL300.
 pub const MACH_BAND_FT: f64 = 28_000.0;
-/// A winds snapshot older than this (s) at the sample time is not used: AWC issues the tables about
-/// four times a day and OIS snapshots them hourly, so a gap past two hours means a missed refresh.
+/// A winds snapshot older than this (s) at the sample time is not used: RAP publishes a cycle every
+/// hour and OIS snapshots each one (`jobs.rs` `WINDS_REFRESH_INTERVAL`), so a gap past two hours
+/// means missed refreshes.
 pub const WINDS_MAX_AGE_SEC: i64 = 2 * 60 * 60;
 
 /// One performance field of [`crate::feed::trajectory::AircraftProfile`] a flight can measure.
@@ -131,9 +132,10 @@ pub fn tas_to_ias(tas_kt: f64, alt_ft: f64) -> f64 {
     tas_kt / ias_to_tas(1.0, alt_ft)
 }
 
-/// Mach number for a true airspeed at altitude: the inverse of `trajectory::mach_to_tas`.
-pub fn tas_to_mach(tas_kt: f64, alt_ft: f64) -> f64 {
-    tas_kt / mach_to_tas(1.0, alt_ft)
+/// Mach number for a true airspeed in air at `temp_k`: the inverse of `trajectory::mach_to_tas_at`,
+/// the conversion the model flies a Mach schedule with.
+pub fn tas_to_mach(tas_kt: f64, temp_k: f64) -> f64 {
+    tas_kt / mach_to_tas_at(1.0, temp_k)
 }
 
 /// Every sample one flight yields, per field, in position order.
@@ -176,12 +178,14 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
         if dt < MIN_GAP_SEC {
             continue;
         }
-        let fpm = (b.altitude - a.altitude) as f64 / dt as f64 * 60.0;
+        let fpm = (b.altitude - a.altitude) as f64 * 60.0 / dt as f64;
         if fpm.abs() > MAX_PLAUSIBLE_FPM {
             continue;
         }
         let alt = (a.altitude + b.altitude) as f64 / 2.0;
-        let tas = pair_tas(a, b, alt, winds);
+        let air = pair_air(a, b, alt, winds);
+        let tas = air.map(|x| x.tas);
+        let temp_k = air.map_or_else(|| isa_temp_k(alt), |x| x.temp_k);
 
         if fpm >= MIN_VERTICAL_FPM && dt <= MAX_RATE_GAP_SEC {
             out.push(
@@ -195,7 +199,7 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
             if let Some(tas) = tas {
                 push_speed(
                     &mut out,
-                    alt,
+                    (alt, temp_k),
                     tas,
                     Field::ClimbIasLo,
                     Field::ClimbIasHi,
@@ -207,7 +211,7 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
             if let Some(tas) = tas {
                 push_speed(
                     &mut out,
-                    alt,
+                    (alt, temp_k),
                     tas,
                     Field::DescIasLo,
                     Field::DescIasHi,
@@ -222,7 +226,7 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
         {
             out.push(Field::CruiseTas, tas);
             if alt >= MACH_BAND_FT {
-                out.push(Field::CruiseMach, tas_to_mach(tas, alt));
+                out.push(Field::CruiseMach, tas_to_mach(tas, temp_k));
             }
         }
     }
@@ -230,9 +234,16 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
 }
 
 /// A climb or descent speed: Mach at or above [`MACH_BAND_FT`], otherwise IAS in the low or high band.
-fn push_speed(out: &mut FlightSamples, alt: f64, tas: f64, lo: Field, hi: Field, mach: Field) {
+fn push_speed(
+    out: &mut FlightSamples,
+    (alt, temp_k): (f64, f64),
+    tas: f64,
+    lo: Field,
+    hi: Field,
+    mach: Field,
+) {
     if alt >= MACH_BAND_FT {
-        out.push(mach, tas_to_mach(tas, alt));
+        out.push(mach, tas_to_mach(tas, temp_k));
     } else {
         out.push(
             if alt < LOW_BAND_FT { lo } else { hi },
@@ -241,10 +252,28 @@ fn push_speed(out: &mut FlightSamples, alt: f64, tas: f64, lo: Field, hi: Field,
     }
 }
 
-/// The pair's true airspeed: the mean reported groundspeed plus the headwind along the track between
-/// the two points, at their midpoint and mean altitude. None without a fresh winds snapshot, when no
-/// station covers the point, or when the result is not a believable airspeed.
-fn pair_tas(a: &HistPosition, b: &HistPosition, alt: f64, winds: &WindsTimeline) -> Option<f64> {
+/// The air a position pair flew through: its true airspeed and the air temperature (K) the model
+/// would fly a Mach number in there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PairAir {
+    tas: f64,
+    temp_k: f64,
+}
+
+/// Length (nm) of the one-leg path [`pair_air`] samples the field along.
+const PROBE_LEG_NM: f64 = 1.0;
+
+/// The pair's true airspeed: the mean reported groundspeed plus the headwind along the track, at the
+/// midpoint and mean altitude, read from the field the way the model reads it (`Winds::along` and
+/// `RouteWind::air`). The temperature is the field's there, else ISA, as the model falls back
+/// (`VerticalProfile`'s Mach cap). None without a fresh winds snapshot, where the field does not
+/// cover the point, or when the result is not a believable airspeed.
+fn pair_air(
+    a: &HistPosition,
+    b: &HistPosition,
+    alt: f64,
+    winds: &WindsTimeline,
+) -> Option<PairAir> {
     let w = winds.at(a.ts)?;
     let (pa, pb) = ([a.lat as f64, a.lon as f64], [b.lat as f64, b.lon as f64]);
     // Between two feed ticks a few hundred metres apart the bearing is noise; the reported heading
@@ -254,11 +283,26 @@ fn pair_tas(a: &HistPosition, b: &HistPosition, alt: f64, winds: &WindsTimeline)
     } else {
         b.heading as f64
     };
-    let mid = ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0);
-    let hw = w.point_headwind(mid.0, mid.1, track, alt)?;
-    let gs = (a.groundspeed as f64 + b.groundspeed as f64) / 2.0;
-    let tas = tas_from_gs(gs, hw);
-    (60.0..=MAX_PLAUSIBLE_TAS).contains(&tas).then_some(tas)
+    let mid = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0];
+    let ahead = offset(mid, track, PROBE_LEG_NM);
+    let (hw, temp) = w.along(&[mid, ahead], PROBE_LEG_NM).air(PROBE_LEG_NM, alt);
+    let tas = tas_from_gs((a.groundspeed as f64 + b.groundspeed as f64) / 2.0, hw?);
+    (60.0..=MAX_PLAUSIBLE_TAS)
+        .contains(&tas)
+        .then_some(PairAir {
+            tas,
+            temp_k: temp.unwrap_or_else(|| isa_temp_k(alt)),
+        })
+}
+
+/// The point `nm` from `p` along `course_deg`, flat-earth: over one mile the error is far below the
+/// field's 1° grid.
+fn offset(p: [f64; 2], course_deg: f64, nm: f64) -> [f64; 2] {
+    let c = course_deg.to_radians();
+    [
+        p[0] + nm * c.cos() / 60.0,
+        p[1] + nm * c.sin() / (60.0 * p[0].to_radians().cos().max(1e-6)),
+    ]
 }
 
 #[cfg(test)]
@@ -266,6 +310,7 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+    use crate::feed::{trajectory::mach_to_tas, winds::GRID_MISSING};
 
     fn t0() -> DateTime<Utc> {
         DateTime::from_timestamp(1_790_000_000, 0).unwrap()
@@ -296,10 +341,10 @@ mod tests {
 
     #[test]
     fn conversions_invert_the_model() {
-        // Literal ISA values: 250 KIAS at 10,000 ft is about 288 KTAS; M0.78 at FL350 about 450 KTAS.
-        assert!((ias_to_tas(250.0, 10_000.0) - 288.0).abs() < 1.5);
+        // Literal ISA value: 250 KIAS at 10,000 ft is 290.9 KTAS (σ = 0.7385).
+        assert!((ias_to_tas(250.0, 10_000.0) - 290.9).abs() < 0.1);
         assert!((tas_to_ias(ias_to_tas(250.0, 10_000.0), 10_000.0) - 250.0).abs() < 1e-9);
-        assert!((tas_to_mach(mach_to_tas(0.78, 35_000.0), 35_000.0) - 0.78).abs() < 1e-12);
+        assert!((tas_to_mach(mach_to_tas_at(0.78, 218.81), 218.81) - 0.78).abs() < 1e-12);
         assert_eq!(tas_from_gs(400.0, 50.0), 450.0);
     }
 
@@ -337,24 +382,6 @@ mod tests {
         assert!(tas.iter().all(|t| (t - 470.0).abs() < 0.5), "{tas:?}");
         let mach = s.0[&Field::CruiseMach][0];
         assert!((mach - 470.0 / mach_to_tas(1.0, 35_000.0)).abs() < 1e-3);
-    }
-
-    #[test]
-    fn a_stale_winds_snapshot_gives_no_airspeed() {
-        let snap = [(
-            t0() - Duration::seconds(WINDS_MAX_AGE_SEC + 60),
-            winds(90.0, 50.0),
-        )];
-        let p: Vec<_> = (0..5)
-            .map(|k| pos(k * 60, -100.0 + k as f64 * 0.12, 35_000, 420))
-            .collect();
-        assert!(flight_samples(&p, &WindsTimeline(&snap)).0.is_empty());
-        // Positive control: the same snapshot just inside the limit is used.
-        let fresh = [(
-            t0() - Duration::seconds(WINDS_MAX_AGE_SEC - 60),
-            winds(90.0, 50.0),
-        )];
-        assert!(!flight_samples(&p, &WindsTimeline(&fresh)).0.is_empty());
     }
 
     #[test]
@@ -397,5 +424,141 @@ mod tests {
         ];
         let s = flight_samples(&p, &WindsTimeline(&[]));
         assert_eq!(s.0[&Field::ClimbFpmLo], vec![2_000.0]);
+    }
+
+    /// A RAP-shaped field over 38–42°N, 104–94°W, at every level the same "from" wind vector
+    /// `(u, v)` (kt) and temperature `t` (°C, or `GRID_MISSING`).
+    fn grid(u: i16, v: i16, t: i16) -> Winds {
+        Winds::test_grid(
+            (38.0, -104.0),
+            (5, 11),
+            &[3_000.0, 10_000.0, 18_000.0, 30_000.0, 39_000.0],
+            t0(),
+            move |_, _, _| (u, v, t),
+        )
+    }
+
+    /// A position at `lat` (otherwise as [`pos`]).
+    fn pos_at(sec: i64, lat: f64, lon: f64, alt: i32, gs: i16) -> HistPosition {
+        HistPosition {
+            lat: lat as f32,
+            ..pos(sec, lon, alt, gs)
+        }
+    }
+
+    /// Level at FL350 eastbound at `gs`, ten one-minute pairs.
+    fn cruise(gs: i16) -> Vec<HistPosition> {
+        (0..10)
+            .map(|k| pos(k * 60, -100.0 + k as f64 * 0.17, 35_000, gs))
+            .collect()
+    }
+
+    fn sampled(p: &[HistPosition], w: Winds) -> FlightSamples {
+        flight_samples(p, &WindsTimeline(&[(t0() - Duration::minutes(10), w)]))
+    }
+
+    /// A Mach at -40 °C (233.15 K; ISA at FL350 is 218.81 K) is the TAS over the speed of sound in
+    /// that air: 480 / 595.01 = 0.8067, not ISA's 0.8327. Converting back through the model's own
+    /// `mach_to_tas_at` gives the TAS.
+    #[test]
+    fn a_cruise_mach_in_a_warm_rap_column_inverts_the_models_temperature_conversion() {
+        let s = sampled(&cruise(480), grid(0, 0, -40));
+        assert!(
+            s.0[&Field::CruiseTas]
+                .iter()
+                .all(|t| (t - 480.0).abs() < 1e-9)
+        );
+        let m = s.0[&Field::CruiseMach][0];
+        assert!((m - 0.8067).abs() < 1e-4, "{m}");
+        assert!((mach_to_tas_at(m, 233.15) - 480.0).abs() < 0.01);
+    }
+
+    /// A 2,000 fpm climb through FL300–FL320 at 450 kt in a -30 °C column records Mach
+    /// 450 / 607.63 = 0.7406 and no high-band IAS.
+    #[test]
+    fn a_climb_mach_in_a_warm_rap_column_uses_the_column_temperature() {
+        let p: Vec<_> = (0..5)
+            .map(|k| {
+                pos(
+                    k * 15,
+                    -100.0 + k as f64 * 0.03,
+                    30_000 + 500 * k as i32,
+                    450,
+                )
+            })
+            .collect();
+        let s = sampled(&p, grid(0, 0, -30));
+        let m = s.0[&Field::ClimbMach][0];
+        assert!((m - 0.7406).abs() < 1e-4, "{m}");
+        assert!(!s.0.contains_key(&Field::ClimbIasHi));
+    }
+
+    /// Where the field carries no temperature the Mach is taken on ISA, as the model flies it:
+    /// 480 / 576.42 = 0.8327 at FL350.
+    #[test]
+    fn a_mach_sample_without_a_field_temperature_uses_isa() {
+        let s = sampled(&cruise(480), grid(0, 0, GRID_MISSING));
+        let m = s.0[&Field::CruiseMach][0];
+        assert!((m - 0.8327).abs() < 1e-4, "{m}");
+    }
+
+    /// The model converts IAS on density altitude alone (`trajectory::ias_to_tas`), so a warm
+    /// column leaves an IAS sample where an ISA one puts it: 300 kt TAS at 15,000 ft is 238 KIAS.
+    #[test]
+    fn an_ias_sample_is_unchanged_by_a_warm_column() {
+        let p = vec![pos(0, -100.0, 14_625, 300), pos(30, -99.96, 15_375, 300)];
+        let isa = sampled(&p, grid(0, 0, -15)).0[&Field::ClimbIasHi][0];
+        let warm = sampled(&p, grid(0, 0, 5)).0[&Field::ClimbIasHi][0];
+        assert_eq!(isa, warm);
+        assert!((isa - 238.0).abs() < 0.5, "{isa}");
+    }
+
+    /// TAS is the mean groundspeed plus the field's headwind along the pair: 50 kt from 090 on an
+    /// eastbound pair is a headwind (470), from 270 a tailwind (370).
+    #[test]
+    fn cruise_tas_adds_the_rap_headwind_along_the_pair() {
+        let head = sampled(&cruise(420), grid(50, 0, -50)).0[&Field::CruiseTas].clone();
+        assert!(head.iter().all(|t| (t - 470.0).abs() < 0.5), "{head:?}");
+        let tail = sampled(&cruise(420), grid(-50, 0, -50)).0[&Field::CruiseTas].clone();
+        assert!(tail.iter().all(|t| (t - 370.0).abs() < 0.5), "{tail:?}");
+    }
+
+    /// Two fixes 0.2 nm apart are too close for a bearing: the reported heading (090, into a 50 kt
+    /// easterly) is the track, though the second fix lies due north.
+    #[test]
+    fn a_pair_under_half_a_mile_takes_its_track_from_the_reported_heading() {
+        let p = vec![
+            pos_at(0, 40.0, -100.0, 35_000, 480),
+            pos_at(60, 40.0 + 0.2 / 60.0, -100.0, 35_000, 480),
+        ];
+        let tas = sampled(&p, grid(50, 0, -50)).0[&Field::CruiseTas][0];
+        assert!((tas - 530.0).abs() < 0.5, "{tas}");
+    }
+
+    /// Two fixes 6 nm apart due north of each other: the bearing (000) is the track, so a 50 kt
+    /// easterly is a crosswind and TAS is the groundspeed, whatever the reported heading says.
+    #[test]
+    fn a_pair_over_half_a_mile_takes_its_track_from_its_own_bearing() {
+        let p = vec![
+            pos_at(0, 40.0, -100.0, 35_000, 480),
+            pos_at(60, 40.1, -100.0, 35_000, 480),
+        ];
+        let tas = sampled(&p, grid(50, 0, -50)).0[&Field::CruiseTas][0];
+        assert!((tas - 480.0).abs() < 0.5, "{tas}");
+    }
+
+    /// A snapshot 110 minutes old still gives an airspeed; one 130 minutes old gives none.
+    #[test]
+    fn winds_110_minutes_old_are_used_and_130_minutes_old_are_not() {
+        assert!((6_600..7_800).contains(&WINDS_MAX_AGE_SEC));
+        let p = &cruise(420)[..2];
+        let at = |min: i64| {
+            flight_samples(
+                p,
+                &WindsTimeline(&[(t0() - Duration::minutes(min), grid(0, 0, -50))]),
+            )
+        };
+        assert_eq!(at(110).0[&Field::CruiseTas], vec![420.0]);
+        assert!(at(130).0.is_empty());
     }
 }

@@ -219,22 +219,22 @@ pub struct ArrivalInput<'a> {
     pub cruise_tas: f64,
 }
 
-/// Predict when an aircraft reaches its destination field, and how far along its route that is.
-///
-/// Resolves the filed route via [`fca::route_path`] (the trimmed remaining route for airborne
-/// aircraft, the full dep→arr route for ground/proposed), then times it through
-/// [`eta_along_route`] with the target at the field. Falls back to a straight-line great circle
-/// `pos → arr_ll` when the route won't resolve. `ground_allowance_sec` is only applied on the
-/// ground branch (see [`eta_along_route`]) — an airborne caller may pass any value.
-pub fn arrival_eta(
-    nav: &NavData,
-    airports: &AirportDb,
-    winds: &Winds,
-    profile: &AircraftProfile,
-    ac: &ArrivalInput,
-    ground_allowance_sec: f64,
-    now: DateTime<Utc>,
-) -> ArrivalPrediction {
+/// The route an arrival is timed along: the resolved path, its length, and whether the aircraft is
+/// airborne (`gs >= 50`).
+pub struct ArrivalRoute {
+    pub path: Vec<[f64; 2]>,
+    /// Along-route distance to the field, nm. A ground flight whose route does not resolve past its
+    /// endpoints carries [`GROUND_ROUTE_FACTOR`].
+    pub route_nm: f64,
+    pub airborne: bool,
+}
+
+/// Resolve the route [`arrival_eta`] times an aircraft along: the filed route via
+/// [`fca::route_path`] (the trimmed remaining route for airborne aircraft, the full dep→arr route
+/// for ground/proposed), else a straight-line great circle `pos → arr_ll`. Public so the offline
+/// profile backtest (`profile_builder::backtest`) times a point short of the field on exactly this
+/// route.
+pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> ArrivalRoute {
     let [lat, lon] = ac.pos;
     let airborne = ac.gs >= 50;
     let (path, mut route_nm, enroute_resolved) = match fca::route_path(
@@ -260,6 +260,32 @@ pub fn arrival_eta(
     if !airborne && !enroute_resolved {
         route_nm *= GROUND_ROUTE_FACTOR;
     }
+    ArrivalRoute {
+        path,
+        route_nm,
+        airborne,
+    }
+}
+
+/// Predict when an aircraft reaches its destination field, and how far along its route that is.
+///
+/// Times the route [`arrival_route`] resolves through [`eta_along_route`] with the target at the
+/// field. `ground_allowance_sec` is only applied on the ground branch (see [`eta_along_route`]) —
+/// an airborne caller may pass any value.
+pub fn arrival_eta(
+    nav: &NavData,
+    airports: &AirportDb,
+    winds: &Winds,
+    profile: &AircraftProfile,
+    ac: &ArrivalInput,
+    ground_allowance_sec: f64,
+    now: DateTime<Utc>,
+) -> ArrivalPrediction {
+    let ArrivalRoute {
+        path,
+        route_nm,
+        airborne,
+    } = arrival_route(nav, airports, ac);
     let wind = winds.along(&path, route_nm);
     let eta = eta_along_route(
         airborne,
@@ -1096,5 +1122,114 @@ mod tests {
         assert!(((pred.eta - now()).num_seconds() as f64 - timed).abs() <= 1.0);
         assert_eq!(pred.profile.ground_speed_at(200.0), pred.gs_kt);
         assert_eq!(pred.profile.mean_headwind(300.0, 0.0), Some(60.0));
+    }
+
+    // ---- #828: `arrival_route` is `arrival_eta`'s route resolution, extracted (plan A) ---------
+    //
+    /// `arrival_eta` timed by hand from its parts: `arrival_route`, `Winds::along` over that route,
+    /// and `eta_along_route` to the field. Returns the route and the composed ETA.
+    fn composed(nav: &NavData, winds: &Winds, ac: &ArrivalInput) -> (ArrivalRoute, DateTime<Utc>) {
+        let profile = AircraftProfile::default();
+        let ap = jfk_dca();
+        let r = arrival_route(nav, &ap, ac);
+        let eta = eta_along_route(
+            r.airborne,
+            r.route_nm,
+            r.route_nm,
+            ac.alt_ft,
+            ac.gs as f64,
+            ac.cruise_ft,
+            ac.cruise_tas,
+            &ap,
+            ac.arr,
+            &profile,
+            winds.along(&r.path, r.route_nm),
+            GROUND_TAXI_SEC,
+            now(),
+        )
+        .eta;
+        (r, eta)
+    }
+
+    /// Airborne on a route that resolves (`RBV WHITE SIE`) under the sheared field: the composed
+    /// parts give `arrival_eta`'s ETA and route length exactly, on the resolved path's length.
+    #[test]
+    fn arrival_eta_is_arrival_route_along_and_eta_along_route_on_a_resolved_route() {
+        let nav = NavData::load();
+        let shear = Winds::test_shear();
+        let ac = coastal("RBV WHITE SIE");
+        let (r, eta) = composed(&nav, &shear, &ac);
+        assert!(r.airborne && r.path.len() > 2);
+        assert_eq!(r.route_nm, path_len_nm(&r.path));
+        let live = arrival_eta(
+            &nav,
+            &jfk_dca(),
+            &shear,
+            &AircraftProfile::default(),
+            &ac,
+            GROUND_TAXI_SEC,
+            now(),
+        );
+        assert_eq!(eta, live.eta);
+        assert_eq!(r.route_nm, live.route_nm);
+    }
+
+    /// Airborne with nothing to resolve: the unpadded great circle to the field, and the composed
+    /// parts give `arrival_eta`'s ETA.
+    #[test]
+    fn arrival_eta_is_arrival_route_along_and_eta_along_route_when_airborne_and_unresolved() {
+        let nav = NavData::default();
+        let shear = Winds::test_shear();
+        let ac = coastal("");
+        let (r, eta) = composed(&nav, &shear, &ac);
+        assert!(r.airborne);
+        assert!((r.route_nm - gc_dist(40.2, -74.0, 38.85, -77.04)).abs() < 1e-9);
+        assert_eq!(eta, eta_in(&nav, &shear, &ac));
+    }
+
+    /// On the ground with nothing to resolve: the great circle carries `GROUND_ROUTE_FACTOR`, and
+    /// the composed parts (taxi allowance included) give `arrival_eta`'s ETA.
+    #[test]
+    fn arrival_eta_is_arrival_route_along_and_eta_along_route_with_ground_padding() {
+        assert!((1.11..1.13).contains(&GROUND_ROUTE_FACTOR));
+        let nav = NavData::default();
+        let shear = Winds::test_shear();
+        let ac = ArrivalInput {
+            pos: [40.64, -73.78],
+            gs: 0,
+            alt_ft: 0.0,
+            ..coastal("")
+        };
+        let (r, eta) = composed(&nav, &shear, &ac);
+        assert!(!r.airborne);
+        assert_eq!(r.path, vec![[40.64, -73.78], [38.85, -77.04]]);
+        let gc = gc_dist(40.64, -73.78, 38.85, -77.04);
+        assert!((r.route_nm - gc * GROUND_ROUTE_FACTOR).abs() < 1e-9);
+        assert_eq!(eta, eta_in(&nav, &shear, &ac));
+    }
+
+    /// A ground flight whose route resolves is timed on the resolved length, unpadded.
+    #[test]
+    fn arrival_route_does_not_pad_a_ground_flight_whose_route_resolves() {
+        let nav = NavData::load();
+        let ac = ArrivalInput {
+            pos: [40.64, -73.78],
+            gs: 0,
+            alt_ft: 0.0,
+            ..coastal("RBV WHITE SIE")
+        };
+        let r = arrival_route(&nav, &jfk_dca(), &ac);
+        assert!(!r.airborne && r.path.len() > 2);
+        assert_eq!(r.route_nm, path_len_nm(&r.path));
+    }
+
+    /// The airborne flag flips at 50 kt, the boundary `arrival_eta` times a flight from its
+    /// position rather than its departure on.
+    #[test]
+    fn arrival_route_calls_a_flight_airborne_from_50_kt() {
+        let nav = NavData::default();
+        let at = |gs| arrival_route(&nav, &jfk_dca(), &ArrivalInput { gs, ..coastal("") }).airborne;
+        assert!(!at(49));
+        assert!(at(50));
     }
 }

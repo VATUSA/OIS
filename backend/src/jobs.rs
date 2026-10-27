@@ -69,9 +69,10 @@ const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const STATS_PRUNE_AFTER_DAYS: i64 = 14;
 /// Retention horizon for `stats.winds` snapshots (#828). The aircraft-profile builder turns a
 /// historical groundspeed into TAS with the winds of that hour, so a position whose winds were
-/// pruned can't feed a speed sample. One snapshot an hour is a few KB (`0042_stats_history.sql`),
-/// so a year of them is small next to `stats.position`.
-const WINDS_RETAIN_DAYS: i64 = 365;
+/// pruned can't feed a speed sample. A RAP snapshot is about 222 KB stored, one an hour, so 90
+/// days is about 480 MB. Climbs and descents are timeable only from positions under 14 days old
+/// (`COMPACTION_TIERS`); the older winds serve cruise samples.
+const WINDS_RETAIN_DAYS: i64 = 90;
 /// Delay legs are tiny (one row per flight leg) and useful over a longer window than raw positions.
 const DELAY_LEG_RETAIN_DAYS: i64 = 30;
 
@@ -2003,14 +2004,14 @@ mod winds_retention_tests {
 
     /// Absolute ages straddling the documented horizons, never offsets from the constants (a
     /// fixture built from the constant moves with it; see `departure_runway_prune_tests`).
-    const WINDS_KEPT_DAYS: i32 = 300;
-    const WINDS_PRUNED_DAYS: i32 = 400;
+    const WINDS_KEPT_DAYS: i32 = 60;
+    const WINDS_PRUNED_DAYS: i32 = 120;
     /// Older than the 14-day TM-history horizon and younger than the winds one: winds this old must
     /// survive while TM history this old is still pruned, which is what splitting the constant buys.
     const BETWEEN_DAYS: i32 = 20;
 
     #[test]
-    fn the_fixed_ages_straddle_the_retention_horizons() {
+    fn the_fixed_ages_straddle_the_90_day_winds_horizon() {
         assert!(
             (WINDS_KEPT_DAYS as i64) < WINDS_RETAIN_DAYS
                 && WINDS_RETAIN_DAYS < (WINDS_PRUNED_DAYS as i64),
@@ -2045,7 +2046,7 @@ mod winds_retention_tests {
 
     /// The pass itself, so the test pins the constant the job uses, not a cutoff passed in by hand.
     #[sqlx::test]
-    async fn winds_are_kept_a_year_while_tm_history_keeps_its_14_days(pool: PgPool) {
+    async fn winds_are_kept_90_days_while_tm_history_keeps_its_14_days(pool: PgPool) {
         for d in [BETWEEN_DAYS, WINDS_KEPT_DAYS, WINDS_PRUNED_DAYS] {
             winds_row(&pool, d).await;
         }
@@ -2067,7 +2068,7 @@ mod winds_retention_tests {
         assert_eq!(
             winds_ages(&pool).await,
             vec![BETWEEN_DAYS, WINDS_KEPT_DAYS],
-            "only the snapshot past a year is pruned"
+            "only the snapshot past 90 days is pruned"
         );
         let gs: i64 = sqlx::query_scalar("select count(*) from tmu.ground_stops")
             .fetch_one(&pool)

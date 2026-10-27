@@ -5,7 +5,7 @@
 //! ```text
 //! stats.flight + stats.position + stats.winds
 //!   ─▶ build:    training flights ─▶ samples::flight_samples ─▶ stats::Accumulator ─▶ ProfileSet
-//!   ─▶ backtest: held-out flights ─▶ backtest::predict_case (predict::arrival_eta / eta_along_route)
+//!   ─▶ backtest: held-out flights ─▶ backtest::predict_case (predict::arrival_eta, arrival_route + eta_along_route)
 //!                with set A (flow.aircraft_profile) and set B (A + the ProfileSet) ─▶ ETA error
 //! ```
 //!
@@ -50,6 +50,21 @@ pub fn type_and_wake(f: &HistFlight) -> (String, String) {
     .aircraft_type_wake()
 }
 
+/// Flights read per batch: each batch's positions (and the backtest's plan revisions) come in one
+/// query, and its winds in another covering the batch's span. Flights arrive in `first_seen` order,
+/// so a batch spans a short stretch of time and holds few winds snapshots in memory.
+pub const FLIGHTS_PER_BATCH: usize = 500;
+
+/// The time a batch of flights covers: the earliest `first_seen` to the latest `last_seen`.
+pub(crate) fn batch_span<'a>(
+    batch: impl Iterator<Item = &'a HistFlight>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    batch.fold(
+        (DateTime::<Utc>::MAX_UTC, DateTime::<Utc>::MIN_UTC),
+        |(lo, hi), f| (lo.min(f.first_seen), hi.max(f.last_seen)),
+    )
+}
+
 /// Measure every type from the training flights wholly inside `[from, to)`.
 pub async fn build(
     pool: &PgPool,
@@ -57,26 +72,30 @@ pub async fn build(
     to: DateTime<Utc>,
 ) -> Result<ProfileSet, ApiError> {
     let flights = profile_history::flights(pool, from, to).await?;
+    let training: Vec<&HistFlight> = flights
+        .iter()
+        .filter(|f| !is_held_out(f.session_id))
+        .collect();
     let mut acc = Accumulator::default();
-    let (mut training, mut held_out) = (0, 0);
-    for f in &flights {
-        if is_held_out(f.session_id) {
-            held_out += 1;
-            continue;
+    for batch in training.chunks(FLIGHTS_PER_BATCH) {
+        let ids: Vec<i64> = batch.iter().map(|f| f.session_id).collect();
+        let positions = profile_history::positions(pool, &ids).await?;
+        let (start, end) = batch_span(batch.iter().copied());
+        let winds = profile_history::winds_covering(pool, start, end).await?;
+        let timeline = WindsTimeline(&winds);
+        for f in batch {
+            let pos = positions.get(&f.session_id).map_or(&[][..], Vec::as_slice);
+            let samples = flight_samples(pos, &timeline);
+            let (ty, wake) = type_and_wake(f);
+            acc.add_flight(&ty, &wake, &samples.per_flight_medians());
         }
-        training += 1;
-        let positions = profile_history::positions(pool, f.session_id).await?;
-        let winds = profile_history::winds_covering(pool, f.first_seen, f.last_seen).await?;
-        let samples = flight_samples(&positions, &WindsTimeline(&winds));
-        let (ty, wake) = type_and_wake(f);
-        acc.add_flight(&ty, &wake, &samples.per_flight_medians());
     }
     let source = Source {
         from: from.to_rfc3339_opts(SecondsFormat::Secs, true),
         to: to.to_rfc3339_opts(SecondsFormat::Secs, true),
         flights_read: flights.len(),
-        training_flights: training,
-        held_out_flights: held_out,
+        training_flights: training.len(),
+        held_out_flights: flights.len() - training.len(),
         held_out_rule: HELD_OUT_RULE.to_string(),
     };
     Ok(acc.finish(source, engine_family))

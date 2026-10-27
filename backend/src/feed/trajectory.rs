@@ -95,7 +95,7 @@ const ISA_TROPOPAUSE_T_K: f64 = 216.65; // isothermal above the tropopause
 const SPEED_OF_SOUND_SL_KT: f64 = 661.4788; // a0 at ISA sea level, knots
 
 /// ISA temperature (K) at a pressure altitude.
-fn isa_temp_k(alt_ft: f64) -> f64 {
+pub(crate) fn isa_temp_k(alt_ft: f64) -> f64 {
     if alt_ft <= ISA_TROPOPAUSE_FT {
         ISA_T0_K - ISA_LAPSE_K_PER_FT * alt_ft
     } else {
