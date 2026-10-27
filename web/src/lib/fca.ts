@@ -486,7 +486,30 @@ function useOnGone(fcaId: string) {
   };
 }
 
-/** Issue a CFR release (RDY = earliest slot; `ready` HHMMz = pinned wheels-up). */
+/** A Set's ready time was refused: not `HHMM`/`HHMMz`, or before the current minute (#816). */
+class ReadyRefusedError extends Error {}
+
+/** How much later than the typed ready time a Set's release landed (#816). The release and its
+ *  crossing slot show in the panel's own rows; this is the one figure they cannot give. */
+export type SetResult = { callsign: string; ready: string; delayMin: number };
+
+/** Read from the flight list the release returns. `readyIso` is the typed ready time as
+ *  `parseHhmm` resolves it. Null when the callsign is missing or holds no release. */
+export function setResult(
+  flights: FcaFlight[],
+  callsign: string,
+  readyIso: string,
+): SetResult | null {
+  const f = flights.find((x) => x.callsign === callsign);
+  if (!f?.released || !f.edct) return null;
+  const delayMs = Date.parse(f.edct) - Date.parse(readyIso);
+  // Whole minutes, floored: the ready time is on a minute and the panel shows the release as HHMM,
+  // so the delay matches the difference between the two times it prints.
+  return { callsign, ready: readyIso, delayMin: Math.max(0, Math.floor(delayMs / 60_000)) };
+}
+
+/** Issue a CFR release (RDY = earliest slot; `ready` HHMMz = the pilot's ready time, which takes
+ *  the first slot it can make, #816). */
 export function useMarkRelease(fcaId: string) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -504,6 +527,7 @@ export function useMarkRelease(fcaId: string) {
         { params: { path: { id: fcaId, callsign } }, body: { ready } },
       );
       if (response.status === 404) throw new GoneError();
+      if (response.status === 400 && ready) throw new ReadyRefusedError();
       if (error || !data) throw new Error("release failed");
       return data;
     },
@@ -514,9 +538,15 @@ export function useMarkRelease(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["idst"] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: (e) => (e instanceof GoneError ? onGone() : toast.error("Couldn’t issue the release")),
+    onError: (e) => {
+      if (e instanceof GoneError) onGone();
+      else if (e instanceof ReadyRefusedError) toast.error("Ready time refused", { description: READY_REFUSED });
+      else toast.error("Couldn’t issue the release");
+    },
   });
 }
+
+export const READY_REFUSED = "Type it as HHMMz, no earlier than the current minute.";
 
 export function useClearRelease(fcaId: string) {
   const queryClient = useQueryClient();

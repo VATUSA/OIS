@@ -332,9 +332,12 @@ different machine, so it gets `409 held_by_other_machine` on those releases; a p
   It resolves to the **nearest occurrence within ±12 hours of now**:
   - `"1415"` at 13:02Z → 14:15Z today;
   - `"0010"` at 23:50Z → 00:10Z **tomorrow**;
-  - `"2350"` at 00:10Z → 23:50Z **yesterday** (in the past, so it pins an already-due wheels-up).
+  - `"2350"` at 00:10Z → 23:50Z **yesterday**, which is in the past and answers `400`. A time in
+    the current minute is accepted and read as now.
 
-  Omit `ready` (or send empty) for RDY: the metered slot.
+  The ready time is a runway time: the release takes the first slot at or after ready plus the
+  airborne ETE, clear of every other airborne or released crossing, so its `edct` can be later than
+  `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: the metered slot.
 - **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
   `"2026-10-03T14:15:00Z"`. No rollover rule is needed.
 - **Responses**: every time is RFC 3339 UTC (`cross_time`, `edct`, `wheels_up`). Storage in epoch

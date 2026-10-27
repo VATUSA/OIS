@@ -1523,6 +1523,16 @@ pub(crate) fn project_traffic(
         .collect()
 }
 
+/// A Set's ready time, epoch ms: [`parse_hhmm_z`], refused when its minute ended before `now`'s
+/// began (#816). An HHMM cannot name a second, so the current minute is accepted and read as `now`;
+/// the release built on it is never earlier than the moment it was issued.
+fn ready_ms(s: &str, now: DateTime<Utc>) -> Option<i64> {
+    let ready = parse_hhmm_z(s, now)?;
+    let now_ms = now.timestamp_millis();
+    let minute_start = now_ms - now_ms.rem_euclid(60_000);
+    (ready >= minute_start).then_some(ready.max(now_ms))
+}
+
 /// Parse an "HHMM"/"HHMMz" Zulu clock into an epoch-ms near `now` (±12h).
 fn parse_hhmm_z(s: &str, now: DateTime<Utc>) -> Option<i64> {
     let s = s.trim().trim_end_matches(['z', 'Z']);
@@ -2060,6 +2070,51 @@ fn rdy_slot(
     fca::earliest_slot(metas[ti].eta_ms, &committed, sep_ms + RELEASE_MARGIN_MS)
 }
 
+/// The crossing to pin when a controller Sets a ready time (#816): the first slot at or after
+/// `desired_ms` (ready + airborne ETE) clear of every other pinned crossing by the separation plus
+/// [`RELEASE_MARGIN_MS`], the gap RDY holds.
+///
+/// Every other flight is a given, as in TBFM's Schedule a Departure with "delay scheduled flights
+/// for this aircraft only" off. Their crossings are metered **without** the flight being set: in
+/// manual mode `meter` chains an airborne aircraft behind this one's unpinned ladder slot, and
+/// spacing against that pushed time would space the Set against a delay it caused itself.
+fn set_slot(
+    fca: &FcaBody,
+    metas: &[fca::MeterInput],
+    order: Option<&[usize]>,
+    ti: usize,
+    desired_ms: i64,
+) -> i64 {
+    let others: Vec<fca::MeterInput> = metas
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != ti)
+        .map(|(_, m)| fca::MeterInput {
+            eta_ms: m.eta_ms,
+            airborne: m.airborne,
+            cross_speed: m.cross_speed,
+            frozen_ms: m.frozen_ms,
+            ground_allowance_ms: m.ground_allowance_ms,
+        })
+        .collect();
+    // The controller's order with this flight taken out, every later index shifted down one.
+    let order: Option<Vec<usize>> = order.map(|o| {
+        o.iter()
+            .filter(|&&i| i != ti)
+            .map(|&i| if i > ti { i - 1 } else { i })
+            .collect()
+    });
+    let metered = fca::meter(&others, &fca.mode, fca.rate, fca.mit, order.as_deref());
+    let given: Vec<i64> = others
+        .iter()
+        .zip(&metered)
+        .filter(|(m, _)| m.airborne || m.frozen_ms.is_some())
+        .map(|(_, out)| out.sched_ms)
+        .collect();
+    let sep_ms = separation_ms(fca, metas[ti].cross_speed);
+    fca::earliest_slot(desired_ms, &given, sep_ms + RELEASE_MARGIN_MS)
+}
+
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
 fn finalize(
     fca: &FcaBody,
@@ -2445,7 +2500,8 @@ pub async fn list_idst(
     request_body = ReleaseRequest,
     responses(
         (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
-        (status = 400), (status = 401),
+        (status = 400, description = "`ready` is not `HHMM`/`HHMMz`, or names a minute that has ended (#816)"),
+        (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
         (status = 404, description = "No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
@@ -2513,11 +2569,12 @@ pub async fn mark_release(
     let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
 
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
-        // SET: pin the crossing so wheels-up lands on the requested time: the typed time is a
-        // runway time, so the crossing is that plus the airborne ETE alone (#815).
+        // SET: the typed time is a ready (runway) time. The crossing it asks for is that plus the
+        // airborne ETE alone (#815); the slot is the first legal one from there (#816).
         Some(ready) => {
-            let ready_ms = parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)?;
-            ready_ms + (eta_ms - now_ms - allowance_ms)
+            let ready_ms = ready_ms(ready, now).ok_or(ApiError::BadRequest)?;
+            let desired_ms = ready_ms + (eta_ms - now_ms - allowance_ms);
+            set_slot(&fca, &metas, order.as_deref(), ti, desired_ms)
         }
         // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
@@ -4337,6 +4394,176 @@ mod release_spacing_tests {
         );
         // Airborne: no allowance, so the whole ETA is airborne time.
         assert_eq!(release_ms(at(14, 0), at(13, 30), at(13, 0), 0), at(13, 30));
+    }
+
+    // ---- #816: SET searches for a slot from ready + airborne ETE ------------------------------
+
+    /// 2026-10-10 at `h:m:s` UTC, epoch ms.
+    fn utc(h: u32, m: u32, s: u32) -> chrono::DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(2026, 10, 10, h, m, s).unwrap()
+    }
+    fn ms(h: u32, m: u32, s: u32) -> i64 {
+        utc(h, m, s).timestamp_millis()
+    }
+
+    /// #816 AC1: ready 1400Z, airborne ETE 30 min, so the crossing asked for is 14:30. An airborne
+    /// flight crosses at 14:30, so the Set lands 120 s (rate 30) + 15 s margin behind it: 14:32:15.
+    #[test]
+    fn set_spaces_a_desired_crossing_behind_an_airborne_one() {
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(
+            slot,
+            ms(14, 32, 15),
+            "one separation plus the margin behind the airborne crossing"
+        );
+        assert_eq!(RELEASE_MARGIN_MS, 15_000);
+    }
+
+    /// #816 AC1: clear of every pinned crossing, the Set keeps its desired crossing. An unreleased
+    /// ground flight at the same time is no commitment and does not push it.
+    #[test]
+    fn set_keeps_the_desired_crossing_when_the_slot_is_clear() {
+        let metas = vec![
+            cand(ms(14, 0, 0), true, None),   // airborne, 30 min clear
+            cand(ms(14, 30, 0), false, None), // unreleased ground at the same time
+            cand(ms(14, 5, 0), false, None),  // the one being set
+        ];
+        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 2, ms(14, 30, 0));
+        assert_eq!(slot, ms(14, 30, 0));
+    }
+
+    /// #816: a released (frozen) crossing is a commitment the Set spaces behind, as an airborne
+    /// one is.
+    #[test]
+    fn set_spaces_behind_a_released_crossing() {
+        let metas = vec![
+            cand(ms(14, 10, 0), false, Some(ms(14, 30, 0))),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(slot, ms(14, 32, 15));
+    }
+
+    /// #816 AC2: two Sets for the same ready time. The second sees the first as released.
+    #[test]
+    fn a_second_set_for_the_same_time_spaces_behind_the_first() {
+        let fca = rate_fca(vec![]);
+        let mut metas = vec![
+            cand(ms(14, 5, 0), false, None),
+            cand(ms(14, 6, 0), false, None),
+        ];
+        let a = super::set_slot(&fca, &metas, None, 0, ms(14, 30, 0));
+        metas[0].frozen_ms = Some(a);
+        let b = super::set_slot(&fca, &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(a, ms(14, 30, 0));
+        assert_eq!(b, ms(14, 32, 15));
+        assert!(b - a >= SEP_MS);
+    }
+
+    /// #816, manual mode: order Leader -> Dep -> Trailer. Metered with Dep in the chain, the
+    /// airborne Trailer is pushed to 240 s; without it, Trailer crosses at 120 s. A Set for Dep asking
+    /// for 300 s is clear of 120 s by more than 135 s, so it keeps 300 s. Spaced against the pushed
+    /// 240 s it would land at 375 s.
+    #[test]
+    fn a_manual_set_spaces_against_the_trailers_unpushed_crossing() {
+        let metas = vec![
+            cand(0, true, None),        // Leader, airborne
+            cand(100_000, false, None), // Dep, ground: the one being set
+            cand(110_000, true, None),  // Trailer, airborne, ordered behind Dep
+        ];
+        let order = vec![0usize, 1, 2];
+        let with_dep = fca::meter(&metas, "rate", 30, 0, Some(&order));
+        assert_eq!(
+            with_dep[2].sched_ms, 240_000,
+            "sanity: Dep's ladder slot pushes the Trailer"
+        );
+
+        let fca = rate_fca(vec!["LEAD".into(), "DEP".into(), "TRAIL".into()]);
+        assert_eq!(
+            super::set_slot(&fca, &metas, Some(&order), 1, 300_000),
+            300_000
+        );
+        // And it still spaces behind the Trailer's own crossing: 200 s is inside 120 s + 135 s.
+        assert_eq!(
+            super::set_slot(&fca, &metas, Some(&order), 1, 200_000),
+            255_000
+        );
+    }
+
+    /// #816 AC3: the previous minute has ended, so it is refused.
+    #[test]
+    fn ready_ms_refuses_a_ready_time_whose_minute_has_ended() {
+        let now = utc(14, 0, 30);
+        assert_eq!(super::ready_ms("1359", now), None);
+        assert_eq!(super::ready_ms("1359z", now), None);
+        // Two hours back is past too, though `parse_hhmm_z` resolves it.
+        assert_eq!(super::ready_ms("1200", now), None);
+    }
+
+    /// #816 AC3: the current minute is accepted and read as now, so a release is never in the past.
+    #[test]
+    fn ready_ms_reads_the_current_minute_as_now() {
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 30)), Some(ms(14, 0, 30)));
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 0)), Some(ms(14, 0, 0)));
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 59)), Some(ms(14, 0, 59)));
+    }
+
+    /// #816: a future minute is the typed time.
+    #[test]
+    fn ready_ms_accepts_a_future_minute_as_typed() {
+        assert_eq!(super::ready_ms("1401", utc(14, 0, 30)), Some(ms(14, 1, 0)));
+        assert_eq!(
+            super::ready_ms("2359Z", utc(14, 0, 30)),
+            Some(ms(23, 59, 0))
+        );
+    }
+
+    /// The ±12 h wrap survives the past-time check: at 23:50Z "0010" is tomorrow; at 00:10Z "2350"
+    /// is yesterday, and refused.
+    #[test]
+    fn ready_ms_keeps_the_twelve_hour_wrap_across_midnight() {
+        use chrono::TimeZone;
+        let tomorrow = Utc.with_ymd_and_hms(2026, 10, 11, 0, 10, 0).unwrap();
+        assert_eq!(
+            super::ready_ms("0010", utc(23, 50, 0)),
+            Some(tomorrow.timestamp_millis())
+        );
+        assert_eq!(super::ready_ms("2350", tomorrow), None);
+    }
+
+    /// Malformed input is refused, not guessed at.
+    #[test]
+    fn ready_ms_refuses_a_malformed_ready_time() {
+        for bad in ["", "14", "140", "14000", "2460", "1460", "ab12", "14:00"] {
+            assert_eq!(
+                super::ready_ms(bad, utc(14, 0, 30)),
+                None,
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// #816, MIT mode: the gap is sized on the setting flight's own crossing speed, as RDY's is.
+    /// 20 MIT at 300 kt is 240 s, so 14:30 + 240 s + 15 s = 14:34:15. Sized on the airborne
+    /// flight's 600 kt it would be 120 s (14:32:15).
+    #[test]
+    fn a_set_under_mit_is_spaced_on_its_own_crossing_speed() {
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.rate = 0;
+        fca.mit = 20;
+        let mut airborne = cand(ms(14, 30, 0), true, None);
+        airborne.cross_speed = 600.0;
+        let metas = vec![airborne, cand(ms(14, 5, 0), false, None)]; // the setter crosses at 300 kt
+        assert_eq!(
+            super::set_slot(&fca, &metas, None, 1, ms(14, 30, 0)),
+            ms(14, 34, 15)
+        );
     }
 }
 

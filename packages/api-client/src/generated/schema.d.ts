@@ -6479,8 +6479,9 @@ export interface components {
             guilds: components["schemas"]["DiscordGuildSnapshotBody"][];
         };
         /**
-         * @description Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
-         *     omitted = release at the earliest metered slot.
+         * @description Issue a CFR release for a crossing aircraft. `ready` (HHMMz) is the pilot's ready (runway) time:
+         *     the release takes the first slot at or after it plus the airborne ETE, so it is never earlier than
+         *     `ready`; a time before the current minute is 400. Omitted = release at the earliest metered slot.
          */
         ReleaseRequest: {
             ready?: string | null;
@@ -14768,6 +14769,7 @@ export interface operations {
                     "application/json": components["schemas"]["FcaFlight"][];
                 };
             };
+            /** @description `ready` is not `HHMM`/`HHMMz`, or names a minute that has ended (#816) */
             400: {
                 headers: {
                     [name: string]: unknown;

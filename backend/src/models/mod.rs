@@ -2706,8 +2706,9 @@ pub struct TaxiEstimateDebug {
     pub taxi_samples: i64,
 }
 
-/// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) pins a wheels-up time;
-/// omitted = release at the earliest metered slot.
+/// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) is the pilot's ready (runway) time:
+/// the release takes the first slot at or after it plus the airborne ETE, so it is never earlier than
+/// `ready`; a time before the current minute is 400. Omitted = release at the earliest metered slot.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReleaseRequest {
     #[serde(default)]

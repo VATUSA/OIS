@@ -809,7 +809,8 @@ async fn a_retried_create_cannot_mark_a_release_twice(pool: PgPool) {
         http::Method::POST,
         &uri,
         &[&auth, "If-None-Match: *"],
-        Some(json!({"ready": "2359"})),
+        // A future ready time, so the 412 comes from `If-None-Match`, never from a past-time 400 (#816).
+        Some(json!({"ready": (Utc::now() + Duration::hours(1)).format("%H%M").to_string()})),
     )
     .await;
     assert_eq!(status, http::StatusCode::PRECONDITION_FAILED);
@@ -4082,4 +4083,166 @@ async fn a_cfr_without_a_ready_time_or_program_locks_the_flights_wheels_up(pool:
             .contains(&wheels_up),
         "locked {wheels_up}, now in [{before}, {after}]: not now + 660 s"
     );
+}
+
+// ==== VATUSA/OIS#816: SET searches for a crossing slot from ready + airborne ETE =================
+
+/// SET `callsign` on `fca_id` with `ready` as `auth`; the status and the stored `(cta_ms, edct_ms)`.
+async fn set_816(
+    state: &AppState,
+    fca_id: &str,
+    callsign: &str,
+    auth: &str,
+    ready: &str,
+) -> (http::StatusCode, Option<(i64, i64)>) {
+    let (status, _, body) = send_full(
+        state,
+        http::Method::POST,
+        &format!("/api/v1/flow/fcas/{fca_id}/release/{callsign}"),
+        &[auth, "If-None-Match: *"],
+        Some(json!({ "ready": ready })),
+    )
+    .await;
+    assert!(
+        status == http::StatusCode::OK || status == http::StatusCode::BAD_REQUEST,
+        "{status}: {body}"
+    );
+    let row = sqlx::query_as(
+        "select cta_ms, edct_ms from flow.fca_release where fca_id = $1 and callsign = $2",
+    )
+    .bind(fca_id)
+    .bind(callsign)
+    .fetch_optional(state.db.as_ref().unwrap())
+    .await
+    .unwrap();
+    (status, row)
+}
+
+/// A ready time an hour out, as typed, and the epoch ms it names.
+fn ready_in_an_hour() -> (String, i64) {
+    use chrono::Timelike;
+    let t = Utc::now() + Duration::hours(1);
+    let minute = t.with_second(0).and_then(|t| t.with_nanosecond(0)).unwrap();
+    (t.format("%H%M").to_string(), minute.timestamp_millis())
+}
+
+/// Rate 30 is a 120 s gap; a release holds the 15 s margin on top (`RELEASE_MARGIN_MS`).
+const SPACING_816_MS: i64 = 120_000 + 15_000;
+
+/// #816 AC1 through the real router: TEST2 holds a release at exactly the crossing TEST1's ready
+/// time asks for (ready + airborne ETE). TEST1's Set takes the next legal slot, and its release is
+/// later than the ready time by the same amount.
+#[sqlx::test]
+async fn a_set_ready_time_is_spaced_behind_a_held_crossing(pool: PgPool) {
+    let state = crossing_state_of(pool.clone(), &["TEST1", "TEST2"]).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let (ready, ready_ms) = ready_in_an_hour();
+
+    // Probe the crossing TEST1 asks for on an FCA where nothing else is pinned: the slot is free, so
+    // the Set takes it as asked, and its release is the ready time.
+    let probe = fca(&pool).await;
+    let (status, row) = set_816(&state, &probe, "TEST1", &auth, &ready).await;
+    assert_eq!(status, http::StatusCode::OK);
+    let (desired, edct) = row.unwrap();
+    assert_eq!(edct, ready_ms, "a free slot releases on the ready time");
+
+    // The same crossing, already held by TEST2 on a second, identical FCA.
+    let taken = fca(&pool).await;
+    seed_release(&pool, &taken, "TEST2", desired).await;
+    let (status, row) = set_816(&state, &taken, "TEST1", &auth, &ready).await;
+    assert_eq!(status, http::StatusCode::OK);
+    let (cta, edct) = row.unwrap();
+    assert_eq!(
+        cta,
+        desired + SPACING_816_MS,
+        "the next legal slot behind the held crossing"
+    );
+    assert_eq!(
+        edct,
+        ready_ms + SPACING_816_MS,
+        "released later than the ready time"
+    );
+    assert_eq!(
+        cta - edct,
+        desired - ready_ms,
+        "release = slot − the airborne ETE"
+    );
+    let held: i64 = sqlx::query_scalar(
+        "select cta_ms from flow.fca_release where fca_id = $1 and callsign = 'TEST2'",
+    )
+    .bind(&taken)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(held, desired, "the held release does not move");
+}
+
+/// #816 AC2: two Sets for the same ready time, one after the other, land a full separation apart:
+/// the second sees the first as released.
+#[sqlx::test]
+async fn two_sets_for_the_same_ready_time_are_spaced_apart(pool: PgPool) {
+    let state = crossing_state_of(pool.clone(), &["TEST1", "TEST2"]).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let (ready, ready_ms) = ready_in_an_hour();
+
+    let (s1, first) = set_816(&state, &fca_id, "TEST1", &auth, &ready).await;
+    let (s2, second) = set_816(&state, &fca_id, "TEST2", &auth, &ready).await;
+    assert_eq!((s1, s2), (http::StatusCode::OK, http::StatusCode::OK));
+    let ((cta1, edct1), (cta2, edct2)) = (first.unwrap(), second.unwrap());
+    assert_eq!(
+        edct1, ready_ms,
+        "the first takes the slot its ready time asks for"
+    );
+    assert_eq!(
+        cta2 - cta1,
+        SPACING_816_MS,
+        "the second is spaced a full separation behind"
+    );
+    assert_eq!(edct2, ready_ms + SPACING_816_MS);
+}
+
+/// #816 AC3: a ready time whose minute has ended answers 400 and writes nothing. The current minute
+/// is accepted and its release is not in the past (the positive control: the same request shape
+/// reaches the handler and succeeds).
+#[sqlx::test]
+async fn a_set_ready_time_in_a_past_minute_is_refused(pool: PgPool) {
+    let state = crossing_state(pool.clone()).await;
+    let fca_id = fca(&pool).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+
+    let past = (Utc::now() - Duration::minutes(1))
+        .format("%H%M")
+        .to_string();
+    let (status, row) = set_816(&state, &fca_id, "TEST1", &auth, &past).await;
+    assert_eq!(
+        status,
+        http::StatusCode::BAD_REQUEST,
+        "{past} is a minute that has ended"
+    );
+    assert_eq!(row, None, "a refused Set writes no release");
+
+    // The current minute. If the clock rolls into the next minute before the handler reads it, the
+    // typed minute has ended by then and a 400 is right; take the next minute's attempt instead.
+    for _ in 0..2 {
+        let before = Utc::now();
+        let typed = before.format("%H%M").to_string();
+        let (status, row) = set_816(&state, &fca_id, "TEST1", &auth, &typed).await;
+        if status == http::StatusCode::BAD_REQUEST && Utc::now().format("%H%M").to_string() != typed
+        {
+            continue;
+        }
+        assert_eq!(
+            status,
+            http::StatusCode::OK,
+            "{typed} is the current minute"
+        );
+        let (_, edct) = row.unwrap();
+        assert!(
+            edct >= before.timestamp_millis(),
+            "the current minute is read as now, so the release {edct} is not before {before}"
+        );
+        return;
+    }
+    panic!("the minute rolled over twice in a row");
 }

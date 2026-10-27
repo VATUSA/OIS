@@ -6,8 +6,7 @@ found. Written for #838 against `next` at `333a7831`. Tables, permissions, and t
 [flow.md](flow.md). This doc does not repeat them.
 
 Out of scope here, with links: ETA computation itself (`feed/predict.rs`, `feed/trajectory.rs`;
-design doc planned by #814 at `docs/architecture/prediction.md`), the release-time formula (#815),
-IDST Set (#816), the scheduler re-check and freeze horizon (#817), manual-order late joiners
+design doc planned by #814 at `docs/architecture/prediction.md`), the release-time formula (#815), the scheduler re-check and freeze horizon (#817), manual-order late joiners
 (#819), naming (#820), profiles (#818, #828), winds (#836), and IDST duplicate rows (#834).
 
 Paths below are relative to `backend/src/` unless they start with `web/` or `backend/migrations/`.
@@ -208,8 +207,8 @@ an optional manual order.
 - otherwise 0, which means no spacing at all. Writes clamp rate to 0-240 (default 30) and MIT to
   0-200 (default 15) (`repos/flow.rs:156-157`), so 0 is a legal value that turns metering off.
 
-The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2116`), which
-RDY uses.
+The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs`), which
+RDY and SET use.
 
 **Auto mode** (`feed/fca.rs:402-432`). Pinned flights (airborne, or holding a release) sort ahead
 of the rest, then by ETA (`:408-414`). Each in turn is placed at its frozen time if it has one,
@@ -232,10 +231,13 @@ numbers are the order itself (`:399-401`).
   `RELEASE_MARGIN_MS` = 15 s (`:508`). In auto mode, `earliest_slot` against every other pinned
   flight at its **metered** time (`committed_crossings`, `:2099`, #356), with the margin added to
   the separation.
-- **SET**: the typed time plus the airborne ETE, `eta - now - ground_allowance`
-  (`handlers/flow.rs:2630`, #815). It runs no slot search; that is **owned by #816**.
+- **SET**, `set_slot` (`handlers/flow.rs`, #816): the typed time is a ready (runway) time. The
+  desired crossing is that time plus the airborne ETE, `eta - now - ground_allowance` (#815), and
+  the slot is `earliest_slot` from there against every other pinned flight, metered without the
+  flight being set, with the margin added to the separation. A ready time before the current
+  minute is refused with 400 (`ready_ms`).
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
-  (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
+  (`handlers/flow.rs:2133`, `:2635`, #815), so both store a wheels-up; SET's is never earlier than the typed time.
 
 **Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, and four manual-order cases.

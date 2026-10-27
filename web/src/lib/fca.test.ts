@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, fcaIsLive, refreshToast, windsLabel} from "./fca";
+import {type DataStatus, type FcaFlight, fcaIsLive, refreshToast, setResult, windsLabel} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -73,5 +73,44 @@ describe("fcaIsLive", () => {
     [7461, null, false],
   ])("event %s / %s → %s", (eventId, eventStatus, live) => {
     expect(fcaIsLive({event_id: eventId, event_status: eventStatus})).toBe(live);
+  });
+});
+
+// VATUSA/OIS#816: after a Set, the panel reports how far past the typed ready time the release
+// landed, read from the FcaFlight list the mutation returned. Expectations are literals.
+function flight(callsign: string, over: Partial<FcaFlight>): FcaFlight {
+  return {
+    callsign,
+    released: true,
+    edct: "2026-10-10T14:00:00Z",
+    cross_time: "2026-10-10T14:30:00Z",
+    ...over,
+  } as FcaFlight;
+}
+const READY = "2026-10-10T14:00:00.000Z";
+
+describe("setResult", () => {
+  it("reports the delay as release minus ready in whole minutes", () => {
+    const r = setResult([flight("AAL1", { edct: "2026-10-10T14:02:15Z" })], "AAL1", READY);
+    expect(r).toEqual({ callsign: "AAL1", ready: READY, delayMin: 2 });
+  });
+
+  it("floors to the minute the panel prints, so 14:02:59 is +2 after a 1400Z ready", () => {
+    expect(setResult([flight("AAL1", { edct: "2026-10-10T14:02:59Z" })], "AAL1", READY)?.delayMin).toBe(2);
+  });
+
+  it("reports zero delay when the release is the ready time", () => {
+    expect(setResult([flight("AAL1", {})], "AAL1", READY)?.delayMin).toBe(0);
+  });
+
+  it("reads the named callsign, not the first row", () => {
+    const rows = [flight("UAL2", { edct: "2026-10-10T14:20:00Z" }), flight("AAL1", { edct: "2026-10-10T14:07:00Z" })];
+    expect(setResult(rows, "AAL1", READY)?.delayMin).toBe(7);
+  });
+
+  it("is null when the callsign is absent, unreleased or has no release time", () => {
+    expect(setResult([flight("UAL2", {})], "AAL1", READY)).toBeNull();
+    expect(setResult([flight("AAL1", { released: false })], "AAL1", READY)).toBeNull();
+    expect(setResult([flight("AAL1", { edct: null })], "AAL1", READY)).toBeNull();
   });
 });
