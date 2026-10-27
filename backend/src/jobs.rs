@@ -2067,6 +2067,25 @@ mod stats_compaction_tests {
         assert_eq!(summary, "1 rows removed");
         assert_eq!(taxi_observation_count(&pool).await, 1);
     }
+
+    /// Each downsample tier is named on its own, so a failed run says which age boundary failed.
+    #[sqlx::test]
+    async fn a_failed_downsample_names_each_tier(pool: PgPool) {
+        sqlx::query("drop table stats.position")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = stats_compaction_once(&pool, &AtomicI64::new(0))
+            .await
+            .expect_err("a failed downsample must fail the run");
+
+        assert_eq!(
+            err,
+            "compaction sub-pass(es) failed: downsample-7d, downsample-14d, downsample-21d; \
+             0 rows removed by the rest"
+        );
+    }
 }
 
 #[cfg(test)]
