@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, type FcaFlight, fcaIsLive, refreshToast, setResult, windsLabel} from "./fca";
+import {type DataStatus, type FcaFlight, fcaIsLive, refreshToast, setResult, setResultIsCurrent, windsLabel} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -92,7 +92,7 @@ const READY = "2026-10-10T14:00:00.000Z";
 describe("setResult", () => {
   it("reports the delay as release minus ready in whole minutes", () => {
     const r = setResult([flight("AAL1", { edct: "2026-10-10T14:02:15Z" })], "AAL1", READY);
-    expect(r).toEqual({ callsign: "AAL1", ready: READY, delayMin: 2 });
+    expect(r).toEqual({ callsign: "AAL1", ready: READY, edct: "2026-10-10T14:02:15Z", delayMin: 2 });
   });
 
   it("never reports a negative delay when the client clock resolves the ready time late", () => {
@@ -116,5 +116,27 @@ describe("setResult", () => {
     expect(setResult([flight("UAL2", {})], "AAL1", READY)).toBeNull();
     expect(setResult([flight("AAL1", { released: false })], "AAL1", READY)).toBeNull();
     expect(setResult([flight("AAL1", { edct: null })], "AAL1", READY)).toBeNull();
+  });
+});
+
+describe("setResultIsCurrent", () => {
+  const result = { callsign: "AAL1", ready: READY, edct: "2026-10-10T14:07:00Z", delayMin: 7 };
+  const row = (over: Partial<{ callsign: string; released: boolean; edct: string | null }>) => ({
+    callsign: "AAL1",
+    released: true,
+    edct: "2026-10-10T14:07:00.000Z",
+    ...over,
+  });
+
+  it("holds while the flight keeps the release the Set gave it, whatever the timestamp's format", () => {
+    expect(setResultIsCurrent(result, row({}))).toBe(true);
+  });
+
+  it("ends when the release is cancelled, moved, or the panel shows another flight", () => {
+    expect(setResultIsCurrent(result, row({ released: false }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ edct: "2026-10-10T14:09:00Z" }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ edct: null }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ callsign: "UAL2" }))).toBe(false);
+    expect(setResultIsCurrent(null, row({}))).toBe(false);
   });
 });

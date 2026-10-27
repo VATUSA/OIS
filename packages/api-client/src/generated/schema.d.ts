@@ -14769,7 +14769,7 @@ export interface operations {
                     "application/json": components["schemas"]["FcaFlight"][];
                 };
             };
-            /** @description `ready` is not `HHMM`/`HHMMz`, or names a minute that has ended (#816) */
+            /** @description `ready` is not `HHMM`/`HHMMz` or names a minute that has ended, or `If-Match`/`If-None-Match` is malformed */
             400: {
                 headers: {
                     [name: string]: unknown;

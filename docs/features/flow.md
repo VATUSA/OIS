@@ -336,7 +336,8 @@ different machine, so it gets `409 held_by_other_machine` on those releases; a p
     the current minute is accepted and read as now.
 
   The ready time is a runway time: the release takes the first slot at or after ready plus the
-  airborne ETE, clear of every other airborne or released crossing, so its `edct` can be later than
+  airborne ETE that keeps its spacing (in manual mode, behind the flight ordered ahead of it), so
+  its `edct` can be later than
   `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: the metered slot.
 - **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
   `"2026-10-03T14:15:00Z"`. No rollover rule is needed.

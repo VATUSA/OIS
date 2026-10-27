@@ -18,7 +18,7 @@ import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {setResult, useClearRelease, useMarkRelease, useSwapReleases, type SetResult} from "@/lib/fca";
+import {setResult, setResultIsCurrent, useClearRelease, useMarkRelease, useSwapReleases, type SetResult} from "@/lib/fca";
 import {parseHhmm} from "@/lib/time";
 import {swapPartners, useIdst, useIdstScope, scopeIsEmpty, type IdstFlight, type IdstScope} from "@/lib/idst";
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
@@ -304,7 +304,7 @@ export function SelectedPanel({
               <dt className="text-ink-2">{selected.released ? "Release time (wheels-up)" : "Proposed release"}</dt>
               <dd className={`font-mono ${selected.released ? "text-success" : ""}`}>{hhmmZ(selected.edct)}</dd>
             </div>
-            {lastSet?.callsign === selected.callsign ? (
+            {setResultIsCurrent(lastSet, selected) ? (
               <div className="flex justify-between py-1.5" data-set-result>
                 <dt className="text-ink-2">Delay after ready {hhmmZ(lastSet.ready)}</dt>
                 <dd className="font-mono">{lastSet.delayMin > 0 ? `+${lastSet.delayMin}m` : "none"}</dd>

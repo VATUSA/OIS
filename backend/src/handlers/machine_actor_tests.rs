@@ -4246,3 +4246,37 @@ async fn a_set_ready_time_in_a_past_minute_is_refused(pool: PgPool) {
     }
     panic!("the minute rolled over twice in a row");
 }
+
+/// #816 through the real router on a manual-sequence FCA: the controller ordered TEST2 ahead of
+/// TEST1, and TEST2 is released 300 s after the crossing TEST1's ready time asks for. TEST1 follows
+/// TEST2 in the controller's order, a full spacing behind it, though the earlier slot is clear.
+/// Spaced as on an automatic FCA it would keep the crossing it asked for.
+#[sqlx::test]
+async fn a_set_on_a_manual_fca_follows_the_flight_ordered_ahead(pool: PgPool) {
+    let state = crossing_state_of(pool.clone(), &["TEST1", "TEST2"]).await;
+    let (_, auth) = service_account(&pool, "flow.fca.update", None).await;
+    let (ready, _) = ready_in_an_hour();
+
+    let probe = fca(&pool).await;
+    let (status, row) = set_816(&state, &probe, "TEST1", &auth, &ready).await;
+    assert_eq!(status, http::StatusCode::OK);
+    let (desired, _) = row.unwrap();
+
+    let manual = fca(&pool).await;
+    sqlx::query(
+        "update flow.fca set manual_seq = true, manual_order = '{TEST2,TEST1}' where id = $1",
+    )
+    .bind(&manual)
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_release(&pool, &manual, "TEST2", desired + 300_000).await;
+    let (status, row) = set_816(&state, &manual, "TEST1", &auth, &ready).await;
+    assert_eq!(status, http::StatusCode::OK);
+    let (cta, _) = row.unwrap();
+    assert_eq!(
+        cta,
+        desired + 300_000 + SPACING_816_MS,
+        "behind the flight ordered ahead"
+    );
+}

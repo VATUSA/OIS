@@ -2071,20 +2071,35 @@ fn rdy_slot(
 }
 
 /// The crossing to pin when a controller Sets a ready time (#816): the first slot at or after
-/// `desired_ms` (ready + airborne ETE) clear of every other pinned crossing by the separation plus
-/// [`RELEASE_MARGIN_MS`], the gap RDY holds.
+/// `desired_ms` (ready + airborne ETE) that keeps the separation plus [`RELEASE_MARGIN_MS`], the
+/// gap RDY holds.
 ///
-/// Every other flight is a given, as in TBFM's Schedule a Departure with "delay scheduled flights
-/// for this aircraft only" off. Their crossings are metered **without** the flight being set: in
-/// manual mode `meter` chains an airborne aircraft behind this one's unpinned ladder slot, and
-/// spacing against that pushed time would space the Set against a delay it caused itself.
+/// **Auto:** clear of every other pinned crossing (airborne or released), each a given, as in
+/// TBFM's Schedule a Departure with "delay scheduled flights for this aircraft only" off. They are
+/// metered **without** the flight being set, so a re-Set never spaces against its own old release.
+///
+/// **Manual:** the controller's order is the sequence, as for RDY. The flight follows the one
+/// ordered ahead of it in the ladder (`metered`). An airborne flight ordered behind it is chained
+/// behind its new time by the next metering pass, so spacing against it would only delay both; a
+/// released one keeps its time whatever the order, so the Set still clears every other release.
 fn set_slot(
     fca: &FcaBody,
     metas: &[fca::MeterInput],
-    order: Option<&[usize]>,
+    metered: &[fca::MeterOutput],
+    manual: bool,
     ti: usize,
     desired_ms: i64,
 ) -> i64 {
+    let gap_ms = separation_ms(fca, metas[ti].cross_speed) + RELEASE_MARGIN_MS;
+    if manual {
+        let ahead = metered.iter().find(|m| m.seq == metered[ti].seq - 1);
+        let from = ahead.map_or(desired_ms, |a| desired_ms.max(a.sched_ms + gap_ms));
+        let released: Vec<i64> = (metas.iter().enumerate())
+            .filter(|(i, _)| *i != ti)
+            .filter_map(|(_, m)| m.frozen_ms)
+            .collect();
+        return fca::earliest_slot(from, &released, gap_ms);
+    }
     let others: Vec<fca::MeterInput> = metas
         .iter()
         .enumerate()
@@ -2097,22 +2112,14 @@ fn set_slot(
             ground_allowance_ms: m.ground_allowance_ms,
         })
         .collect();
-    // The controller's order with this flight taken out, every later index shifted down one.
-    let order: Option<Vec<usize>> = order.map(|o| {
-        o.iter()
-            .filter(|&&i| i != ti)
-            .map(|&i| if i > ti { i - 1 } else { i })
-            .collect()
-    });
-    let metered = fca::meter(&others, &fca.mode, fca.rate, fca.mit, order.as_deref());
+    let metered = fca::meter(&others, &fca.mode, fca.rate, fca.mit, None);
     let given: Vec<i64> = others
         .iter()
         .zip(&metered)
         .filter(|(m, _)| m.airborne || m.frozen_ms.is_some())
         .map(|(_, out)| out.sched_ms)
         .collect();
-    let sep_ms = separation_ms(fca, metas[ti].cross_speed);
-    fca::earliest_slot(desired_ms, &given, sep_ms + RELEASE_MARGIN_MS)
+    fca::earliest_slot(desired_ms, &given, gap_ms)
 }
 
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
@@ -2500,7 +2507,7 @@ pub async fn list_idst(
     request_body = ReleaseRequest,
     responses(
         (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
-        (status = 400, description = "`ready` is not `HHMM`/`HHMMz`, or names a minute that has ended (#816)"),
+        (status = 400, description = "`ready` is not `HHMM`/`HHMMz` or names a minute that has ended, or `If-Match`/`If-None-Match` is malformed"),
         (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
         (status = 404, description = "No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it"),
@@ -2574,7 +2581,7 @@ pub async fn mark_release(
         Some(ready) => {
             let ready_ms = ready_ms(ready, now).ok_or(ApiError::BadRequest)?;
             let desired_ms = ready_ms + (eta_ms - now_ms - allowance_ms);
-            set_slot(&fca, &metas, order.as_deref(), ti, desired_ms)
+            set_slot(&fca, &metas, &metered, order.is_some(), ti, desired_ms)
         }
         // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
@@ -4398,13 +4405,26 @@ mod release_spacing_tests {
 
     // ---- #816: SET searches for a slot from ready + airborne ETE ------------------------------
 
-    /// 2026-10-10 at `h:m:s` UTC, epoch ms.
+    /// 2026-10-10 at `h:m:s` UTC.
     fn utc(h: u32, m: u32, s: u32) -> chrono::DateTime<Utc> {
         use chrono::TimeZone;
         Utc.with_ymd_and_hms(2026, 10, 10, h, m, s).unwrap()
     }
     fn ms(h: u32, m: u32, s: u32) -> i64 {
         utc(h, m, s).timestamp_millis()
+    }
+
+    /// `set_slot` as `mark_release` calls it: the ladder metered first, in the controller's order
+    /// when there is one.
+    fn set(
+        fca: &FcaBody,
+        metas: &[MeterInput],
+        order: Option<&[usize]>,
+        ti: usize,
+        desired: i64,
+    ) -> i64 {
+        let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order);
+        super::set_slot(fca, metas, &metered, order.is_some(), ti, desired)
     }
 
     /// #816 AC1: ready 1400Z, airborne ETE 30 min, so the crossing asked for is 14:30. An airborne
@@ -4415,7 +4435,7 @@ mod release_spacing_tests {
             cand(ms(14, 30, 0), true, None),
             cand(ms(14, 5, 0), false, None),
         ];
-        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        let slot = set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
         assert_eq!(
             slot,
             ms(14, 32, 15),
@@ -4433,7 +4453,7 @@ mod release_spacing_tests {
             cand(ms(14, 30, 0), false, None), // unreleased ground at the same time
             cand(ms(14, 5, 0), false, None),  // the one being set
         ];
-        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 2, ms(14, 30, 0));
+        let slot = set(&rate_fca(vec![]), &metas, None, 2, ms(14, 30, 0));
         assert_eq!(slot, ms(14, 30, 0));
     }
 
@@ -4445,7 +4465,7 @@ mod release_spacing_tests {
             cand(ms(14, 10, 0), false, Some(ms(14, 30, 0))),
             cand(ms(14, 5, 0), false, None),
         ];
-        let slot = super::set_slot(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        let slot = set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
         assert_eq!(slot, ms(14, 32, 15));
     }
 
@@ -4457,60 +4477,111 @@ mod release_spacing_tests {
             cand(ms(14, 5, 0), false, None),
             cand(ms(14, 6, 0), false, None),
         ];
-        let a = super::set_slot(&fca, &metas, None, 0, ms(14, 30, 0));
+        let a = set(&fca, &metas, None, 0, ms(14, 30, 0));
         metas[0].frozen_ms = Some(a);
-        let b = super::set_slot(&fca, &metas, None, 1, ms(14, 30, 0));
+        let b = set(&fca, &metas, None, 1, ms(14, 30, 0));
         assert_eq!(a, ms(14, 30, 0));
         assert_eq!(b, ms(14, 32, 15));
         assert!(b - a >= SEP_MS);
     }
 
-    /// #816, manual mode: order Leader -> Dep -> Trailer. Metered with Dep in the chain, the
-    /// airborne Trailer is pushed to 240 s; without it, Trailer crosses at 120 s. A Set for Dep asking
-    /// for 300 s is clear of 120 s by more than 135 s, so it keeps 300 s. Spaced against the pushed
-    /// 240 s it would land at 375 s.
+    /// #816, manual mode: order Leader -> Dep -> Trailer, Leader airborne at 0 s. Dep follows
+    /// Leader by 120 s + 15 s, so a Set asking for 100 s lands at 135 s, and one asking for 300 s
+    /// keeps it. The airborne Trailer, ordered behind, is no constraint: its 110 s ETA is inside
+    /// 135 s of both, and the next metering pass chains it behind Dep's new time.
     #[test]
-    fn a_manual_set_spaces_against_the_trailers_unpushed_crossing() {
+    fn a_manual_set_follows_the_flight_ordered_ahead_not_those_behind() {
         let metas = vec![
             cand(0, true, None),        // Leader, airborne
             cand(100_000, false, None), // Dep, ground: the one being set
             cand(110_000, true, None),  // Trailer, airborne, ordered behind Dep
         ];
-        let order = vec![0usize, 1, 2];
-        let with_dep = fca::meter(&metas, "rate", 30, 0, Some(&order));
-        assert_eq!(
-            with_dep[2].sched_ms, 240_000,
-            "sanity: Dep's ladder slot pushes the Trailer"
-        );
-
+        let order = [0usize, 1, 2];
         let fca = rate_fca(vec!["LEAD".into(), "DEP".into(), "TRAIL".into()]);
-        assert_eq!(
-            super::set_slot(&fca, &metas, Some(&order), 1, 300_000),
-            300_000
-        );
-        // And it still spaces behind the Trailer's own crossing: 200 s is inside 120 s + 135 s.
-        assert_eq!(
-            super::set_slot(&fca, &metas, Some(&order), 1, 200_000),
-            255_000
-        );
+        assert_eq!(set(&fca, &metas, Some(&order), 1, 100_000), 135_000);
+        assert_eq!(set(&fca, &metas, Some(&order), 1, 300_000), 300_000);
     }
 
-    /// #816, manual mode: the controller's order holds among the other flights once the Set flight
-    /// is taken out. Order B -> Dep -> A: B crosses at its 10 s ETA and A is chained behind it at
-    /// 10 s + 120 s = 130 s. A Set asking for 250 s is inside 130 s + 135 s, so it lands at 265 s.
-    /// Metered in ETA order instead (A at 0 s, B pushed to 120 s) it would land at 255 s.
+    /// #816, manual mode: the flight ahead is the one the controller ordered ahead, at its ladder
+    /// time. Order B -> Dep -> A: B (airborne, ETA 10 s) leads, so Dep follows it at
+    /// 10 s + 135 s = 145 s, though A (airborne, ETA 0 s) crosses first. Spaced in ETA order it
+    /// would follow B's pushed 120 s crossing to 255 s.
     #[test]
-    fn a_manual_set_keeps_the_controllers_order_among_the_others() {
+    fn a_manual_set_follows_the_controllers_order_not_the_eta_order() {
         let metas = vec![
             cand(0, true, None),      // A, airborne, ordered last
             cand(5_000, false, None), // Dep, ground: the one being set
             cand(10_000, true, None), // B, airborne, ordered first
         ];
-        let order = vec![2usize, 1, 0];
         let fca = rate_fca(vec!["B".into(), "DEP".into(), "A".into()]);
+        assert_eq!(set(&fca, &metas, Some(&[2, 1, 0]), 1, 100_000), 145_000);
+    }
+
+    /// #816 AC2, manual mode: a release ordered behind is still a commitment. Order Dep -> R, R
+    /// released for 14:30: a Set for Dep asking for 14:30 lands 135 s behind it, and Dep's own
+    /// earlier release (a re-Set) is not one.
+    #[test]
+    fn a_manual_set_still_clears_a_release_ordered_behind_it() {
+        let metas = vec![
+            cand(ms(14, 5, 0), false, Some(ms(14, 0, 0))), // Dep, released before, set again
+            cand(ms(14, 10, 0), false, Some(ms(14, 30, 0))), // R, released, ordered behind
+        ];
+        let fca = rate_fca(vec!["DEP".into(), "R".into()]);
         assert_eq!(
-            super::set_slot(&fca, &metas, Some(&order), 1, 250_000),
-            265_000
+            set(&fca, &metas, Some(&[0, 1]), 0, ms(14, 30, 0)),
+            ms(14, 32, 15)
+        );
+        assert_eq!(
+            set(&fca, &metas, Some(&[0, 1]), 0, ms(14, 1, 0)),
+            ms(14, 1, 0)
+        );
+    }
+
+    /// #816, auto mode: an airborne flight is a given at its **metered** time. B (ETA 14:31) owes
+    /// A (14:30) 120 s and is metered to 14:32, so a Set asking for 14:33:30 is inside 14:32 + 135 s
+    /// and lands at 14:34:15. Against B's raw ETA it would keep 14:33:30.
+    #[test]
+    fn a_set_spaces_against_an_airborne_flights_metered_time_not_its_eta() {
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            cand(ms(14, 31, 0), true, None),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        assert_eq!(
+            set(&rate_fca(vec![]), &metas, None, 2, ms(14, 33, 30)),
+            ms(14, 34, 15)
+        );
+    }
+
+    /// #816, auto MIT: the other flights are metered on their own crossing speeds. 20 MIT: B at
+    /// 600 kt owes A 120 s, so crosses 14:32; the setter at 300 kt needs 240 s + 15 s behind it, so
+    /// 14:36:15 is clear. Metered at 300 kt, B would cross 14:34 and push the Set to 14:38:15.
+    #[test]
+    fn a_set_under_mit_meters_the_others_on_their_own_speeds() {
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.rate = 0;
+        fca.mit = 20;
+        let mut b = cand(ms(14, 31, 0), true, None);
+        b.cross_speed = 600.0;
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            b,
+            cand(ms(14, 5, 0), false, None),
+        ];
+        assert_eq!(set(&fca, &metas, None, 2, ms(14, 36, 15)), ms(14, 36, 15));
+    }
+
+    /// #816, auto mode: a re-Set does not space against the flight's own earlier release.
+    #[test]
+    fn a_re_set_ignores_the_flights_own_release() {
+        let metas = vec![
+            cand(ms(14, 0, 0), true, None),
+            cand(ms(14, 5, 0), false, Some(ms(14, 30, 0))), // released for 14:30, set again
+        ];
+        assert_eq!(
+            set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0)),
+            ms(14, 30, 0)
         );
     }
 
@@ -4522,6 +4593,8 @@ mod release_spacing_tests {
         assert_eq!(super::ready_ms("1359z", now), None);
         // Two hours back is past too, though `parse_hhmm_z` resolves it.
         assert_eq!(super::ready_ms("1200", now), None);
+        // An odd minute: the minute is 60 s wide, so 1400 has ended by 14:01:30.
+        assert_eq!(super::ready_ms("1400", utc(14, 1, 30)), None);
     }
 
     /// #816 AC3: the current minute is accepted and read as now, so a release is never in the past.
@@ -4579,10 +4652,7 @@ mod release_spacing_tests {
         let mut airborne = cand(ms(14, 30, 0), true, None);
         airborne.cross_speed = 600.0;
         let metas = vec![airborne, cand(ms(14, 5, 0), false, None)]; // the setter crosses at 300 kt
-        assert_eq!(
-            super::set_slot(&fca, &metas, None, 1, ms(14, 30, 0)),
-            ms(14, 34, 15)
-        );
+        assert_eq!(set(&fca, &metas, None, 1, ms(14, 30, 0)), ms(14, 34, 15));
     }
 }
 

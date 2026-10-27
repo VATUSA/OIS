@@ -96,18 +96,16 @@ describe("IDST SelectedPanel (VATUSA/OIS#816)", () => {
     expect(host.textContent).not.toContain("EDCT");
   });
 
-  it("after a Set shows the delay of the assigned release against the typed ready time", async () => {
-    // Ready 1400Z; the server gave a release at 14:07Z (its 14:30 slot was taken).
+  async function setReady(host: HTMLElement, typed: string, edct: string) {
     api.POST.mockResolvedValue({
-      data: [{ callsign: "AAL1", released: true, edct: "2026-10-10T14:07:00Z", cross_time: "2026-10-10T14:37:00Z" }],
+      data: [{ callsign: "AAL1", released: true, edct, cross_time: "2026-10-10T14:37:00Z" }],
       error: undefined,
       response: { status: 200, ok: true },
     });
-    const { host, render } = mount(flight({}));
     const input = host.querySelector<HTMLInputElement>("#idst-ready")!;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => {
-      setter.call(input, "1400");
+      setter.call(input, typed);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     const set = [...host.querySelectorAll("button")].find((b) => b.textContent === "Set")!;
@@ -115,15 +113,43 @@ describe("IDST SelectedPanel (VATUSA/OIS#816)", () => {
       set.click();
       await new Promise((r) => setTimeout(r, 0));
     });
+  }
+  const releasedAt = (edct: string, over: Partial<IdstFlight> = {}) =>
+    flight({ released: true, edct, cross_time: "2026-10-10T14:37:00Z", ...over });
+
+  it("after a Set shows the delay of the assigned release against the typed ready time", async () => {
+    // Ready 1400Z; the server gave a release at 14:07Z (its 14:30 slot was taken).
+    const { host, render } = mount(flight({}));
+    await setReady(host, "1400", "2026-10-10T14:07:00Z");
     expect(api.POST).toHaveBeenCalledWith(
       "/api/v1/flow/fcas/{id}/release/{callsign}",
       expect.objectContaining({ body: { ready: "1400" } }),
     );
     // The IDST refetch then shows the frozen release in the panel's own rows.
-    render(flight({ released: true, edct: "2026-10-10T14:07:00Z", cross_time: "2026-10-10T14:37:00Z" }));
+    render(releasedAt("2026-10-10T14:07:00Z"));
     const row = host.querySelector("[data-set-result]");
     expect(row?.textContent).toBe("Delay after ready 1400z+7m");
     expect(host.textContent).toContain("1407z");
     expect(host.textContent).toContain("1437z");
+  });
+
+  it("says \"none\" when the release is the ready time", async () => {
+    const { host, render } = mount(flight({}));
+    await setReady(host, "1400", "2026-10-10T14:00:00Z");
+    render(releasedAt("2026-10-10T14:00:00Z"));
+    expect(host.querySelector("[data-set-result]")?.textContent).toBe("Delay after ready 1400znone");
+  });
+
+  it("drops the delay once the release it describes is cancelled, moved or another flight is shown", async () => {
+    const { host, render } = mount(flight({}));
+    await setReady(host, "1400", "2026-10-10T14:07:00Z");
+    render(releasedAt("2026-10-10T14:07:00Z"));
+    expect(host.querySelector("[data-set-result]")).not.toBeNull();
+    render(flight({}));
+    expect(host.querySelector("[data-set-result]")).toBeNull();
+    render(releasedAt("2026-10-10T14:09:00Z"));
+    expect(host.querySelector("[data-set-result]")).toBeNull();
+    render(releasedAt("2026-10-10T14:07:00Z", { callsign: "UAL2" }));
+    expect(host.querySelector("[data-set-result]")).toBeNull();
   });
 });

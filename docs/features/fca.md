@@ -234,10 +234,12 @@ numbers are the order itself (`:399-401`).
 - **SET**, `set_slot` (`handlers/flow.rs`, #816): the typed time is a ready (runway) time. The
   desired crossing is that time plus the airborne ETE, `eta - now - ground_allowance` (#815), and
   the slot is `earliest_slot` from there against every other pinned flight, metered without the
-  flight being set, with the margin added to the separation. A ready time before the current
+  flight being set, with the margin added to the separation. In manual mode the flight instead
+  follows the one ordered ahead of it on the ladder by the same gap, and still clears every other
+  release; airborne flights ordered behind it re-chain behind its new time. A ready time before the current
   minute is refused with 400 (`ready_ms`).
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
-  (`handlers/flow.rs:2133`, `:2635`, #815), so both store a wheels-up; SET's is never earlier than the typed time.
+  (`release_ms` and `mark_release` in `handlers/flow.rs`, #815), so both store a wheels-up; SET's is never earlier than the typed time.
 
 **Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, and four manual-order cases.

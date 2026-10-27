@@ -490,11 +490,27 @@ function useOnGone(fcaId: string) {
 class ReadyRefusedError extends Error {}
 
 /** How much later than the typed ready time a Set's release landed (#816). The release and its
- *  crossing slot show in the panel's own rows; this is the one figure they cannot give. */
-export type SetResult = { callsign: string; ready: string; delayMin: number };
+ *  crossing slot show in the panel's own rows; this is the one figure they cannot give. `edct` is
+ *  the release it describes, so the panel can drop the figure once that release changes. */
+export type SetResult = { callsign: string; ready: string; edct: string; delayMin: number };
 
 /** Read from the flight list the release returns. `readyIso` is the typed ready time as
  *  `parseHhmm` resolves it. Null when the callsign is missing or holds no release. */
+/** The Set result still describes `flight`'s release: the same callsign, still released, at the
+ *  same release time. A cancel, a swap or another Set elsewhere ends it. */
+export function setResultIsCurrent(
+  result: SetResult | null,
+  flight: { callsign: string; released: boolean; edct?: string | null },
+): result is SetResult {
+  return (
+    result !== null &&
+    result.callsign === flight.callsign &&
+    flight.released &&
+    !!flight.edct &&
+    Date.parse(flight.edct) === Date.parse(result.edct)
+  );
+}
+
 export function setResult(
   flights: FcaFlight[],
   callsign: string,
@@ -505,7 +521,7 @@ export function setResult(
   const delayMs = Date.parse(f.edct) - Date.parse(readyIso);
   // Whole minutes, floored: the ready time is on a minute and the panel shows the release as HHMM,
   // so the delay matches the difference between the two times it prints.
-  return { callsign, ready: readyIso, delayMin: Math.max(0, Math.floor(delayMs / 60_000)) };
+  return { callsign, ready: readyIso, edct: f.edct, delayMin: Math.max(0, Math.floor(delayMs / 60_000)) };
 }
 
 /** Issue a CFR release (RDY = earliest slot; `ready` HHMMz = the pilot's ready time, which takes
