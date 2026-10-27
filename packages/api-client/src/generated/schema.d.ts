@@ -6076,7 +6076,12 @@ export interface components {
             dep: string;
             /**
              * Format: date-time
-             * @description Frozen wheels-up (EDCT) once released; null while unscheduled.
+             * @description Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
+             *     would meet `cross_time`. The EDCT a release stores can be earlier or later than the
+             *     proposal: RDY spaces the flight only against airborne and already-released crossings (in
+             *     manual mode it takes its ladder slot), plus a 15 s margin, and SET uses the time the
+             *     controller enters. Null only when an unreleased flight has no metered crossing time or no
+             *     ETA.
              */
             edct?: string | null;
             /** @description The FCA metering this flight (the "program"). */

@@ -1,18 +1,20 @@
 //! The single arrival/crossing prediction service. Every surface that estimates when a connected
 //! aircraft reaches a point — the arrival ladder, airport-flow demand, runway ETE, and FCA
 //! metering — resolves the filed route **once** here and times position-along-route through the
-//! one [`trajectory::VerticalProfile`] model. That keeps a given aircraft's ETA identical on every
-//! surface and consistent with the real route drawn on the map (issue #63): before this, the
+//! one [`trajectory::VerticalProfile`] model. That keeps a given aircraft's ETA consistent across
+//! surfaces and with the real route drawn on the map (issue #63): before this, the
 //! arrival surfaces timed aircraft on a straight-line great circle to the field while FCA metering
 //! (correctly) used the real, longer, dog-legged route.
 //!
 //! Route resolution ([`fca::route_path`] → the nav engine) is the same one FCA metering uses. When
 //! a route can't be resolved past its dep/arr endpoints (blank/`DCT` route, fixes the nav engine
-//! doesn't know, unknown airport), we fall back to a straight-line great circle to the field so an
-//! arrival is never dropped — and for a **not-yet-airborne** flight that fallback carries the
-//! [`GROUND_ROUTE_FACTOR`] allowance, because issue #63 only meant to drop the historical padding
-//! where an actual enroute path *is* resolved, not to start timing `DCT` prefiles on a distance no
-//! real routing can fly (that fed metered wheels-up / CFR times early).
+//! doesn't know, unknown airport), [`arrival_eta`] falls back to a straight-line great circle to
+//! the field so an arrival is never dropped — and for a **not-yet-airborne** flight that fallback
+//! carries the [`GROUND_ROUTE_FACTOR`] allowance, because issue #63 only meant to drop the
+//! historical padding where an actual enroute path *is* resolved. [`arrival_eta`] applies that
+//! factor, and the per-fix debug table mirrors it (`handlers/flow.rs::ground_route_scale`); FCA
+//! metering (`handlers/flow.rs::build_candidates`) calls [`eta_along_route`] with the unpadded
+//! length of the resolved path, so for such a flight its ETA is earlier than the ladder's.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -23,15 +25,16 @@ use super::nav::NavData;
 use super::trajectory::{self, AircraftProfile, RouteWind};
 use super::winds::Winds;
 
-/// Taxi + spool-up allowance added to a not-yet-airborne aircraft's flight time (the profile model
-/// covers the climb itself).
+/// Default taxi-out time: the ground allowance's taxi phase when an airport has too few samples
+/// (`feed::taxi_estimate::estimate`), on top of the default pushback and start-up there.
 pub const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
 
 /// Great-circle → flyable-route length multiplier for a ground/proposed flight whose filed route
 /// won't resolve to an enroute path. Airway routings run a little longer than the direct great
 /// circle; without this a bare `DCT`/blank filing would be timed on an unachievable distance and
-/// its metered wheels-up / CFR time would skew early. Matches the factor `ground_estimate` applied
-/// before issue #63.
+/// its ETA would skew early. Applied by [`arrival_eta`] and the per-fix debug table; FCA metering
+/// does not pad. Matches
+/// the factor `ground_estimate` applied before issue #63.
 pub const GROUND_ROUTE_FACTOR: f64 = 1.12;
 
 /// Total great-circle length (nm) of a resolved route path.
@@ -64,8 +67,9 @@ pub struct AlongRouteEta {
 /// the target is near the field); the target sits
 /// `along_nm` ahead. Airborne aircraft start from their current altitude; ground aircraft climb
 /// from the surface and carry `ground_allowance_sec` (a learned per-gate/type/runway pushback+taxi
-/// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to [`GROUND_TAXI_SEC`]
-/// itself when data is thin, so callers always have a value to pass here). Ignored when `airborne`
+/// estimate, #164 sub-issue E — `feed::taxi_estimate::estimate` falls back to its defaults, taxi
+/// [`GROUND_TAXI_SEC`] plus pushback and start-up, when data is thin, so callers always have a value
+/// to pass here). Ignored when `airborne`
 /// is true. The descent ends at `arr_icao`'s field elevation, resolved from `airports` by
 /// [`profile_from_here`] rather than passed in (#411). An airborne aircraft's
 /// prediction is anchored to `observed_gs_kt` when it is established at cruise

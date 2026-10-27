@@ -16,8 +16,9 @@ const DEFAULT_STRATA: string[] = ["high"];
 
 /**
  * Admin sector map (#602): every ATC sector volume (#594), one stratum at a time, with a hover card.
- * Internal monitoring data, so it lives only here, behind `flow.sectors.read` (the nav item's
- * permission is the page gate).
+ * Gated by `flow.sectors.read` (the nav item's permission is the page gate). The Sector Monitor
+ * (`/ops/sectors`) reads the same backend sector cache, through
+ * `GET /api/v1/flow/sector-demand/{artcc}`.
  */
 export function SectorsPage() {
   const sectors = useSectors();

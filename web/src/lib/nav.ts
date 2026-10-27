@@ -36,8 +36,8 @@ import type {Me} from "./auth";
 import {hasPermission} from "./permissions";
 
 /**
- * The one navigation map. The top nav, the area sidebars, the mobile menu, breadcrumbs and the ⌘K
- * page search all derive from it, so a link's permission is declared once. An item is visible when
+ * The one navigation map. The global sidebar, its phone drawer, breadcrumbs and the ⌘K page search
+ * all derive from it, so a link's permission is declared once. An item is visible when
  * the user holds `permission` (or any of `anyOf`); an item with neither is public.
  */
 export type NavItem = {

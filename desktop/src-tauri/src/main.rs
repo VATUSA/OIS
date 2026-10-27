@@ -6,12 +6,10 @@
 //! the desktop app is literally the same app.
 //!
 //! What it adds beyond the window is authentication (see [`auth`]): the desktop app can't carry the
-//! website's session cookie, so it holds a session token in the OS keychain and sends it as a
-//! bearer. The remaining desktop features arrive in later issues, each adding its own commands and
-//! capability entries:
-//!
-//! - native notifications whose click opens the page they're about — #348 (see [`notify`])
-//! - tray, hotkeys and the rest — #349-#354
+//! website's session cookie, so it holds a session token (the OS credential store, or a 0600 file
+//! on macOS) and sends it as a bearer. The other desktop-only features are native notifications
+//! (see [`notify`]), pop-out and route windows (see [`popout`]), the tray, global shortcuts,
+//! launch at login, auto-update and diagnostics (see [`diagnostics`]).
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
 // appear behind them. Logs go to the log file either way (see `logging`); debug builds also print them
@@ -70,15 +68,13 @@ fn main() {
             // macOS-only in the literal sense: `RunEvent::Reopen` does not exist on Windows or
             // Linux, so it must be compiled out there rather than merely skipped at runtime — a
             // plain runtime check does not compile at all (caught by the 3-OS CI matrix).
-            //
-            // Nested rather than a let chain: those need Rust 1.88, and the workspace promises 1.85.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                if let Some(window) = tauri::Manager::get_webview_window(_app, "main") {
-                    // A failure here leaves the user with no way back into the app, so it is logged.
-                    if let Err(e) = window.show().and_then(|()| window.set_focus()) {
-                        log::warn!("could not bring the main window back on reopen: {e}");
-                    }
+            if let tauri::RunEvent::Reopen { .. } = _event
+                && let Some(window) = tauri::Manager::get_webview_window(_app, "main")
+            {
+                // A failure here leaves the user with no way back into the app, so it is logged.
+                if let Err(e) = window.show().and_then(|()| window.set_focus()) {
+                    log::warn!("could not bring the main window back on reopen: {e}");
                 }
             }
         });

@@ -4,8 +4,8 @@
 # ==============================================================================
 # Runs code quality checks on the staged files before allowing a commit.
 # Installed for the whole clone by `just setup` (core.hooksPath=.githooks), whose
-# .githooks/pre-commit execs this file. Bypassing it (`--no-verify`) only defers the
-# failure to CI.
+# .githooks/pre-commit execs this file. Bypassing it (`--no-verify`) defers the rustfmt
+# and migration-version failures to CI; CI runs no debug-call or gitleaks check.
 # Tests: bin/lib/pre-commit.test.sh
 # ==============================================================================
 
