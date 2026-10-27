@@ -1,0 +1,14 @@
+worktree /mnt/c/Users/Matthew/orca/OIS
+HEAD 748eb8ce1421c2fd3e20d20154eb436e0fa44b26
+branch refs/heads/next
+
+worktree /mnt/c/Users/Matthew/orca/OIS/.git/worktrees/23632-80da791d-c3af-4fa8-859f-0b14d4863f49/C:/Users/Matthew/orca/workspaces/OIS/ticket-loops-wsl-gate-clone-is-unmanaged-target
+HEAD 2dbb1a1680b20c091f4d10cc1e2b4ebb406f7fdd
+branch refs/heads/chore/872/wsl-gate-clone
+prunable gitdir file points to non-existent location
+
+worktree /mnt/c/Users/Matthew/orca/OIS/.git/worktrees/chore-748eb8ce-session-learnings/C:/Users/Matthew/orca/OIS/.claude/worktrees/chore-748eb8ce-session-learnings
+HEAD d05167f9ea7ba5fce7b352c230ab903c3c653d2d
+branch refs/heads/chore/748eb8ce/session-learnings
+prunable gitdir file points to non-existent location
+

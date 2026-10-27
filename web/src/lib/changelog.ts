@@ -38,6 +38,70 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-10-21-sidebar-flyouts",
+    date: "2026-10-21",
+    title: "Sidebar group menus, and one row per flight on IDST",
+    sections: [
+      {
+        heading: "Navigation",
+        highlights: [
+          "The collapsed sidebar now shows one icon per group (Advisories, Operations, Planning, Historical, Admin and User) instead of an icon for every page. Click a group's icon, or press Enter or Space, to open a menu of its pages. The group you are in is highlighted.",
+        ],
+      },
+      {
+        heading: "Flow and FCAs",
+        highlights: [
+          "An FCA now counts only connected pilots with a flight plan. A prefile left in the feed after its pilot connected no longer puts the flight on IDST twice or adds it to the count badge again.",
+          "A prefile with no connected pilot no longer takes a metering slot, so it cannot push a real departure's release later.",
+        ],
+      },
+      {
+        heading: "Advisories",
+        highlights: [
+          "Discard, Publish and Cancel on the TMU advisories tab work on the second click again. Before, the second click only re-armed the button, so a draft could not be deleted.",
+          "When one of those actions fails, the message now says why: outside your facility, no longer exists, or the advisory is in the wrong state.",
+        ],
+      },
+      {
+        heading: "Security",
+        highlights: [
+          "Updates the certificate-checking libraries behind every outbound connection, so a certificate issued through a distrusted authority is refused.",
+          "Moves the server to a version of its zip library with the published security fixes.",
+        ],
+      },
+    ],
+  },
+  {
+    id: "2026-10-16-wheels-up-releases",
+    date: "2026-10-16",
+    title: "Sector data loads itself, and release times are wheels-up",
+    sections: [
+      {
+        heading: "Sector Monitor",
+        highlights: [
+          "The Sector Monitor and the admin Sectors page are no longer empty. The server now loads the sector volumes when it starts and checks for an update every 24 hours, instead of waiting for someone to run an import by hand.",
+          "The admin Sectors map draws its sector polygons again.",
+          "Sectors has moved from its own Flow heading into the Admin group of the sidebar, as the last item. Its address has not changed, so links and favorites still work.",
+        ],
+      },
+      {
+        heading: "Flow, TMU and FCAs",
+        highlights: [
+          "A release's EDCT is now a wheels-up time: the CTA less the flight's airborne time. It used to take the taxi time off as well, so a departure that took off on its EDCT reached the FCA one taxi time early.",
+          "Airport-flow CFRs, GDP EDCTs and the proposed EDCT on IDST follow the same rule, so each matches the release the flight would get.",
+          "A GDP's maximum-enroute tier now counts airborne minutes only, so a flight just over the limit before can now be controlled.",
+          "Issuing a CFR without a ready time now locks the flight's estimated wheels-up instead of the current time.",
+        ],
+      },
+      {
+        heading: "Security",
+        highlights: [
+          "Updates the TLS library behind every outbound connection, fixing four published security advisories.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-09-sector-monitor",
     date: "2026-10-09",
     title: "The Sector Monitor, controller access, and a reset to VATUSA",

@@ -28,7 +28,10 @@ Use the best source available, in this order:
    them as secondary.
 
 Also read what OIS already says: the relevant `docs/features/*.md` (for example `flow.md`,
-`tmu-ntml-adv-tmi.md`, `vatusa-sync.md`, `discord-integration.md`) and the code that models it.
+`tmu-ntml-adv-tmi.md`, `vatusa-sync.md`, `discord-integration.md`), the code that models it, and,
+for a feed, trajectory, metering or TMI question, `.claude/rules/feed-and-trajectory.md` and
+`.claude/rules/domain-lessons.md` in full (path-scoped, not loaded in a subagent; the second records
+what OIS's domain rules already got wrong and the proof each fix holds).
 If the code path needs a full trace, say so and recommend that the dispatcher run
 `codebase-researcher`. Note where OIS's current model departs from the real rule.
 

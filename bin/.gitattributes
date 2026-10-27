@@ -1,0 +1,3 @@
+wsl-clone.sh text eol=lf
+lib/wsl.sh text eol=lf
+lib/wsl-clone.test.sh text eol=lf

@@ -92,6 +92,11 @@ export function useDataStatus() {
   });
 }
 
+/** Which wind field the ETAs are using (#836): NOAA RAP, or none (still air). */
+export function windsLabel(data: DataStatus): string {
+  return data.winds_source === "rap" ? "RAP winds" : "no winds";
+}
+
 /**
  * The toast a completed data refresh should raise. The endpoint answers 200 even when the nav fetch
  * could only fall back to an older cycle — it keeps last-good rather than failing — so a stale or
@@ -103,7 +108,7 @@ export function refreshToast(data: DataStatus): {
   title: string;
   description?: string;
 } {
-  const summary = `Nav ${data.nav_cycle} · ${data.winds_stations} wind stations`;
+  const summary = `Nav ${data.nav_cycle} · ${windsLabel(data)}`;
   const behind = data.nav_cycles_behind;
   if (behind == null)
     return {

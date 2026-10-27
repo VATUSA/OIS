@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.92"
 
 # Versions are pinned once here and referenced by members with `<dep>.workspace = true`.
 # Mirrors the versions proven in osmium so the ported permission core builds unchanged.
@@ -106,3 +106,13 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 # --- internal crates ---
 ois-core = { path = "crates/ois-core" }
 ois-client = { path = "crates/ois-client" }
+
+# Dev and test builds keep file:line for workspace crates (backtraces still point at our code) and
+# carry no debug info for dependencies. That shrinks target/ and the work every rebuild and link
+# does; a debugger loses locals everywhere and dependency frames show no file:line (#871).
+# Release builds are unaffected.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

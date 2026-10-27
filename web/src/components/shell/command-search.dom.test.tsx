@@ -340,3 +340,13 @@ describe("⌘⇧F keys a page the way its Pages row does (VATUSA/OIS#339 review)
     expect(p.favorite()).toEqual([]);
   });
 });
+
+describe("the Sectors page in the palette", () => {
+  it("lists Sectors under the Admin group's context, not Flow", async () => {
+    await mountSearch({ me: ME });
+    paletteType("sectors");
+    const row = Array.from(document.querySelectorAll("[data-index]")).find((r) => r.textContent?.includes("Sectors"));
+    expect(row?.textContent).toContain("Admin · Admin");
+    expect(row?.textContent).not.toContain("Flow");
+  });
+});

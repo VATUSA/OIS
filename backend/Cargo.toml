@@ -1,7 +1,7 @@
 [package]
 name = "ois-backend"
 # Local/fallback base only; the deployed build version comes from the root VERSION file via build.rs.
-version = "0.4.0"
+version = "0.4.2"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -65,12 +65,15 @@ reqwest.workspace = true
 
 # --- nav data (runtime NASR fetch + hot-swap) ---
 flate2 = "1"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 # Nav-fetch-only DNS resolver (A + AAAA itself, IPv4 first) — see feed/nav_dns.rs.
 hickory-resolver = { version = "0.26", features = ["tokio"] }
 arc-swap = "1"
 governor = "0.10.4"
+# Decodes NOAA RAP winds aloft (GRIB2, JPEG2000-packed) for feed/rap.rs (#836). Pure Rust: the
+# default features pull in C OpenJPEG and libaec, so only the hayro JPEG2000 decoder is enabled.
+grib = { version = "0.19.1", default-features = false, features = ["jpeg2000-unpack-with-hayro"] }
 # Streams a large query row by row instead of `fetch_all` (#776). Already in the tree via axum/sqlx.
 futures-util = { version = "0.3", default-features = false }
 

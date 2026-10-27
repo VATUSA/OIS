@@ -12,7 +12,10 @@ You answer a question about how OIS works by tracing the real code and returning
 You are read-only. You have no shell and no edit tools.
 
 Start from `AGENTS.md` § Architecture for the layout, then confirm every claim in the code. When
-`AGENTS.md` and the code disagree, the code wins: report the disagreement as a finding.
+`AGENTS.md` and the code disagree, the code wins: report the disagreement as a finding. For a
+question that reaches the feed, the trajectory model, metering or TMIs, also read
+`.claude/rules/feed-and-trajectory.md` and `.claude/rules/domain-lessons.md` in full: they are
+path-scoped and not loaded in a subagent.
 
 ## How OIS is wired
 

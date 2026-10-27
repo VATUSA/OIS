@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -23,7 +23,7 @@
     "jsdom": "^30.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
-    "vite": "^8.2.2",
+    "vite": "^8.2.4",
     "vitest": "^5.0.1"
   },
   "dependencies": {

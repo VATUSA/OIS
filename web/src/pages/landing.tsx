@@ -2,6 +2,7 @@ import {Link} from "@tanstack/react-router";
 import {ArrowRight, CalendarClock, Gauge, type LucideIcon, Radar, TrendingUp, Waypoints, Wind} from "lucide-react";
 
 import {Footer} from "@/components/footer";
+import {ReleaseStageChip} from "@/components/release-stage-chip";
 import {SignInButton} from "@/components/sign-in-button";
 
 /** A tinted icon-chip accent — background + matching icon color, paired so they always read as one. */
@@ -107,9 +108,12 @@ export function LandingPage() {
       {/* Hero */}
       <div className="flex flex-col items-center gap-5 text-center">
         <Radar className="size-10 text-primary" />
-        <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
-          OIS
-        </h1>
+        <div data-hero-title className="flex items-center gap-3">
+          <h1 className="max-w-2xl text-4xl font-semibold tracking-tight sm:text-5xl">
+            OIS
+          </h1>
+          <ReleaseStageChip />
+        </div>
         <p className="max-w-xl text-muted-foreground">
           VATUSA's traffic-management and event-planning platform.
         </p>

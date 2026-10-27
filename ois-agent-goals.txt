@@ -1,18 +1,18 @@
+=====================================================TICKET=======================================================
+/goal Run the ticket-worker agent to complete the ticket given. Once the ticket-worker agent has completed and shipped to POST BUILD, immediately launch the ticket-reviewer agent against the same ticket. Do not run either agent in a sub shell, run them both in this session. Continue iterating until the ticket-reviewer approves handing the ticket over for review at the CODE REVIEW GitHub status.
+
+As you go, continuously review the contents of this Claude session. Context: we have recently started seeing that when we run the ticket-worker and ticket-reviewer agents as designed, which is we have a fleet of ticket-workers working on tickets, shipping to POST BUILD on completion, and then separately a fleet of ticket-reviewers reviewing the tickets at POST BUILD, we are seeing these symptoms in the workflow: (1) tickets reach POST BUILD with criteria not being met, (2) Tickets are frequently failing the ticket-reviewers reviews, (3) general process failures, (4) Where time could have been saved between the ticket-worker and ticket-reviewer agents, reducing back and forth, (5) any project rules which led to inefficacies; These symptoms manifest as tickets being stuck bouncing back and forth between the agents, causing delays in product development. Your task is to review this session to identify process failings, inefficacies, where the two agents don't work together, and for signs and causes of the issues we're seeing, and largely based on your interaction with me, could workflows be optimised based on the knowledge I've given you. If you can amount some of the inefficiencies to genuine project gaps around quality, you may flag this too. You will write your findings to /tmp/ois-claude-agent-findings.txt (file may exist, if it does append to it, otherwise create and append): but understand that this is largely a process issue, it's not majorly a code quality, test quality, etc, type of issue. Carry on with the goal given, but do this proactively in the background when you identify process flaws.
+
+The ticket is #<n>
+
 =====================================================TICKET LOOP=================================================
-Run /ticket-loop and follow .claude/commands/ticket-loop.md exactly; re-read it after any context compaction. You are the orchestrator: you write no code and review nothing yourself. You pick issues with me from the OIS Kanban (GitHub project #7, owner VATUSA: 'To Do' and 'Returned', assigned to me), dispatch the ticket-worker agent to build each one and a fresh ticket-reviewer agent to test it, and relay every decision between them and me.
+Run /ticket-loop and follow .claude/commands/ticket-loop.md exactly; re-read it after any context compaction. You are the orchestrator: you write no code and review nothing yourself. You pick issues with me from the OIS Kanban (GitHub project #7, owner VATUSA: 'Returned', 'To Do' and parked 'In build', assigned to me), dispatch the ticket-worker agent to build each one and ship it to 'Post build', then a fresh ticket-reviewer agent to test it, and relay every decision between them and me.
 
 Every operator decision goes through AskUserQuestion, with your recommendation first. The subagents can't ask: they return OPERATOR_QUESTIONS blocks, and you relay each one and send the answer back to the same agent. Never answer one yourself. Silence, or an answer to a different question, is not approval.
 
 The standing rules hold under the loop: no merging, no priority labels, no AI attribution anywhere (commits, PRs, issues or comments; no Co-Authored-By, Drafted by or Generated with line), never Shippable or Done, nothing pushed to next or main. When this goal and a gate disagree, the gate wins.
 
 Done only when the queue is empty. Queue exhaustion is the only exit condition.
-
-=====================================================REVIEW QUEUE=================================================
-Run /ticket-loop --review and follow .claude/commands/ticket-loop.md § Review only. Every 15 minutes, check the OIS Kanban (GitHub project #7, owner VATUSA) for issues in 'Testing Queue' assigned to me, offer them through AskUserQuestion, and dispatch a fresh ticket-reviewer agent for each one I pick. The reviewer tests the PR's head in its own worktree, never origin/next.
-
-Relay its OPERATOR_QUESTIONS and its verdict through AskUserQuestion; only CRITICAL or MAJOR findings send work back, and I decide pass or return. Never answer for me.
-
-Complete when the queue is empty. Queue exhaustion is the only exit condition.
 
 =================================================REGRESSION CHECKER=================================================
 Start a separate session with `claude --agent regression-checker`, then `/loop 30m run one Sentry pass per your agent instructions`, and follow .claude/agents/regression-checker.md. Confirm the Sentry connection values (instance URL, org slug, the ois-backend and ois-web project slugs, the backend trace sample rate) with me before the first run.

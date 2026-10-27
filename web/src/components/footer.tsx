@@ -1,6 +1,7 @@
 import {Link} from "@tanstack/react-router";
 import {BookOpen, Code2} from "lucide-react";
 
+import {ReleaseStageChip} from "@/components/release-stage-chip";
 import vatusaLogo from "@/assets/vatusa-logo.png";
 import {DOCS_URL} from "@/lib/api";
 
@@ -68,6 +69,7 @@ export function Footer() {
           >
             v{VERSION}
           </a>
+          <ReleaseStageChip />
         </nav>
       </div>
 

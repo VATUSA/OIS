@@ -14,6 +14,53 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
+  is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
+  RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
+  RAP, which has no stations. A caller reading `winds_stations` must read `winds_source` instead.
+  `FcaFlightDebug.headwind` is the mean headwind over the remaining route, each point read at the
+  profile's altitude there. `winds_refreshed` no longer means a field is in use: after failed
+  refreshes drop to still air it keeps the time the last field loaded, so read `winds_source`. (#836)
+- **Changed: `GET /api/v1/flow/idst`, `GET /api/v1/flow/fcas/{id}/traffic` and
+  `GET /api/v1/flow/counts`** list and count connected pilots with a flight plan only. A prefile is no
+  longer an FCA candidate, so `FcaFlight.status` is `airborne` or `ground` and `IdstFlight.status` is always
+  `ground`; neither carries `proposed`. `POST /api/v1/flow/fcas/{id}/release/{callsign}` answers `404`
+  for a callsign that is only prefiled. A release already stored for a prefiled callsign is kept but
+  appears on no FCA surface (IDST `released`, the traffic list, metering) until that pilot connects;
+  `GET /api/v1/tmu/departures/{dep}` and sector demand still read it as the flight's locked wheels-up
+  (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
+  count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
+  prefiled flights must wait for the pilot to connect. (#834)
+- **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
+  `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
+  `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory
+  outside the caller's facility scope; the OpenAPI document now lists both. Nothing changes for a caller.
+- **Changed: release and CFR times are wheels-up, not gate times** (#815). `FlowFlight.etd` on
+  `GET /api/v1/tmu/flow/{icao}` is a ground or prefiled flight's estimated wheels-up: now for a ground
+  flight, or for a prefile its filed departure time (never earlier than now + 20 min, and now + 20 min
+  when none parses), plus the ground allowance. It was the same time with no allowance. Every time backed
+  out of it moves with it, so for a ground or prefiled flight each of these is one ground allowance later
+  than before: `FlowFlight.cfr`, the EDCTs a GDP assigns, the `edct` a release stores when
+  `POST /api/v1/flow/fcas/{id}/release/{callsign}` is sent without a `ready` time, and the advisory
+  `edct` on `GET /api/v1/flow/idst`. Each is now the CTA less the airborne flight time.
+  - `POST /api/v1/tmu/cfr` without a `ready_time` locks the flight's `FlowFlight.cfr`, else its
+    `FlowFlight.etd`, and now only when the flow has neither (the flight is not listed, or is airborne).
+    It locked `cfr` or now, so a ground flight bound for an airport with no program now gets its
+    wheels-up estimate instead of the current time.
+  - With a `ready_time` and an airport-flow program, `POST /api/v1/tmu/cfr` locks the later of that
+    time and now, pushed later only if the flight's arrival would conflict. It now projects the arrival
+    by the airborne flight time alone.
+  - A release sent with a `ready` time still stores that time as its `edct`, and now stores a CTA one
+    allowance earlier: the typed time plus the airborne flight time.
+  - For a flight holding an issued CFR, `FlowFlight.sta` and `delay_min` are one allowance earlier: the
+    locked wheels-up plus the airborne flight time.
+  - A GDP's `max_enroute_min` tier counts a ground flight's airborne minutes, without its ground
+    allowance, so the set of flights a GDP controls can change. That reaches
+    `GET /api/v1/tmu/gdp/{id}/board`, `POST /api/v1/tmu/gdp/{id}/publish`, `PUT /api/v1/tmu/gdp/{id}`,
+    `POST /api/v1/tmu/gdp/{id}/slots/{callsign}` and `POST /api/v1/tmu/gdp/{id}/compress`.
+
+  Releases and CFRs stored before the change keep their stored value. The shapes are unchanged; a tool
+  that read `etd` as an off-block time should read it as wheels-up.
 - **New:** `PUT /api/v1/flow/sector-consolidations/{artcc}` changes several of one ARTCC's sector
   consolidations in one request. The body is `{ "into": { "<sector_id>": "<target_sector_id>" | null } }`:
   each sector is worked at the target given, or given its own row back for `null`. It needs

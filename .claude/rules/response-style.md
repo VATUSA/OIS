@@ -1,40 +1,54 @@
-# Response style
+# Response Style (always loaded)
 
-Loads for every file. How to answer in the terminal. Commit bodies, PRs, and review write-ups are
-`engineering-prose.md`; word choice is `anti-ai-slop.md`.
+How to answer in chat. This is a different surface from the two prose rules:
+`engineering-prose.md` governs commit bodies, PR descriptions and review write-ups;
+`anti-ai-slop.md` governs word choice in docs, UI copy and anything posted. This file is about the
+reply in the terminal.
 
-Source: ported from the house response-style rule (#742).
-
-Be concise. Default to the shortest complete answer.
+Be extremely concise. Default to the shortest complete answer.
 
 Answer first. No preamble, no restating the question, no "Great question."
 
-No recap at the end. When the answer is done, stop.
+No summaries or recaps at the end. When the answer is done, stop.
 
 No hedging filler: "it's worth noting", "it's important to", "keep in mind".
 
-Don't offer next steps or ask follow-up questions unless asked, or unless you are blocked on a
-decision that is the user's to make.
+**Never ask a question or offer next steps in prose; use `AskUserQuestion`**, recommended
+option first. Exception: a question that is rhetorical or answered in the same breath.
 
-Plain prose over bullets and headers unless the content needs structure.
+**A loose end is a question too.** When a reply names something that follows from what just
+happened and you are not doing it, it goes in `AskUserQuestion`:
 
-A simple question gets one to three sentences. Go long only when depth is asked for.
+- a gap a user action exposed: a stale PR description, docs out of step with a push;
+- a follow-up you noticed and chose not to do;
+- "X still needs Y", "nothing covers Z yet", "this will need …" as a closing line.
 
-Never pad for politeness. Short and blunt beats warm and long.
+If it is in scope, cheap and reversible, do it and say so instead of asking. Never name it and
+stop.
 
-**Report a problem in four short parts:** the problem (one line), why (the mechanism), how it may
-affect someone (what an operator, controller, or pilot would see), and the risk if it ships.
+Plain prose over bullets and headers unless the content genuinely needs structure.
 
-**When you explain how data moves, draw a data-flow diagram inline in the terminal.** Not
-optional. A described flow is harder to check than a drawn one, and most OIS questions are flow
-questions: the VATSIM feed into the `AppState` caches and on to the trajectory model's callers
-(listed in `AGENTS.md` § The trajectory / ETA model), or a handler enqueueing to
-`integration.outbound_jobs` for the bot to lease. Never create or publish a file or artifact for a
-diagram.
+Simple question = 1-3 sentences. Only go long when depth is asked for.
 
-**Name an issue as `#123 [short summary] (Status)`, never a bare number.** The canonical rule,
-including where the status comes from, is in `docs/github-issues.md` § Referring to an issue.
+Never pad for politeness. Blunt and short beats warm and long.
 
-**Say which "done" you mean.** "Ready for review", "pushed, PR open", and "merged" are different
+Draw diagrams inline in the terminal. Never create or publish a file or artifact for one.
+
+**When reporting a problem, use this structure and keep it short:** problem (one line), why
+(the mechanism), how it may affect (what an operator, controller or pilot sees), risks (what is
+at stake if it ships).
+
+**When looking at, explaining, or discussing how data moves, draw a data flow diagram.** Not
+optional. A described flow is harder to check than a drawn one, and most of what gets
+discussed here is a flow: the VATSIM feed into the `AppState` caches and on to the trajectory
+model's callers (`AGENTS.md` § The trajectory / ETA model), or a handler enqueueing to
+`integration.outbound_jobs` for the bot to lease. Those are exactly the shapes a reader cannot hold
+in their head from prose.
+
+**Name an issue as `#123 [short summary] (Status)`, never as a bare number.** The canonical
+rule, including where the status comes from, lives in `github-issues.md` → "Referring to an
+issue".
+
+**Say which "done" you mean.** "Ready for review", "pushed, PR open" and "merged" are different
 states, and a report that blurs them reads as the strongest one. Say which gates ran and which did
 not.

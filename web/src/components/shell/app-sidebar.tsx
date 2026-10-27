@@ -1,5 +1,5 @@
 import {useState} from "react";
-import {Link, useRouter} from "@tanstack/react-router";
+import {Link, useRouter, useRouterState} from "@tanstack/react-router";
 import {
   Avatar,
   AvatarFallback,
@@ -24,6 +24,7 @@ import {
   BookOpen,
   ChevronLeft,
   ChevronRight,
+  CircleUser,
   History,
   Home,
   KeyRound,
@@ -37,13 +38,14 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import {ReleaseStageChip} from "@/components/release-stage-chip";
 import {SignInButton} from "@/components/sign-in-button";
 import {openWhatsNew} from "@/components/whats-new";
 import {ZuluClock} from "@/components/zulu-clock";
 import {DOCS_URL} from "@/lib/api";
 import {useLogout, useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {ADMIN_HOME, AREAS, visibleGroups} from "@/lib/nav";
+import {ADMIN_HOME, AREAS, groupContainsPath, visibleGroups} from "@/lib/nav";
 
 import {openCommandSearch} from "./command-search";
 import {useRecentPages} from "./recent-pages";
@@ -114,6 +116,26 @@ function ChromeRow({ collapsed, onToggle }: { collapsed: boolean; onToggle: () =
   );
 }
 
+/**
+ * The OIS wordmark and the release-stage chip (#841), below the chrome row so that row still leads
+ * the header. Collapsed, the rail has room only for the compact chip.
+ */
+function StageRow({ collapsed }: { collapsed: boolean }) {
+  if (collapsed) {
+    return (
+      <div data-stage-row className="flex justify-center empty:hidden">
+        <ReleaseStageChip compact />
+      </div>
+    );
+  }
+  return (
+    <div data-stage-row className="flex items-center gap-2 px-1.5">
+      <span className="text-sm font-bold tracking-tight text-ink">OIS</span>
+      <ReleaseStageChip />
+    </div>
+  );
+}
+
 function initials(name: string) {
   return name
     .split(/\s+/)
@@ -155,33 +177,39 @@ function Identity({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+function usePathname(): string {
+  return useRouterState({ select: (s) => s.location.pathname });
+}
+
+/**
+ * The User group's page links, in display order. One list drives both the rendered items and the
+ * collapsed icon's active state, so a link added here is active-aware without a second edit.
+ * Desktop app is deliberately permission-less: anyone signed in may install the app (#534).
+ */
+function userLinks(canCreateKeys: boolean) {
+  return [
+    { to: "/profile", icon: UserIcon, label: "Profile" },
+    { to: "/settings", icon: SettingsIcon, label: "Settings" },
+    ...(canCreateKeys ? [{ to: "/api-keys", icon: KeyRound, label: "API keys" }] : []),
+    { to: "/download", icon: DownloadIcon, label: "Desktop app" },
+  ] as const;
+}
+
 /** Profile, settings, API keys and sign out — the signed-in user's own links. */
 export function UserGroup() {
   const { data: me } = useMe();
   const logout = useLogout();
+  const pathname = usePathname();
   if (!me) return null;
+  const links = userLinks(hasPermission(me, "api_keys.key.create"));
+  const active = groupContainsPath({ items: links }, pathname);
   return (
-    <SidebarGroup label="User">
-      <SidebarItem asChild icon={UserIcon} label="Profile">
-        <Link to="/profile" />
-      </SidebarItem>
-      <SidebarItem asChild icon={SettingsIcon} label="Settings">
-        <Link to="/settings" />
-      </SidebarItem>
-      {hasPermission(me, "api_keys.key.create") && (
-        <SidebarItem asChild icon={KeyRound} label="API keys">
-          <Link to="/api-keys" />
+    <SidebarGroup label="User" icon={CircleUser} active={active}>
+      {links.map(({ to, icon, label }) => (
+        <SidebarItem key={to} asChild icon={icon} label={label}>
+          <Link to={to} />
         </SidebarItem>
-      )}
-      {/*
-        Deliberately permission-less: `canSeeItem` treats an item with neither `permission` nor
-        `anyOf` as public, and anyone signed in may install the app. Before #534 the only link to
-        this page was in the footer, which renders solely on the signed-out landing page — so a
-        signed-in user had no route to it at all.
-      */}
-      <SidebarItem asChild icon={DownloadIcon} label="Desktop app">
-        <Link to="/download" />
-      </SidebarItem>
+      ))}
       {/*
         Reopens the full changelog — once dismissed, the panel otherwise never shows again (#665). It
         sits directly above Sign out (#680), and its gold hover is DESIGN.md's one named icon exception.
@@ -194,17 +222,19 @@ export function UserGroup() {
       >
         <button type="button" onClick={openWhatsNew} />
       </SidebarItem>
-      {/* Confirms in place like a delete: first click arms it, a second click signs out. */}
-      <SidebarTooltip label="Sign out">
+      {/*
+        Confirms in place like a delete: first click arms it, a second click signs out.
+        `data-keep-open` keeps the collapsed flyout open between the two clicks.
+      */}
       <ConfirmButton
+        data-keep-open
         onConfirm={() => logout.mutate()}
         warn="Sign out of OIS?"
-        className="h-auto w-full justify-start gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-normal [&_svg]:size-[17px] group-data-[collapsed]/sidebar:justify-center group-data-[collapsed]/sidebar:px-0"
+        className="h-auto w-full justify-start gap-2.5 rounded-sm px-2.5 py-2 text-[13px] font-normal [&_svg]:size-[17px]"
       >
         <LogOut />
-        <span className="group-data-[collapsed]/sidebar:sr-only">Sign out</span>
+        <span>Sign out</span>
       </ConfirmButton>
-      </SidebarTooltip>
     </SidebarGroup>
   );
 }
@@ -238,12 +268,18 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
  */
 function NavGroups() {
   const { data: me } = useMe();
+  const pathname = usePathname();
   const groups = AREAS.flatMap((area) =>
-    visibleGroups(me, area).map((g) => ({
-      key: `${area.id}-${g.label ?? ""}`,
-      label: g.label ?? area.label,
-      items: area.id === "admin" && g.label === "Admin" ? [ADMIN_HOME, ...g.items] : g.items,
-    })),
+    visibleGroups(me, area).map((g) => {
+      const items = area.id === "admin" && g.label === "Admin" ? [ADMIN_HOME, ...g.items] : g.items;
+      return {
+        key: `${area.id}-${g.label ?? ""}`,
+        label: g.label ?? area.label,
+        icon: g.icon,
+        active: groupContainsPath({ prefix: g.prefix, items }, pathname),
+        items,
+      };
+    }),
   );
   return (
     <>
@@ -253,7 +289,7 @@ function NavGroups() {
         </SidebarItem>
       </SidebarGroup>
       {groups.map((g) => (
-        <SidebarGroup key={g.key} label={g.label}>
+        <SidebarGroup key={g.key} label={g.label} icon={g.icon} active={g.active}>
           {g.items.map((item) => (
             <SidebarItem key={item.to} asChild icon={item.icon} label={item.label}>
               <Link to={item.to} activeOptions={{ exact: item.exact }} />
@@ -284,14 +320,17 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/** The one global sidebar: chrome row, identity, ⌘K, every permitted section, then Docs/theme/clock. */
+/** The one global sidebar: chrome row, stage row, identity, ⌘K, every permitted section, then Docs/theme/clock. */
 export function AppSidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const pathname = usePathname();
   return (
     <Sidebar
       collapsed={collapsed}
+      path={pathname}
       header={
         <>
           <ChromeRow collapsed={collapsed} onToggle={onToggle} />
+          <StageRow collapsed={collapsed} />
           <Identity collapsed={collapsed} />
           <SearchPill collapsed={collapsed} />
         </>
@@ -312,7 +351,18 @@ export function MobileNavButton() {
       <Button size="icon" variant="ghost" aria-label="Menu" className="size-8 md:hidden" onClick={() => setOpen(true)}>
         <Menu className="size-5" />
       </Button>
-      <Modal open={open} onClose={close} placement="left" title="OIS">
+      <Modal
+        open={open}
+        onClose={close}
+        placement="left"
+        aria-label="OIS"
+        title={
+          <span className="flex items-center gap-2">
+            OIS
+            <ReleaseStageChip />
+          </span>
+        }
+      >
         <nav className="flex flex-col gap-3" onClick={(e) => (e.target as HTMLElement).closest("a") && close()}>
           <Identity collapsed={false} />
           <SearchPill collapsed={false} />
