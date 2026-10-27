@@ -409,7 +409,9 @@ RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder 
   (at least 300 fpm, at most 90 s apart) or cruise (under 100 fpm, within 300 ft of the flight's
   top, up to 20 min apart). Groundspeed becomes TAS with the `stats.winds` snapshot in force, read along the
   pair's track the way the model reads RAP (`Winds::along`); a snapshot over 2 h old is not used.
-  Mach uses the field's temperature, IAS the ISA density, matching `trajectory.rs`. Positions are
+  Mach uses the field's temperature, IAS the ISA density, matching `trajectory.rs`. Climb and
+  descent speeds are IAS below FL260 and Mach from FL310; a pair between gives a rate but no speed,
+  since the IAS/Mach crossover moves with the type. Positions are
   thinned past 7 days (`COMPACTION_TIERS`), so climbs and descents come only from the last 14 days;
   cruise samples use any age `stats.winds` still holds (90 days, `WINDS_RETAIN_DAYS`).
 - **Output.** One value per flight per field (its median), then per type the median and quartiles
