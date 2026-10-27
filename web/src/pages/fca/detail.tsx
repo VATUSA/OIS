@@ -145,6 +145,7 @@ function Strip({
           ) : (
             <>
               <Input
+                aria-label="Ready time"
                 className="h-7 w-20 font-mono"
                 placeholder="HHMMz"
                 maxLength={5}

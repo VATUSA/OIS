@@ -16,7 +16,7 @@ Either way the result is the same kind of frozen wheels-up time.
 You have two ways to release a flight:
 
 - **RDY (release earliest)** — OIS assigns the earliest open slot and freezes the wheels-up time that falls out of it. Use it when the pilot is ready now.
-- **Set `HHMMz`** — you pin the wheels-up time to an exact minute and OIS holds the flight to it.
+- **Set `HHMMz`** — you give the pilot's ready time and OIS assigns the first open slot the flight can make from it. The wheels-up time is never earlier than the ready time, and later if that slot is taken; on a manually sequenced FCA it follows the flight ordered ahead of it. A ready time earlier than the current minute is refused.
 
 ## Issued releases are frozen
 

@@ -14,6 +14,12 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
+  pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
+  or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,
+  behind the flight ordered ahead of it), and `edct` is that slot less the flight time. `edct` was always `ready`; it is now never earlier and
+  may be later. A `ready` before the current minute answers `400 bad_request`; it used to store an
+  already-due release. A caller sending a past time must send a current one. (#816)
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
   RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
