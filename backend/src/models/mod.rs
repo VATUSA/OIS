@@ -2510,6 +2510,9 @@ pub struct FcaBody {
     pub mode: String,
     pub rate: i32,
     pub mit: i32,
+    /// Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+    /// 0 turns freezing off (#817).
+    pub freeze_min: i32,
     pub enabled: bool,
     /// Controller's manual crossing order (callsigns); empty = auto.
     pub manual_order: Vec<String>,
@@ -2556,6 +2559,9 @@ pub struct UpsertFcaRequest {
     pub rate: Option<i32>,
     #[serde(default)]
     pub mit: Option<i32>,
+    /// Freeze horizon in minutes, 0-120; defaults to 30, 0 turns freezing off (#817).
+    #[serde(default)]
+    pub freeze_min: Option<i32>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -2647,6 +2653,14 @@ pub struct FcaFlight {
     /// The release's version, for `If-Match` (#585); null when not released.
     #[serde(default)]
     pub release_version: Option<i64>,
+    /// Seconds the live ETA has run past this flight's release or frozen STA; 0 when on time. A
+    /// late flight's `cross_time` is its ETA (#817).
+    pub late_sec: i64,
+    /// A released crossing that sits inside another crossing's required gap (#817).
+    pub slot_conflict: bool,
+    /// Inside the FCA's freeze horizon: `cross_time` is a stored STA that holds while the ETA
+    /// moves (#817).
+    pub sta_frozen: bool,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,

@@ -5281,6 +5281,12 @@ export interface components {
             /** @description Event FCA lifecycle: planned | published | archived (null for shared FCAs). */
             event_status?: string | null;
             fixes: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+             *     0 turns freezing off (#817).
+             */
+            freeze_min: number;
             id: string;
             /** @description Controller's manual crossing order (callsigns); empty = auto. */
             manual_order: string[];
@@ -5359,6 +5365,12 @@ export interface components {
             heading: number;
             /** Format: double */
             lat: number;
+            /**
+             * Format: int64
+             * @description Seconds the live ETA has run past this flight's release or frozen STA; 0 when on time. A
+             *     late flight's `cross_time` is its ETA (#817).
+             */
+            late_sec: number;
             /** Format: double */
             lon: number;
             /**
@@ -5378,6 +5390,13 @@ export interface components {
              * @description 1-based sequence in the metered order.
              */
             seq: number;
+            /** @description A released crossing that sits inside another crossing's required gap (#817). */
+            slot_conflict: boolean;
+            /**
+             * @description Inside the FCA's freeze horizon: `cross_time` is a stored STA that holds while the ETA
+             *     moves (#817).
+             */
+            sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
             status: string;
         };
@@ -7634,6 +7653,11 @@ export interface components {
             dir?: string | null;
             enabled?: boolean | null;
             fixes?: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon in minutes, 0-120; defaults to 30, 0 turns freezing off (#817).
+             */
+            freeze_min?: number | null;
             /** Format: int32 */
             max_fl?: number | null;
             /** Format: int32 */

@@ -457,6 +457,7 @@ export function FcaMapView({
       mode: draft.mode,
       rate: draft.rate,
       mit: draft.mit,
+      freeze_min: draft.freezeMin,
     };
     if (draft.id) updateFca.mutate({ id: draft.id, body }, { onSuccess: cancel });
     else createFca.mutate(body, { onSuccess: cancel });

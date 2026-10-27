@@ -59,6 +59,14 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
+  // Behind its release or frozen time (#817): it crosses at its ETA, so it is never "on time".
+  const late = f.late_sec >= DELAY_THRESHOLD_SEC;
+  const status = delayed
+    ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}`
+    : late
+      ? `late +${fmtDelaySec(f.late_sec)}`
+      : "on time";
+  const statusTone = delayed ? "text-danger" : late ? "text-warning" : "text-success";
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -109,9 +117,10 @@ function Strip({
             {hhmmZulu(f.cross_time)}
           </span>
           <span
-            className={`block text-xs ${delayed ? "text-danger" : "text-success"}`}
+            className={`block text-xs ${statusTone}`}
+            title={late && !delayed ? "ETA is past its release or frozen time" : undefined}
           >
-            {delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : "on time"}
+            {status}
           </span>
         </span>
       </div>
@@ -123,6 +132,13 @@ function Strip({
         <span className="font-mono">{Math.round(f.distance_nm)}nm to line</span>
         {f.altitude > 0 && <span className="font-mono">FL{Math.round(f.altitude / 100)}</span>}
         {delayed && f.delay_nm > 0 && <span className="font-mono text-danger">+{f.delay_nm}nm</span>}
+        {f.slot_conflict && (
+          <span title="Released inside another crossing's gap">
+            <StatusPill tone="bad" className="px-1.5 text-[10px] leading-4">
+              IN GAP
+            </StatusPill>
+          </span>
+        )}
       </div>
 
       {canCfr && (

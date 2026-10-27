@@ -27,6 +27,8 @@ export type Draft = {
   mode: "rate" | "mit";
   rate: number;
   mit: number;
+  /** Freeze horizon, minutes before the crossing; 0 is off (#817). */
+  freezeMin: number;
 };
 
 const list = (a: string[]) => a.join(" ");
@@ -57,6 +59,7 @@ export function blankDraft(count: number, colors: string[] = readFcaColors()): D
     mode: "rate",
     rate: 30,
     mit: 15,
+    freezeMin: 30,
   };
 }
 export function draftFrom(fca: Fca): Draft {
@@ -75,6 +78,7 @@ export function draftFrom(fca: Fca): Draft {
     mode: fca.mode === "mit" ? "mit" : "rate",
     rate: fca.rate,
     mit: fca.mit,
+    freezeMin: fca.freeze_min,
   };
 }
 
@@ -266,6 +270,19 @@ export function DraftEditor({
           </>
         )}
       </div>
+
+      <Field
+        label="Freeze horizon · min"
+        help="An airborne flight this close to the line keeps its crossing time. 0 turns it off."
+      >
+        <Input
+          type="number"
+          min={0}
+          max={120}
+          value={draft.freezeMin}
+          onChange={(e) => set("freezeMin", Number(e.target.value) || 0)}
+        />
+      </Field>
 
       <ColorSwatches
         label="Color"

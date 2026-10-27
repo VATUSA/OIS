@@ -70,15 +70,13 @@ fn main() {
             // macOS-only in the literal sense: `RunEvent::Reopen` does not exist on Windows or
             // Linux, so it must be compiled out there rather than merely skipped at runtime — a
             // plain runtime check does not compile at all (caught by the 3-OS CI matrix).
-            //
-            // Nested rather than a let chain: those need Rust 1.88, and the workspace promises 1.85.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
-                if let Some(window) = tauri::Manager::get_webview_window(_app, "main") {
-                    // A failure here leaves the user with no way back into the app, so it is logged.
-                    if let Err(e) = window.show().and_then(|()| window.set_focus()) {
-                        log::warn!("could not bring the main window back on reopen: {e}");
-                    }
+            if let tauri::RunEvent::Reopen { .. } = _event
+                && let Some(window) = tauri::Manager::get_webview_window(_app, "main")
+            {
+                // A failure here leaves the user with no way back into the app, so it is logged.
+                if let Err(e) = window.show().and_then(|()| window.set_focus()) {
+                    log::warn!("could not bring the main window back on reopen: {e}");
                 }
             }
         });

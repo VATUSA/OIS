@@ -208,23 +208,36 @@ an optional manual order.
 - otherwise 0, which means no spacing at all. Writes clamp rate to 0-240 (default 30) and MIT to
   0-200 (default 15) (`repos/flow.rs:156-157`), so 0 is a legal value that turns metering off.
 
-The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2116`), which
-RDY uses.
+The formula is `fca::separation_ms`; the handler's `separation_ms` and `rdy_slot` call it. Two
+crossings are spaced by the **larger** of the pair's separations (#817), so under MIT the slower
+aircraft's gap holds whichever of the two is placed first.
 
-**Auto mode** (`feed/fca.rs:402-432`). Pinned flights (airborne, or holding a release) sort ahead
-of the rest, then by ETA (`:408-414`). Each in turn is placed at its frozen time if it has one,
-else at `earliest_slot(eta, committed, sep)` (`:418-422`), and is added to `committed`. Sequence
-numbers follow the scheduled time (`:427-431`).
+**Fixed times** (#817). A flight's time is fixed by a release (`frozen_ms`, the CTA) or, when it is
+airborne with no release and its ETA is within the FCA's `freeze_min` of now, by its held STA
+(`held_ms`, from `flow.fca_held_sta`). A fixed flight is placed at `max(fixed, eta)`: a late flight
+moves to its ETA and reports `late_sec = (eta - fixed) / 1000`. `freeze_min` 0 turns holding off.
 
-**`earliest_slot`** (`feed/fca.rs:444`): from the ETA, move to `c + sep` for any committed `c`
-closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
+**Auto mode** (`fca::meter`). Flights sort by tier, then by anchor time: releases, frozen airborne
+flights with a held STA, other airborne, ground. A release is placed at its anchor and never moved;
+every other flight is placed at `earliest_slot(anchor, sep, committed)`, so a held STA moves later
+when the pair's gap grows (under MIT the gap follows each aircraft's predicted crossing speed). Sequence numbers follow the
+scheduled time.
 
-**Manual mode** (`feed/fca.rs:370-401`). The stored order comes first and every other flight is
-appended by ETA (`:372-376`). Each flight is chained `max(eta, prev + sep)` behind the one before,
-except a frozen flight, which keeps its time and becomes the new `prev` (`:385-393`). Sequence
-numbers are the order itself (`:399-401`).
+**`earliest_slot`** (`feed/fca.rs`): from the start time, move past any committed crossing closer
+than `max(sep, that crossing's sep)`, and repeat until nothing moves.
 
-`delay_sec = max(sched - eta, 0) / 1000` (`feed/fca.rs:437`).
+**Manual mode**. The stored order comes first and every other flight is appended by ETA. A release
+keeps its anchor; every other flight goes at the earliest time clear of every flight placed before
+it in the order, by the larger separation of each pair. Sequence numbers are the order itself.
+
+`delay_sec = max(sched - eta, 0) / 1000`. A release that ends inside another crossing's gap is
+returned with `slot_conflict` set; it is the only crossing allowed there.
+
+**Held STAs.** `metered_flights` is the only writer, reached from the traffic route and the flight
+advisory (`build_flight_advisory`): it stores the STA of each
+newly frozen flight, first STA wins (`on conflict do nothing`), and prunes rows more than an hour
+past their STA. IDST, `mark_release` and `clear_release` read the rows without writing. An FCA edit
+deletes the FCA's rows; deleting the FCA cascades.
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
@@ -237,26 +250,15 @@ numbers are the order itself (`:399-401`).
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
-a frozen ground release, two conflicting airborne crossings, and four manual-order cases.
-`mod release_spacing_tests` (`handlers/flow.rs:3817`) covers `rdy_slot` and `separation_ms`.
-
-**Untested branches.** Airborne against frozen in auto mode. A frozen flight whose ETA is past its
-frozen time. Duplicate or out-of-range indices in the order. MIT with a slow leader and a fast
-follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
+**Tests.** `feed/fca.rs` `mod tests` covers the six #817 cases, the freeze horizon on both sides of
+its default, and a randomized check that no two crossings are closer than the gap except a flagged
+release. `mod release_spacing_tests` (`handlers/flow.rs`) covers `rdy_slot`, and
+`handlers/fca_freeze_tests.rs` drives the held STAs through the traffic route and the FCA edit.
 
 ### Findings, area 3
 
-- **Frozen times are never checked against their neighbors.** In manual mode a frozen flight can sit
-  inside the gap, or before the flight ordered ahead of it, and the flight after it is chained from
-  that frozen time. `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1055`) asserts this
-  as intended (noted on #817). In auto mode, pinned flights sort by ETA, not by frozen time, so an
-  airborne flight can be slotted inside a release's gap before the release is committed. **Owned
-  by #817** (its cases 2 and 3).
-- **A frozen flight that is now late shows as on time.** `delay_sec` clamps to 0. **Owned by #817**
-  (case 1).
-- **MIT spacing uses the placed aircraft's speed even when it ends up in front.** **Owned by #817**
-  (case 4).
+- **Frozen times were never checked against their neighbors, a late frozen flight showed on time,
+  and MIT used the placed aircraft's speed when it ended up in front.** Fixed by #817 (see above).
 - **A manual order is stored verbatim, duplicates included.** `ReorderRequest.order`
   (`models/mod.rs:2717`) is saved as sent (`repos/flow.rs:435`), and `manual_order` matches it by
   exact string (`handlers/flow.rs:2086`). A repeated callsign is scheduled at every occurrence, and its

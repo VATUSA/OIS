@@ -11,7 +11,7 @@ use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
+    f.freeze_min, f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
     coalesce(u.display_name, a.display_name) as updated_by, \
     f.event_id, f.event_status, f.auto_publish \
     from flow.fca f left join identity.users u on u.id = f.updated_by \
@@ -158,6 +158,11 @@ fn bind_fca<'q>(
         .bind(req.enabled.unwrap_or(true))
         .bind(&by.user_id)
         .bind(&by.actor_id)
+        .bind(
+            req.freeze_min
+                .unwrap_or(crate::feed::fca::DEFAULT_FREEZE_MIN)
+                .clamp(0, 120),
+        )
 }
 
 pub async fn create_fca(
@@ -169,12 +174,12 @@ pub async fn create_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17)
+              updated_by_actor, created_by_actor, freeze_min)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18)
          returning id",
     );
-    // bind_fca sets $1..$17 (the 15 shared columns, then the user → `*_by` and the actor →
-    // `*_by_actor`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
+    // bind_fca sets $1..$18 (the 15 shared columns, the user → `*_by`, the actor → `*_by_actor`,
+    // then `freeze_min`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
     let row = bind_fca(q, req, by)
         .fetch_one(pool)
         .await
@@ -196,8 +201,8 @@ pub async fn create_event_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor, event_id, event_status)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,'planned')
+              updated_by_actor, created_by_actor, freeze_min, event_id, event_status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,$19,'planned')
          returning id",
     );
     let row = bind_fca(q, req, by)
@@ -210,6 +215,8 @@ pub async fn create_event_fca(
         .map_err(|_| ApiError::Internal)
 }
 
+/// Update an FCA and drop its held STAs in the same statement: they were spaced under the old
+/// geometry and settings, so the next read re-meters and re-holds (#817).
 pub async fn update_fca(
     pool: &PgPool,
     id: &str,
@@ -217,11 +224,13 @@ pub async fn update_fca(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let q = sqlx::query(
-        "update flow.fca set
+        "with d as (delete from flow.fca_held_sta where fca_id = $19)
+         update flow.fca set
              name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
              fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
-             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17
-         where id = $18",
+             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17,
+             freeze_min = $18
+         where id = $19",
     );
     let result = bind_fca(q, req, by)
         .bind(id)
@@ -533,6 +542,63 @@ pub async fn list_releases(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// How long past its STA a held row still counts. A flight that has not crossed an hour after its
+/// held STA has left the flow; its row is ignored, then pruned on the next write (#817).
+pub const HELD_STA_RETAIN_MS: i64 = 3_600_000;
+
+/// The STAs held for an FCA's flights inside its freeze horizon, by callsign (#817). Rows more than
+/// [`HELD_STA_RETAIN_MS`] past their STA are left out.
+pub async fn list_held_stas(
+    pool: &PgPool,
+    fca_id: &str,
+    now: DateTime<Utc>,
+) -> Result<HashMap<String, i64>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "select callsign, sta_ms from flow.fca_held_sta where fca_id = $1 and sta_ms >= $2",
+    )
+    .bind(fca_id)
+    .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Hold the STA of each flight that has just entered the FCA's freeze horizon. The first STA stored
+/// wins (`on conflict do nothing`), so concurrent replicas agree. The FCA's stale rows are pruned in
+/// the same transaction first, so a callsign that comes back later is held afresh. No-op for an
+/// empty list.
+pub async fn hold_stas(
+    pool: &PgPool,
+    fca_id: &str,
+    holds: &[(String, i64)],
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    if holds.is_empty() {
+        return Ok(());
+    }
+    let (callsigns, stas): (Vec<String>, Vec<i64>) = holds.iter().cloned().unzip();
+    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    sqlx::query("delete from flow.fca_held_sta where fca_id = $1 and sta_ms < $2")
+        .bind(fca_id)
+        .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| ApiError::Internal)?;
+    sqlx::query(
+        "insert into flow.fca_held_sta (fca_id, callsign, sta_ms)
+         select $1, c, s from unnest($2::text[], $3::bigint[]) as h(c, s)
+         on conflict (fca_id, callsign) do nothing",
+    )
+    .bind(fca_id)
+    .bind(&callsigns)
+    .bind(&stas)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::Internal)
 }
 
 /// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy
