@@ -81,10 +81,15 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "backtest" => &["--from", "--to", "--profiles", "--report"],
         _ => return Err(USAGE.into()),
     };
+    let mut seen = Vec::new();
     for pair in args[2..].chunks(2) {
         if pair.len() != 2 || !flags.contains(&pair[0].as_str()) {
             return Err(format!("unexpected argument {:?}\n{USAGE}", pair[0]));
         }
+        if seen.contains(&pair[0]) {
+            return Err(format!("{} given twice", pair[0]));
+        }
+        seen.push(pair[0].clone());
     }
     let from = instant(&required(args, "--from")?)?;
     let to = instant(&required(args, "--to")?)?;
@@ -220,7 +225,7 @@ mod tests {
     /// A subcommand or flag the tool does not know is refused, as is a flag with no value, so a typo
     /// cannot send the report to stdout or drop a setting; `backtest` needs `--profiles`.
     #[test]
-    fn unknown_commands_flags_and_missing_values_are_refused() {
+    fn unknown_commands_repeated_flags_and_missing_values_are_refused() {
         let w = ["--from", "2026-09-20", "--to", "2026-10-11"];
         let run = |head: &[&str], tail: &[&str]| {
             let v: Vec<&str> = head.iter().chain(&w).chain(tail).copied().collect();
@@ -234,6 +239,10 @@ mod tests {
             let err = run(&["build"], bad).unwrap_err();
             assert!(err.starts_with("unexpected argument"), "{bad:?}: {err}");
         }
+        assert_eq!(
+            run(&["build"], &["--out", "x", "--out", "y"]),
+            Err("--out given twice".to_string())
+        );
         let err = run(&["backtest"], &["--out", "x"]).unwrap_err();
         assert!(err.starts_with("unexpected argument \"--out\""), "{err}");
         assert_eq!(

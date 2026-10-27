@@ -89,7 +89,8 @@ pub struct TypeProfile {
     pub wake: Option<String>,
     /// `jet`, `turboprop` or `piston` from `feed::flow`'s engine reference, or None when unlisted.
     pub engine: Option<String>,
-    /// True when climb, cruise and descent each have at least one measured field.
+    /// True when climb (`climb_fpm_lo` or `climb_fpm_hi`), cruise (`cruise_tas`) and descent
+    /// (`desc_fpm`) each have a measured field.
     pub profiled: bool,
     /// Keyed by the `AircraftProfile` field name.
     pub fields: BTreeMap<String, FieldStat>,
@@ -395,6 +396,11 @@ mod tests {
             other.check(),
             Err("the file was built with min_flights_per_field 10, this build uses 20".into())
         );
+        other.min_flights_per_field = 30;
+        assert_eq!(
+            other.check(),
+            Err("the file was built with min_flights_per_field 30, this build uses 20".into())
+        );
 
         let mut typo = set.clone();
         let stat = typo.types["B738"].fields["desc_fpm"].clone();
@@ -410,6 +416,11 @@ mod tests {
     /// three from an otherwise full set leaves it unprofiled.
     #[test]
     fn each_phase_is_needed_to_profile_a_type() {
+        let mut acc = Accumulator::default();
+        for _ in 0..MIN_FLIGHTS_PER_FIELD {
+            acc.add_flight("B738", "", &full_flight(2_000.0));
+        }
+        assert!(acc.finish(source(), |_| None).types["B738"].profiled);
         for missing in [Field::ClimbFpmHi, Field::CruiseTas, Field::DescFpm] {
             let mut acc = Accumulator::default();
             for _ in 0..MIN_FLIGHTS_PER_FIELD {

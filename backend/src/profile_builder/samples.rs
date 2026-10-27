@@ -2,7 +2,8 @@
 //!
 //! Each pair of consecutive positions is classified by its vertical rate: climbing, descending, or
 //! level at the flight's cruise altitude. A climb or descent pair yields a vertical rate, and with a
-//! winds snapshot also an indicated airspeed (or a Mach number high up); a cruise pair yields a true
+//! winds snapshot also an indicated airspeed below [`IAS_TOP_FT`] or a Mach number from
+//! [`MACH_FLOOR_FT`], and no speed in the crossover band between; a cruise pair yields a true
 //! airspeed (and a Mach number high up). Each flight then contributes **one** value per field, the
 //! median of its own samples, so a long flight weighs no more than a short one.
 
@@ -46,9 +47,9 @@ pub const MACH_BAND_FT: f64 = 28_000.0;
 pub const IAS_TOP_FT: f64 = 26_000.0;
 /// A climb or descent speed is a Mach number at or above this altitude. Between [`IAS_TOP_FT`] and
 /// here no speed is recorded: the model flies `min(IAS, Mach)` (`trajectory::phase_tas`), so the
-/// crossover moves with the type (about FL270 to FL320 for 270–300 KIAS and M0.74–0.84), and a pair
-/// near it would record an IAS flown as Mach, or the reverse, slow.
-pub const MACH_FLOOR_FT: f64 = 31_000.0;
+/// crossover moves with the type (about FL290 to FL350 for 250–300 KIAS and M0.74–0.84, most of it
+/// below FL340), and a pair near it would record an IAS flown as Mach, or the reverse, slow.
+pub const MACH_FLOOR_FT: f64 = 34_000.0;
 /// A winds snapshot older than this (s) at the sample time is not used: RAP publishes a cycle every
 /// hour and OIS snapshots each one (`jobs.rs` `WINDS_REFRESH_INTERVAL`), so a gap past two hours
 /// means missed refreshes.
@@ -480,7 +481,7 @@ mod tests {
         assert!((mach_to_tas_at(m, 233.15) - 480.0).abs() < 0.01);
     }
 
-    /// A 2,000 fpm climb through FL300–FL320 at 450 kt in a -30 °C column records Mach
+    /// A 2,000 fpm climb through FL350–FL370 at 450 kt in a -30 °C column records Mach
     /// 450 / 607.63 = 0.7406 and no high-band IAS.
     #[test]
     fn a_climb_mach_in_a_warm_rap_column_uses_the_column_temperature() {
@@ -489,7 +490,7 @@ mod tests {
                 pos(
                     k * 15,
                     -100.0 + k as f64 * 0.03,
-                    33_000 + 500 * k as i32,
+                    35_000 + 500 * k as i32,
                     450,
                 )
             })
@@ -500,7 +501,7 @@ mod tests {
         assert!(!s.0.contains_key(&Field::ClimbIasHi));
     }
 
-    /// Climb pairs either side of the crossover band: an IAS just below FL260, a Mach from FL310, and
+    /// Climb pairs either side of the crossover band: an IAS just below FL260, a Mach from FL340, and
     /// between them a rate but no speed.
     #[test]
     fn climb_speeds_skip_the_ias_mach_crossover_band() {
@@ -514,13 +515,13 @@ mod tests {
         let below = at(25_900);
         assert!(below.0.contains_key(&Field::ClimbIasHi));
         assert!(!below.0.contains_key(&Field::ClimbMach));
-        for alt in [26_000, 28_500, 30_900] {
+        for alt in [26_000, 30_000, 33_900] {
             let mid = at(alt);
             assert_eq!(mid.0[&Field::ClimbFpmHi], vec![1_000.0], "{alt}");
             assert!(!mid.0.contains_key(&Field::ClimbIasHi), "{alt}");
             assert!(!mid.0.contains_key(&Field::ClimbMach), "{alt}");
         }
-        let above = at(31_000);
+        let above = at(34_000);
         assert!(above.0.contains_key(&Field::ClimbMach));
         assert!(!above.0.contains_key(&Field::ClimbIasHi));
     }
