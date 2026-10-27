@@ -2,15 +2,15 @@
 
 Shared, OpenAPI-generated client for the OIS backend — consumed by both `web` and
 `desktop`. Same tooling as osmium's website (`openapi-typescript` + `openapi-fetch` + TanStack Query), lifted into a
-package so the generated types and hooks aren't duplicated per app.
+package so the generated types aren't duplicated per app. The TanStack Query hooks live in
+`web/src/lib/*`.
 
-## Layout (Phase 3)
+## Layout
 
 ```
 src/
   generated/schema.d.ts   # openapi-typescript output (paths + components). Do not edit.
-  client.ts               # createOisClient(baseUrl) -> createClient<paths>(...)
-  hooks/                  # per-domain TanStack Query hooks over the typed client
+  client.ts               # createOisClient(baseUrl, getToken?) -> createClient<paths>(...)
   index.ts
 ```
 

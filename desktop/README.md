@@ -242,10 +242,8 @@ fine until the bundle ships — which is how event banners were broken for the w
 Anything that loads a remote resource must be checked in a *bundled* build, or kept off remote
 origins entirely the way banners now are.
 
-## What isn't here yet
+## Commands
 
-Keychain auth (#346) adds the app's first commands: `begin_login`, `get_token`, `store_token`,
-`delete_token`; signed auto-update (#347) adds the updater and process plugins. The rest of desktop
-behaviour lands in later issues, each adding its own plugins and capability entries: the feature
-set (#348–#354).
-See the epic, #343.
+The shell's IPC commands are `begin_login`, `get_token`, `store_token` and `delete_token` (#346),
+`notify` (#348) and `send_diagnostics` (#629); the plugins are registered in
+`src-tauri/src/main.rs`. The epic is #343.

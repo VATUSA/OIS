@@ -11,9 +11,9 @@ export type TokenProvider = () => string | undefined | Promise<string | undefine
  * cookie on same-site requests.
  *
  * `getToken` is how the desktop app authenticates instead: it has no browser origin and so cannot
- * carry the cookie, and sends `Authorization: Bearer ois_dsk_…` from the OS keychain (#346). Omit
- * it — as the web app does — and the client behaves exactly as it did before: no middleware is
- * registered and the cookie is the only credential.
+ * carry the cookie, and sends `Authorization: Bearer ois_dsk_…` from the desktop's token store
+ * (#346). Omit it (the browser build does) and no middleware is registered: the session cookie is
+ * the only credential.
  */
 export function createOisClient(baseUrl: string, getToken?: TokenProvider) {
   const client = createClient<paths>({ baseUrl, credentials: "include" });

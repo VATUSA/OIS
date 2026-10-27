@@ -45,10 +45,9 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// "about 30 minutes" after its validity ends. The pass is what decides that, so its cadence is the
 /// tolerance: at 5 minutes removal lands in **[30, 35)** minutes rather than [30, 45).
 ///
-/// The shared constant is left at 15 minutes deliberately. Its other four users
-/// (`desktop_auth_code_prune`, `outbound_job_reaper`, `audit_log_prune`, `departure_runway_prune`)
-/// work on horizons of 12 hours and longer, where running three times as often changes no outcome
-/// and only adds load.
+/// The shared constant is left at 15 minutes deliberately: its other users are prune passes and the
+/// outbound-job reaper, where a 15-minute cadence only delays a cleanup or a requeue, and running
+/// three times as often would mostly add load.
 const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often the server admin reconciliation runs (#805): once on starting, like every `run_interval`
@@ -953,8 +952,9 @@ pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
 
 /// One stats-compaction pass: downsample the narrow slice of positions crossing each
 /// `COMPACTION_TIERS` boundary, and prune everything past the unrelated retention horizons (winds,
-/// TM history, flight legs — `stats.position` is never hard-deleted anymore). Best-effort — a
-/// failed sub-pass is logged and the others still run; returns a summary of rows removed.
+/// TM history, flight legs, taxi observations — `stats.position` is never hard-deleted anymore). A
+/// failed sub-pass is logged and the others still run; the pass then returns `Err` naming every
+/// failed sub-pass, so the job registry records the run as failed.
 async fn stats_compaction_once(
     pool: &PgPool,
     last_tier_hour: &AtomicI64,
@@ -1002,6 +1002,7 @@ async fn stats_compaction_once(
         stats_repo::prune_taxi_observations(pool, legs_before).await,
     ));
 
+    let mut failed: Vec<&str> = Vec::new();
     for (label, res) in passes {
         match res {
             Ok(n) => {
@@ -1010,8 +1011,17 @@ async fn stats_compaction_once(
                 }
                 removed += n;
             }
-            Err(_) => tracing::warn!(pass = label, "stats: compaction sub-pass failed"),
+            Err(e) => {
+                tracing::warn!(pass = label, error = %e, "stats: compaction sub-pass failed");
+                failed.push(label);
+            }
         }
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "compaction sub-pass(es) failed: {}; {removed} rows removed by the rest",
+            failed.join(", ")
+        ));
     }
     Ok(format!("{removed} rows removed"))
 }
@@ -1348,7 +1358,7 @@ pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
 }
 
 /// Delete one-time desktop auth codes long past their 60-second life (VATUSA/OIS#346). Nothing
-/// else removes them, so without this the table only grows. Same cadence as the TMU cleanup.
+/// else removes them, so without this the table only grows. Runs every `CLEANUP_INTERVAL`.
 pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
     tokio::spawn(run_interval(
         reg,
@@ -1984,6 +1994,76 @@ mod departure_runway_prune_tests {
             "0 deleted"
         );
         assert!(get(&pool, "KJFK", "FRESH").await.unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod stats_compaction_tests {
+    use std::sync::atomic::AtomicI64;
+
+    use sqlx::PgPool;
+
+    use super::stats_compaction_once;
+
+    async fn seed_taxi_observation(pool: &PgPool, age: &str) {
+        sqlx::query(&format!(
+            "insert into stats.taxi_observation (airport, taxi_sec, observed_at) \
+             values ('KIAD', 600, now() - interval '{age}')"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn taxi_observation_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from stats.taxi_observation")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A failed sub-pass fails the run (code-quality.md § Fail-Open), names the sub-pass, and does
+    /// not stop the sub-passes after it.
+    #[sqlx::test]
+    async fn a_failed_sub_pass_fails_the_run_and_the_rest_still_prune(pool: PgPool) {
+        seed_taxi_observation(&pool, "40 days").await;
+        seed_taxi_observation(&pool, "1 day").await;
+        // Contained to this test's own database (test-writing.md: DDL inside #[sqlx::test]).
+        sqlx::query("drop table stats.winds")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let res = stats_compaction_once(&pool, &AtomicI64::new(0)).await;
+
+        let err = res.expect_err("a failed winds prune must fail the run");
+        assert!(
+            err.contains("winds"),
+            "the error names the failed sub-pass: {err}"
+        );
+        assert!(
+            !err.contains("taxi"),
+            "only failed sub-passes are named: {err}"
+        );
+        assert_eq!(
+            taxi_observation_count(&pool).await,
+            1,
+            "the taxi-observation prune after the failed winds prune still ran"
+        );
+    }
+
+    /// Positive control: with every sub-pass healthy the run succeeds.
+    #[sqlx::test]
+    async fn a_healthy_run_succeeds_and_prunes(pool: PgPool) {
+        seed_taxi_observation(&pool, "40 days").await;
+        seed_taxi_observation(&pool, "1 day").await;
+
+        let summary = stats_compaction_once(&pool, &AtomicI64::new(0))
+            .await
+            .expect("a healthy run succeeds");
+
+        assert_eq!(summary, "1 rows removed");
+        assert_eq!(taxi_observation_count(&pool).await, 1);
     }
 }
 

@@ -2759,7 +2759,9 @@ pub struct IdstFlight {
     pub delay_min: i64,
     /// Metered crossing time (CTA) at the FCA line.
     pub cross_time: Option<DateTime<Utc>>,
-    /// Frozen wheels-up (EDCT) once released; null while unscheduled.
+    /// Frozen wheels-up (EDCT) once released. Before release, the proposed EDCT: the wheels-up that
+    /// would meet `cross_time`, the same time a release would store. Null only when an unreleased
+    /// flight has no metered crossing time or no ETA.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
     /// The display name of the service account or API key that issued this release, or null when a

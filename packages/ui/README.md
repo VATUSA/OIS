@@ -1,6 +1,6 @@
 # @ois/ui
 
-The shared component set for the OIS web app (and later the desktop app). Every component reads the
+The shared component set for the OIS web app and the desktop app. Every component reads the
 Console Design Language tokens in `src/styles/globals.css` — see `/DESIGN.md` for the rules. If a
 screen needs something this package doesn't have, add it here rather than hand-styling it in a page.
 
@@ -32,4 +32,5 @@ their shadcn shapes, restyled to the tokens.
 
 ## Tests
 
-`pnpm --filter @ois/ui test` (vitest) — logic only (token parsing, table paging).
+`pnpm --filter @ois/ui test` (vitest): node tests for logic (tokens, color, table paging) and jsdom
+`*.dom.test.tsx` files for component interaction.

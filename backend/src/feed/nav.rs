@@ -21,8 +21,8 @@ type Leg = (String, f64, f64);
 
 const R_NM: f64 = 3440.065;
 
-/// What a resolved anchor represents. Retained for future labeled rendering; only the
-/// coordinate is consumed by the geometry today.
+/// What a resolved anchor represents. The route builder reads it to exempt explicit coordinates
+/// from the duplicate-name distance guard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[allow(dead_code)]
 pub enum Kind {

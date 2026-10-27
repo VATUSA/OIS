@@ -1554,8 +1554,8 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
 /// direct/unexpandable filed route) is no better than a great circle. Mirrors
 /// `predict::arrival_eta`'s own `!airborne && !enroute_resolved` padding exactly, so a
 /// ground/prefile aircraft on an unresolved route gets the same [`predict::GROUND_ROUTE_FACTOR`]
-/// this debug table's ETAs would otherwise silently disagree with the real metering/ladder model
-/// on (a live-confirmed ~12% undercount before this fix).
+/// the arrival ladder applies. FCA metering ([`build_candidates`]) does not pad, so for such an
+/// aircraft this table times a route 12% longer than the one metering times.
 fn ground_route_scale(airborne: bool, path_len: usize) -> f64 {
     let enroute_resolved = path_len > 2;
     if !airborne && !enroute_resolved {
