@@ -2362,7 +2362,8 @@ pub async fn list_idst(
                 }
                 // For released flights the frozen wheels-up; otherwise an *advisory* EDCT: the
                 // wheels-up that would hit the current metered crossing. A release backs out its own
-                // EDCT the same way (`release_ms`) from the slot it takes, which can be later.
+                // EDCT the same way (`release_ms`) from the slot it takes, which can be earlier or
+                // later.
                 let edct = if f.released {
                     f.edct
                 } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {

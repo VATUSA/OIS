@@ -16,7 +16,8 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 - **Documentation:** `IdstFlight.edct` in `GET /api/v1/flow/idst` now documents what the route already
   returns: before release it carries the proposed EDCT (the wheels-up that would meet `cross_time`), and
-  it is null only when an unreleased flight has no metered crossing time or no ETA. No caller change.
+  it is null only when an unreleased flight has no metered crossing time or no ETA. The EDCT a release
+  stores can be earlier or later than that proposal. No caller change.
   (#827)
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
