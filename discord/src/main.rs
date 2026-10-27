@@ -2,11 +2,11 @@
 //!
 //! Two responsibilities, both mediated by the backend (the bot owns no data):
 //!   1. **Drain the outbound-job queue** — poll `integration.outbound_jobs` via the API, perform the
-//!      Discord side-effect (post or edit a message, DM a user, open a thread), and ack the job with
-//!      any ids it produced.
+//!      Discord side-effect (post or edit a message, DM a user, open a thread, send the guild's
+//!      channels and roles back to the API), and ack the job with any ids it produced.
 //!   2. **Handle interactions** — ACE claim buttons, TMI and advisory "View structured" buttons and
-//!      event-availability buttons call back into the API as a service account; the backend resolves
-//!      the Discord user to the linked OIS account.
+//!      event-availability buttons call back into the API as a service account. For an ACE claim or
+//!      an availability answer the backend resolves the Discord user to the linked OIS account.
 //!
 //! Config (env / `.env`): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN` (an `ois_sa_…` token
 //! for a service account keyed `discord` holding the BOT role; any other key gets 403 on every

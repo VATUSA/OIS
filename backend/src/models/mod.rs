@@ -2759,8 +2759,9 @@ pub struct IdstFlight {
     pub delay_min: i64,
     /// Metered crossing time (CTA) at the FCA line.
     pub cross_time: Option<DateTime<Utc>>,
-    /// Frozen wheels-up (EDCT) once released. Before release, the proposed EDCT: the wheels-up that
-    /// would meet `cross_time`, the same time a release would store. Null only when an unreleased
+    /// Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
+    /// would meet `cross_time`. A release can store a later time, since RDY adds a 15 s margin and may
+    /// take a later slot, and SET uses the time the controller enters. Null only when an unreleased
     /// flight has no metered crossing time or no ETA.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,

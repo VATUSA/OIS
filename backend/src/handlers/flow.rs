@@ -2360,9 +2360,9 @@ pub async fn list_idst(
                 if f.status != "ground" || !airports.contains(&f.dep.to_ascii_uppercase()) {
                     continue;
                 }
-                // For released flights the frozen wheels-up; otherwise an *advisory* EDCT — the
-                // wheels-up that would hit the metered crossing, the same `release_ms` a release
-                // stores. Lets the controller see the proposed release.
+                // For released flights the frozen wheels-up; otherwise an *advisory* EDCT: the
+                // wheels-up that would hit the current metered crossing. A release backs out its own
+                // EDCT the same way (`release_ms`) from the slot it takes, which can be later.
                 let edct = if f.released {
                     f.edct
                 } else if let (Some(cta), Some(eta)) = (f.cross_time, f.eta) {
@@ -3621,7 +3621,8 @@ mod ground_route_scale_tests {
     /// Regression (#225 rework): `fix_predictions` originally fed `path_len_nm` straight into the
     /// debug table's ETA math with no padding, so a ground/prefile aircraft on an unresolved
     /// (direct-filed, 2-anchor) route showed ETAs ~12% earlier than `predict::arrival_eta` — the
-    /// real model backing metering/the ladder/runway ETE — would compute for the identical flight.
+    /// model behind airport-flow demand, the ladder and runway ETE — would compute for the
+    /// identical flight.
     #[test]
     fn pads_a_ground_aircraft_on_an_unresolved_two_anchor_route() {
         assert_eq!(

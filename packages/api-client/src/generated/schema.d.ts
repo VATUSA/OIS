@@ -6076,8 +6076,9 @@ export interface components {
             dep: string;
             /**
              * Format: date-time
-             * @description Frozen wheels-up (EDCT) once released. Before release, the proposed EDCT: the wheels-up that
-             *     would meet `cross_time`, the same time a release would store. Null only when an unreleased
+             * @description Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
+             *     would meet `cross_time`. A release can store a later time, since RDY adds a 15 s margin and may
+             *     take a later slot, and SET uses the time the controller enters. Null only when an unreleased
              *     flight has no metered crossing time or no ETA.
              */
             edct?: string | null;

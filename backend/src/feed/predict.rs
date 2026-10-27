@@ -1,8 +1,8 @@
 //! The single arrival/crossing prediction service. Every surface that estimates when a connected
 //! aircraft reaches a point — the arrival ladder, airport-flow demand, runway ETE, and FCA
 //! metering — resolves the filed route **once** here and times position-along-route through the
-//! one [`trajectory::VerticalProfile`] model. That keeps a given aircraft's ETA identical on every
-//! surface and consistent with the real route drawn on the map (issue #63): before this, the
+//! one [`trajectory::VerticalProfile`] model. That keeps a given aircraft's ETA consistent across
+//! surfaces and with the real route drawn on the map (issue #63): before this, the
 //! arrival surfaces timed aircraft on a straight-line great circle to the field while FCA metering
 //! (correctly) used the real, longer, dog-legged route.
 //!
@@ -11,9 +11,10 @@
 //! doesn't know, unknown airport), [`arrival_eta`] falls back to a straight-line great circle to
 //! the field so an arrival is never dropped — and for a **not-yet-airborne** flight that fallback
 //! carries the [`GROUND_ROUTE_FACTOR`] allowance, because issue #63 only meant to drop the
-//! historical padding where an actual enroute path *is* resolved. Only [`arrival_eta`] applies that
-//! factor: FCA metering (`handlers/flow.rs::build_candidates`) calls [`eta_along_route`] with the
-//! unpadded length of the resolved path.
+//! historical padding where an actual enroute path *is* resolved. [`arrival_eta`] applies that
+//! factor, and the per-fix debug table mirrors it (`handlers/flow.rs::ground_route_scale`); FCA
+//! metering (`handlers/flow.rs::build_candidates`) calls [`eta_along_route`] with the unpadded
+//! length of the resolved path, so for such a flight its ETA is earlier than the ladder's.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -31,7 +32,8 @@ pub const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
 /// Great-circle → flyable-route length multiplier for a ground/proposed flight whose filed route
 /// won't resolve to an enroute path. Airway routings run a little longer than the direct great
 /// circle; without this a bare `DCT`/blank filing would be timed on an unachievable distance and
-/// its ETA would skew early. Applied only by [`arrival_eta`]; FCA metering does not pad. Matches
+/// its ETA would skew early. Applied by [`arrival_eta`] and the per-fix debug table; FCA metering
+/// does not pad. Matches
 /// the factor `ground_estimate` applied before issue #63.
 pub const GROUND_ROUTE_FACTOR: f64 = 1.12;
 

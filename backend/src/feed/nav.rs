@@ -24,7 +24,6 @@ const R_NM: f64 = 3440.065;
 /// What a resolved anchor represents. The route builder reads it to exempt explicit coordinates
 /// from the duplicate-name distance guard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)]
 pub enum Kind {
     Apt,
     Nav,
@@ -41,7 +40,6 @@ pub enum Kind {
 pub struct Anchor {
     pub name: String,
     pub ll: Ll,
-    #[allow(dead_code)]
     pub kind: Kind,
 }
 

@@ -977,32 +977,35 @@ async fn stats_compaction_once(
     let hour_bucket = now.timestamp() / STATS_COMPACTION_INTERVAL.as_secs() as i64;
     let tiers_due = last_tier_hour.swap(hour_bucket, Ordering::Relaxed) != hour_bucket;
 
-    let mut passes: Vec<(&str, Result<u64, ApiError>)> = Vec::new();
+    let mut passes: Vec<(String, Result<u64, ApiError>)> = Vec::new();
     if tiers_due {
         for &(age_days, keep_every) in COMPACTION_TIERS {
             let to = now - chrono::Duration::days(age_days);
             let from = to - slice;
             passes.push((
-                "downsample",
+                format!("downsample-{age_days}d"),
                 stats_repo::downsample_positions(pool, from, to, keep_every).await,
             ));
         }
     }
-    passes.push(("winds", stats_repo::prune_winds(pool, prune_before).await));
     passes.push((
-        "tm-history",
+        "winds".into(),
+        stats_repo::prune_winds(pool, prune_before).await,
+    ));
+    passes.push((
+        "tm-history".into(),
         crate::repos::tmu::prune_history(pool, prune_before).await,
     ));
     passes.push((
-        "flight-legs",
+        "flight-legs".into(),
         stats_repo::prune_flight_legs(pool, legs_before).await,
     ));
     passes.push((
-        "taxi-observations",
+        "taxi-observations".into(),
         stats_repo::prune_taxi_observations(pool, legs_before).await,
     ));
 
-    let mut failed: Vec<&str> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for (label, res) in passes {
         match res {
             Ok(n) => {
@@ -1011,8 +1014,9 @@ async fn stats_compaction_once(
                 }
                 removed += n;
             }
-            Err(e) => {
-                tracing::warn!(pass = label, error = %e, "stats: compaction sub-pass failed");
+            // `ApiError` carries no cause; the stats repos log it (`repos/stats.rs::db`).
+            Err(_) => {
+                tracing::warn!(pass = %label, "stats: compaction sub-pass failed");
                 failed.push(label);
             }
         }
@@ -2022,28 +2026,26 @@ mod stats_compaction_tests {
             .unwrap()
     }
 
-    /// A failed sub-pass fails the run (code-quality.md § Fail-Open), names the sub-pass, and does
-    /// not stop the sub-passes after it.
+    /// Failed sub-passes fail the run (code-quality.md § Fail-Open), each is named, and they do
+    /// not stop the sub-passes after them.
     #[sqlx::test]
     async fn a_failed_sub_pass_fails_the_run_and_the_rest_still_prune(pool: PgPool) {
         seed_taxi_observation(&pool, "40 days").await;
         seed_taxi_observation(&pool, "1 day").await;
         // Contained to this test's own database (test-writing.md: DDL inside #[sqlx::test]).
-        sqlx::query("drop table stats.winds")
-            .execute(&pool)
-            .await
-            .unwrap();
+        for table in ["stats.winds", "stats.flight_leg"] {
+            sqlx::query(&format!("drop table {table}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
 
         let res = stats_compaction_once(&pool, &AtomicI64::new(0)).await;
 
-        let err = res.expect_err("a failed winds prune must fail the run");
-        assert!(
-            err.contains("winds"),
-            "the error names the failed sub-pass: {err}"
-        );
-        assert!(
-            !err.contains("taxi"),
-            "only failed sub-passes are named: {err}"
+        let err = res.expect_err("a failed prune must fail the run");
+        assert_eq!(
+            err, "compaction sub-pass(es) failed: winds, flight-legs; 1 rows removed by the rest",
+            "every failed sub-pass is named, and only those"
         );
         assert_eq!(
             taxi_observation_count(&pool).await,
