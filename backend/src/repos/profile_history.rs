@@ -208,15 +208,15 @@ mod tests {
     }
 
     /// Two readable flights beside one neighbor per filter, each failing exactly that filter: only
-    /// the readable two come back, in `first_seen` order though inserted newest first.
+    /// the readable two come back in `first_seen` order, which is not their `session_id` order.
     #[sqlx::test]
     async fn flights_reads_only_completed_typed_flights_with_both_ends_inside_the_window(
         pool: PgPool,
     ) {
         let ends = (Some("KJFK"), Some("KDCA"));
         let ty = Some("B738");
-        flight(&pool, 2, "completed", ends, ty, 20).await;
-        flight(&pool, 1, "completed", ends, ty, 10).await;
+        flight(&pool, 1, "completed", ends, ty, 20).await;
+        flight(&pool, 2, "completed", ends, ty, 10).await;
         flight(&pool, 3, "active", ends, ty, 10).await;
         flight(&pool, 4, "completed", (None, Some("KDCA")), ty, 10).await;
         flight(&pool, 5, "completed", (Some("KJFK"), None), ty, 10).await;
@@ -229,7 +229,7 @@ mod tests {
             .iter()
             .map(|f| f.session_id)
             .collect();
-        assert_eq!(got, vec![1, 2]);
+        assert_eq!(got, vec![2, 1], "first_seen order, not session_id");
     }
 
     /// Flights 10 and 20 tick 5 s apart, inserted newest first: each flight gets its own rows,
