@@ -33,7 +33,7 @@ Select a flight to open the right panel. It shows the **CTA** (metered crossing 
 Issuing a release needs **`flow.fca.update`** — read-only viewers see the board but not the buttons. There are two ways to release:
 
 - **RDY — release earliest** — drops the flight into the **earliest open metered slot** and freezes the wheels-up time that results. Use this when the pilot is ready to go now.
-- **Ready time + Set** — type the time the aircraft will be ready at the runway (`HHMMz`) and press **Set**. OIS gives it the first open crossing slot it can make from that time, clear of every airborne and released flight, and freezes the release time that results. The release is never before the ready time; if the slot it needed was taken, it is later, and the panel shows the release time, the crossing slot and the delay. On a manually sequenced FCA it follows the flight you ordered ahead of it. A ready time earlier than the current minute is refused.
+- **Ready time + Set** — type the time the aircraft will be ready at the runway (`HHMMz`) and press **Set**. OIS gives it the first open crossing slot it can make from that time and freezes the release time that results. On an automatically sequenced FCA that slot is clear of every airborne and released flight; on a manually sequenced one it follows the flight you ordered ahead of it and clears every released flight, and airborne flights ordered behind it are re-spaced behind it. The release is never before the ready time; if the slot it needed was taken, it is later, and the panel shows the release time, the crossing slot and the delay. A ready time earlier than the current minute is refused.
 - **Cancel release** — on a released flight, returns it to Unscheduled.
 
 ::: tip Proposed vs. issued

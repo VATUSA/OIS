@@ -4488,7 +4488,7 @@ mod release_spacing_tests {
     /// #816, manual mode: order Leader -> Dep -> Trailer, Leader airborne at 0 s. Dep follows
     /// Leader by 120 s + 15 s, so a Set asking for 100 s lands at 135 s, and one asking for 300 s
     /// keeps it. The airborne Trailer, ordered behind, is no constraint: its 110 s ETA is inside
-    /// 135 s of both, and the next metering pass chains it behind Dep's new time.
+    /// 135 s of the 135 s slot, and the next metering pass chains it behind Dep's new time.
     #[test]
     fn a_manual_set_follows_the_flight_ordered_ahead_not_those_behind() {
         let metas = vec![

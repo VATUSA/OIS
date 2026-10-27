@@ -494,8 +494,6 @@ class ReadyRefusedError extends Error {}
  *  the release it describes, so the panel can drop the figure once that release changes. */
 export type SetResult = { callsign: string; ready: string; edct: string; delayMin: number };
 
-/** Read from the flight list the release returns. `readyIso` is the typed ready time as
- *  `parseHhmm` resolves it. Null when the callsign is missing or holds no release. */
 /** The Set result still describes `flight`'s release: the same callsign, still released, at the
  *  same release time. A cancel, a swap or another Set elsewhere ends it. */
 export function setResultIsCurrent(
@@ -511,6 +509,8 @@ export function setResultIsCurrent(
   );
 }
 
+/** Read from the flight list the release returns. `readyIso` is the typed ready time as
+ *  `parseHhmm` resolves it. Null when the callsign is missing or holds no release. */
 export function setResult(
   flights: FcaFlight[],
   callsign: string,
