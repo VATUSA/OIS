@@ -40,9 +40,15 @@ pub const CRUISE_BAND_FT: f64 = 300.0;
 const MAX_PLAUSIBLE_FPM: f64 = 8_000.0;
 /// The model's low/high speed-schedule boundary (`AircraftProfile::climb_ias_lo` is "below 10,000 ft").
 pub const LOW_BAND_FT: f64 = 10_000.0;
-/// At or above this altitude a climb, cruise or descent speed is recorded as a Mach number instead
-/// of an indicated airspeed: the IAS/Mach crossover of a jet sits around FL280–FL300.
+/// At or above this altitude a cruise adds a Mach number beside its TAS.
 pub const MACH_BAND_FT: f64 = 28_000.0;
+/// A climb or descent speed is an IAS below this altitude.
+pub const IAS_TOP_FT: f64 = 26_000.0;
+/// A climb or descent speed is a Mach number at or above this altitude. Between [`IAS_TOP_FT`] and
+/// here no speed is recorded: the model flies `min(IAS, Mach)` (`trajectory::phase_tas`), so the
+/// crossover moves with the type (about FL270 to FL320 for 270–300 KIAS and M0.74–0.84), and a pair
+/// near it would record an IAS flown as Mach, or the reverse, slow.
+pub const MACH_FLOOR_FT: f64 = 31_000.0;
 /// A winds snapshot older than this (s) at the sample time is not used: RAP publishes a cycle every
 /// hour and OIS snapshots each one (`jobs.rs` `WINDS_REFRESH_INTERVAL`), so a gap past two hours
 /// means missed refreshes.
@@ -233,7 +239,8 @@ pub fn flight_samples(positions: &[HistPosition], winds: &WindsTimeline) -> Flig
     out
 }
 
-/// A climb or descent speed: Mach at or above [`MACH_BAND_FT`], otherwise IAS in the low or high band.
+/// A climb or descent speed: Mach at or above [`MACH_FLOOR_FT`], IAS in the low or high band below
+/// [`IAS_TOP_FT`], nothing between.
 fn push_speed(
     out: &mut FlightSamples,
     (alt, temp_k): (f64, f64),
@@ -242,9 +249,9 @@ fn push_speed(
     hi: Field,
     mach: Field,
 ) {
-    if alt >= MACH_BAND_FT {
+    if alt >= MACH_FLOOR_FT {
         out.push(mach, tas_to_mach(tas, temp_k));
-    } else {
+    } else if alt < IAS_TOP_FT {
         out.push(
             if alt < LOW_BAND_FT { lo } else { hi },
             tas_to_ias(tas, alt),
@@ -482,7 +489,7 @@ mod tests {
                 pos(
                     k * 15,
                     -100.0 + k as f64 * 0.03,
-                    30_000 + 500 * k as i32,
+                    33_000 + 500 * k as i32,
                     450,
                 )
             })
@@ -491,6 +498,31 @@ mod tests {
         let m = s.0[&Field::ClimbMach][0];
         assert!((m - 0.7406).abs() < 1e-4, "{m}");
         assert!(!s.0.contains_key(&Field::ClimbIasHi));
+    }
+
+    /// Climb pairs either side of the crossover band: an IAS just below FL260, a Mach from FL310, and
+    /// between them a rate but no speed.
+    #[test]
+    fn climb_speeds_skip_the_ias_mach_crossover_band() {
+        let at = |alt: i32| {
+            let p = vec![
+                pos(0, -100.0, alt - 250, 450),
+                pos(30, -99.94, alt + 250, 450),
+            ];
+            sampled(&p, grid(0, 0, -40))
+        };
+        let below = at(25_900);
+        assert!(below.0.contains_key(&Field::ClimbIasHi));
+        assert!(!below.0.contains_key(&Field::ClimbMach));
+        for alt in [26_000, 28_500, 30_900] {
+            let mid = at(alt);
+            assert_eq!(mid.0[&Field::ClimbFpmHi], vec![1_000.0], "{alt}");
+            assert!(!mid.0.contains_key(&Field::ClimbIasHi), "{alt}");
+            assert!(!mid.0.contains_key(&Field::ClimbMach), "{alt}");
+        }
+        let above = at(31_000);
+        assert!(above.0.contains_key(&Field::ClimbMach));
+        assert!(!above.0.contains_key(&Field::ClimbIasHi));
     }
 
     /// Where the field carries no temperature the Mach is taken on ISA, as the model flies it:

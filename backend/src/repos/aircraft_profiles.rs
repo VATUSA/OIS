@@ -113,26 +113,45 @@ pub async fn delete(pool: &PgPool, kind: &str, key: &str) -> Result<bool, ApiErr
 /// `AircraftProfile::default()` when no `default` row exists (e.g. an empty DB).
 pub async fn load_all(pool: &PgPool) -> Result<ProfileTable, ApiError> {
     let rows = list(pool).await?;
-    let mut default = AircraftProfile::default();
-    let mut by_wake: HashMap<String, AircraftProfile> = HashMap::new();
-    let mut by_type: HashMap<String, AircraftProfile> = HashMap::new();
-    for r in &rows {
-        let p = to_profile(r);
-        match r.kind.as_str() {
-            "default" => default = p,
-            "wake" => {
-                by_wake.insert(r.key.to_ascii_uppercase(), p);
-            }
-            _ => {
-                by_type.insert(r.key.to_ascii_uppercase(), p);
+    let t = StoredTiers::from_rows(&rows);
+    Ok(ProfileTable::new(t.default, t.by_wake, t.by_type))
+}
+
+/// Stored rows split into the three tiers [`ProfileTable`] resolves through, keys uppercased. The
+/// one place a row's `kind` picks its tier, shared by [`load_all`] and the aircraft-profile
+/// backtest's stored set (#828).
+#[derive(Debug, Clone)]
+pub struct StoredTiers {
+    pub default: AircraftProfile,
+    pub by_wake: HashMap<String, AircraftProfile>,
+    pub by_type: HashMap<String, AircraftProfile>,
+}
+
+impl StoredTiers {
+    pub fn from_rows(rows: &[AircraftProfileBody]) -> Self {
+        let mut t = Self {
+            default: AircraftProfile::default(),
+            by_wake: HashMap::new(),
+            by_type: HashMap::new(),
+        };
+        for r in rows {
+            let p = to_profile(r);
+            match r.kind.as_str() {
+                "default" => t.default = p,
+                "wake" => {
+                    t.by_wake.insert(r.key.to_ascii_uppercase(), p);
+                }
+                _ => {
+                    t.by_type.insert(r.key.to_ascii_uppercase(), p);
+                }
             }
         }
+        t
     }
-    Ok(ProfileTable::new(default, by_wake, by_type))
 }
 
 /// Map a stored row to the pure trajectory profile.
-pub(crate) fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
+fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
     AircraftProfile {
         climb_ias_lo: r.climb_ias_lo,
         climb_ias_hi: r.climb_ias_hi,

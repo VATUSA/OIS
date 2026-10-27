@@ -76,8 +76,15 @@ const USAGE: &str = "usage: aircraft-profile-builder build --from <date> --to <d
 /// where the caller says.
 fn parse(args: &[String]) -> Result<Command, String> {
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
-    if cmd != "build" && cmd != "backtest" {
-        return Err(USAGE.into());
+    let flags: &[&str] = match cmd {
+        "build" => &["--from", "--to", "--out", "--report"],
+        "backtest" => &["--from", "--to", "--profiles", "--report"],
+        _ => return Err(USAGE.into()),
+    };
+    for pair in args[2..].chunks(2) {
+        if pair.len() != 2 || !flags.contains(&pair[0].as_str()) {
+            return Err(format!("unexpected argument {:?}\n{USAGE}", pair[0]));
+        }
     }
     let from = instant(&required(args, "--from")?)?;
     let to = instant(&required(args, "--to")?)?;
@@ -149,6 +156,7 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("reading {profiles}: {e}"))?;
             let built: ProfileSet =
                 serde_json::from_str(&raw).map_err(|e| format!("parsing {profiles}: {e}"))?;
+            built.check().map_err(|e| format!("{profiles}: {e}"))?;
             let rows = aircraft_profiles::list(&pool)
                 .await
                 .map_err(|e| format!("loading flow.aircraft_profile: {e:?}"))?;
@@ -207,6 +215,35 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A subcommand or flag the tool does not know is refused, as is a flag with no value, so a typo
+    /// cannot send the report to stdout or drop a setting; `backtest` needs `--profiles`.
+    #[test]
+    fn unknown_commands_flags_and_missing_values_are_refused() {
+        let w = ["--from", "2026-09-20", "--to", "2026-10-11"];
+        let run = |head: &[&str], tail: &[&str]| {
+            let v: Vec<&str> = head.iter().chain(&w).chain(tail).copied().collect();
+            parse(&args(&v))
+        };
+        assert_eq!(run(&["rebuild"], &[]), Err(USAGE.to_string()));
+        for bad in [
+            &["--out", "x", "--reprot", "r"][..],
+            &["--out", "x", "--report"][..],
+        ] {
+            let err = run(&["build"], bad).unwrap_err();
+            assert!(err.starts_with("unexpected argument"), "{bad:?}: {err}");
+        }
+        let err = run(&["backtest"], &["--out", "x"]).unwrap_err();
+        assert!(err.starts_with("unexpected argument \"--out\""), "{err}");
+        assert_eq!(
+            run(&["backtest"], &[]),
+            Err("--profiles is required".to_string())
+        );
+        assert!(matches!(
+            run(&["backtest"], &["--profiles", "p.json"]),
+            Ok(Command::Backtest { .. })
+        ));
     }
 
     /// The documented `--from` / `--to` forms: a UTC date is its midnight, an RFC 3339 instant is

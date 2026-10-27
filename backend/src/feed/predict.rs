@@ -1124,7 +1124,7 @@ mod tests {
         assert_eq!(pred.profile.mean_headwind(300.0, 0.0), Some(60.0));
     }
 
-    // ---- #828: `arrival_route` is `arrival_eta`'s route resolution, extracted (plan A) ---------
+    // ---- #828: `arrival_route` is `arrival_eta`'s route resolution ---------------------------
     //
     /// `arrival_eta` timed by hand from its parts: `arrival_route`, `Winds::along` over that route,
     /// and `eta_along_route` to the field. Returns the route and the composed ETA.

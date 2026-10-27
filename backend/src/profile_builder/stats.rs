@@ -11,8 +11,9 @@ use crate::feed::trajectory::AircraftProfile;
 /// A field is measured for a type only when at least this many training flights contributed a value
 /// to it. Twenty keeps one odd flight (a sim on autopilot V/S 4000, a pilot holding 250 kt to FL200)
 /// from moving the median, while still reaching the regional and business types the 0059 seed never
-/// covered. A type below it on any phase keeps that phase's current profile, and the coverage report
-/// lists it with its wake class and engine family so #818 can give it a family fallback.
+/// covered. A type short of it on climb, cruise or descent is not profiled and keeps its whole
+/// current profile; the coverage report lists it with its wake class and engine family so #818 can
+/// give it a family fallback.
 pub const MIN_FLIGHTS_PER_FIELD: usize = 20;
 
 /// The median of `v` (unsorted), or None when empty.
@@ -94,7 +95,7 @@ pub struct TypeProfile {
     pub fields: BTreeMap<String, FieldStat>,
 }
 
-/// The builder's output file (`backend/data/aircraft_profiles.json`).
+/// The builder's output file, written where `--out` says.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileSet {
     pub source: Source,
@@ -204,6 +205,24 @@ impl TypeProfile {
 }
 
 impl ProfileSet {
+    /// Refuse a file this build would read differently from how it was written: one measured under
+    /// another flight threshold (`measured` uses the compiled one), or one naming a field this build
+    /// does not know (`apply_to` would leave it out of set B).
+    pub fn check(&self) -> Result<(), String> {
+        if self.min_flights_per_field != MIN_FLIGHTS_PER_FIELD {
+            return Err(format!(
+                "the file was built with min_flights_per_field {}, this build uses {}",
+                self.min_flights_per_field, MIN_FLIGHTS_PER_FIELD
+            ));
+        }
+        for (ty, tp) in &self.types {
+            if let Some(name) = tp.fields.keys().find(|n| Field::from_name(n).is_none()) {
+                return Err(format!("{ty}: unknown field {name:?}"));
+            }
+        }
+        Ok(())
+    }
+
     /// The coverage report as Markdown: per-type sample counts and the share of traffic covered.
     /// Aggregates only; nothing in it identifies a pilot or a flight.
     pub fn coverage_report(&self) -> String {
@@ -317,6 +336,92 @@ mod tests {
             (Field::CruiseTas, 440.0 + fpm / 100.0),
             (Field::DescFpm, 2_000.0),
         ]
+    }
+
+    /// One measured stat per field, each a distinct value, so every arm of `apply_to` is seen to
+    /// write its own profile field: schedules the median, caps the upper quartile.
+    #[test]
+    fn apply_to_writes_each_field_to_its_own_profile_field() {
+        let stat = |k: f64| FieldStat {
+            median: k,
+            q1: k - 0.5,
+            q3: k + 0.5,
+            flights: MIN_FLIGHTS_PER_FIELD,
+        };
+        let tp = TypeProfile {
+            flights: MIN_FLIGHTS_PER_FIELD,
+            wake: None,
+            engine: None,
+            profiled: true,
+            fields: Field::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name().to_string(), stat(i as f64 + 1.0)))
+                .collect(),
+        };
+        let p = tp.apply_to(&AircraftProfile::default());
+        let got = |f: Field| match f {
+            Field::ClimbIasLo => p.climb_ias_lo,
+            Field::ClimbIasHi => p.climb_ias_hi,
+            Field::ClimbMach => p.climb_mach.unwrap(),
+            Field::ClimbFpmLo => p.climb_fpm_lo,
+            Field::ClimbFpmHi => p.climb_fpm_hi,
+            Field::CruiseTas => p.cruise_tas.unwrap(),
+            Field::CruiseMach => p.cruise_mach.unwrap(),
+            Field::DescMach => p.desc_mach.unwrap(),
+            Field::DescIasHi => p.desc_ias_hi,
+            Field::DescIasLo => p.desc_ias_lo,
+            Field::DescFpm => p.desc_fpm,
+        };
+        for (i, f) in Field::ALL.into_iter().enumerate() {
+            let cap = matches!(f, Field::CruiseTas | Field::CruiseMach);
+            let want = i as f64 + 1.0 + if cap { 0.5 } else { 0.0 };
+            assert_eq!(got(f), want, "{}", f.name());
+        }
+    }
+
+    /// A file from a build with another threshold, or naming a field this build does not know, is
+    /// refused; one this build wrote passes.
+    #[test]
+    fn a_profile_file_this_build_would_misread_is_refused() {
+        let mut acc = Accumulator::default();
+        acc.add_flight("B738", "", &full_flight(2_000.0));
+        let set = acc.finish(source(), |_| None);
+        assert_eq!(set.check(), Ok(()));
+
+        let mut other = set.clone();
+        other.min_flights_per_field = 10;
+        assert_eq!(
+            other.check(),
+            Err("the file was built with min_flights_per_field 10, this build uses 20".into())
+        );
+
+        let mut typo = set.clone();
+        let stat = typo.types["B738"].fields["desc_fpm"].clone();
+        typo.types
+            .get_mut("B738")
+            .unwrap()
+            .fields
+            .insert("desc_fmp".into(), stat);
+        assert_eq!(typo.check(), Err("B738: unknown field \"desc_fmp\"".into()));
+    }
+
+    /// A type is profiled only with climb, cruise and descent each measured: dropping any one of the
+    /// three from an otherwise full set leaves it unprofiled.
+    #[test]
+    fn each_phase_is_needed_to_profile_a_type() {
+        for missing in [Field::ClimbFpmHi, Field::CruiseTas, Field::DescFpm] {
+            let mut acc = Accumulator::default();
+            for _ in 0..MIN_FLIGHTS_PER_FIELD {
+                let f: Vec<_> = full_flight(2_000.0)
+                    .into_iter()
+                    .filter(|(f, _)| *f != missing)
+                    .collect();
+                acc.add_flight("B738", "", &f);
+            }
+            let set = acc.finish(source(), |_| None);
+            assert!(!set.types["B738"].profiled, "{}", missing.name());
+        }
     }
 
     #[test]

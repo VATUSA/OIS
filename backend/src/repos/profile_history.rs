@@ -25,7 +25,7 @@ pub struct HistFlight {
 }
 
 /// One stored feed tick for a flight.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct HistPosition {
     pub ts: DateTime<Utc>,
     pub lat: f32,
@@ -178,6 +178,58 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// One `stats.flight` row: `status`, `dep`, `arr` and `ty` (both type columns) as given, flown
+    /// from `start_min` to `start_min + 60` minutes after t0.
+    async fn flight(
+        pool: &PgPool,
+        session_id: i64,
+        status: &str,
+        (dep, arr): (Option<&str>, Option<&str>),
+        ty: Option<&str>,
+        start_min: i64,
+    ) {
+        sqlx::query(
+            "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, last_seen, \
+                status, departure, arrival, aircraft_short, aircraft_faa) \
+             values ($1, 1, 'TEST', $2, $2, $3, $4, $5, $6, $7, $7)",
+        )
+        .bind(session_id)
+        .bind(t0() + Duration::minutes(start_min))
+        .bind(t0() + Duration::minutes(start_min + 60))
+        .bind(status)
+        .bind(dep)
+        .bind(arr)
+        .bind(ty)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Two readable flights beside one neighbor per filter, each failing exactly that filter: only
+    /// the readable two come back, in `first_seen` order though inserted newest first.
+    #[sqlx::test]
+    async fn flights_reads_only_completed_typed_flights_with_both_ends_inside_the_window(
+        pool: PgPool,
+    ) {
+        let ends = (Some("KJFK"), Some("KDCA"));
+        let ty = Some("B738");
+        flight(&pool, 2, "completed", ends, ty, 20).await;
+        flight(&pool, 1, "completed", ends, ty, 10).await;
+        flight(&pool, 3, "active", ends, ty, 10).await;
+        flight(&pool, 4, "completed", (None, Some("KDCA")), ty, 10).await;
+        flight(&pool, 5, "completed", (Some("KJFK"), None), ty, 10).await;
+        flight(&pool, 6, "completed", ends, None, 10).await;
+        flight(&pool, 7, "completed", ends, ty, -5).await;
+        flight(&pool, 8, "completed", ends, ty, 130).await;
+        let got: Vec<i64> = flights(&pool, t0(), t0() + Duration::hours(3))
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.session_id)
+            .collect();
+        assert_eq!(got, vec![1, 2]);
     }
 
     /// Flights 10 and 20 tick 5 s apart, inserted newest first: each flight gets its own rows,

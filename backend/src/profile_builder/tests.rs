@@ -188,7 +188,7 @@ async fn the_builder_is_repeatable_and_skips_held_out_flights(pool: PgPool) {
     assert_eq!(none.source.flights_read, 0);
 }
 
-// ---- #828 plan D: one streamed position query, winds loaded once, output unchanged ------------
+// ---- positions and winds read per batch of flights -------------------------------------------
 //
 /// A snapshot of `w` at `ts`.
 async fn seed_winds(pool: &PgPool, ts: DateTime<Utc>, w: &crate::feed::winds::Winds) {

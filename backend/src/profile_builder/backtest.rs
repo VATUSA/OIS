@@ -6,8 +6,8 @@
 //! descent ([`predict::eta_along_route`], the function FCA metering crosses fixes with). The errors
 //! are predicted minus observed, so a positive number means the model was late.
 //!
-//! Only airborne instants are replayed, so the ground branch (the taxi allowance #814 is removing)
-//! never enters the score.
+//! Only airborne instants are replayed, so the ground branch (the taxi allowance, see #814) never
+//! enters the score.
 
 use std::collections::BTreeSet;
 
@@ -322,31 +322,24 @@ pub fn profile_sets(
     ProfileTable,
     std::collections::BTreeSet<String>,
 ) {
-    use std::collections::HashMap;
-    let mut default = AircraftProfile::default();
-    let mut by_wake: HashMap<String, AircraftProfile> = HashMap::new();
-    let mut by_type: HashMap<String, AircraftProfile> = HashMap::new();
-    for r in rows {
-        let p = crate::repos::aircraft_profiles::to_profile(r);
-        match r.kind.as_str() {
-            "default" => default = p,
-            "wake" => {
-                by_wake.insert(r.key.to_ascii_uppercase(), p);
-            }
-            _ => {
-                by_type.insert(r.key.to_ascii_uppercase(), p);
-            }
-        }
-    }
-    let a = ProfileTable::new(default.clone(), by_wake.clone(), by_type.clone());
+    let stored = crate::repos::aircraft_profiles::StoredTiers::from_rows(rows);
+    let a = ProfileTable::new(
+        stored.default.clone(),
+        stored.by_wake.clone(),
+        stored.by_type.clone(),
+    );
     let mut b_types = std::collections::BTreeSet::new();
-    let mut b_by_type = by_type;
+    let mut b_by_type = stored.by_type;
     for (ty, tp) in built.types.iter().filter(|(_, tp)| tp.profiled) {
         let base = a.resolve(ty, tp.wake.as_deref().unwrap_or("")).clone();
         b_by_type.insert(ty.to_ascii_uppercase(), tp.apply_to(&base));
         b_types.insert(ty.clone());
     }
-    (a, ProfileTable::new(default, by_wake, b_by_type), b_types)
+    (
+        a,
+        ProfileTable::new(stored.default, stored.by_wake, b_by_type),
+        b_types,
+    )
 }
 
 /// The backtest result as Markdown. Aggregates only.
@@ -552,14 +545,17 @@ mod tests {
     /// Set B replaces only the types the builder profiled, starting from what set A resolved them
     /// to; everything else resolves exactly as in set A.
     #[test]
-    fn set_b_overlays_only_profiled_types() {
+    fn set_b_overlays_only_profiled_types_on_the_profile_set_a_resolves_them_to() {
         use super::super::samples::Field;
         use super::super::stats::{Accumulator, Source};
-        let rows = vec![
+        let mut rows = vec![
             row("default", "default", 1_800.0),
             row("wake", "H", 2_200.0),
             row("type", "B738", 1_900.0),
         ];
+        // A field the measurement leaves alone, distinct on the heavy row: B77W's set-B profile must
+        // carry it, which it does only when built from the wake row set A resolves it to.
+        rows[1].desc_ias_hi = 310.0;
         let mut acc = Accumulator::default();
         for _ in 0..20 {
             acc.add_flight(
@@ -596,9 +592,10 @@ mod tests {
         assert_eq!(b77w.desc_fpm, 2_600.0);
         assert_eq!(b77w.climb_fpm_lo, 1_700.0);
         assert_eq!(
-            b77w.service_ceiling_ft, 41_000.0,
-            "unmeasured fields come from A's resolution"
+            b77w.desc_ias_hi, 310.0,
+            "unmeasured fields come from A's resolution (the H row)"
         );
+        assert_eq!(b77w.service_ceiling_ft, 41_000.0);
         // E75L has no climb or cruise measurement, so it is not profiled and resolves as in A.
         assert_eq!(b.resolve("E75L", ""), a.resolve("E75L", ""));
         assert_eq!(b.resolve("B738", ""), a.resolve("B738", ""));
@@ -689,6 +686,30 @@ mod tests {
         }
     }
 
+    /// The TOD is timed at the along-route distance from the replay instant to the observed TOD fix:
+    /// on unresolved (great-circle) routes, the snapshot's distance to the field less the TOD
+    /// fix's. Control: timing it at the TOD fix's own distance to the field lands over a minute off.
+    #[test]
+    fn the_tod_is_timed_at_the_along_route_distance_to_the_observed_tod_fix() {
+        let nav = NavData::default();
+        let ap = airports();
+        let winds = Winds::default();
+        let profile = AircraftProfile::default();
+        let p = plan("");
+        let obs = Observed {
+            snapshot: pos(0, 40.2, -74.0, 18_000, 380),
+            tod: pos(1_200, 39.4, -75.6, 24_000, 450),
+            touchdown: t0() + Duration::seconds(2_400),
+        };
+        let pred = predict_case(&nav, &ap, &winds, &profile, &p, &obs);
+        let to_field = |q: &HistPosition| gc_dist(q.lat as f64, q.lon as f64, 38.85, -77.04);
+        let along = to_field(&obs.snapshot) - to_field(&obs.tod);
+        let ac = arrival_input(&p, &obs.snapshot, &profile);
+        let at = |nm: f64| eta_at_along(&nav, &ap, &winds, &profile, &ac, nm, t0());
+        assert!((pred.tod - at(along)).num_milliseconds().abs() < 1_000);
+        assert!((at(to_field(&obs.tod)) - pred.tod).num_seconds().abs() > 60);
+    }
+
     /// One stored flight: its row (`route` filed on the flight) and its positions.
     async fn seed(pool: &PgPool, session_id: i64, route: &str, positions: &[HistPosition]) {
         let (first, last) = (positions[0].ts, positions[positions.len() - 1].ts);
@@ -758,18 +779,72 @@ mod tests {
 
     /// The arrival error `predict_case` gives `positions` under `winds` and `route`.
     fn expected(nav: &NavData, winds: &Winds, route: &str, positions: &[HistPosition]) -> f64 {
+        expected_on(nav, winds, &AircraftProfile::default(), route, positions)
+    }
+
+    /// As [`expected`], flown on `profile`.
+    fn expected_on(
+        nav: &NavData,
+        winds: &Winds,
+        profile: &AircraftProfile,
+        route: &str,
+        positions: &[HistPosition],
+    ) -> f64 {
         let obs = observe(positions, [38.85, -77.04]).unwrap();
         let mut p = plan(route);
         p.cruise_ft = 24_000.0;
-        let pred = predict_case(
-            nav,
-            &airports(),
-            winds,
-            &AircraftProfile::default(),
-            &p,
-            &obs,
-        );
+        let pred = predict_case(nav, &airports(), winds, profile, &p, &obs);
         (pred.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0
+    }
+
+    /// Set A's error goes to `a`, set B's to `b`, and a type set B profiles is marked `in_b`: B
+    /// flies the B738 at 3,000 fpm descent where A flies the default.
+    #[sqlx::test]
+    async fn run_scores_set_a_and_set_b_each_on_its_own_profile(pool: PgPool) {
+        let nav = NavData::default();
+        let ap = airports();
+        let f = flight();
+        seed(&pool, 5, "", &f).await;
+        let fast = AircraftProfile {
+            desc_fpm: 3_000.0,
+            climb_fpm_hi: 3_000.0,
+            ..AircraftProfile::default()
+        };
+        let set_a = ProfileTable::new(AircraftProfile::default(), HashMap::new(), HashMap::new());
+        let set_b = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([("B738".to_string(), fast.clone())]),
+        );
+        let b_types = BTreeSet::from(["B738".to_string()]);
+        let replay = Replay {
+            nav: &nav,
+            airports: &ap,
+            set_a: &set_a,
+            set_b: &set_b,
+            b_types: &b_types,
+        };
+        let (scored, _) = run(
+            &pool,
+            &replay,
+            t0() - Duration::hours(1),
+            t0() + Duration::hours(3),
+        )
+        .await
+        .unwrap();
+        let (on_a, on_b) = (
+            expected(&nav, &Winds::default(), "", &f),
+            expected_on(&nav, &Winds::default(), &fast, "", &f),
+        );
+        assert_ne!(
+            on_a, on_b,
+            "the two profiles must time the flight differently"
+        );
+        assert_eq!(
+            (scored[0].a.arrival_sec, scored[0].b.arrival_sec),
+            (on_a, on_b)
+        );
+        assert!(scored[0].in_b);
     }
 
     /// The backtest applies training's winds freshness rule: a snapshot 130 min before the replay
