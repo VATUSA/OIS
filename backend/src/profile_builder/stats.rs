@@ -83,8 +83,8 @@ pub struct Source {
 pub struct TypeProfile {
     /// Training flights of this type.
     pub flights: usize,
-    /// The wake class most of its flight plans carry (`H`, `J`; see `profile_builder::wake_of`), or
-    /// None when they carry none.
+    /// The wake class most of its flight plans carry (`H`, `J`; see
+    /// `profile_builder::type_and_wake`), or None when they carry none.
     pub wake: Option<String>,
     /// `jet`, `turboprop` or `piston` from `feed::flow`'s engine reference, or None when unlisted.
     pub engine: Option<String>,
