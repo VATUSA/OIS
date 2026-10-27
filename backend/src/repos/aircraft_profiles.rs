@@ -167,3 +167,40 @@ fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
         desc_fpm: r.desc_fpm,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::load_all;
+
+    /// Each stored tier reaches the table the trajectory model resolves through: a type row (stored
+    /// lowercase, matched uppercase), a wake row and the default, each told apart by its descent
+    /// rate.
+    #[sqlx::test]
+    async fn load_all_puts_each_stored_row_in_its_own_tier(pool: PgPool) {
+        for (kind, key, fpm) in [("default", "", 1_111.0), ("wake", "H", 2_222.0)] {
+            sqlx::query(
+                "update flow.aircraft_profile set desc_fpm = $3 where kind = $1 and key = $2",
+            )
+            .bind(kind)
+            .bind(key)
+            .bind(fpm)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "insert into flow.aircraft_profile (kind, key, desc_fpm) values ('type', 'zz9z', 3333)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let table = load_all(&pool).await.unwrap();
+
+        assert_eq!(table.resolve("ZZ9Z", "H").desc_fpm, 3_333.0, "type tier");
+        assert_eq!(table.resolve("QQQQ", "H").desc_fpm, 2_222.0, "wake tier");
+        assert_eq!(table.resolve("QQQQ", "").desc_fpm, 1_111.0, "default tier");
+    }
+}

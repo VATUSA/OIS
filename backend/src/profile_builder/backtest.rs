@@ -516,6 +516,10 @@ mod tests {
         let mut v = flight();
         v[6].ts = v[5].ts + Duration::seconds(240);
         assert!(observe(&v, [38.85, -77.04]).is_none());
+        // Touchdown can't be timed: the first ground tick is four minutes after the last airborne one.
+        let mut v = flight();
+        v[9].ts = v[8].ts + Duration::seconds(240);
+        assert!(observe(&v, [38.85, -77.04]).is_none());
         // Positive control: the untouched flight is scorable.
         assert!(observe(&flight(), [38.85, -77.04]).is_some());
     }
