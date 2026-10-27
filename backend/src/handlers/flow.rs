@@ -4495,6 +4495,25 @@ mod release_spacing_tests {
         );
     }
 
+    /// #816, manual mode: the controller's order holds among the other flights once the Set flight
+    /// is taken out. Order B -> Dep -> A: B crosses at its 10 s ETA and A is chained behind it at
+    /// 10 s + 120 s = 130 s. A Set asking for 250 s is inside 130 s + 135 s, so it lands at 265 s.
+    /// Metered in ETA order instead (A at 0 s, B pushed to 120 s) it would land at 255 s.
+    #[test]
+    fn a_manual_set_keeps_the_controllers_order_among_the_others() {
+        let metas = vec![
+            cand(0, true, None),      // A, airborne, ordered last
+            cand(5_000, false, None), // Dep, ground: the one being set
+            cand(10_000, true, None), // B, airborne, ordered first
+        ];
+        let order = vec![2usize, 1, 0];
+        let fca = rate_fca(vec!["B".into(), "DEP".into(), "A".into()]);
+        assert_eq!(
+            super::set_slot(&fca, &metas, Some(&order), 1, 250_000),
+            265_000
+        );
+    }
+
     /// #816 AC3: the previous minute has ended, so it is refused.
     #[test]
     fn ready_ms_refuses_a_ready_time_whose_minute_has_ended() {

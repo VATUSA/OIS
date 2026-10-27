@@ -95,6 +95,10 @@ describe("setResult", () => {
     expect(r).toEqual({ callsign: "AAL1", ready: READY, delayMin: 2 });
   });
 
+  it("never reports a negative delay when the client clock resolves the ready time late", () => {
+    expect(setResult([flight("AAL1", { edct: "2026-10-10T13:59:30Z" })], "AAL1", READY)?.delayMin).toBe(0);
+  });
+
   it("floors to the minute the panel prints, so 14:02:59 is +2 after a 1400Z ready", () => {
     expect(setResult([flight("AAL1", { edct: "2026-10-10T14:02:59Z" })], "AAL1", READY)?.delayMin).toBe(2);
   });
