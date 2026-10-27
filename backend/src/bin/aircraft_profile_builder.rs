@@ -222,8 +222,9 @@ mod tests {
         }
     }
 
-    /// A subcommand or flag the tool does not know is refused, as is a flag with no value, so a typo
-    /// cannot send the report to stdout or drop a setting; `backtest` needs `--profiles`.
+    /// A subcommand or flag the tool does not know is refused, as is a flag with no value or one given
+    /// twice, so a typo cannot send the report to stdout or drop a setting; `backtest` needs
+    /// `--profiles`.
     #[test]
     fn unknown_commands_repeated_flags_and_missing_values_are_refused() {
         let w = ["--from", "2026-09-20", "--to", "2026-10-11"];

@@ -47,8 +47,8 @@ pub const MACH_BAND_FT: f64 = 28_000.0;
 pub const IAS_TOP_FT: f64 = 26_000.0;
 /// A climb or descent speed is a Mach number at or above this altitude. Between [`IAS_TOP_FT`] and
 /// here no speed is recorded: the model flies `min(IAS, Mach)` (`trajectory::phase_tas`), so the
-/// crossover moves with the type (about FL290 to FL350 for 250–300 KIAS and M0.74–0.84, most of it
-/// below FL340), and a pair near it would record an IAS flown as Mach, or the reverse, slow.
+/// crossover moves with the type (in the standard atmosphere FL293 for 300 KIAS and M0.78, FL341 for
+/// 270 KIAS and M0.78), and a pair near it would record an IAS flown as Mach, or the reverse, slow.
 pub const MACH_FLOOR_FT: f64 = 34_000.0;
 /// A winds snapshot older than this (s) at the sample time is not used: RAP publishes a cycle every
 /// hour and OIS snapshots each one (`jobs.rs` `WINDS_REFRESH_INTERVAL`), so a gap past two hours
@@ -524,6 +524,34 @@ mod tests {
         let above = at(34_000);
         assert!(above.0.contains_key(&Field::ClimbMach));
         assert!(!above.0.contains_key(&Field::ClimbIasHi));
+    }
+
+    /// A descent pair records its speed in its own band: Mach from FL340, the high IAS band below
+    /// FL260, the low one below 10,000 ft, and nothing as a climb.
+    #[test]
+    fn descent_speeds_go_to_the_descent_field_of_their_band() {
+        let at = |alt: i32| {
+            let p = vec![
+                pos(0, -100.0, alt + 500, 300),
+                pos(30, -99.96, alt - 500, 300),
+            ];
+            sampled(&p, grid(0, 0, -40))
+        };
+        let cases = [
+            (35_000, Field::DescMach),
+            (20_000, Field::DescIasHi),
+            (5_000, Field::DescIasLo),
+        ];
+        for (alt, want) in cases {
+            let s = at(alt);
+            assert_eq!(s.0[&Field::DescFpm], vec![2_000.0], "{alt}");
+            for (_, f) in cases {
+                assert_eq!(s.0.contains_key(&f), f == want, "{alt}: {}", f.name());
+            }
+            for f in [Field::ClimbMach, Field::ClimbIasHi, Field::ClimbIasLo] {
+                assert!(!s.0.contains_key(&f), "{alt}: {}", f.name());
+            }
+        }
     }
 
     /// Where the field carries no temperature the Mach is taken on ISA, as the model flies it:
