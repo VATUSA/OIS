@@ -406,8 +406,8 @@ RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder 
 - **Split.** A flight whose `session_id mod 5 == 0` is held out of `build` and scored by
   `backtest`, so no flight both shapes and scores a profile.
 - **Samples** (`profile_builder::samples`). Each pair of consecutive positions is a climb or descent
-  (at least 300 fpm, at most 90 s apart) or cruise (level within 300 ft of the flight's top, up to
-  20 min apart). Groundspeed becomes TAS with the `stats.winds` snapshot in force, read along the
+  (at least 300 fpm, at most 90 s apart) or cruise (under 100 fpm, within 300 ft of the flight's
+  top, up to 20 min apart). Groundspeed becomes TAS with the `stats.winds` snapshot in force, read along the
   pair's track the way the model reads RAP (`Winds::along`); a snapshot over 2 h old is not used.
   Mach uses the field's temperature, IAS the ISA density, matching `trajectory.rs`. Positions are
   thinned past 7 days (`COMPACTION_TIERS`), so climbs and descents come only from the last 14 days;
