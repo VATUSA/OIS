@@ -28,7 +28,7 @@ The map draws the matched aircraft **tinted and numbered in crossing order**, an
 
 Drag a strip in the FCA panel to put the sequence in your own order; **manual** in the panel header returns it to automatic sequencing. Each aircraft is spaced behind the one you put ahead of it, so moving one up can delay the aircraft behind it that no longer have their spacing. An aircraft with an issued release keeps its time.
 
-An aircraft that joins the FCA after you set the order (it connects, or its route starts crossing the line) is merged in by its ETA, or by its release time if it already has one: it goes directly behind the last ordered aircraft whose ETA is at or before that time. It never goes ahead of an ordered aircraft that would reach the line first, and it never moves an aircraft you placed.
+An aircraft that joins the FCA after you set the order (it connects, or its route starts crossing the line) is merged in by its ETA: it goes behind every ordered aircraft whose ETA is at or before its own. One that already has a release goes further back if its release time crosses later, so it sits where it will actually cross. It never goes ahead of an ordered aircraft with an earlier ETA, and the aircraft you placed keep their order, though one spaced behind a joiner can cross later.
 
 ### Why one aircraft is ahead of another
 
@@ -36,9 +36,9 @@ Each strip shows its **gap** to the aircraft ahead, in nm and minutes:seconds, a
 
 Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing required behind the one ahead, and one line of reason:
 
-- **Manual placement** — you put them in this order, or one of them is in your order and the other was merged around it.
+- **Manual placement** — you put them in this order, or the one behind reaches the line first and you placed at least one of them.
 - **ETA order** — the one ahead simply reaches the line first.
-- **Spacing push** — the one behind would reach the line first, but was pushed behind an airborne aircraft or an issued release to hold spacing.
+- **Spacing push** — the one behind would reach the line first, but the scheduler moved it back to hold spacing.
 
 ## Enabling & disabling
 

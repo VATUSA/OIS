@@ -17,9 +17,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 - **Changed: FCA manual order** (#819). `PUT /api/v1/flow/fcas/{id}/order` answers `400` when
   `order` names a callsign twice, compared case-insensitively, and stores nothing; a stored order now
   matches flights case-insensitively. In manual sequence, a flight missing from the order is placed
-  directly behind the last ordered flight whose ETA is at or before its own (its release time when it
-  holds one) instead of at the end.
-  `FcaFlight` (`GET /api/v1/flow/fcas/{id}/traffic`, `GET /api/v1/flow/idst` and the release routes) gains
+  behind every ordered flight whose ETA is at or before its own instead of at the end, and one holding
+  a release goes further back when its release time says so.
+  `FcaFlight` (`GET /api/v1/flow/fcas/{id}/traffic` and `POST`/`DELETE /api/v1/flow/fcas/{id}/release/{callsign}`) gains
   `gap_to_leader_sec`, `gap_to_leader_nm`, `required_spacing_sec`, `required_spacing_nm`,
   `cross_speed` and `manually_placed`. A caller that sends a duplicate callsign must drop it.
 

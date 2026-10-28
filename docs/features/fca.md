@@ -211,22 +211,24 @@ an optional manual order.
 The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2116`), which
 RDY uses.
 
-**Auto mode** (`feed/fca.rs:413-443`). Pinned flights (airborne, or holding a release) sort ahead
-of the rest, then by ETA (`:419-425`). Each in turn is placed at its frozen time if it has one,
-else at `earliest_slot(eta, committed, sep)` (`:429-434`), and is added to `committed`. Sequence
-numbers follow the scheduled time (`:438-442`).
+**Auto mode** (`feed/fca.rs:399-429`). Pinned flights (airborne, or holding a release) sort ahead
+of the rest, then by ETA (`:405-411`). Each in turn is placed at its frozen time if it has one,
+else at `earliest_slot(eta, committed, sep)` (`:415-420`), and is added to `committed`. Sequence
+numbers follow the scheduled time (`:424-428`).
 
-**`earliest_slot`** (`feed/fca.rs:503`): from the ETA, move to `c + sep` for any committed `c`
+**`earliest_slot`** (`feed/fca.rs:549`): from the ETA, move to `c + sep` for any committed `c`
 closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
 
-**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` keeps the stored order (first occurrence
-of a repeated index only) and places each flight it does not name directly behind the last ordered
-flight whose ETA is at or before the joiner's release time if it holds one, else its ETA, joiners in
-that order (#819). Each flight is chained `max(eta, prev + sep)` behind the one before,
-except a frozen flight, which keeps its time and becomes the new `prev` (`:396-403`). Sequence
-numbers are the order itself (`:410-412`).
+**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` (`feed/fca.rs:480`) keeps the stored order
+(first occurrence of a repeated index only) and places each flight it does not name behind every
+ordered flight whose ETA is at or before its own (#819). A joiner holding a release goes further back
+when its release time says so: behind the last flight of the order without it that crosses at least
+its spacing earlier, so RDY's own release never moves it out of the slot it was released into.
+`chain` (`:455`) then chains each flight `max(eta, prev + sep)` behind the one before, except a
+frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers are the order itself
+(`:396-398`).
 
-`delay_sec = max(sched - eta, 0) / 1000` (`feed/fca.rs:455`).
+`delay_sec = max(sched - eta, 0) / 1000` (`feed/fca.rs:441`).
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
@@ -239,16 +241,17 @@ numbers are the order itself (`:410-412`).
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:630-1676`: MIT at the follower's speed, rate metering, airborne priority,
-a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners included), repeated indices and gap outputs.
-Rate and MIT 0 reach `meter` only through `sep_ms` (`sep_ms_is_the_rate_interval_in_rate_mode`),
-and equal ETAs only between late joiners and an ordered flight.
+**Tests.** `feed/fca.rs:676-1766`: MIT at the follower's speed, rate metering, airborne priority,
+a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
+indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
+(`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and
+between a joiner and an ordered flight.
 `a_faster_flight_slotted_inside_a_pushed_flights_spacing_shows_the_shortfall` pins auto MIT with a
 slow pushed flight and a fast follower placed inside its spacing (#817 case 4).
 `mod release_spacing_tests` (`handlers/flow.rs:3817`) covers `rdy_slot` and `separation_ms`.
 
 **Untested branches.** Airborne against frozen in auto mode. A frozen flight whose ETA is past its
-frozen time. A full sequence with rate or MIT 0. Equal-ETA ties in auto mode.
+frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode.
 
 ### Findings, area 3
 
@@ -374,7 +377,7 @@ covers `hist_fcas`.
 ### Findings, area 5
 
 - **The badge and the board disagree.** The count included prefiles, and the detail panel hid
-  `proposed` rows (`web/src/pages/fca/detail.tsx:221`); #834 removed prefiles from both the count and
+  `proposed` rows (`web/src/pages/fca/detail.tsx:310`); #834 removed prefiles from both the count and
   the board. Counts still skip a disabled FCA while traffic serves it (area 2), so the comment at
   `handlers/flow.rs:710-711` ("a badge count can never disagree with the board") holds for an enabled
   FCA only. Filed as #853; the disabled-FCA gap is #846.
@@ -390,10 +393,11 @@ covers `hist_fcas`.
 loads the selected FCA's traffic (`useFcaTraffic`, `web/src/lib/fca.ts:407`, key
 `["fca-traffic", id, debug]` at `:414`) and the counts (`useFcaCounts`, `:342`).
 
-- **`detail.tsx`** lists non-`proposed` rows (`:221`), shows Air, Ground and summed delay
-  (`:242-247`), and gives each strip its sequence, crossing time, delay, distance, `delay_nm` and
-  release. RDY and SET are hidden for airborne flights (`:59`). Dragging sends the new order of the
-  listed callsigns (`:249-257`).
+- **`detail.tsx`** lists non-`proposed` rows (`:310`), shows Air, Ground and summed delay
+  (`:344-349`), and gives each strip its sequence, crossing time, delay, distance, `delay_nm` and
+  release. RDY and SET are hidden for airborne flights (`:68`). Dragging sends the new order of the
+  listed callsigns (`:351-359`). Each strip after the first shows its gap to the one ahead, and
+  Compare on two strips opens `ComparePanel` with the reason from `web/src/lib/fca-compare.ts` (#819).
 - **`ladder.tsx`** drops `proposed` rows and rows without a crossing time, and places each strip at
   `cross_time − now` (`web/src/pages/fca/ladder.tsx:27-47`).
 - **`overview-panel.tsx`** is read-only and also drops `proposed` rows
@@ -425,9 +429,9 @@ defect below and has to change with its fix.
   answers and the prefix invalidation refetches. A fix that only adds `debug` to the mutations'
   key would break the overview, so it has to update both keys. Filed as #850.
 - **Release and reorder controls ignore the FCA's ARTCC.** `canOperate`
-  (`web/src/pages/fca/detail.tsx:237`) checks that the user holds `flow.fca.update` somewhere and
+  (`web/src/pages/fca/detail.tsx:326`) checks that the user holds `flow.fca.update` somewhere and
   that the FCA is live or the user is a planner, but never the FCA's ARTCC. Exclusions already ask
-  the server (`:229-232`). A controller viewing another facility's FCA is offered RDY, SET, clear
+  the server (`:318-321`). A controller viewing another facility's FCA is offered RDY, SET, clear
   and drag, and gets a 403. Filed as #851.
 - **Historical mode mixes a past FCA list with live counts and traffic.** Inside a
   `HistoricalProvider`, `useFcas` reads the instant (`web/src/lib/fca.ts:158`) and switches to

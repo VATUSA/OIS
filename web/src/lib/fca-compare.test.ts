@@ -89,6 +89,8 @@ describe("pairGapSec, fmtGap and nmAt (VATUSA/OIS#819)", () => {
   it("converts seconds to nm at a speed, to one decimal", () => {
     // 150 s at 300 kt = 12.5 nm; 120 s at 283 kt = 9.433 nm.
     expect(nmAt(150, 300)).toBe(12.5);
+    // 500 s at 283.4 kt = 39.36 nm, which rounds up.
+    expect(nmAt(500, 283.4)).toBe(39.4);
     expect(nmAt(120, 283)).toBe(9.4);
   });
 });

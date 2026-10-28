@@ -5320,8 +5320,8 @@ export interface components {
             cross_lon: number;
             /**
              * Format: int64
-             * @description Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with it, and the
-             *     `_nm` figures convert at it.
+             * @description Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with the unrounded
+             *     speed, and the `_nm` figures convert at it.
              */
             cross_speed: number;
             /**
@@ -5380,7 +5380,7 @@ export interface components {
             lon: number;
             /**
              * @description True when the FCA is in manual sequence and this flight's position comes from the
-             *     controller's saved order; false for a flight merged in by ETA and for every flight in auto.
+             *     controller's saved order; false for a late joiner merged into it and for every flight in auto.
              */
             manually_placed: boolean;
             /**
@@ -5402,8 +5402,9 @@ export interface components {
             required_spacing_nm: number;
             /**
              * Format: int64
-             * @description The separation the scheduler required this flight to hold behind the flight ahead, seconds:
-             *     MIT at this flight's crossing speed, or the rate interval.
+             * @description The separation this flight is owed behind the flight ahead, seconds: MIT at this flight's
+             *     crossing speed, or the rate interval. Reported for every flight; the first has no flight
+             *     ahead, and an issued release keeps its time whatever the spacing.
              */
             required_spacing_sec: number;
             /**

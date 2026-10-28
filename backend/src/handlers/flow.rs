@@ -6938,6 +6938,17 @@ mod fca_order_wiring_tests {
         assert_eq!(flights[1].gap_to_leader_nm, Some(-16.7));
     }
 
+    /// nm convert at the unrounded crossing speed: 500 s at 283.4 kt = 39.36 nm (39.4), where the
+    /// rounded 283 kt would give 39.3.
+    #[test]
+    fn gap_nm_converts_at_the_unrounded_crossing_speed() {
+        let mut flights = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(500_000, true, 283.4)];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut flights, &metas);
+        assert_eq!(flights[1].cross_speed, 283);
+        assert_eq!(flights[1].gap_to_leader_nm, Some(39.4));
+    }
+
     #[test]
     fn cross_speed_rounds_to_the_nearest_knot() {
         let mut flights = vec![flight("A")];

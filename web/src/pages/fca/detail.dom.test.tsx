@@ -390,6 +390,15 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(["DAL2", "AAL1", "UAL3"].map((cs) => toggle(host, cs).disabled)).toEqual([false, false, false]);
   });
 
+  it("measures a non-adjacent pair's gap between the two of them, not the strip's gap", () => {
+    // DAL2 (seq 1, 12:10) and UAL3 (seq 3, 12:20): 600 s at UAL3's 300 kt = 50 nm. UAL3's own strip
+    // gap is to AAL1 (40 nm), which must not be shown for this pair.
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "UAL3");
+    expect(text(host, "compare-gap")).toBe("10:00 · 50.0nm");
+  });
+
   it("shows an adjacent pair's gap in nm as the strip reports it", () => {
     // 500 s at 283.4 kt is 39.4 nm on the backend; recomputed at the rounded 283 kt it would be 39.3.
     const pairOf = [

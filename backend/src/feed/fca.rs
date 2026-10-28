@@ -354,7 +354,7 @@ pub struct MeterOutput {
 /// fixed constraints; unreleased ground floats into the first gap clear of every
 /// committed crossing by the separation (rate → constant MINIT; MIT → distance ÷ cross
 /// speed). Manual mode (`order` = candidate indices): chain in the controller's order,
-/// spacing each behind the previous, with newcomers merged by ETA (`merge_late_joiners`). Ported from
+/// spacing each behind the previous, with newcomers merged in (`merge_late_joiners`). Ported from
 /// vatflow's `scheduleAuto` / `scheduleCandidates`.
 pub fn meter(
     cands: &[MeterInput],
@@ -380,28 +380,14 @@ pub fn meter(
     let mut placed = vec![false; n];
 
     if let Some(seq) = order {
-        // Manual: honour the controller's order; merge newcomers in by ETA.
-        let ordered = merge_late_joiners(cands, seq);
+        // Manual: honour the controller's order; merge newcomers in.
+        let ordered = merge_late_joiners(cands, seq, &sep_ms);
         for &i in seq.iter().filter(|&&i| i < n) {
             placed[i] = true;
         }
-        let mut prev: Option<i64> = None;
+        let chained = chain(cands, &ordered, &sep_ms);
         for &i in &ordered {
-            let c = &cands[i];
-            // In manual mode the controller's order is authoritative, so every crossing — airborne
-            // included — is chained behind the previous one by the required separation. Moving an
-            // aircraft up therefore pushes the ones now behind it later: the delay a controller would
-            // have to create with vectors/speed control. An issued CFR is the only hard, un-moveable
-            // commitment; it keeps its frozen time (and still spaces those chained behind it).
-            sched[i] = if let Some(f) = c.frozen_ms {
-                f
-            } else {
-                match prev {
-                    Some(p) => c.eta_ms.max(p + sep_ms(c)),
-                    None => c.eta_ms,
-                }
-            };
-            prev = Some(sched[i]);
+            sched[i] = chained[i];
         }
         // Manual: the crossing sequence IS the controller's order — assigned directly, not derived
         // from scheduled time. That keeps a dragged aircraft in the slot it was moved to even though
@@ -461,14 +447,41 @@ pub fn meter(
         .collect()
 }
 
+/// Manual-mode crossing times for `seq`, indexed by candidate. In manual mode the controller's
+/// order is authoritative, so every crossing (airborne included) is chained behind the previous one
+/// by the required separation. Moving an aircraft up therefore pushes the ones now behind it later:
+/// the delay a controller would have to create with vectors or speed control. An issued CFR is the
+/// only hard, un-moveable commitment; it keeps its frozen time and still spaces those behind it.
+fn chain(cands: &[MeterInput], seq: &[usize], sep: &dyn Fn(&MeterInput) -> i64) -> Vec<i64> {
+    let mut at = vec![0i64; cands.len()];
+    let mut prev: Option<i64> = None;
+    for &i in seq {
+        let c = &cands[i];
+        at[i] = match (c.frozen_ms, prev) {
+            (Some(f), _) => f,
+            (None, Some(p)) => c.eta_ms.max(p + sep(c)),
+            (None, None) => c.eta_ms,
+        };
+        prev = Some(at[i]);
+    }
+    at
+}
+
 /// The manual crossing order with every flight the controller has not ordered merged in (#819).
 ///
-/// `order` keeps its first occurrence of each index. A late joiner goes directly behind the last
-/// ordered flight whose ETA is at or before the joiner's own time (its frozen release when it holds
-/// one, else its ETA), at the head when there is none, so it never crosses ahead of an ordered flight
-/// that reaches the line first and a joiner released late never pushes the ordered flights behind it.
-/// Joiners keep that time order among themselves, ties by candidate index.
-fn merge_late_joiners(cands: &[MeterInput], order: &[usize]) -> Vec<usize> {
+/// `order` keeps its first occurrence of each index. A late joiner goes behind every ordered flight
+/// whose ETA is at or before its own, so it never crosses ahead of an ordered flight that reaches the
+/// line first, and it never moves one the controller placed. One without a release goes directly
+/// there. One holding a release crosses at that time whatever its position, so it goes further back
+/// when the release says so: behind the last flight of the order without it that crosses at least
+/// its spacing earlier. Its own release is never measured against a sequence it already sits in, so
+/// a release spaced into a slot keeps that slot, and a release set late does not chain the ordered
+/// flights behind it.
+fn merge_late_joiners(
+    cands: &[MeterInput],
+    order: &[usize],
+    sep: &dyn Fn(&MeterInput) -> i64,
+) -> Vec<usize> {
     let n = cands.len();
     let mut seen = vec![false; n];
     let ordered: Vec<usize> = order
@@ -476,26 +489,59 @@ fn merge_late_joiners(cands: &[MeterInput], order: &[usize]) -> Vec<usize> {
         .copied()
         .filter(|&i| i < n && !std::mem::replace(&mut seen[i], true))
         .collect();
-    let joiner_time = |j: usize| cands[j].frozen_ms.unwrap_or(cands[j].eta_ms);
-    let mut joiners: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
-    joiners.sort_by_key(|&i| (joiner_time(i), i));
-    // Slot k means "after the first k ordered flights".
-    let slot = |j: usize| {
+    // How many ordered flights have an ETA at or before the joiner's.
+    let floor = |j: usize| {
         ordered
             .iter()
-            .rposition(|&o| cands[o].eta_ms <= joiner_time(j))
+            .rposition(|&o| cands[o].eta_ms <= cands[j].eta_ms)
             .map_or(0, |p| p + 1)
     };
-    let mut merged = Vec::with_capacity(n);
+    let (released, unreleased): (Vec<usize>, Vec<usize>) = (0..n)
+        .filter(|&i| !seen[i])
+        .partition(|&i| cands[i].frozen_ms.is_some());
+    let base = splice(
+        &ordered,
+        unreleased
+            .into_iter()
+            .map(|j| (floor(j), cands[j].eta_ms, j))
+            .collect(),
+    );
+    let at = chain(cands, &base, sep);
+    let mut base_pos = vec![0usize; n];
+    for (k, &i) in base.iter().enumerate() {
+        base_pos[i] = k;
+    }
+    let slots = released
+        .into_iter()
+        .map(|j| {
+            let f = cands[j].frozen_ms.unwrap_or(cands[j].eta_ms);
+            let by_eta = match floor(j) {
+                0 => 0,
+                k => base_pos[ordered[k - 1]] + 1,
+            };
+            let by_release = base
+                .iter()
+                .rposition(|&x| at[x] + sep(&cands[j]) <= f)
+                .map_or(0, |p| p + 1);
+            (by_eta.max(by_release), f, j)
+        })
+        .collect();
+    splice(&base, slots)
+}
+
+/// `base` with each `(slot, time, index)` joiner inserted after the first `slot` entries; joiners in
+/// one slot go in time order, ties by candidate index.
+fn splice(base: &[usize], mut joiners: Vec<(usize, i64, usize)>) -> Vec<usize> {
+    joiners.sort_unstable();
+    let mut merged = Vec::with_capacity(base.len() + joiners.len());
     let mut rest = joiners.into_iter().peekable();
-    for (k, &o) in ordered.iter().enumerate() {
-        while let Some(&j) = rest.peek().filter(|&&j| slot(j) <= k) {
+    for (k, &o) in base.iter().enumerate() {
+        while let Some((_, _, j)) = rest.next_if(|&(slot, _, _)| slot <= k) {
             merged.push(j);
-            rest.next();
         }
         merged.push(o);
     }
-    merged.extend(rest);
+    merged.extend(rest.map(|(_, _, j)| j));
     merged
 }
 
@@ -1415,16 +1461,60 @@ mod tests {
         assert_eq!(out[2].sched_ms, 1_800_000, "the release keeps its time");
     }
 
-    // A joiner released early merges by its release, still never ahead of an ordered flight with
-    // an earlier ETA: J (ETA 300 s) released for 100 s goes behind A (ETA 0) and ahead of B (200 s).
+    // A joiner released early still goes behind every ordered flight with an earlier ETA (AC1):
+    // J (ETA 300 s) released for 100 s sits behind A (0) and B (200 s), keeps its time, and reports
+    // the conflict as a negative gap to B.
     #[test]
-    fn a_late_joiner_holding_an_early_release_merges_by_its_release_time() {
+    fn a_late_joiner_holding_an_early_release_still_goes_behind_every_earlier_eta_ordered_flight() {
         let mut j = cand(300_000);
         j.frozen_ms = Some(100_000);
         let cands = [cand(0), cand(200_000), j];
         let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
         let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
-        assert_eq!(seqs, [1, 3, 2]);
+        assert_eq!(seqs, [1, 2, 3]);
+        assert_eq!(out[2].sched_ms, 100_000);
+        assert_eq!(out[2].gap_ms, Some(-100_000));
+    }
+
+    fn seqs_of(out: &[MeterOutput]) -> Vec<i64> {
+        out.iter().map(|o| o.seq).collect()
+    }
+
+    // RDY on a late joiner freezes its merged slot plus a margin. Re-metered, the joiner keeps that
+    // slot: J (ETA 100 s) merges behind A (0) at 120 s ahead of B (ETA 110 s); frozen at 135 s it
+    // still sits second and B is spaced 120 s behind it, not moved up inside J's spacing.
+    #[test]
+    fn a_late_joiner_released_into_its_merged_slot_keeps_that_slot_when_re_metered() {
+        let cands = [cand(0), cand(110_000), cand(100_000)];
+        let before = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&before), [1, 3, 2]);
+        assert_eq!(before[2].sched_ms, 120_000);
+
+        let mut released = cands;
+        released[2].frozen_ms = Some(before[2].sched_ms + 15_000);
+        let after = meter(&released, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&after), [1, 3, 2]);
+        assert_eq!(after[2].sched_ms, 135_000, "the release keeps its time");
+        assert_eq!(after[1].sched_ms, 255_000, "B is spaced behind the release");
+        assert_eq!(after[1].gap_ms, Some(after[1].sep_ms));
+    }
+
+    // The same when the chain, not the ETA, put the joiner past the next ordered flight's ETA:
+    // A 0, P chained to 120 s; J (ETA 130 s) merges at 240 s ahead of O (ETA 140 s). Frozen at
+    // 255 s, J must not slip behind O, whose chained time without J (240 s) is inside J's spacing.
+    #[test]
+    fn a_chained_late_joiner_released_into_its_slot_keeps_it_when_re_metered() {
+        let cands = [cand(0), cand(10_000), cand(140_000), cand(130_000)];
+        let before = meter(&cands, "rate", 30, 0, Some(&[0, 1, 2]));
+        assert_eq!(seqs_of(&before), [1, 2, 4, 3]);
+        assert_eq!(before[3].sched_ms, 240_000);
+
+        let mut released = cands;
+        released[3].frozen_ms = Some(before[3].sched_ms + 15_000);
+        let after = meter(&released, "rate", 30, 0, Some(&[0, 1, 2]));
+        assert_eq!(seqs_of(&after), [1, 2, 4, 3]);
+        assert_eq!(after[3].sched_ms, 255_000);
+        assert_eq!(after[2].sched_ms, 375_000, "O is spaced behind the release");
     }
 
     // An ordered flight holding a late release still counts at its ETA for the merge: J (ETA 150 s)
