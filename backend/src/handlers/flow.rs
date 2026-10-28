@@ -6924,6 +6924,16 @@ mod fca_order_wiring_tests {
         assert_eq!(flights[1].required_spacing_nm, 9.4);
     }
 
+    /// Rate 13 spaces crossings 276.923 s apart: the seconds round to 277, not truncate to 276.
+    #[test]
+    fn gap_and_required_spacing_seconds_round_to_the_nearest_second() {
+        let mut flights = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(100_000, true, 300.0)];
+        meter_in_place(&fca("rate", 13, 0, &[]), &mut flights, &metas);
+        assert_eq!(flights[1].gap_to_leader_sec, Some(277));
+        assert_eq!(flights[1].required_spacing_sec, 277);
+    }
+
     #[test]
     fn meter_in_place_marks_ordered_flights_manually_placed_and_joiners_not() {
         let metas = [
