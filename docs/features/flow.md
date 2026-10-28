@@ -385,3 +385,43 @@ model back ETA/crossing prediction. All metering (`fca::meter`, the runway board
 the departures view) is computed **live** per request against the current snapshot — the
 `flow` schema stores config and frozen releases, not traffic history. Persisted network
 history lives in the separate `stats` domain.
+
+## Measuring aircraft profiles *(#828)*
+
+The `flow.aircraft_profile` rows are hand-written. `aircraft-profile-builder` measures what each
+type actually flies on VATSIM from the stats history, and scores a profile set against flights it
+held out. It runs offline from a checkout (the backend image ships only `ois-backend`), reads the
+database named by `DATABASE_URL` and writes nothing to it:
+
+```text
+# Measure: the profile file and its coverage report.
+RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- build \
+    --from 2026-09-20 --to 2026-10-11 --out /tmp/aircraft_profiles.json --report coverage.md
+
+# Score: the stored catalog (set A) against it with the measured types applied (set B).
+RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- backtest \
+    --from 2026-09-20 --to 2026-10-11 --profiles /tmp/aircraft_profiles.json --report backtest.md
+```
+
+- **Split.** A flight whose `session_id mod 5 == 0` is held out of `build` and scored by
+  `backtest`, so no flight both shapes and scores a profile.
+- **Samples** (`profile_builder::samples`). Each pair of consecutive positions is a climb or descent
+  (at least 300 fpm, at most 90 s apart) or cruise (under 100 fpm, within 300 ft of the flight's
+  top, up to 20 min apart). Groundspeed becomes TAS with the `stats.winds` snapshot in force, read along the
+  pair's track the way the model reads RAP (`Winds::along`); a snapshot over 2 h old is not used.
+  Mach uses the field's temperature, IAS the ISA density, matching `trajectory.rs`. Climb and
+  descent speeds are IAS below FL260 and Mach from FL340; a pair between gives a rate but no speed,
+  since the IAS/Mach crossover moves with the type. Positions are
+  thinned past 7 days (`COMPACTION_TIERS`), so climbs and descents come only from the last 14 days;
+  cruise samples use any age `stats.winds` still holds (90 days, `WINDS_RETAIN_DAYS`).
+- **Output.** One value per flight per field (its median), then per type the median and quartiles
+  across flights. A field counts as measured at 20 flights (`MIN_FLIGHTS_PER_FIELD`); a type is
+  profiled when climb, cruise and descent each have a measured field (`climb_fpm_lo` or
+  `climb_fpm_hi`, `cruise_tas`, `desc_fpm`). Types below that are listed in
+  the coverage report with their wake class and engine family. The same data gives the same bytes.
+  The file is a measurement to review, not committed data.
+- **Backtest** (`profile_builder::backtest`). Each held-out flight is replayed from its first fix
+  1,000 ft above its take-off roll, on the plan revision in force then, through
+  `predict::arrival_eta` and, for the top of descent, `predict::arrival_route` +
+  `predict::eta_along_route`: the code every arrival ETA runs. Errors are predicted minus
+  observed, at the top of descent and at touchdown.

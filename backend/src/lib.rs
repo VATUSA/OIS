@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod metrics;
 pub mod models;
 pub mod openapi;
+pub mod profile_builder;
 pub mod rate_limit;
 pub mod realtime;
 pub mod repos;

@@ -62,9 +62,12 @@ layers, each trading fidelity for size only where it doesn't hurt:
    (a narrow, one-`STATS_COMPACTION_INTERVAL`-wide slice, not the whole historical band — see the
    doc comment on `COMPACTION_TIERS`) — the incremental steps compound to the cumulative densities
    above.
-5. **Prune horizon (winds & TM history only).** Winds snapshots and published TM history
-   (TMIs/GDPs/ground stops) older than **`STATS_PRUNE_AFTER_DAYS = 14`** days are deleted outright —
-   unrelated to `stats.position`, which is only ever thinned, never dropped.
+5. **Prune horizons (winds & TM history only).** Published TM history (TMIs/GDPs/ground stops)
+   older than **`STATS_PRUNE_AFTER_DAYS = 14`** days and winds snapshots older than
+   **`WINDS_RETAIN_DAYS = 90`** days are deleted outright, unrelated to `stats.position`, which is
+   only ever thinned, never dropped. Winds are kept longer so the aircraft-profile builder
+   ([flow.md](flow.md#measuring-aircraft-profiles-828)) can turn older groundspeeds into TAS; a RAP
+   snapshot is about 222 KB stored, so 90 days of hourly snapshots is about 480 MB.
 6. **Capture guard.** Any row whose `ts` falls inside an **open or saved** `stats.capture` window is
    **exempt from downsampling** — captured events keep full ~15s fidelity indefinitely
    (`CAPTURE_GUARD` in `repos/stats.rs`). A window can be **saved after the fact**, too (see
