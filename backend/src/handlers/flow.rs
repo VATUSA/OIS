@@ -6924,6 +6924,31 @@ mod fca_order_wiring_tests {
         assert_eq!(flights[1].required_spacing_nm, 9.4);
     }
 
+    /// A release frozen at 100 s, ordered behind A (crossing 300 s), reports the shortfall as a
+    /// negative gap rather than clamping it: -200 s, -16.7 nm at 300 kt.
+    #[test]
+    fn a_frozen_release_ordered_behind_a_later_crossing_reports_a_negative_gap() {
+        let mut flights = vec![flight("A"), flight("F")];
+        let mut frozen = meta(50_000, false, 300.0);
+        frozen.frozen_ms = Some(100_000);
+        let metas = [meta(300_000, true, 300.0), frozen];
+        meter_in_place(&fca("rate", 30, 0, &["A", "F"]), &mut flights, &metas);
+        assert_eq!(flights[1].seq, 2);
+        assert_eq!(flights[1].gap_to_leader_sec, Some(-200));
+        assert_eq!(flights[1].gap_to_leader_nm, Some(-16.7));
+    }
+
+    #[test]
+    fn cross_speed_rounds_to_the_nearest_knot() {
+        let mut flights = vec![flight("A")];
+        meter_in_place(
+            &fca("rate", 30, 0, &[]),
+            &mut flights,
+            &[meta(0, true, 282.6)],
+        );
+        assert_eq!(flights[0].cross_speed, 283);
+    }
+
     /// Rate 13 spaces crossings 276.923 s apart: the seconds round to 277, not truncate to 276.
     #[test]
     fn gap_and_required_spacing_seconds_round_to_the_nearest_second() {

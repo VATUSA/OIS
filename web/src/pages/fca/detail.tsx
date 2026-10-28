@@ -275,7 +275,11 @@ function ComparePanel({ pair, onClose }: { pair: [FcaFlight, FcaFlight]; onClose
       <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 font-mono">
         <dt className="text-ink-3">Gap</dt>
         <dd data-testid="compare-gap">
-          {gapSec == null ? "—" : fmtGap(gapSec, nmAt(gapSec, behind.cross_speed))}
+          {gapSec == null
+            ? "—"
+            : fmtGap(gapSec, behind.seq === ahead.seq + 1 && behind.gap_to_leader_nm != null
+                ? behind.gap_to_leader_nm
+                : nmAt(gapSec, behind.cross_speed))}
         </dd>
         <dt className="text-ink-3">Required</dt>
         <dd data-testid="compare-required">
@@ -320,16 +324,19 @@ export function FcaDetail({
   // else reaching one — a stale selection on the ops map — would be offered controls that can only fail.
   const { data: me } = useMe();
   const canOperate = canEdit && (fcaIsLive(fca) || hasPermission(me, "events.plan.update"));
-  // Callsigns picked for the compare panel, at most two (#819). The flights themselves are read
-  // from `list` on every render, so the panel follows the live sequence.
-  const [compare, setCompare] = useState<string[]>([]);
-  const pair = compare
+  // Callsigns picked for the compare panel, at most two (#819), kept for the FCA they were picked
+  // on. A pick whose flight has left the list no longer counts, so a flight crossing the line or a
+  // switch to another FCA frees its place; the flights are read from `list` on every render.
+  const [picked, setPicked] = useState<{ fcaId: string; callsigns: string[] }>({ fcaId: fca.id, callsigns: [] });
+  const pair = (picked.fcaId === fca.id ? picked.callsigns : [])
     .map((cs) => list.find((f) => f.callsign === cs))
     .filter((f): f is FcaFlight => f !== undefined);
+  const compare = pair.map((f) => f.callsign);
   const toggleCompare = (callsign: string) =>
-    setCompare((cur) =>
-      cur.includes(callsign) ? cur.filter((c) => c !== callsign) : [...cur, callsign].slice(-2),
-    );
+    setPicked({
+      fcaId: fca.id,
+      callsigns: compare.includes(callsign) ? compare.filter((c) => c !== callsign) : [...compare, callsign],
+    });
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -417,7 +424,7 @@ export function FcaDetail({
           </div>
 
           {pair.length === 2 && (
-            <ComparePanel pair={[pair[0], pair[1]]} onClose={() => setCompare([])} />
+            <ComparePanel pair={[pair[0], pair[1]]} onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })} />
           )}
 
           <DndContext
@@ -436,7 +443,7 @@ export function FcaDetail({
                     f={f}
                     canEdit={canOperate}
                     comparing={compare.includes(f.callsign)}
-                    canCompare={compare.length < 2}
+                    canCompare={pair.length < 2}
                     onCompare={toggleCompare}
                     onRelease={(callsign, ready) =>
                       markRelease.mutate({ callsign, ready })

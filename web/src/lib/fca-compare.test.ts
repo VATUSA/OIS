@@ -72,6 +72,13 @@ describe("pairGapSec, fmtGap and nmAt (VATUSA/OIS#819)", () => {
       pairGapSec({cross_time: "2026-10-27T12:00:00Z"}, {cross_time: "2026-10-27T12:02:30Z"}),
     ).toBe(150);
     expect(pairGapSec({cross_time: null}, {cross_time: "2026-10-27T12:02:30Z"})).toBeNull();
+    expect(pairGapSec({cross_time: "2026-10-27T12:00:00Z"}, {cross_time: null})).toBeNull();
+  });
+
+  it("rounds a sub-second gap to the nearest second", () => {
+    expect(
+      pairGapSec({cross_time: "2026-10-27T12:00:00.000Z"}, {cross_time: "2026-10-27T12:02:29.600Z"}),
+    ).toBe(150);
   });
 
   it("formats a gap as minutes:seconds and nm, keeping the sign of an out-of-order pair", () => {

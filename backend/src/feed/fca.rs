@@ -464,9 +464,10 @@ pub fn meter(
 /// The manual crossing order with every flight the controller has not ordered merged in (#819).
 ///
 /// `order` keeps its first occurrence of each index. A late joiner goes directly behind the last
-/// ordered flight whose ETA is at or before its own (at the head when there is none), so it never
-/// crosses ahead of an ordered flight that reaches the line first and never moves one the controller
-/// placed. Joiners keep ETA order among themselves, ties by candidate index.
+/// ordered flight whose ETA is at or before the joiner's own time (its frozen release when it holds
+/// one, else its ETA), at the head when there is none, so it never crosses ahead of an ordered flight
+/// that reaches the line first and a joiner released late never pushes the ordered flights behind it.
+/// Joiners keep that time order among themselves, ties by candidate index.
 fn merge_late_joiners(cands: &[MeterInput], order: &[usize]) -> Vec<usize> {
     let n = cands.len();
     let mut seen = vec![false; n];
@@ -475,13 +476,14 @@ fn merge_late_joiners(cands: &[MeterInput], order: &[usize]) -> Vec<usize> {
         .copied()
         .filter(|&i| i < n && !std::mem::replace(&mut seen[i], true))
         .collect();
+    let joiner_time = |j: usize| cands[j].frozen_ms.unwrap_or(cands[j].eta_ms);
     let mut joiners: Vec<usize> = (0..n).filter(|&i| !seen[i]).collect();
-    joiners.sort_by_key(|&i| (cands[i].eta_ms, i));
+    joiners.sort_by_key(|&i| (joiner_time(i), i));
     // Slot k means "after the first k ordered flights".
     let slot = |j: usize| {
         ordered
             .iter()
-            .rposition(|&o| cands[o].eta_ms <= cands[j].eta_ms)
+            .rposition(|&o| cands[o].eta_ms <= joiner_time(j))
             .map_or(0, |p| p + 1)
     };
     let mut merged = Vec::with_capacity(n);
@@ -1396,6 +1398,44 @@ mod tests {
         assert_eq!(out[2].sched_ms, 320_000);
         let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
         assert_eq!(seqs, [1, 2, 3]);
+    }
+
+    // A joiner SET to cross at 1,800 s merges by that time, not its 150 s ETA, so the ordered B
+    // keeps its own ETA slot instead of being chained 120 s behind the late release.
+    #[test]
+    fn a_late_joiner_holding_a_late_release_merges_by_its_release_time() {
+        let mut j = cand(150_000);
+        j.frozen_ms = Some(1_800_000);
+        let cands = [cand(0), cand(200_000), j];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
+        assert_eq!(seqs, [1, 2, 3], "the released joiner follows B");
+        assert_eq!(out[1].sched_ms, 200_000, "B keeps its ETA");
+        assert_eq!(out[2].sched_ms, 1_800_000, "the release keeps its time");
+    }
+
+    // A joiner released early merges by its release, still never ahead of an ordered flight with
+    // an earlier ETA: J (ETA 300 s) released for 100 s goes behind A (ETA 0) and ahead of B (200 s).
+    #[test]
+    fn a_late_joiner_holding_an_early_release_merges_by_its_release_time() {
+        let mut j = cand(300_000);
+        j.frozen_ms = Some(100_000);
+        let cands = [cand(0), cand(200_000), j];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
+        assert_eq!(seqs, [1, 3, 2]);
+    }
+
+    // A frozen release ordered behind a flight that crosses later keeps its time, and its gap to
+    // that flight is reported as the negative shortfall, not clamped to zero.
+    #[test]
+    fn a_frozen_release_behind_a_later_crossing_has_a_negative_gap() {
+        let mut f = cand(50_000);
+        f.frozen_ms = Some(100_000);
+        let cands = [cand(300_000), f];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(out[1].sched_ms, 100_000);
+        assert_eq!(out[1].gap_ms, Some(-200_000));
     }
 
     // AC4: a callsign repeated in an order already stored keeps its first position; the stored
