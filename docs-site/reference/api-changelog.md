@@ -22,7 +22,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
   held times. A flight whose ETA has passed its
   release or held time reports how far in `late_sec`, and its `cross_time` is never before its ETA.
-  (#817)
+  In airport flow, an issued CFR's `FlowFlight.sta` and `delay_min` now go through the same slot
+  check as every other arrival and are never before its ETA, so a CFR the flight can no longer make
+  shows its ETA and a CFR whose slot is taken shows the delay. (#817)
 
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the

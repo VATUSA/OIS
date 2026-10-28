@@ -2249,8 +2249,9 @@ async fn metered_flights(
             store: &store,
             drop: &drop,
         };
+        // `sync_held_stas` logs the database error; this records that the read answered anyway.
         if let Err(e) = flow_repo::sync_held_stas(pool, &fca_id, fca_updated_at, &sync, now).await {
-            tracing::error!(fca_id = %fca_id, error = %e, "storing held STAs failed; answering without them");
+            tracing::debug!(fca_id = %fca_id, error = %e, "held STAs not stored; read answered");
         }
     }
     Ok(flights)

@@ -207,6 +207,7 @@ describe("lateness and the slot-conflict flag", () => {
     const host = mount(CONTROLLER, fca(null, null), true, [both]);
     expect(host.textContent).toContain("CFR +2:05 · late +1:30");
     expect(host.textContent).not.toContain("on time");
+    expect(host.querySelector('[title="ETA is past its release or frozen time"]')).not.toBeNull();
   });
 
   it("hides lateness under the delay threshold", () => {

@@ -70,12 +70,21 @@ carry `updated_at` (via the shared `platform.touch_updated_at()` trigger) and re
 | `enabled` | boolean | |
 | `manual_order` | text[] | drag-to-reorder callsign list (migration 0023) |
 | `manual_seq` | boolean | whether manual order is active (migration 0023) |
+| `freeze_min` | int | freeze horizon in minutes, 0-120, default 30; 0 turns it off (migration 0132, #817) |
+
+### `flow.fca_held_sta` — held crossing times *(migration 0132)*
+
+One row per airborne flight inside an FCA's freeze horizon: `fca_id`, `callsign`, `sta_ms`. The
+metered read stores the first STA a flight gets on entering the horizon and later reads place it
+there no earlier than its ETA. Editing or deleting the FCA clears its rows. See
+`docs/features/fca.md` for the write rules.
 
 ### `flow.fca_release` — frozen CFR releases per FCA *(migration 0023)*
 
 One row per released crossing. When a controller issues a release, the flight's metered
 crossing (`cta_ms`) and wheels-up/release time (`edct_ms`) are **frozen**; the metering
-engine then treats it as a fixed constraint that unreleased ground traffic floats around.
+engine then treats it as a fixed constraint that unreleased traffic floats around (a late
+release sits at its ETA, #817).
 
 | column | type | notes |
 | --- | --- | --- |

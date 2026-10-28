@@ -21,7 +21,7 @@ VATSIM snapshot (handlers/flow.rs::feed_view :61)
         predict::eta_along_route ─▶ eta, crossing groundspeed      (ETA model: #814)
         flow.fca_release (by callsign) ─▶ frozen_ms
                                                       ▼  MeterInput[]
-        finalize (flow.rs:2160) ─▶ manual_order (:2082) ─▶ fca::meter (fca.rs:348)
+        finalize (flow.rs:2160) ─▶ manual_order (:2082) ─▶ fca::meter
                                                       ▼
         fca_traffic · flight_advisory · list_idst · mark_release · clear_release
                                                       ▼
@@ -198,7 +198,7 @@ plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 `fca::meter` takes the `MeterInput` list, a `MeterConfig` (mode, rate, MIT, freeze horizon and
 now) and an optional manual order.
 
-**Separation** (`feed/fca.rs:355-364`):
+**Separation** (`fca::separation_ms`):
 
 - `mode == "mit"`: `mit / max(cross_speed, 60) × 3600` seconds, at each aircraft's own crossing
   speed; a pair takes the larger of its two.
@@ -239,8 +239,9 @@ advisory (`build_flight_advisory`), both public. `flow_repo::sync_held_stas` sto
 newly frozen flight (first STA wins, `on conflict do nothing`), deletes the rows of held flights the
 read no longer holds (out of the horizon, released, or gone from the feed) and rows more than an
 hour past their STA. A new row is stored only while the FCA is not deleted and `flow.fca.updated_at`
-still matches the read's FCA (checked under a share lock), so a read that raced an edit or a delete
-stores nothing; a signed-in read of a deleted FCA (historical replay) stores none. A failed write is logged and the read still
+still matches the read's FCA, so a read that metered before a committed edit or delete stores
+nothing (a sync committing inside the edit's own transaction window can leave rows the clear missed;
+the slot check still spaces them); a signed-in read of a deleted FCA (historical replay) stores none. A failed write is logged and the read still
 answers. IDST, `mark_release` and `clear_release` read the rows without writing. `update_fca` and
 `delete_fca` (a soft delete) delete the FCA's rows. `set_manual_order` does not: in manual mode a
 held STA is still the earliest a flight is placed.

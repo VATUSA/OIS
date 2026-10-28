@@ -590,9 +590,11 @@ pub struct HeldStaSync<'a> {
 
 /// Apply one metered read's changes to an FCA's held STAs, in one transaction (#817). Stale rows
 /// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
-/// has the `fca_updated_at` the read metered under: the check takes a share lock on the FCA row, so
-/// it waits for an edit in flight and then sees its new `updated_at`. A read that raced an edit or
-/// a delete (both clear the rows) therefore stores nothing. The first STA stored wins
+/// has the `fca_updated_at` the read metered under, so a read that metered before a committed edit
+/// or delete stores nothing. A sync that commits inside an edit's own uncommitted window can leave
+/// rows the edit's clear did not see; they act only as an earliest crossing, which the pairwise
+/// slot check still spaces under the new settings, and they leave with the flight. The first STA
+/// stored wins
 /// (`on conflict do nothing`), so concurrent replicas agree. No-op when there is nothing to change.
 pub async fn sync_held_stas(
     pool: &PgPool,
@@ -627,7 +629,6 @@ pub async fn sync_held_stas(
          where exists (
              select 1 from flow.fca
              where id = $1 and updated_at = $4 and deleted_at is null
-             for share
          )
          on conflict (fca_id, callsign) do nothing",
     )
