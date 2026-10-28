@@ -197,6 +197,7 @@ describe("lateness and the slot-conflict flag", () => {
     const host = mount(CONTROLLER, fca(null, null), true, [late("DAL2", 0, false)]);
     expect(host.textContent).not.toContain("late +");
     expect(host.textContent).not.toContain("IN GAP");
+    expect(host.querySelector('[title="ETA is past its release or frozen time"]')).toBeNull();
     // Positive control: the strip itself rendered, as on time.
     expect(host.textContent).toContain("DAL2");
     expect(host.textContent).toContain("on time");

@@ -21,7 +21,7 @@ VATSIM snapshot (handlers/flow.rs::feed_view :61)
         predict::eta_along_route ─▶ eta, crossing groundspeed      (ETA model: #814)
         flow.fca_release (by callsign) ─▶ frozen_ms
                                                       ▼  MeterInput[]
-        finalize (flow.rs:2160) ─▶ manual_order (:2082) ─▶ fca::meter
+        finalize ─▶ manual_order ─▶ fca::meter
                                                       ▼
         fca_traffic · flight_advisory · list_idst · mark_release · clear_release
                                                       ▼
@@ -240,8 +240,10 @@ newly frozen flight (first STA wins, `on conflict do nothing`), deletes the rows
 read no longer holds (out of the horizon, released, or gone from the feed) and rows more than an
 hour past their STA. A new row is stored only while the FCA is not deleted and `flow.fca.updated_at`
 still matches the read's FCA, so a read that metered before a committed edit or delete stores
-nothing (a sync committing inside the edit's own transaction window can leave rows the clear missed;
-the slot check still spaces them); a signed-in read of a deleted FCA (historical replay) stores none. A failed write is logged and the read still
+nothing, and a signed-in read of a deleted FCA (historical replay) stores none. A sync that commits
+while the edit's or delete's own statement runs can leave rows its clear missed; each is only an
+earliest crossing until the flight leaves the horizon or the feed, and after an edit that moves the
+line it can show the flight late or delayed at the new line until then. A failed write is logged and the read still
 answers. IDST, `mark_release` and `clear_release` read the rows without writing. `update_fca` and
 `delete_fca` (a soft delete) delete the FCA's rows. `set_manual_order` does not: in manual mode a
 held STA is still the earliest a flight is placed.

@@ -1766,15 +1766,12 @@ mod tests {
         );
     }
 
-    /// #817: a CFR whose estimated wheels-up is later than the issued one is placed at its live
-    /// ETA, not at the slot its wheels-up would have given. G was released for now - 5 min with a 10 min enroute
-    /// time, so its locked STA is +5 min, but its ETA is +30 min. Airborne A (ETA +6 min) keeps its
-    /// ETA instead of going 6 min behind a slot G cannot use; B, well clear, keeps its ETA too.
     /// #817: an on-time CFR is placed before a late one, even when the late one's ETA is earlier.
     /// L was issued wheels-up +3 min with a 2 min enroute (STA +5) but its ETA is +10. O was issued
     /// wheels-up +9 (STA +11) and its ETA +8 is ahead of that. AAR 10, a 6 min runway interval: O
-    /// keeps +11 and L goes 6 min behind it, to +17. Ranking by the locked STA or by ETA alone puts
-    /// L at +10 and pushes O, who is making its wheels-up, to +16. B, well clear, keeps its ETA.
+    /// keeps +11 and L goes 6 min behind it, to +17. Ranking by the locked STA or by the anchor
+    /// alone puts L at +10 and pushes O, who is making its wheels-up, to +16. B, well clear, keeps
+    /// its ETA.
     #[test]
     fn an_on_time_cfr_is_placed_before_a_late_one() {
         let now = t0();
@@ -1800,6 +1797,38 @@ mod tests {
         );
     }
 
+    /// #817: a CFR whose ETA is exactly its locked STA is on time. E was issued wheels-up +6 with a
+    /// 6 min enroute (STA +12) and its ETA is +12; L is late (STA +5, ETA +10). E keeps +12 and L
+    /// goes 6 min behind it, to +18. Counting E as late would rank L first at +10 and push E to +16.
+    #[test]
+    fn a_cfr_exactly_at_its_locked_sta_counts_as_on_time() {
+        let now = t0();
+        let mut flights = vec![
+            ff("E", "ground", 12, None),
+            ff("L", "ground", 10, None),
+            ff("B", "airborne", 50, None),
+        ];
+        let at = |m: i64| Some((now + Duration::minutes(m)).timestamp_millis());
+        let etd = vec![at(6), at(8), None];
+        let issued = HashMap::from([
+            ("E".to_string(), now + Duration::minutes(6)),
+            ("L".to_string(), now + Duration::minutes(3)),
+        ]);
+        apply_metering(&mut flights, &etd, &base_program_aar(10), &issued, now);
+
+        assert_eq!(min_after(now, flights[0].sta), 12, "E keeps its STA");
+        assert_eq!(min_after(now, flights[1].sta), 18, "L goes behind E");
+        assert_eq!(
+            min_after(now, flights[2].sta),
+            50,
+            "the neighbor keeps its ETA"
+        );
+    }
+
+    /// #817: a CFR whose estimated wheels-up is later than the issued one is placed at its live
+    /// ETA, not at the slot its wheels-up would have given. G was released for now - 5 min with a 10 min enroute
+    /// time, so its locked STA is +5 min, but its ETA is +30 min. Airborne A (ETA +6 min) keeps its
+    /// ETA instead of going 6 min behind a slot G cannot use; B, well clear, keeps its ETA too.
     #[test]
     fn a_cfr_past_its_wheels_up_is_placed_at_its_eta() {
         let now = t0();
@@ -1910,10 +1939,30 @@ mod tests {
         )
         .unwrap();
         assert!(slot >= ready, "slot {slot} should be >= ready {ready}");
+
+        // An excluded flight is not metered, so it has no slot to search from.
+        let excluded = ready_time_slot(
+            "KJFK",
+            &pg,
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &HashSet::from(["GRD1".to_string()]),
+            "GRD1",
+            ready,
+            t0(),
+        );
+        assert_eq!(excluded, None);
     }
 
     /// #815: `ready_time_slot` returns a wheels-up, so the enroute time it slots with is the
-    /// airborne ETE alone (`sta − cfr`), with no ground allowance in it. AIR is airborne, so its slot
+    /// airborne ETE alone (`eta − etd`), with no ground allowance in it. AIR is airborne, so its slot
     /// does not depend on any ETD. GRD1 is ready one airborne ETE less 1 min before AIR's slot, so it
     /// would arrive 1 min behind AIR, inside the 2 min runway interval (AAR 30), and its wheels-up is
     /// pushed 1 min later. With the 660 s allowance counted in the enroute time, the ready time would
@@ -1999,7 +2048,8 @@ mod tests {
 
         // #817: re-issuing a CFR the flight already missed slots with the same enroute time. GRD1
         // holds a wheels-up 30 min ago, so its board STA is its live ETA; the slot still lands
-        // 1 min later, not at `ready` as an enroute time inflated by the 30 min would give.
+        // 1 min later, not at `ready` as `sta − cfr` (inflated by the 30 min and the allowance)
+        // would give.
         let issued = HashMap::from([("GRD1".to_string(), now - Duration::minutes(30))]);
         let reissued = ready_time_slot(
             "KJFK",

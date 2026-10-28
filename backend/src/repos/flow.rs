@@ -332,7 +332,7 @@ pub async fn run_event_fca_lifecycle(pool: &PgPool) -> Result<u64, ApiError> {
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
-    // Its held STAs (#817) go with it, and `sync_held_stas` stores none for a deleted FCA.
+    // Its held STAs (#817) go with it; `sync_held_stas` stores none once the delete commits.
     let result = sqlx::query(
         "with d as (delete from flow.fca_held_sta where fca_id = $1)
          update flow.fca set deleted_at = now() where id = $1 and deleted_at is null",
@@ -591,9 +591,10 @@ pub struct HeldStaSync<'a> {
 /// Apply one metered read's changes to an FCA's held STAs, in one transaction (#817). Stale rows
 /// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
 /// has the `fca_updated_at` the read metered under, so a read that metered before a committed edit
-/// or delete stores nothing. A sync that commits inside an edit's own uncommitted window can leave
-/// rows the edit's clear did not see; they act only as an earliest crossing, which the pairwise
-/// slot check still spaces under the new settings, and they leave with the flight. The first STA
+/// or delete stores nothing. A sync that commits while an edit's or a delete's own statement runs
+/// can leave rows that statement's clear did not see. They act only as an earliest crossing until
+/// the flight leaves the horizon or the feed: the slot check spaces them, but after an edit that
+/// moves the line one can show the flight late or delayed at the new line until then. The first STA
 /// stored wins
 /// (`on conflict do nothing`), so concurrent replicas agree. No-op when there is nothing to change.
 pub async fn sync_held_stas(
