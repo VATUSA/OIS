@@ -896,7 +896,7 @@ pub fn spawn_faa_surface_seed(reg: Arc<JobRegistry>, pool: PgPool) {
 }
 
 /// Keep the learned taxi-observation sample cache current for the DB-less feed subsystem
-/// (`feed::flow::resolve_ground_allowance_sec`, #164 sub-issue E): load every observation from the
+/// (`feed::flow::resolve_ground_allowance`, #164 sub-issue E): load every observation from the
 /// DB, group by airport, and hot-swap it in, then reload periodically. Fails safe — a failed load
 /// keeps the current map.
 pub fn spawn_taxi_estimate_samples_refresh(

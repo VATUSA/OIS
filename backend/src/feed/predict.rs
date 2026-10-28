@@ -246,9 +246,7 @@ pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> 
         nav,
         airports,
         (ac.dep, ac.arr, ac.route),
-        ac.pos,
-        ac.hdg,
-        ac.gs,
+        (ac.pos, ac.hdg, ac.gs),
         Some(ac.arr_ll),
     )
     .unwrap_or_else(|| (vec![ac.pos, ac.arr_ll], false));
@@ -311,8 +309,8 @@ pub fn arrival_eta(
 //   resolver trims on, so a caller using another value labels a flight one way and times it the
 //   other; an `alt > 300` term reads an MSL altitude and means nothing at a high field.
 // - **Route**: the filed route resolved from where the flight is (`fca::route_path`), else a great
-//   circle to the field; a ground or prefiled flight with neither is timed over
-//   `NOMINAL_ROUTE_NM` in still air.
+//   circle to the field, except for a pilot that has arrived (`ARRIVED_NM`); a ground or prefiled
+//   flight with neither is timed over `NOMINAL_ROUTE_NM` in still air.
 // - **Padding**: `GROUND_ROUTE_FACTOR` for every not-yet-airborne flight whose route does not
 //   resolve past its endpoints, so no surface times a `DCT` filing on a distance no routing flies.
 // - **Filed altitude** (`trajectory::filed_altitude_ft`, unknown timed at 35,000 ft) and **filed
@@ -488,9 +486,7 @@ pub fn trajectory<'a>(
             inp.nav,
             inp.airports,
             (&fp.departure, &fp.arrival, &fp.route),
-            o.pos,
-            o.hdg,
-            o.gs,
+            (o.pos, o.hdg, o.gs),
             arr_ll,
         )
     });
@@ -521,7 +517,7 @@ pub fn trajectory<'a>(
 
 /// The path [`trajectory`] times a flight at `pos` along, for a caller that only needs the crossing
 /// geometry (the FCA badge counts, the flight advisory's pre-filter): the filed route, else the
-/// great circle to the destination.
+/// great circle to the destination (none for a pilot that has arrived, as [`resolve_path`]).
 pub fn flight_path(
     nav: &NavData,
     airports: &AirportDb,
@@ -538,34 +534,36 @@ pub fn flight_path(
         fp.arrival.as_str(),
         fp.route.as_str(),
     );
-    resolve_path(nav, airports, route, pos, hdg, gs, arr_ll).map(|(path, _)| path)
+    resolve_path(nav, airports, route, (pos, hdg, gs), arr_ll).map(|(path, _)| path)
 }
 
-/// A not-yet-airborne pilot this close (nm) to its arrival field has arrived there; airport flow
-/// labels it "arrived" and no surface times it.
+/// A not-yet-airborne pilot this close (nm) to an arrival field other than its departure field has
+/// arrived there: no surface times it. Airport flow labels a ground pilot this close
+/// "arrived" whatever its departure field.
 pub(crate) const ARRIVED_NM: f64 = 5.0;
 
 /// The path a flight at `pos` is timed along, and whether the nav engine placed an enroute point on
 /// it (`> 2` anchors; exactly 2 is no better than the great circle). Falls back to the great circle
 /// to `arr_ll` when the filed route does not resolve, except for a flight on the ground within
-/// [`ARRIVED_NM`] of the field: `route_path` returns `None` for it because it has arrived, and it
-/// has nowhere left to fly.
+/// [`ARRIVED_NM`] of an arrival field it did not depart from: `route_path` returns `None` for it
+/// because it has arrived, and it has nowhere left to fly. A local flight (departure = arrival)
+/// starts at its arrival field without having arrived. A prefile is placed at its departure field,
+/// where a filed route between two known fields resolves, so the exception never reaches one.
 fn resolve_path(
     nav: &NavData,
     airports: &AirportDb,
     (dep, arr, route): (&str, &str, &str),
-    pos: [f64; 2],
-    hdg: i64,
-    gs: i64,
+    (pos, hdg, gs): ([f64; 2], i64, i64),
     arr_ll: Option<[f64; 2]>,
 ) -> Option<(Vec<[f64; 2]>, bool)> {
+    let can_arrive = !is_airborne(gs) && !dep.eq_ignore_ascii_case(arr);
     match fca::route_path(nav, airports, dep, arr, route, pos[0], pos[1], hdg, gs) {
         Some(path) => {
             let enroute = path.len() > 2;
             Some((path, enroute))
         }
         None => arr_ll
-            .filter(|a| is_airborne(gs) || gc_dist(pos[0], pos[1], a[0], a[1]) >= ARRIVED_NM)
+            .filter(|a| !can_arrive || gc_dist(pos[0], pos[1], a[0], a[1]) >= ARRIVED_NM)
             .map(|a| (vec![pos, a], false)),
     }
 }
@@ -1690,13 +1688,16 @@ mod tests {
             flight_path(&nav, &ap, &fp, pos, 190, gs)
         };
         assert_eq!(path([25.80, -80.29], 0), None, "parked at KMIA");
+        // 0.0833 deg of longitude at 25.79 N is 4.5 nm; 0.10 deg is 5.4 nm.
         assert_eq!(
-            path([25.80, -80.29 + ARRIVED_NM / 60.0 * 1.2], 0),
-            Some(vec![
-                [25.80, -80.29 + ARRIVED_NM / 60.0 * 1.2],
-                [25.79, -80.29]
-            ]),
-            "just outside the arrived radius, still on the ground"
+            path([25.79, -80.2067], 0),
+            None,
+            "4.5 nm out, on the ground"
+        );
+        assert_eq!(
+            path([25.79, -80.19], 0),
+            Some(vec![[25.79, -80.19], [25.79, -80.29]]),
+            "5.4 nm out, still on the ground"
         );
         assert_eq!(
             path(JFK, 0).map(|p| p.len()),
@@ -1713,6 +1714,47 @@ mod tests {
         let landed = pilot([25.80, -80.29], 0, 0, plan("KZZZ", "KMIA", "DCT"));
         let traj = trajectory(&inp, Flight::Pilot(&landed), None, now()).unwrap();
         assert!(traj.path().is_empty(), "nothing to cross");
+    }
+
+    /// A local flight (departure = arrival) and a prefile both start at a field without having
+    /// arrived there, so they keep a path, as `next` timed them, and not the 300 nm nominal leg a
+    /// flight with no route at all gets.
+    #[test]
+    fn a_local_flight_and_a_prefile_have_not_arrived() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let local = plan("KMIA", "KMIA", "DCT");
+        let pre = prefile(local.clone());
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        assert_eq!(
+            t.path(),
+            [[25.79, -80.29], [25.79, -80.29]],
+            "local prefile"
+        );
+        assert_eq!(
+            t.route_nm(),
+            0.0,
+            "not the {NOMINAL_ROUTE_NM} nm nominal leg"
+        );
+        let parked = pilot([25.80, -80.29], 0, 0, local.clone());
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(t.path().len(), 2, "local pilot parked at its field");
+        assert_eq!(
+            flight_path(&nav, &ap, &local, [25.80, -80.29], 190, 0).map(|p| p.len()),
+            Some(2),
+            "the badge counts see the same local pilot"
+        );
+        // A field 3.2 nm from KMIA: a prefile from it sits inside KMIA's arrived radius.
+        let mut near_ap = airports();
+        near_ap.insert("KNBR".into(), Airport::at(25.79, -80.23));
+        let inp = with_ground(&nav, &near_ap, GroundInputs::unused());
+        let near = prefile(plan("KNBR", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Prefile(&near), None, now()).unwrap();
+        assert_eq!(
+            t.path(),
+            [[25.79, -80.23], [25.79, -80.29]],
+            "a prefile has not arrived"
+        );
     }
 
     /// AC2 airborne: from 50 kt, whatever the altitude, and the altitude alone never makes a flight

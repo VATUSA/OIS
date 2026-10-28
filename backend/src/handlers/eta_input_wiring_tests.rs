@@ -433,7 +433,11 @@ async fn demand_counts_a_departure_from_its_assigned_runway(pool: PgPool) {
     };
     let (status, before) = send_json(&state, Method::GET, "/api/v1/tmu/demand", &cookie).await;
     assert_eq!(status, 200, "{before}");
-    assert_eq!(demand(&before), 1, "inside the hour on the heading guess");
+    assert_eq!(
+        demand(&before),
+        1,
+        "inside the hour on the airport-tier allowance"
+    );
     assign_04l(&pool).await;
     let (_, after) = send_json(&state, Method::GET, "/api/v1/tmu/demand", &cookie).await;
     assert_eq!(demand(&after), 0, "outside it from the assigned runway");

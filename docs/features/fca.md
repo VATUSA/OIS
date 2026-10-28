@@ -2,7 +2,7 @@
 
 How an FCA decides which flights it includes, how it orders and spaces them, what each write
 changes, and what each read and screen shows. Each area ends with what was checked and what was
-found. Written for #838 against `next` at `333a7831`. Tables, permissions, and the route list are in
+found. Written for #838 against `next` at `333a7831`; the findings marked "Resolved by #813" describe the code after #813. Tables, permissions, and the route list are in
 [flow.md](flow.md). This doc does not repeat them.
 
 Out of scope here, with links: ETA computation itself (`feed/predict.rs`, `feed/trajectory.rs`;
@@ -190,8 +190,9 @@ and `build_candidates_with`) could be dropped with the suite green. A pilot with
 - **The flight advisory ignores prefiles.** `build_flight_advisory` looks only at the
   snapshot's pilots (`handlers/flow.rs:951-955`) and answers `found: false` otherwise. Since #834
   the board does not meter prefiles either.
-- *Checked, not filed.* `gs >= 50` counts a takeoff roll as airborne. The threshold is one of the
-  disagreeing inputs **#813** already lists (its input 3).
+- *Checked, not filed.* `gs >= 50` counts a takeoff roll as airborne. Resolved by #813: every
+  surface now reads the one `predict::is_airborne` threshold, so the takeoff roll is airborne on
+  all of them.
 
 ## 3. Metering
 
