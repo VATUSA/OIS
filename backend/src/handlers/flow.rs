@@ -1752,6 +1752,12 @@ fn fca_flight(
         delay_sec: 0,
         delay_nm: 0,
         seq: 0,
+        gap_to_leader_sec: None,
+        gap_to_leader_nm: None,
+        required_spacing_sec: 0,
+        required_spacing_nm: 0.0,
+        cross_speed: 0,
+        manually_placed: false,
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
         release_version: None,
@@ -1970,7 +1976,8 @@ fn build_candidates(
 }
 
 /// The controller's manual crossing order as candidate indices, when the FCA is in manual sequence.
-/// `None` means auto — `fca::meter` sequences by time itself.
+/// `None` means auto — `fca::meter` sequences by time itself. An order is stored as sent and its
+/// callsigns match flights case-insensitively (#819).
 ///
 /// Shared by [`finalize`] and `mark_release` so a release is metered against exactly the sequence the
 /// ladder resolves, rather than a second, subtly different derivation of it (#356).
@@ -1978,7 +1985,11 @@ fn manual_order(fca: &FcaBody, flights: &[FcaFlight]) -> Option<Vec<usize>> {
     (fca.manual_seq && !fca.manual_order.is_empty()).then(|| {
         fca.manual_order
             .iter()
-            .filter_map(|cs| flights.iter().position(|f| &f.callsign == cs))
+            .filter_map(|cs| {
+                flights
+                    .iter()
+                    .position(|f| f.callsign.eq_ignore_ascii_case(cs))
+            })
             .collect()
     })
 }
@@ -2084,7 +2095,23 @@ fn meter_in_place(fca: &FcaBody, flights: &mut [FcaFlight], metas: &[fca::MeterI
         // controller sees): how much further back this aircraft must sit to hold separation.
         f.delay_nm = (m.delay_sec as f64 / 3600.0 * input.cross_speed).round() as i64;
         f.seq = m.seq;
+        f.gap_to_leader_sec = m.gap_ms.map(round_ms_to_sec);
+        f.gap_to_leader_nm = m.gap_ms.map(|g| nm_at(g, input.cross_speed));
+        f.required_spacing_sec = round_ms_to_sec(m.sep_ms);
+        f.required_spacing_nm = nm_at(m.sep_ms, input.cross_speed);
+        f.cross_speed = input.cross_speed.round() as i64;
+        f.manually_placed = m.manually_placed;
     }
+}
+
+/// Millis to whole seconds, rounded half away from zero.
+fn round_ms_to_sec(ms: i64) -> i64 {
+    (ms as f64 / 1000.0).round() as i64
+}
+
+/// A time gap as distance flown at `speed_kt`, nm to one decimal.
+fn nm_at(ms: i64, speed_kt: f64) -> f64 {
+    (ms as f64 / 3_600_000.0 * speed_kt * 10.0).round() / 10.0
 }
 
 /// Stamp each released flight with its release's version, so a tool can `If-Match` it (#585). Read
@@ -2760,7 +2787,7 @@ async fn same_departure_slot(
     security(("session" = ["flow.fca.update"]), ("api_key" = ["flow.fca.update"]), ("service_account" = ["flow.fca.update"])),
     params(("id" = String, Path, description = "FCA id")),
     request_body = ReorderRequest,
-    responses((status = 204), (status = 401), (status = 403), (status = 404, description = "No such FCA, or an unpublished event FCA (#746)"))
+    responses((status = 204), (status = 400, description = "The order names a callsign twice, compared case-insensitively (#819)"), (status = 401), (status = 403), (status = 404, description = "No such FCA, or an unpublished event FCA (#746)"))
 )]
 pub async fn reorder_fca(
     State(state): State<AppState>,
@@ -2776,6 +2803,9 @@ pub async fn reorder_fca(
         .ok_or(ApiError::NotFound)?;
     require_visible_event_fca(&state, &principal, &existing).await?;
     require_fca_write_scope(&state, &principal, "flow.fca.update", &[&existing.artcc]).await?;
+    if has_repeated_callsign(&payload.order) {
+        return Err(ApiError::BadRequest);
+    }
     // Empty order clears manual mode (back to auto).
     let manual = !payload.order.is_empty();
     if !flow_repo::set_manual_order(pool, &id, &payload.order, manual, &by).await? {
@@ -2783,6 +2813,13 @@ pub async fn reorder_fca(
     }
     state.publish(crate::realtime::topic::FCA);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// True when `order` names one callsign twice, ignoring case: such an order does not say where that
+/// flight goes, so it is refused rather than stored (#819).
+fn has_repeated_callsign(order: &[String]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    order.iter().any(|cs| !seen.insert(cs.to_ascii_uppercase()))
 }
 
 #[cfg(test)]
@@ -4277,6 +4314,27 @@ mod release_spacing_tests {
             cta,
             dep_slot + RELEASE_MARGIN_MS,
             "a manual release takes the slot the ladder already assigned it, plus the margin"
+        );
+    }
+
+    // AC1 at the RDY caller (#819): `mark_release` meters through `manual_order` + `fca::meter` and
+    // `rdy_slot` takes the ladder's slot, so a released late joiner gets its merged slot.
+    #[test]
+    fn a_manual_release_of_a_late_joiner_takes_its_merged_slot_not_the_tail() {
+        // Rate 30 = 120 s. LEAD 0 and TRAIL 600 s are ordered; DEP (ETA 100 s) joined later and merges
+        // behind LEAD: max(100, 0 + 120) = 120 s. At the tail it would meter at 720 s.
+        let fca = rate_fca(vec!["LEAD".into(), "TRAIL".into()]);
+        let metas = vec![
+            cand(0, true, None),
+            cand(100_000, false, None),
+            cand(600_000, true, None),
+        ];
+        let metered = fca::meter(&metas, "rate", 30, 0, Some(&[0, 2]));
+        assert_eq!(metered[1].sched_ms, 120_000);
+        assert_eq!(metered[1].seq, 2);
+        assert_eq!(
+            rdy_slot(&fca, &metas, &metered, 1, true),
+            120_000 + RELEASE_MARGIN_MS
         );
     }
 
@@ -6174,6 +6232,145 @@ mod fca_scope_tests {
         );
     }
 
+    // AC4: an order repeating a callsign, compared case-insensitively, is refused with 400 before
+    // anything is written.
+    #[sqlx::test]
+    async fn reorder_refuses_a_callsign_repeated_in_another_case_and_stores_nothing(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let national = holder(&pool, None).await;
+        let id = seed_fca(&pool, &owner, "ZDC").await;
+        let by = crate::auth::principal::Attribution {
+            user_id: Some(owner.clone()),
+            actor_id: None,
+        };
+        flow_repo::set_manual_order(&pool, &id, &["UAL3".to_string()], true, &by)
+            .await
+            .unwrap();
+        let uri = format!("/api/v1/flow/fcas/{id}/order");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &uri,
+                &national,
+                Some(json!({ "order": ["AAL1", "DAL2", "aal1"] }))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        let stored = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(stored.manual_order, ["UAL3"], "nothing was written");
+        assert!(stored.manual_seq);
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &uri,
+                &national,
+                Some(json!({ "order": ["AAL1", "DAL2"] }))
+            )
+            .await,
+            StatusCode::NO_CONTENT,
+            "control: distinct callsigns are accepted"
+        );
+        let stored = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(stored.manual_order, ["AAL1", "DAL2"]);
+    }
+
+    // AC4: an exact repeat is refused the same way.
+    #[sqlx::test]
+    async fn reorder_refuses_an_exactly_repeated_callsign_and_stores_nothing(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let id = seed_fca(&pool, &owner, "ZDC").await;
+        let by = crate::auth::principal::Attribution {
+            user_id: Some(owner.clone()),
+            actor_id: None,
+        };
+        flow_repo::set_manual_order(&pool, &id, &["UAL3".to_string()], true, &by)
+            .await
+            .unwrap();
+        let uri = format!("/api/v1/flow/fcas/{id}/order");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &uri,
+                &zdc,
+                Some(json!({ "order": ["AAL1", "DAL2", "AAL1"] }))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        let stored = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(stored.manual_order, ["UAL3"], "nothing was written");
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &uri,
+                &zdc,
+                Some(json!({ "order": ["AAL1", "DAL2"] }))
+            )
+            .await,
+            StatusCode::NO_CONTENT,
+            "control: distinct callsigns are accepted"
+        );
+        let stored = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+        assert_eq!(stored.manual_order, ["AAL1", "DAL2"]);
+    }
+
+    // AC4 + secure-coding: the scope check runs before the body is validated, so a holder at
+    // another ARTCC learns nothing from the 400 and the row is untouched.
+    #[sqlx::test]
+    async fn an_out_of_scope_holder_sending_a_repeated_callsign_is_refused_403(pool: PgPool) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let zdc = holder(&pool, Some("ZDC")).await;
+        let zny = seed_fca(&pool, &owner, "ZNY").await;
+        let own = seed_fca(&pool, &owner, "ZDC").await;
+        let by = crate::auth::principal::Attribution {
+            user_id: Some(owner.clone()),
+            actor_id: None,
+        };
+        flow_repo::set_manual_order(&pool, &zny, &["UAL3".to_string()], true, &by)
+            .await
+            .unwrap();
+        let body = Some(json!({ "order": ["AAL1", "aal1"] }));
+
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &format!("/api/v1/flow/fcas/{zny}/order"),
+                &zdc,
+                body.clone()
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        let stored = flow_repo::get_fca(&pool, &zny).await.unwrap().unwrap();
+        assert_eq!(stored.manual_order, ["UAL3"]);
+        assert_eq!(
+            send(
+                &state,
+                Method::PUT,
+                &format!("/api/v1/flow/fcas/{own}/order"),
+                &zdc,
+                body
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "control: in scope, the same body reaches the duplicate check"
+        );
+    }
+
     /// AC1 + AC4: delete.
     #[sqlx::test]
     async fn a_scoped_holder_deletes_only_its_artccs_fcas(pool: PgPool) {
@@ -6538,6 +6735,258 @@ mod fca_traffic_visibility_tests {
             send(&state, Method::GET, &uri("v-deleted"), &other, None).await,
             StatusCode::OK,
             "any signed-in caller reads a deleted FCA (historical replay)"
+        );
+    }
+}
+
+/// The late-joiner merge, the stored order's matching and the gap fields at the handler layer:
+/// `manual_order`, `meter_in_place` and `finalize` (#819). The routes are covered in
+/// `flow_manual_order_tests`.
+#[cfg(test)]
+mod fca_order_wiring_tests {
+    use chrono::Utc;
+
+    use super::{finalize, manual_order, meter_in_place};
+    use crate::feed::fca::MeterInput;
+    use crate::models::{FcaBody, FcaFlight};
+
+    fn fca(mode: &str, rate: i32, mit: i32, order: &[&str]) -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[39.5, -75.6], [39.5, -74.0]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: mode.into(),
+            rate,
+            mit,
+            enabled: true,
+            manual_seq: !order.is_empty(),
+            manual_order: order.iter().map(|s| s.to_string()).collect(),
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    fn flight(callsign: &str) -> FcaFlight {
+        let plan = crate::feed::vatsim::FlightPlan::default();
+        let cross = crate::feed::fca::FcaCrossing {
+            lat: 39.5,
+            lon: -75.0,
+            along_nm: 50.0,
+        };
+        super::fca_flight(
+            callsign,
+            &plan,
+            "airborne",
+            40.0,
+            -74.0,
+            &cross,
+            vec![],
+            None,
+            300,
+            30_000,
+            220,
+            None,
+        )
+    }
+
+    fn meta(eta_ms: i64, airborne: bool, cross_speed: f64) -> MeterInput {
+        MeterInput {
+            eta_ms,
+            airborne,
+            cross_speed,
+            frozen_ms: None,
+            ground_allowance_ms: 0,
+        }
+    }
+
+    fn by_seq(flights: &[FcaFlight]) -> Vec<&FcaFlight> {
+        let mut v: Vec<&FcaFlight> = flights.iter().collect();
+        v.sort_by_key(|f| f.seq);
+        v
+    }
+
+    #[test]
+    fn manual_order_matches_a_stored_callsign_in_another_case() {
+        let flights = [flight("AAL1"), flight("DAL2")];
+        let order = manual_order(&fca("rate", 30, 0, &["dal2", "Aal1"]), &flights);
+        assert_eq!(order, Some(vec![1, 0]));
+    }
+
+    #[test]
+    fn manual_order_skips_a_stored_callsign_no_flight_carries() {
+        let flights = [flight("AAL1")];
+        let order = manual_order(&fca("rate", 30, 0, &["GONE1", "aal1"]), &flights);
+        assert_eq!(order, Some(vec![0]));
+    }
+
+    #[test]
+    fn finalize_keeps_a_repeated_stored_callsign_at_its_first_position() {
+        for order in [["AAL1", "DAL2", "AAL1"], ["AAL1", "DAL2", "aal1"]] {
+            let out = finalize(
+                &fca("rate", 30, 0, &order),
+                vec![flight("AAL1"), flight("DAL2")],
+                &[meta(0, true, 300.0), meta(100_000, true, 300.0)],
+            );
+            let seqs: Vec<(&str, i64)> = out.iter().map(|f| (f.callsign.as_str(), f.seq)).collect();
+            assert_eq!(seqs, [("AAL1", 1), ("DAL2", 2)], "order {order:?}");
+        }
+    }
+
+    /// Rate 30 at 300 kt: 120 s and 10 nm required; the gaps are the metered differences.
+    #[test]
+    fn meter_in_place_fills_the_gap_to_leader_and_required_spacing() {
+        let mut flights = vec![flight("A"), flight("B"), flight("C")];
+        let metas = [
+            meta(0, true, 300.0),
+            meta(500_000, true, 300.0),
+            meta(1_200_000, true, 300.0),
+        ];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut flights, &metas);
+        let gaps: Vec<Option<i64>> = by_seq(&flights)
+            .iter()
+            .map(|f| f.gap_to_leader_sec)
+            .collect();
+        assert_eq!(gaps, [None, Some(500), Some(700)]);
+        let nm: Vec<Option<f64>> = by_seq(&flights)
+            .iter()
+            .map(|f| f.gap_to_leader_nm)
+            .collect();
+        assert_eq!(
+            nm,
+            [None, Some(41.7), Some(58.3)],
+            "500 s and 700 s at 300 kt"
+        );
+        for f in &flights {
+            assert_eq!(f.required_spacing_sec, 120, "{}", f.callsign);
+            assert_eq!(f.required_spacing_nm, 10.0, "{}", f.callsign);
+            assert_eq!(f.cross_speed, 300, "{}", f.callsign);
+        }
+    }
+
+    /// The leader has no gap whether it leads by ETA or by the controller's order.
+    #[test]
+    fn meter_in_place_leaves_the_first_flight_without_a_gap() {
+        let mut one = vec![flight("A")];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut one, &[meta(0, true, 300.0)]);
+        assert_eq!(
+            (one[0].gap_to_leader_sec, one[0].gap_to_leader_nm),
+            (None, None)
+        );
+        assert_eq!(one[0].required_spacing_sec, 120);
+
+        let mut two = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(100_000, true, 300.0)];
+        meter_in_place(&fca("rate", 30, 0, &["B", "A"]), &mut two, &metas);
+        assert_eq!(two[1].seq, 1);
+        assert_eq!(two[1].gap_to_leader_sec, None);
+        assert_eq!(
+            two[0].gap_to_leader_sec,
+            Some(120),
+            "A is chained 120 s behind B"
+        );
+    }
+
+    /// 20 MIT: the follower at 300 kt owes 240 s; pushed back, its gap is exactly that, and in nm it
+    /// is the configured 20.
+    #[test]
+    fn a_flight_pushed_back_for_mit_reports_a_gap_equal_to_its_required_spacing() {
+        let mut flights = vec![flight("LEAD"), flight("FOLLOW")];
+        let metas = [meta(0, true, 400.0), meta(60_000, false, 300.0)];
+        meter_in_place(&fca("mit", 0, 20, &[]), &mut flights, &metas);
+        let f = &flights[1];
+        assert!(f.delay_sec > 0);
+        assert_eq!(f.gap_to_leader_sec, Some(240));
+        assert_eq!(f.required_spacing_sec, 240);
+        assert_eq!(f.gap_to_leader_nm, Some(20.0));
+        assert_eq!(f.required_spacing_nm, 20.0);
+        assert_eq!(f.cross_speed, 300);
+    }
+
+    /// 500 s at 283 kt = 39.305 nm; 120 s at 283 kt = 9.433 nm.
+    #[test]
+    fn gap_to_leader_nm_is_the_gap_at_the_crossing_speed_to_one_decimal() {
+        let mut flights = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(500_000, true, 283.0)];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut flights, &metas);
+        assert_eq!(flights[1].gap_to_leader_nm, Some(39.3));
+        assert_eq!(flights[1].required_spacing_nm, 9.4);
+    }
+
+    /// A release frozen at 100 s, ordered behind A (crossing 300 s), reports the shortfall as a
+    /// negative gap rather than clamping it: -200 s, -16.7 nm at 300 kt.
+    #[test]
+    fn a_frozen_release_ordered_behind_a_later_crossing_reports_a_negative_gap() {
+        let mut flights = vec![flight("A"), flight("F")];
+        let mut frozen = meta(50_000, false, 300.0);
+        frozen.frozen_ms = Some(100_000);
+        let metas = [meta(300_000, true, 300.0), frozen];
+        meter_in_place(&fca("rate", 30, 0, &["A", "F"]), &mut flights, &metas);
+        assert_eq!(flights[1].seq, 2);
+        assert_eq!(flights[1].gap_to_leader_sec, Some(-200));
+        assert_eq!(flights[1].gap_to_leader_nm, Some(-16.7));
+    }
+
+    /// nm convert at the unrounded crossing speed: 500 s at 283.4 kt = 39.36 nm (39.4), where the
+    /// rounded 283 kt would give 39.3.
+    #[test]
+    fn gap_nm_converts_at_the_unrounded_crossing_speed() {
+        let mut flights = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(500_000, true, 283.4)];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut flights, &metas);
+        assert_eq!(flights[1].cross_speed, 283);
+        assert_eq!(flights[1].gap_to_leader_nm, Some(39.4));
+    }
+
+    #[test]
+    fn cross_speed_rounds_to_the_nearest_knot() {
+        let mut flights = vec![flight("A")];
+        meter_in_place(
+            &fca("rate", 30, 0, &[]),
+            &mut flights,
+            &[meta(0, true, 282.6)],
+        );
+        assert_eq!(flights[0].cross_speed, 283);
+    }
+
+    /// Rate 13 spaces crossings 276.923 s apart: the seconds round to 277, not truncate to 276.
+    #[test]
+    fn gap_and_required_spacing_seconds_round_to_the_nearest_second() {
+        let mut flights = vec![flight("A"), flight("B")];
+        let metas = [meta(0, true, 300.0), meta(100_000, true, 300.0)];
+        meter_in_place(&fca("rate", 13, 0, &[]), &mut flights, &metas);
+        assert_eq!(flights[1].gap_to_leader_sec, Some(277));
+        assert_eq!(flights[1].required_spacing_sec, 277);
+    }
+
+    #[test]
+    fn meter_in_place_marks_ordered_flights_manually_placed_and_joiners_not() {
+        let metas = [
+            meta(0, true, 300.0),
+            meta(100_000, true, 300.0),
+            meta(200_000, true, 300.0),
+        ];
+        let mut flights = vec![flight("AAL1"), flight("DAL2"), flight("UAL3")];
+        meter_in_place(&fca("rate", 30, 0, &["AAL1", "UAL3"]), &mut flights, &metas);
+        let placed: Vec<bool> = flights.iter().map(|f| f.manually_placed).collect();
+        assert_eq!(placed, [true, false, true]);
+
+        let mut flights = vec![flight("AAL1"), flight("DAL2"), flight("UAL3")];
+        meter_in_place(&fca("rate", 30, 0, &[]), &mut flights, &metas);
+        assert!(
+            flights.iter().all(|f| !f.manually_placed),
+            "auto places nothing"
         );
     }
 }

@@ -13,6 +13,7 @@ import {
   useFlightExclusions,
   useRestoreFlight,
 } from "@/lib/flight-exclusions";
+import {fmtGap, nmAt, orderReason, orderReasonText, pairGapSec} from "@/lib/fca-compare";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {flightStatus} from "@/lib/status";
@@ -39,12 +40,20 @@ function Strip({
   f,
   canEdit,
   canRemove,
+  comparing,
+  canCompare,
+  onCompare,
   onRelease,
   onClear,
   onRemove,
 }: {
   f: FcaFlight;
   canEdit: boolean;
+  /** This strip is one of the (at most two) flights in the compare panel (#819). */
+  comparing: boolean;
+  /** False once two flights are selected for comparison; a selected strip can still be cleared. */
+  canCompare: boolean;
+  onCompare: (callsign: string) => void;
   /** Whether the caller's `flow.fca.update` grant covers *this* FCA's ARTCC (#342). */
   canRemove: boolean;
   onRelease: (callsign: string, ready?: string) => void;
@@ -91,6 +100,18 @@ function Strip({
           </StatusPill>
           <span className="font-mono font-semibold">{f.callsign}</span>
           <span className="font-mono text-xs text-ink-3">{f.aircraft_type}</span>
+          <button
+            type="button"
+            aria-pressed={comparing}
+            aria-label={`Compare ${f.callsign}`}
+            disabled={!comparing && !canCompare}
+            onClick={() => onCompare(f.callsign)}
+            className={`rounded-full px-1.5 text-[10px] leading-4 transition-colors disabled:opacity-40 ${
+              comparing ? "bg-brand text-primary-foreground" : "text-ink-3 hover:text-ink"
+            }`}
+          >
+            Compare
+          </button>
           {canRemove && (
             <ConfirmButton
               size="icon"
@@ -123,6 +144,11 @@ function Strip({
         <span className="font-mono">{Math.round(f.distance_nm)}nm to line</span>
         {f.altitude > 0 && <span className="font-mono">FL{Math.round(f.altitude / 100)}</span>}
         {delayed && f.delay_nm > 0 && <span className="font-mono text-danger">+{f.delay_nm}nm</span>}
+        {f.gap_to_leader_sec != null && f.gap_to_leader_nm != null && (
+          <span className="font-mono" title="Gap to the aircraft ahead">
+            gap {fmtGap(f.gap_to_leader_sec, f.gap_to_leader_nm)}
+          </span>
+        )}
       </div>
 
       {canCfr && (
@@ -204,6 +230,69 @@ function Strip({
   );
 }
 
+/** Two selected flights side by side, and why the one ahead is ahead (#819). */
+function ComparePanel({ pair, onClose }: { pair: [FcaFlight, FcaFlight]; onClose: () => void }) {
+  const [ahead, behind] = [...pair].sort((a, b) => a.seq - b.seq);
+  const gapSec = pairGapSec(ahead, behind);
+  const reason = orderReason(ahead, behind);
+  const rows: [string, (f: FcaFlight) => string][] = [
+    ["Seq", (f) => String(f.seq)],
+    ["Crossing", (f) => hhmmZulu(f.cross_time)],
+    ["Speed", (f) => `${f.cross_speed}kt`],
+    ["To line", (f) => `${Math.round(f.distance_nm)}nm`],
+  ];
+  return (
+    <section aria-label="Compare aircraft" className="border-b border-line p-3 text-xs">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="font-semibold text-ink-2">Compare</span>
+        <button
+          type="button"
+          aria-label="Close compare"
+          onClick={onClose}
+          className="ml-auto text-ink-3 hover:text-ink"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+      <table className="w-full font-mono">
+        <thead>
+          <tr className="text-ink-3">
+            <th className="text-left font-normal" />
+            <th className="text-right font-semibold text-ink">{ahead.callsign}</th>
+            <th className="text-right font-semibold text-ink">{behind.callsign}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, value]) => (
+            <tr key={label}>
+              <td className="text-ink-3">{label}</td>
+              <td className="text-right">{value(ahead)}</td>
+              <td className="text-right">{value(behind)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 font-mono">
+        <dt className="text-ink-3">Gap</dt>
+        <dd data-testid="compare-gap">
+          {gapSec == null
+            ? "—"
+            : fmtGap(gapSec, behind.seq === ahead.seq + 1 && behind.gap_to_leader_nm != null
+                ? behind.gap_to_leader_nm
+                : nmAt(gapSec, behind.cross_speed))}
+        </dd>
+        <dt className="text-ink-3">Required</dt>
+        <dd data-testid="compare-required">
+          {fmtGap(behind.required_spacing_sec, behind.required_spacing_nm)}
+        </dd>
+      </dl>
+      <p data-testid="compare-reason" className="mt-2 text-ink-2">
+        {orderReasonText(reason, ahead.callsign, behind.callsign)}
+      </p>
+    </section>
+  );
+}
+
 export function FcaDetail({
   fca,
   flights,
@@ -235,6 +324,19 @@ export function FcaDetail({
   // else reaching one — a stale selection on the ops map — would be offered controls that can only fail.
   const { data: me } = useMe();
   const canOperate = canEdit && (fcaIsLive(fca) || hasPermission(me, "events.plan.update"));
+  // Callsigns picked for the compare panel, at most two (#819), kept for the FCA they were picked
+  // on. A pick whose flight has left the list no longer counts, so a flight crossing the line or a
+  // switch to another FCA frees its place; the flights are read from `list` on every render.
+  const [picked, setPicked] = useState<{ fcaId: string; callsigns: string[] }>({ fcaId: fca.id, callsigns: [] });
+  const pair = (picked.fcaId === fca.id ? picked.callsigns : [])
+    .map((cs) => list.find((f) => f.callsign === cs))
+    .filter((f): f is FcaFlight => f !== undefined);
+  const compare = pair.map((f) => f.callsign);
+  const toggleCompare = (callsign: string) =>
+    setPicked({
+      fcaId: fca.id,
+      callsigns: compare.includes(callsign) ? compare.filter((c) => c !== callsign) : [...compare, callsign],
+    });
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
@@ -321,6 +423,10 @@ export function FcaDetail({
             <Ladder flights={list} now={now} name={fca.name} />
           </div>
 
+          {pair.length === 2 && (
+            <ComparePanel pair={[pair[0], pair[1]]} onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })} />
+          )}
+
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -336,6 +442,9 @@ export function FcaDetail({
                     key={f.callsign}
                     f={f}
                     canEdit={canOperate}
+                    comparing={compare.includes(f.callsign)}
+                    canCompare={pair.length < 2}
+                    onCompare={toggleCompare}
                     onRelease={(callsign, ready) =>
                       markRelease.mutate({ callsign, ready })
                     }

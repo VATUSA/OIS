@@ -2640,6 +2640,23 @@ pub struct FcaFlight {
     pub delay_nm: i64,
     /// 1-based sequence in the metered order.
     pub seq: i64,
+    /// Metered crossing time less that of the flight one place ahead in `seq`, seconds; null for the
+    /// first flight (#819).
+    pub gap_to_leader_sec: Option<i64>,
+    /// `gap_to_leader_sec` as distance at this flight's predicted crossing speed, nm (one decimal).
+    pub gap_to_leader_nm: Option<f64>,
+    /// The separation this flight is owed behind the flight ahead, seconds: MIT at this flight's
+    /// crossing speed, or the rate interval. Reported for every flight; the first has no flight
+    /// ahead, and an issued release keeps its time whatever the spacing.
+    pub required_spacing_sec: i64,
+    /// `required_spacing_sec` as distance at this flight's predicted crossing speed, nm (one decimal).
+    pub required_spacing_nm: f64,
+    /// Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with the unrounded
+    /// speed, and the `_nm` figures convert at it.
+    pub cross_speed: i64,
+    /// True when the FCA is in manual sequence and this flight's position comes from the
+    /// controller's saved order; false for a late joiner merged into it and for every flight in auto.
+    pub manually_placed: bool,
     /// Release / wheels-up time when a CFR has been issued.
     pub edct: Option<DateTime<Utc>>,
     /// True when this aircraft has a frozen (issued) CFR release.
@@ -2717,6 +2734,8 @@ pub struct ReleaseRequest {
 /// Replace an FCA's manual crossing order (callsigns, in sequence).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ReorderRequest {
+    /// Callsigns in crossing order; empty returns the FCA to automatic sequencing. A callsign may
+    /// appear once, compared case-insensitively, or the request is refused with 400 (#819).
     pub order: Vec<String>,
 }
 

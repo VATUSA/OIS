@@ -5319,6 +5319,12 @@ export interface components {
             /** Format: double */
             cross_lon: number;
             /**
+             * Format: int64
+             * @description Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with the unrounded
+             *     speed, and the `_nm` figures convert at it.
+             */
+            cross_speed: number;
+            /**
              * Format: date-time
              * @description Metered crossing time (after sequencing).
              */
@@ -5353,6 +5359,17 @@ export interface components {
              * @description Unmetered ETA to the crossing.
              */
             eta?: string | null;
+            /**
+             * Format: double
+             * @description `gap_to_leader_sec` as distance at this flight's predicted crossing speed, nm (one decimal).
+             */
+            gap_to_leader_nm?: number | null;
+            /**
+             * Format: int64
+             * @description Metered crossing time less that of the flight one place ahead in `seq`, seconds; null for the
+             *     first flight (#819).
+             */
+            gap_to_leader_sec?: number | null;
             /** Format: int64 */
             groundspeed: number;
             /** Format: int64 */
@@ -5361,6 +5378,11 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
+            /**
+             * @description True when the FCA is in manual sequence and this flight's position comes from the
+             *     controller's saved order; false for a late joiner merged into it and for every flight in auto.
+             */
+            manually_placed: boolean;
             /**
              * @description The resolved route track (remaining route for airborne) as `[lat, lon]` pairs, for
              *     drawing the aircraft's full path across the FCA.
@@ -5373,6 +5395,18 @@ export interface components {
             release_version?: number | null;
             /** @description True when this aircraft has a frozen (issued) CFR release. */
             released: boolean;
+            /**
+             * Format: double
+             * @description `required_spacing_sec` as distance at this flight's predicted crossing speed, nm (one decimal).
+             */
+            required_spacing_nm: number;
+            /**
+             * Format: int64
+             * @description The separation this flight is owed behind the flight ahead, seconds: MIT at this flight's
+             *     crossing speed, or the rate interval. Reported for every flight; the first has no flight
+             *     ahead, and an issued release keeps its time whatever the spacing.
+             */
+            required_spacing_sec: number;
             /**
              * Format: int64
              * @description 1-based sequence in the metered order.
@@ -6487,6 +6521,10 @@ export interface components {
         };
         /** @description Replace an FCA's manual crossing order (callsigns, in sequence). */
         ReorderRequest: {
+            /**
+             * @description Callsigns in crossing order; empty returns the FCA to automatic sequencing. A callsign may
+             *     appear once, compared case-insensitively, or the request is refused with 400 (#819).
+             */
             order: string[];
         };
         /** @description Everything needed to replay a capture window on a map. */
@@ -14701,6 +14739,13 @@ export interface operations {
         };
         responses: {
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The order names a callsign twice, compared case-insensitively (#819) */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

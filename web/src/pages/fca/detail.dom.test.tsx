@@ -179,3 +179,235 @@ describe("FcaDetail live-operation controls (VATUSA/OIS#746)", () => {
     expect(controls(mount(CONTROLLER, fca(null, null), false))).toEqual(NONE);
   });
 });
+
+// VATUSA/OIS#819: the gap on each strip and the two-aircraft compare panel.
+describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
+  /** A strip with every field the gap readout and the compare panel show. */
+  const strip = (
+    callsign: string,
+    seq: number,
+    o: {
+      eta: string;
+      cross: string;
+      placed: boolean;
+      gap: [number, number] | null;
+      speed?: number;
+      distance?: number;
+      req?: [number, number];
+    },
+  ) =>
+    ({
+      callsign,
+      aircraft_type: "B738",
+      altitude: 30000,
+      dep: "KJFK",
+      arr: "KDCA",
+      cross_lat: 0,
+      cross_lon: 0,
+      eta: o.eta,
+      cross_time: o.cross,
+      delay_min: 0,
+      delay_nm: 0,
+      delay_sec: 0,
+      distance_nm: o.distance ?? 100,
+      released: false,
+      edct: null,
+      seq,
+      status: "airborne",
+      gap_to_leader_sec: o.gap?.[0] ?? null,
+      gap_to_leader_nm: o.gap?.[1] ?? null,
+      required_spacing_sec: o.req?.[0] ?? 120,
+      required_spacing_nm: o.req?.[1] ?? 10,
+      cross_speed: o.speed ?? 300,
+      manually_placed: o.placed,
+    }) as unknown as FcaFlight;
+
+  // The controller put DAL2 (later ETA) ahead of AAL1; UAL3 follows by ETA.
+  const MANUAL = [
+    strip("DAL2", 1, {eta: "2026-10-27T12:10:00Z", cross: "2026-10-27T12:10:00Z", placed: true, gap: null, speed: 320, distance: 140, req: [150, 13.3]}),
+    strip("AAL1", 2, {eta: "2026-10-27T12:05:00Z", cross: "2026-10-27T12:12:00Z", placed: true, gap: [120, 10]}),
+    strip("UAL3", 3, {eta: "2026-10-27T12:20:00Z", cross: "2026-10-27T12:20:00Z", placed: false, gap: [480, 40]}),
+  ];
+
+  function mount(flights: FcaFlight[], canEdit = true) {
+    const qc = new QueryClient({defaultOptions: {queries: {retry: false}}});
+    qc.setQueryData(["me"], CONTROLLER);
+    qc.setQueryData(exclusionsKey("f-1"), {exclusions: [], editable: false});
+    qc.setQueryData(exclusionsKey("f-2"), {exclusions: [], editable: false});
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    roots.push({root, host});
+    const render = (list: FcaFlight[], fcaId = "f-1") =>
+      act(() => {
+        root.render(
+          <QueryClientProvider client={qc}>
+            <ToastProvider>
+              <FcaDetail fca={{...fca(null, null), id: fcaId}} flights={list} canEdit={canEdit} />
+            </ToastProvider>
+          </QueryClientProvider>,
+        );
+      });
+    render(flights);
+    return {host, render};
+  }
+  const mountWith = (flights: FcaFlight[], canEdit = true) => mount(flights, canEdit).host;
+
+  const toggle = (host: HTMLElement, cs: string) =>
+    host.querySelector<HTMLButtonElement>(`button[aria-label="Compare ${cs}"]`)!;
+  const pick = (host: HTMLElement, cs: string) => act(() => toggle(host, cs).click());
+  const panel = (host: HTMLElement) => host.querySelector('section[aria-label="Compare aircraft"]');
+  const text = (host: HTMLElement, id: string) =>
+    host.querySelector(`[data-testid="${id}"]`)?.textContent;
+  const stripOf = (host: HTMLElement, cs: string) => toggle(host, cs).closest("li")!;
+
+  it("shows each strip's gap to the aircraft ahead in seconds and nm", () => {
+    const host = mountWith(MANUAL);
+    expect(stripOf(host, "AAL1").textContent).toContain("gap 2:00 · 10.0nm");
+    expect(stripOf(host, "UAL3").textContent).toContain("gap 8:00 · 40.0nm");
+  });
+
+  it("shows no gap on the first strip in the sequence", () => {
+    const host = mountWith(MANUAL);
+    expect(stripOf(host, "DAL2").textContent).not.toContain("gap ");
+    expect(stripOf(host, "AAL1").textContent).toContain("gap ");
+  });
+
+  it("marks a strip's compare toggle pressed when clicked, and unpressed when clicked again", () => {
+    const host = mountWith(MANUAL);
+    expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("false");
+    pick(host, "AAL1");
+    expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("true");
+    pick(host, "AAL1");
+    expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps at most two flights selected for comparison", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(toggle(host, "UAL3").disabled).toBe(true);
+    pick(host, "UAL3");
+    const pressed = MANUAL.filter((f) => toggle(host, f.callsign).getAttribute("aria-pressed") === "true");
+    expect(pressed.map((f) => f.callsign)).toEqual(["DAL2", "AAL1"]);
+  });
+
+  it("shows both aircraft's crossing times, crossing speed, distance to line, gap and required spacing", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    const p = panel(host)!;
+    expect(p.textContent).toContain("1210");
+    expect(p.textContent).toContain("1212");
+    expect(p.textContent).toContain("320kt");
+    expect(p.textContent).toContain("300kt");
+    expect(p.textContent).toContain("140nm");
+    expect(p.textContent).toContain("100nm");
+    // 12:12 − 12:10 = 120 s, at AAL1's 300 kt = 10 nm.
+    expect(text(host, "compare-gap")).toBe("2:00 · 10.0nm");
+    // The required spacing is the behind flight's (AAL1's 120 s), not DAL2's 150 s.
+    expect(text(host, "compare-required")).toBe("2:00 · 10.0nm");
+  });
+
+  it("closes the compare panel and frees both toggles from its close button", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="Close compare"]')!.click());
+    expect(panel(host)).toBeNull();
+    expect(["DAL2", "AAL1", "UAL3"].map((cs) => toggle(host, cs).getAttribute("aria-pressed"))).toEqual(["false", "false", "false"]);
+    expect(toggle(host, "UAL3").disabled).toBe(false);
+  });
+
+  it("puts the lower-sequence flight first whichever was selected first", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "UAL3");
+    pick(host, "DAL2");
+    const heads = [...panel(host)!.querySelectorAll("th")].map((th) => th.textContent);
+    expect(heads.slice(1)).toEqual(["DAL2", "UAL3"]);
+  });
+
+  // AC3's named DOM test.
+  it("explains a pair the controller placed as manual placement", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "AAL1");
+    pick(host, "DAL2");
+    expect(text(host, "compare-reason")).toBe("DAL2 is ahead of AAL1 by manual placement.");
+  });
+
+  it("explains a pair the scheduler pushed apart as a spacing push", () => {
+    const auto = [
+      strip("AIR1", 1, {eta: "2026-10-27T12:06:00Z", cross: "2026-10-27T12:06:00Z", placed: false, gap: null}),
+      strip("GND2", 2, {eta: "2026-10-27T12:05:00Z", cross: "2026-10-27T12:08:00Z", placed: false, gap: [120, 10]}),
+    ];
+    const host = mountWith(auto);
+    pick(host, "AIR1");
+    pick(host, "GND2");
+    expect(text(host, "compare-reason")).toBe(
+      "GND2 has the earlier ETA but was pushed behind AIR1 to hold spacing.",
+    );
+  });
+
+  it("hides the compare panel when one of the two is deselected", () => {
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(panel(host)).not.toBeNull();
+    pick(host, "AAL1");
+    expect(panel(host)).toBeNull();
+  });
+
+  it("offers the compare toggle to a caller who cannot edit", () => {
+    const host = mountWith(MANUAL, false);
+    pick(host, "DAL2");
+    pick(host, "UAL3");
+    expect(text(host, "compare-reason")).toBe("DAL2 is ahead of UAL3 in ETA order.");
+  });
+
+  it("frees a pick whose flight has left the list, so the other toggles work again", () => {
+    const {host, render} = mount(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(toggle(host, "UAL3").disabled).toBe(true);
+    render(MANUAL.filter((f) => f.callsign !== "AAL1"));
+    expect(panel(host)).toBeNull();
+    expect(toggle(host, "UAL3").disabled).toBe(false);
+    pick(host, "UAL3");
+    expect(text(host, "compare-reason")).toBe("DAL2 is ahead of UAL3 in ETA order.");
+    // AAL1 coming back does not revive its old pick as a third selection.
+    render(MANUAL);
+    expect(text(host, "compare-reason")).toBe("DAL2 is ahead of UAL3 in ETA order.");
+    expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("starts with nothing picked after switching to another FCA", () => {
+    const {host, render} = mount(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(panel(host)).not.toBeNull();
+    render(MANUAL, "f-2");
+    expect(panel(host)).toBeNull();
+    expect(["DAL2", "AAL1", "UAL3"].map((cs) => toggle(host, cs).disabled)).toEqual([false, false, false]);
+  });
+
+  it("measures a non-adjacent pair's gap between the two of them, not the strip's gap", () => {
+    // DAL2 (seq 1, 12:10) and UAL3 (seq 3, 12:20): 600 s at UAL3's 300 kt = 50 nm. UAL3's own strip
+    // gap is to AAL1 (40 nm), which must not be shown for this pair.
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "UAL3");
+    expect(text(host, "compare-gap")).toBe("10:00 · 50.0nm");
+  });
+
+  it("shows an adjacent pair's gap in nm as the strip reports it", () => {
+    // 500 s at 283.4 kt is 39.4 nm on the backend; recomputed at the rounded 283 kt it would be 39.3.
+    const pairOf = [
+      strip("DAL2", 1, {eta: "2026-10-27T12:00:00Z", cross: "2026-10-27T12:00:00Z", placed: false, gap: null}),
+      strip("AAL1", 2, {eta: "2026-10-27T12:08:20Z", cross: "2026-10-27T12:08:20Z", placed: false, gap: [500, 39.4], speed: 283}),
+    ];
+    const host = mountWith(pairOf);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(text(host, "compare-gap")).toBe("8:20 · 39.4nm");
+  });
+});
