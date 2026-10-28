@@ -14,14 +14,22 @@
 //! where an actual enroute path *is* resolved, not to start timing `DCT` prefiles on a distance no
 //! real routing can fly (that fed metered wheels-up / CFR times early).
 
+use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use chrono::{DateTime, Duration, Utc};
 
 use super::airports::{AirportDb, field_elevation_ft};
 use super::fca;
-use super::flow::gc_dist;
+use super::flow::{self as feed_flow, GroundAllowanceBreakdown, gc_dist};
 use super::nav::NavData;
-use super::trajectory::{self, AircraftProfile, RouteWind};
+use super::runway_db::RunwayDb;
+use super::taxi_estimate;
+use super::trajectory::{self, AircraftProfile, ProfileTable, RouteWind};
+use super::vatsim::{FlightPlan, Pilot, Prefile};
 use super::winds::Winds;
+use crate::models::AirportGateBody;
 
 /// Taxi + spool-up allowance added to a not-yet-airborne aircraft's flight time (the profile model
 /// covers the climb itself).
@@ -30,8 +38,7 @@ pub const GROUND_TAXI_SEC: f64 = 8.0 * 60.0;
 /// Great-circle → flyable-route length multiplier for a ground/proposed flight whose filed route
 /// won't resolve to an enroute path. Airway routings run a little longer than the direct great
 /// circle; without this a bare `DCT`/blank filing would be timed on an unachievable distance and
-/// its metered wheels-up / CFR time would skew early. Matches the factor `ground_estimate` applied
-/// before issue #63.
+/// its metered wheels-up / CFR time would skew early (#63).
 pub const GROUND_ROUTE_FACTOR: f64 = 1.12;
 
 /// Total great-circle length (nm) of a resolved route path.
@@ -219,13 +226,45 @@ pub struct ArrivalInput<'a> {
     pub cruise_tas: f64,
 }
 
+/// The route an arrival is timed along: the resolved path, its length, and whether the aircraft is
+/// airborne ([`is_airborne`]).
+pub struct ArrivalRoute {
+    pub path: Vec<[f64; 2]>,
+    /// Along-route distance to the field, nm. A ground flight whose route does not resolve past its
+    /// endpoints carries [`GROUND_ROUTE_FACTOR`].
+    pub route_nm: f64,
+    pub airborne: bool,
+}
+
+/// Resolve the route [`arrival_eta`] times an aircraft along: the filed route via
+/// [`fca::route_path`] (the trimmed remaining route for airborne aircraft, the full dep→arr route
+/// for ground/proposed), else a straight-line great circle `pos → arr_ll`. The same resolution
+/// [`trajectory`] makes, through [`resolve_path`] and [`route_scale`].
+pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> ArrivalRoute {
+    let airborne = is_airborne(ac.gs);
+    let (path, resolved) = resolve_path(
+        nav,
+        airports,
+        (ac.dep, ac.arr, ac.route),
+        (ac.pos, ac.hdg, ac.gs),
+        Some(ac.arr_ll),
+        false,
+    )
+    .unwrap_or_else(|| (vec![ac.pos, ac.arr_ll], false));
+    let route_nm = path_len_nm(&path) * route_scale(airborne, resolved);
+    ArrivalRoute {
+        path,
+        route_nm,
+        airborne,
+    }
+}
+
 /// Predict when an aircraft reaches its destination field, and how far along its route that is.
 ///
-/// Resolves the filed route via [`fca::route_path`] (the trimmed remaining route for airborne
-/// aircraft, the full dep→arr route for ground/proposed), then times it through
-/// [`eta_along_route`] with the target at the field. Falls back to a straight-line great circle
-/// `pos → arr_ll` when the route won't resolve. `ground_allowance_sec` is only applied on the
-/// ground branch (see [`eta_along_route`]) — an airborne caller may pass any value.
+/// Times the route [`arrival_route`] resolves through [`eta_along_route`] with the target at the
+/// field. `ground_allowance_sec` is only applied on the ground branch (see [`eta_along_route`]) —
+/// an airborne caller may pass any value. No surface calls this: they all go through
+/// [`trajectory`], which decides the inputs this takes as arguments.
 pub fn arrival_eta(
     nav: &NavData,
     airports: &AirportDb,
@@ -235,31 +274,11 @@ pub fn arrival_eta(
     ground_allowance_sec: f64,
     now: DateTime<Utc>,
 ) -> ArrivalPrediction {
-    let [lat, lon] = ac.pos;
-    let airborne = ac.gs >= 50;
-    let (path, mut route_nm, enroute_resolved) = match fca::route_path(
-        nav, airports, ac.dep, ac.arr, ac.route, lat, lon, ac.hdg, ac.gs,
-    ) {
-        // > 2 anchors ⇒ the nav engine placed at least one enroute point, so `path_len_nm` is a
-        // real routing distance. Exactly 2 (just the endpoints, or pos→field for an airborne
-        // aircraft with nothing ahead) is no better than the great circle.
-        Some(path) => {
-            let len = path_len_nm(&path);
-            let resolved = path.len() > 2;
-            (path, len, resolved)
-        }
-        None => (
-            vec![ac.pos, ac.arr_ll],
-            gc_dist(lat, lon, ac.arr_ll[0], ac.arr_ll[1]),
-            false,
-        ),
-    };
-    // A not-yet-airborne flight timed on an unresolved (great-circle) distance would arrive earlier
-    // than any real routing allows; restore the pre-#63 padding for that case only. An airborne
-    // aircraft is timed against the route the map actually draws, so it must not be padded.
-    if !airborne && !enroute_resolved {
-        route_nm *= GROUND_ROUTE_FACTOR;
-    }
+    let ArrivalRoute {
+        path,
+        route_nm,
+        airborne,
+    } = arrival_route(nav, airports, ac);
     let wind = winds.along(&path, route_nm);
     let eta = eta_along_route(
         airborne,
@@ -278,6 +297,515 @@ pub fn arrival_eta(
     )
     .eta;
     ArrivalPrediction { eta, route_nm }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The one entry point (#813).
+//
+// Every surface that times a flight (airport flow, GDP and CFR, runway ETE, sector demand, FCA
+// metering and IDST, the projected map, the per-fix table) calls [`trajectory`] and reads its
+// times off the [`Trajectory`] it returns. The flight's inputs are decided here and nowhere else:
+//
+// - **Airborne**: `gs >= AIRBORNE_GS_KT`, no altitude term. It is the threshold the route
+//   resolver trims on, so a caller using another value labels a flight one way and times it the
+//   other; an `alt > 300` term reads an MSL altitude and means nothing at a high field.
+// - **Route**: the filed route resolved from where the flight is (`fca::route_path`), else a great
+//   circle to the field, except for a pilot that has arrived (`ARRIVED_NM`); a ground or prefiled
+//   flight with neither is timed over `NOMINAL_ROUTE_NM` in still air.
+// - **Padding**: `GROUND_ROUTE_FACTOR` for every not-yet-airborne flight whose route does not
+//   resolve past its endpoints, so no surface times a `DCT` filing on a distance no routing flies.
+// - **Filed altitude** (`trajectory::filed_altitude_ft`, unknown timed at 35,000 ft) and **filed
+//   cruise speed** (`filed_tas`, capped by the profile through `capped_cruise_tas`).
+// - **Departure time**: a connected flight leaves now, a prefile at its filed `deptime`
+//   (`proposed_etd`), and a flight with a released wheels-up at that time.
+// - **Departure runway**: the assignment `jobs::departure_runway_derive_once` stored, read by the
+//   handler (`GroundInputs::assigned`), which replaces the heading guess in the ground allowance.
+// - **Wind**: each point's own altitude along the profile (`Winds::along`, #836).
+// ---------------------------------------------------------------------------------------------
+
+/// Groundspeed (kt) from which every surface treats a flight as airborne (#813).
+pub const AIRBORNE_GS_KT: i64 = 50;
+
+/// Whether a flight at `gs_kt` is airborne. The one test every surface times and labels with.
+pub fn is_airborne(gs_kt: i64) -> bool {
+    gs_kt >= AIRBORNE_GS_KT
+}
+
+/// Floor (kt) on a predicted crossing speed before a miles-in-trail is turned into a time gap, so a
+/// slow profile sample cannot open an hour-long gap.
+pub const MIN_CROSS_SPEED_KT: f64 = 120.0;
+
+/// The leg (nm) a ground or prefiled flight with no route and no field position is timed over.
+const NOMINAL_ROUTE_NM: f64 = 300.0;
+
+/// Departure runways already assigned, keyed `(departure ICAO, callsign)` with `(runway, source)`:
+/// `repos::departure_runway::assignment_map`.
+pub type AssignedRunways = HashMap<(String, String), (String, String)>;
+
+/// What the ground allowance reads: the gate catalog, the runway table, the learned taxi samples and
+/// the assigned departure runways.
+pub struct GroundInputs<'a> {
+    pub gates: &'a HashMap<String, Vec<AirportGateBody>>,
+    pub runways: &'a RunwayDb,
+    pub taxi_samples: &'a HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    pub assigned: &'a AssignedRunways,
+}
+
+static NO_GATES: LazyLock<HashMap<String, Vec<AirportGateBody>>> = LazyLock::new(HashMap::new);
+static NO_RUNWAYS: LazyLock<RunwayDb> = LazyLock::new(RunwayDb::default);
+static NO_SAMPLES: LazyLock<HashMap<String, Vec<taxi_estimate::TaxiSample>>> =
+    LazyLock::new(HashMap::new);
+static NO_ASSIGNMENTS: LazyLock<AssignedRunways> = LazyLock::new(HashMap::new);
+
+impl GroundInputs<'static> {
+    /// Empty tables, for a caller that never times a flight still to push: one that times airborne
+    /// flights only, or ground flights only with a released wheels-up. A ground flight timed with
+    /// these gets the default allowance.
+    pub fn unused() -> Self {
+        GroundInputs {
+            gates: &NO_GATES,
+            runways: &NO_RUNWAYS,
+            taxi_samples: &NO_SAMPLES,
+            assigned: &NO_ASSIGNMENTS,
+        }
+    }
+}
+
+/// Everything [`trajectory`] reads besides the flight.
+pub struct Inputs<'a> {
+    pub nav: &'a NavData,
+    pub airports: &'a AirportDb,
+    pub winds: &'a Winds,
+    pub profiles: &'a ProfileTable,
+    pub ground: GroundInputs<'a>,
+}
+
+/// The flight to time: a connected pilot, or a prefile (no position; timed from its departure).
+#[derive(Clone, Copy)]
+pub enum Flight<'a> {
+    Pilot(&'a Pilot),
+    Prefile(&'a Prefile),
+}
+
+/// Where a flight is timed from: its live position, or its departure field for a prefile.
+#[derive(Clone, Copy)]
+struct Origin {
+    pos: [f64; 2],
+    hdg: i64,
+    gs: i64,
+    alt_ft: f64,
+}
+
+/// A point a [`Trajectory`] has reached after some flying time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Progress {
+    /// Distance along [`Trajectory::path`] from its start, nm.
+    pub along_nm: f64,
+    pub alt_ft: f64,
+    /// At the field.
+    pub landed: bool,
+}
+
+/// A named fix on the route ahead, with its distance along [`Trajectory::path`] (nm).
+pub struct RouteFix {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub along_nm: f64,
+}
+
+/// One flight, resolved once, that every surface reads its times from.
+///
+/// The route is resolved when [`trajectory`] returns; the vertical profile, the winds and the ground
+/// allowance are computed the first time a time or speed is asked for, so a caller that only tests
+/// the route (an FCA crossing, a sector box) pays nothing for flights it drops.
+pub struct Trajectory<'a> {
+    inp: &'a Inputs<'a>,
+    callsign: &'a str,
+    fp: &'a FlightPlan,
+    prefile: bool,
+    origin: Option<Origin>,
+    path: Vec<[f64; 2]>,
+    airborne: bool,
+    scale: f64,
+    route_nm: f64,
+    released: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    timing: OnceCell<Timing>,
+}
+
+struct Timing {
+    vp: trajectory::VerticalProfile,
+    cruise_ft: f64,
+    cruise_tas: f64,
+    allowance: Option<GroundAllowanceBreakdown>,
+    allowance_sec: f64,
+    off_block: DateTime<Utc>,
+    wheels_up: DateTime<Utc>,
+}
+
+/// Resolve `flight` for timing at `now`. `released` is a locked wheels-up (an EDCT or CFR) for a
+/// flight still on the ground; it replaces the departure time and the ground allowance. `None` when
+/// the flight has no flight plan, or is airborne with neither a route nor a known destination.
+pub fn trajectory<'a>(
+    inp: &'a Inputs<'a>,
+    flight: Flight<'a>,
+    released: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<Trajectory<'a>> {
+    let (callsign, fp, prefile, origin) = match flight {
+        Flight::Pilot(p) => (
+            p.callsign.as_str(),
+            p.flight_plan.as_ref()?,
+            false,
+            Some(Origin {
+                pos: [p.latitude, p.longitude],
+                hdg: p.heading,
+                gs: p.groundspeed,
+                alt_ft: p.altitude as f64,
+            }),
+        ),
+        Flight::Prefile(pf) => {
+            let fp = pf.flight_plan.as_ref()?;
+            let dep = inp.airports.get(&fp.departure.to_ascii_uppercase());
+            let origin = dep.map(|a| Origin {
+                pos: [a.lat, a.lon],
+                hdg: 0,
+                gs: 0,
+                alt_ft: 0.0,
+            });
+            (pf.callsign.as_str(), fp, true, origin)
+        }
+    };
+    let airborne = origin.is_some_and(|o| is_airborne(o.gs));
+    let arr_ll = inp
+        .airports
+        .get(&fp.arrival.to_ascii_uppercase())
+        .map(|a| [a.lat, a.lon]);
+    let resolved = origin.and_then(|o| {
+        resolve_path(
+            inp.nav,
+            inp.airports,
+            (&fp.departure, &fp.arrival, &fp.route),
+            (o.pos, o.hdg, o.gs),
+            arr_ll,
+            !prefile,
+        )
+    });
+    let (path, scale, route_nm) = match resolved {
+        Some((path, enroute)) => {
+            let scale = route_scale(airborne, enroute);
+            let route_nm = path_len_nm(&path) * scale;
+            (path, scale, route_nm)
+        }
+        None if airborne => return None,
+        None => (Vec::new(), 1.0, NOMINAL_ROUTE_NM),
+    };
+    Some(Trajectory {
+        inp,
+        callsign,
+        fp,
+        prefile,
+        origin,
+        path,
+        airborne,
+        scale,
+        route_nm,
+        released,
+        now,
+        timing: OnceCell::new(),
+    })
+}
+
+/// The path [`trajectory`] times a flight at `pos` along, for a caller that only needs the crossing
+/// geometry (the FCA badge counts, the flight advisory's pre-filter): the filed route, else the
+/// great circle to the destination (none for a pilot that has arrived, as [`resolve_path`]).
+pub fn flight_path(
+    nav: &NavData,
+    airports: &AirportDb,
+    fp: &FlightPlan,
+    pos: [f64; 2],
+    hdg: i64,
+    gs: i64,
+) -> Option<Vec<[f64; 2]>> {
+    let arr_ll = airports
+        .get(&fp.arrival.to_ascii_uppercase())
+        .map(|a| [a.lat, a.lon]);
+    let route = (
+        fp.departure.as_str(),
+        fp.arrival.as_str(),
+        fp.route.as_str(),
+    );
+    resolve_path(nav, airports, route, (pos, hdg, gs), arr_ll, true).map(|(path, _)| path)
+}
+
+/// A connected, not-yet-airborne pilot this close (nm) to an arrival field other than its departure
+/// field has arrived there: no surface times it. Airport flow labels a ground pilot this close
+/// "arrived" whatever its departure field.
+pub(crate) const ARRIVED_NM: f64 = 5.0;
+
+/// The path a flight at `pos` is timed along, and whether the nav engine placed an enroute point on
+/// it (`> 2` anchors; exactly 2 is no better than the great circle). Falls back to the great circle
+/// to `arr_ll` when the filed route does not resolve, except for a connected `pilot` on the ground
+/// within [`ARRIVED_NM`] of an arrival field it did not depart from: `route_path` returns `None` for
+/// it because it has arrived, and it has nowhere left to fly. A local flight (departure = arrival)
+/// starts at its arrival field without having arrived, and a prefile has not flown at all.
+/// [`arrival_route`] passes `pilot = false`: it falls back to the great circle itself.
+fn resolve_path(
+    nav: &NavData,
+    airports: &AirportDb,
+    (dep, arr, route): (&str, &str, &str),
+    (pos, hdg, gs): ([f64; 2], i64, i64),
+    arr_ll: Option<[f64; 2]>,
+    pilot: bool,
+) -> Option<(Vec<[f64; 2]>, bool)> {
+    let can_arrive = pilot && !is_airborne(gs) && !dep.eq_ignore_ascii_case(arr);
+    match fca::route_path(nav, airports, dep, arr, route, pos[0], pos[1], hdg, gs) {
+        Some(path) => {
+            let enroute = path.len() > 2;
+            Some((path, enroute))
+        }
+        None => arr_ll
+            .filter(|a| !can_arrive || gc_dist(pos[0], pos[1], a[0], a[1]) >= ARRIVED_NM)
+            .map(|a| (vec![pos, a], false)),
+    }
+}
+
+/// The along-route length multiplier: [`GROUND_ROUTE_FACTOR`] for a not-yet-airborne flight whose
+/// route did not resolve past its endpoints, else 1. An airborne flight is timed on the route the
+/// map draws, so padding it would double-correct.
+fn route_scale(airborne: bool, enroute_resolved: bool) -> f64 {
+    if !airborne && !enroute_resolved {
+        GROUND_ROUTE_FACTOR
+    } else {
+        1.0
+    }
+}
+
+/// The filed cruise speed as a number, `0` when blank or junk; [`trajectory::capped_cruise_tas`]
+/// then replaces an implausible value with the profile's or the altitude default.
+fn filed_tas(raw: &str) -> f64 {
+    raw.trim().parse().unwrap_or(0.0)
+}
+
+/// A prefile's off-block time: filed `deptime` (HHMM Z) nudged into a sane window, else 20 minutes
+/// out. Never earlier than 20 minutes from now.
+pub(crate) fn proposed_etd(deptime: &str, now: DateTime<Utc>) -> DateTime<Utc> {
+    let floor = now + Duration::minutes(20);
+    if deptime.len() == 4 && deptime.chars().all(|c| c.is_ascii_digit()) {
+        let h: u32 = deptime[0..2].parse().unwrap_or(99);
+        let m: u32 = deptime[2..4].parse().unwrap_or(99);
+        if h < 24
+            && m < 60
+            && let Some(naive) = now.date_naive().and_hms_opt(h, m, 0)
+        {
+            let mut t = naive.and_utc();
+            if t < now - Duration::hours(2) {
+                t += Duration::hours(24);
+            } else if t - now > Duration::hours(12) {
+                t -= Duration::hours(24);
+            }
+            return t.max(floor);
+        }
+    }
+    floor
+}
+
+impl Trajectory<'_> {
+    /// The route the flight is timed along, from where it is (or its departure) to the field. Empty
+    /// for a ground flight timed over the nominal leg.
+    pub fn path(&self) -> &[[f64; 2]] {
+        &self.path
+    }
+
+    pub fn airborne(&self) -> bool {
+        self.airborne
+    }
+
+    /// The along-route distance still to fly, nm, padding included.
+    pub fn route_nm(&self) -> f64 {
+        self.route_nm
+    }
+
+    /// A distance along [`Self::path`] as the distance the model flies, padding included.
+    pub fn modeled_nm(&self, along_nm: f64) -> f64 {
+        along_nm * self.scale
+    }
+
+    /// ETA at the point `along_nm` along [`Self::path`].
+    pub fn eta_at(&self, along_nm: f64) -> DateTime<Utc> {
+        self.eta_to_go(self.to_go(along_nm))
+    }
+
+    /// Predicted groundspeed (kt) at the point `along_nm` along [`Self::path`].
+    pub fn gs_at(&self, along_nm: f64) -> f64 {
+        self.timing().vp.ground_speed_at(self.to_go(along_nm))
+    }
+
+    /// Predicted altitude (ft) at the point `along_nm` along [`Self::path`].
+    pub fn alt_at(&self, along_nm: f64) -> f64 {
+        self.timing().vp.alt_at(self.to_go(along_nm))
+    }
+
+    /// ETA at the destination field.
+    pub fn eta_at_field(&self) -> DateTime<Utc> {
+        self.eta_to_go(0.0)
+    }
+
+    /// Predicted groundspeed (kt) `nm` along-route short of the field, or where the flight is now
+    /// when it is closer than that.
+    pub fn gs_short_of_field(&self, nm: f64) -> f64 {
+        self.timing().vp.ground_speed_at(nm.min(self.route_nm))
+    }
+
+    /// Where the flight is after `flying_sec` from its start: now for an airborne flight, wheels-up
+    /// for one on the ground.
+    pub fn progress_after(&self, flying_sec: f64) -> Progress {
+        let vp = &self.timing().vp;
+        let d = vp.distance_after(self.route_nm, flying_sec.max(0.0));
+        Progress {
+            along_nm: ((self.route_nm - d) / self.scale).max(0.0),
+            alt_ft: vp.alt_at(d),
+            landed: d <= 0.0,
+        }
+    }
+
+    /// When the flight leaves the ground: now for an airborne one.
+    pub fn wheels_up(&self) -> DateTime<Utc> {
+        self.timing().wheels_up
+    }
+
+    /// Pushback, start-up and taxi-out ahead of wheels-up, seconds; 0 for an airborne flight or one
+    /// with a released wheels-up.
+    pub fn allowance_sec(&self) -> f64 {
+        self.timing().allowance_sec
+    }
+
+    /// How the ground allowance was derived, for the FCA debug view.
+    pub(crate) fn ground_allowance(&self) -> Option<&GroundAllowanceBreakdown> {
+        self.timing().allowance.as_ref()
+    }
+
+    pub fn cruise_ft(&self) -> f64 {
+        self.timing().cruise_ft
+    }
+
+    pub fn cruise_tas(&self) -> f64 {
+        self.timing().cruise_tas
+    }
+
+    /// Distance-weighted mean headwind (kt) over the route still to fly, for the FCA debug view.
+    pub fn mean_headwind(&self) -> Option<f64> {
+        self.timing().vp.mean_headwind(self.route_nm, 0.0)
+    }
+
+    /// The named fixes ahead on the route, resolved from the same position [`Self::path`] was.
+    pub fn fixes(&self) -> Vec<RouteFix> {
+        let Some(o) = self.origin else {
+            return Vec::new();
+        };
+        let fp = self.fp;
+        fca::route_path_named(
+            self.inp.nav,
+            self.inp.airports,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            o.pos[0],
+            o.pos[1],
+            o.hdg,
+            o.gs,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, lat, lon, along_nm)| RouteFix {
+            name,
+            lat,
+            lon,
+            along_nm,
+        })
+        .collect()
+    }
+
+    /// The model's distance to the field (nm) at `along_nm` along the path.
+    fn to_go(&self, along_nm: f64) -> f64 {
+        (self.route_nm - along_nm * self.scale).max(0.0)
+    }
+
+    fn eta_to_go(&self, to_go_nm: f64) -> DateTime<Utc> {
+        let t = self.timing();
+        let sec = t.vp.time_between(self.route_nm, to_go_nm) + t.allowance_sec;
+        t.off_block + Duration::seconds(sec as i64)
+    }
+
+    fn timing(&self) -> &Timing {
+        self.timing.get_or_init(|| self.time())
+    }
+
+    fn time(&self) -> Timing {
+        let (inp, fp) = (self.inp, self.fp);
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = inp.profiles.resolve(&ty, &wake);
+        let cruise_ft = trajectory::parse_alt_ft(&fp.altitude);
+        let cruise_tas =
+            trajectory::capped_cruise_tas(filed_tas(&fp.cruise_tas), cruise_ft, profile);
+        let wind = inp.winds.along(&self.path, self.route_nm);
+        let (alt_ft, gs) = self.origin.map_or((0.0, 0.0), |o| (o.alt_ft, o.gs as f64));
+        let vp = profile_from_here(
+            self.airborne,
+            self.route_nm,
+            alt_ft,
+            gs,
+            cruise_ft,
+            cruise_tas,
+            inp.airports,
+            &fp.arrival,
+            profile,
+            wind,
+        );
+        let allowance = (!self.airborne && self.released.is_none()).then(|| self.allowance());
+        let allowance_sec = allowance.as_ref().map_or(0.0, |a| a.total_sec());
+        let off_block = match self.released {
+            _ if self.airborne => self.now,
+            Some(r) => r.max(self.now),
+            None if self.prefile => proposed_etd(&fp.deptime, self.now),
+            None => self.now,
+        };
+        Timing {
+            vp,
+            cruise_ft,
+            cruise_tas,
+            allowance,
+            allowance_sec,
+            off_block,
+            wheels_up: off_block + Duration::milliseconds((allowance_sec * 1000.0) as i64),
+        }
+    }
+
+    /// The ground allowance, matched on the live position for a connected pilot (none for a
+    /// prefile) and on the assigned runway when one is stored.
+    fn allowance(&self) -> GroundAllowanceBreakdown {
+        let (g, fp) = (&self.inp.ground, self.fp);
+        let dep = fp.departure.to_ascii_uppercase();
+        let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
+        let pos = self
+            .origin
+            .filter(|_| !self.prefile)
+            .map(|o| (o.pos[0], o.pos[1], o.hdg, o.gs));
+        let assigned = g
+            .assigned
+            .get(&(dep.clone(), self.callsign.to_string()))
+            .map(|(runway, _source)| runway.as_str());
+        feed_flow::resolve_ground_allowance(
+            g.gates,
+            g.runways,
+            g.taxi_samples,
+            &dep,
+            aircraft,
+            pos,
+            assigned,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1096,5 +1624,623 @@ mod tests {
         assert!(((pred.eta - now()).num_seconds() as f64 - timed).abs() <= 1.0);
         assert_eq!(pred.profile.ground_speed_at(200.0), pred.gs_kt);
         assert_eq!(pred.profile.mean_headwind(300.0, 0.0), Some(60.0));
+    }
+
+    // ---- #813 AC2: the entry point decides each input once -------------------------------------
+
+    fn plan(dep: &str, arr: &str, route: &str) -> FlightPlan {
+        FlightPlan {
+            departure: dep.into(),
+            arrival: arr.into(),
+            route: route.into(),
+            aircraft_short: "B738".into(),
+            altitude: "FL350".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }
+    }
+
+    fn pilot(pos: [f64; 2], alt: i64, gs: i64, fp: FlightPlan) -> Pilot {
+        Pilot {
+            callsign: "AAL1".into(),
+            latitude: pos[0],
+            longitude: pos[1],
+            altitude: alt,
+            groundspeed: gs,
+            heading: 190,
+            flight_plan: Some(fp),
+            ..Default::default()
+        }
+    }
+
+    fn prefile(fp: FlightPlan) -> Prefile {
+        Prefile {
+            callsign: "PRE1".into(),
+            flight_plan: Some(fp),
+            ..Default::default()
+        }
+    }
+
+    /// Inputs over `nav` and [`airports`], still air, the default profiles and these ground tables.
+    fn with_ground<'a>(
+        nav: &'a NavData,
+        ap: &'a AirportDb,
+        ground: GroundInputs<'a>,
+    ) -> Inputs<'a> {
+        static WINDS: LazyLock<Winds> = LazyLock::new(Winds::default);
+        static PROFILES: LazyLock<ProfileTable> = LazyLock::new(ProfileTable::default);
+        Inputs {
+            nav,
+            airports: ap,
+            winds: &WINDS,
+            profiles: &PROFILES,
+            ground,
+        }
+    }
+
+    const JFK: [f64; 2] = [40.64, -73.78];
+
+    /// A route that does not resolve falls back to the great circle to the destination, except for a
+    /// pilot on the ground at an arrival field other than its departure field, which has arrived: `route_path`'s `None` there means
+    /// nothing is left to fly, and a great circle would time it as a fresh departure.
+    #[test]
+    fn a_landed_pilot_gets_no_great_circle_to_its_own_field() {
+        let (nav, ap) = (NavData::default(), airports());
+        let path = |pos: [f64; 2], gs: i64| {
+            let fp = plan("KZZZ", "KMIA", "DCT");
+            flight_path(&nav, &ap, &fp, pos, 190, gs)
+        };
+        assert_eq!(path([25.80, -80.29], 0), None, "parked at KMIA");
+        // 0.0833 deg of longitude at 25.79 N is 4.5 nm; 0.10 deg is 5.4 nm.
+        assert_eq!(
+            path([25.79, -80.2067], 0),
+            None,
+            "4.5 nm out, on the ground"
+        );
+        assert_eq!(
+            path([25.79, -80.19], 0),
+            Some(vec![[25.79, -80.19], [25.79, -80.29]]),
+            "5.4 nm out, still on the ground"
+        );
+        assert_eq!(
+            path(JFK, 0).map(|p| p.len()),
+            Some(2),
+            "a departure far away"
+        );
+        assert_eq!(
+            path([25.84, -80.29], 140).map(|p| p.len()),
+            Some(2),
+            "an airborne arrival 3 nm out"
+        );
+        assert_eq!(ARRIVED_NM, 5.0);
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let landed = pilot([25.80, -80.29], 0, 0, plan("KZZZ", "KMIA", "DCT"));
+        let traj = trajectory(&inp, Flight::Pilot(&landed), None, now()).unwrap();
+        assert!(traj.path().is_empty(), "nothing to cross");
+    }
+
+    /// A local flight (departure = arrival) and a prefile both start at a field without having
+    /// arrived there, so they keep a path, as `next` timed them, and not the 300 nm nominal leg a
+    /// flight with no route at all gets.
+    #[test]
+    fn a_local_flight_and_a_prefile_have_not_arrived() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let local = plan("kmia", "KMIA", "DCT");
+        let pre = prefile(local.clone());
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        assert_eq!(
+            t.path(),
+            [[25.79, -80.29], [25.79, -80.29]],
+            "local prefile"
+        );
+        assert_eq!(
+            t.route_nm(),
+            0.0,
+            "not the {NOMINAL_ROUTE_NM} nm nominal leg"
+        );
+        let parked = pilot([25.80, -80.29], 0, 0, local.clone());
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(t.path().len(), 2, "local pilot parked at its field");
+        assert_eq!(
+            flight_path(&nav, &ap, &local, [25.80, -80.29], 190, 0).map(|p| p.len()),
+            Some(2),
+            "the badge counts see the same local pilot"
+        );
+        // A field 2.0 nm from KMIA, inside its arrived radius. `route_path` collapses a ground leg
+        // under 3 nm, so only the great circle times a flight from it.
+        let mut near_ap = airports();
+        near_ap.insert("KNBR".into(), Airport::at(25.79, -80.253));
+        let inp = with_ground(&nav, &near_ap, GroundInputs::unused());
+        let near = prefile(plan("KNBR", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Prefile(&near), None, now()).unwrap();
+        assert_eq!(
+            t.path(),
+            [[25.79, -80.253], [25.79, -80.29]],
+            "a prefile has not arrived"
+        );
+        let parked = pilot([25.79, -80.253], 0, 0, plan("KNBR", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert!(
+            t.path().is_empty(),
+            "control: a pilot on the ground there has"
+        );
+    }
+
+    /// AC2 airborne: from 50 kt, whatever the altitude, and the altitude alone never makes a flight
+    /// airborne. 50-60 kt was ground to airport flow and projected traffic, airborne to FCA.
+    #[test]
+    fn a_flight_is_airborne_from_50_kt_at_any_altitude() {
+        assert_eq!(AIRBORNE_GS_KT, 50);
+        assert!(!is_airborne(49));
+        assert!(is_airborne(50));
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let airborne = |alt: i64, gs: i64| {
+            let p = pilot([35.0, -78.0], alt, gs, plan("KJFK", "KMIA", ""));
+            trajectory(&inp, Flight::Pilot(&p), None, now())
+                .unwrap()
+                .airborne()
+        };
+        assert!(airborne(0, 55), "55 kt at 0 ft is rolling, so airborne");
+        assert!(
+            airborne(250, 55),
+            "the old `alt > 300` term called this ground"
+        );
+        assert!(!airborne(30_000, 49), "an altitude alone is not airborne");
+    }
+
+    /// AC2 padding: a not-yet-airborne flight whose route does not resolve is timed over the great
+    /// circle x `GROUND_ROUTE_FACTOR`; an airborne one, or a ground one on a resolved route, is not
+    /// padded. FCA metering, IDST and sector demand used to time the unpadded great circle.
+    #[test]
+    fn only_a_ground_flight_on_an_unresolved_route_is_padded() {
+        let (none, ap) = (NavData::default(), airports());
+        let inp = with_ground(&none, &ap, GroundInputs::unused());
+        let gc = gc_dist(JFK[0], JFK[1], 25.79, -80.29);
+        let ground = pilot(JFK, 13, 0, plan("KJFK", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Pilot(&ground), None, now()).unwrap();
+        assert_eq!(t.path().len(), 2, "positive control: nothing resolved");
+        assert!(
+            (t.route_nm() - gc * GROUND_ROUTE_FACTOR).abs() < 1e-6,
+            "{}",
+            t.route_nm()
+        );
+        assert_eq!(t.modeled_nm(10.0), 10.0 * GROUND_ROUTE_FACTOR);
+        let pre = prefile(plan("KJFK", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        assert!(
+            (t.route_nm() - gc * GROUND_ROUTE_FACTOR).abs() < 1e-6,
+            "prefile"
+        );
+
+        // An unknown departure leaves no route anchors, so the airborne flight falls back to the
+        // great circle from where it is: the one airborne case with nothing resolved.
+        let air = pilot(JFK, 5_000, 250, plan("ZZZZ", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Pilot(&air), None, now()).unwrap();
+        assert_eq!(
+            t.path().len(),
+            2,
+            "positive control: airborne, nothing resolved"
+        );
+        assert!(
+            (t.route_nm() - gc).abs() < 1e-6,
+            "airborne: {}",
+            t.route_nm()
+        );
+
+        let (nav, dca) = (
+            NavData::load(),
+            AirportDb::from([
+                ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+                ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+            ]),
+        );
+        let inp = with_ground(&nav, &dca, GroundInputs::unused());
+        let routed = pilot(JFK, 13, 0, plan("KJFK", "KDCA", "RBV WHITE SIE"));
+        let t = trajectory(&inp, Flight::Pilot(&routed), None, now()).unwrap();
+        assert!(t.path().len() > 2, "positive control: the route resolved");
+        assert!((t.route_nm() - path_len_nm(t.path())).abs() < 1e-9);
+    }
+
+    #[test]
+    fn route_scale_pads_only_the_unresolved_ground_case() {
+        assert_eq!(route_scale(false, false), GROUND_ROUTE_FACTOR);
+        assert_eq!(route_scale(false, true), 1.0);
+        assert_eq!(route_scale(true, false), 1.0);
+        assert_eq!(route_scale(true, true), 1.0);
+    }
+
+    /// AC2 departure time: a connected ground flight leaves now, a prefile at its filed `deptime`
+    /// (never sooner than 20 minutes out), and a flight with a released wheels-up at that time, with
+    /// no ground allowance on top. An airborne flight ignores a release.
+    #[test]
+    fn each_kind_of_flight_leaves_at_its_own_time() {
+        use chrono::TimeZone;
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let default_allowance = 180.0 + 120.0 + GROUND_TAXI_SEC;
+        let parked = pilot(JFK, 13, 0, plan("KJFK", "KMIA", ""));
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(t.allowance_sec(), default_allowance);
+        assert_eq!(
+            t.wheels_up(),
+            now() + Duration::seconds(default_allowance as i64)
+        );
+
+        // now() is 2023-11-14 22:13:20Z.
+        let pre = prefile(FlightPlan {
+            deptime: "2300".into(),
+            ..plan("KJFK", "KMIA", "")
+        });
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        let filed = Utc.with_ymd_and_hms(2023, 11, 14, 23, 0, 0).unwrap();
+        assert_eq!(
+            t.wheels_up(),
+            filed + Duration::seconds(default_allowance as i64)
+        );
+
+        let release = now() + Duration::minutes(30);
+        for flight in [Flight::Pilot(&parked), Flight::Prefile(&pre)] {
+            let t = trajectory(&inp, flight, Some(release), now()).unwrap();
+            assert_eq!(t.allowance_sec(), 0.0);
+            assert_eq!(t.wheels_up(), release);
+            let airborne_sec = (t.eta_at_field() - release).num_seconds();
+            assert!(airborne_sec > 3600, "{airborne_sec} s from wheels-up");
+        }
+        // A release already passed leaves now: the flight cannot have flown the minutes it sat out.
+        let late = trajectory(
+            &inp,
+            Flight::Pilot(&parked),
+            Some(now() - Duration::minutes(5)),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(late.wheels_up(), now());
+
+        let air = pilot([35.0, -78.0], 30_000, 450, plan("KJFK", "KMIA", ""));
+        for released in [None, Some(release)] {
+            let t = trajectory(&inp, Flight::Pilot(&air), released, now()).unwrap();
+            assert_eq!(t.wheels_up(), now(), "airborne, released {released:?}");
+            assert_eq!(t.allowance_sec(), 0.0, "airborne, released {released:?}");
+        }
+    }
+
+    /// AC2 assigned runway: a stored assignment replaces the heading guess in the ground allowance,
+    /// so a parked departure reaches its runway's taxi tier. FCA metering used to pass none.
+    #[test]
+    fn an_assigned_runway_sets_the_taxi_allowance() {
+        let sample = |runway: &str, taxi_sec: i32| taxi_estimate::TaxiSample {
+            gate_id: None,
+            aircraft: None,
+            runway: Some(runway.into()),
+            pushback_sec: Some(50),
+            startup_sec: Some(40),
+            taxi_sec,
+        };
+        let mut at_jfk: Vec<_> = (0..5).map(|_| sample("04L", 900)).collect();
+        at_jfk.extend((0..5).map(|_| sample("31L", 300)));
+        let samples = HashMap::from([("KJFK".to_string(), at_jfk)]);
+        let assigned = AssignedRunways::from([(
+            ("KJFK".to_string(), "AAL1".to_string()),
+            ("04L".to_string(), "auto".to_string()),
+        )]);
+        let (nav, ap) = (NavData::default(), airports());
+        let ground = |assigned| GroundInputs {
+            taxi_samples: &samples,
+            assigned,
+            ..GroundInputs::unused()
+        };
+        let parked = pilot(JFK, 13, 0, plan("KJFK", "KMIA", ""));
+        let with = with_ground(&nav, &ap, ground(&assigned));
+        let t = trajectory(&with, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(t.allowance_sec(), 50.0 + 40.0 + 900.0);
+        assert_eq!(t.ground_allowance().unwrap().runway.as_deref(), Some("04L"));
+
+        let empty = AssignedRunways::new();
+        let without = with_ground(&nav, &ap, ground(&empty));
+        let t = trajectory(&without, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(
+            t.ground_allowance().unwrap().runway,
+            None,
+            "positive control"
+        );
+        assert_ne!(t.allowance_sec(), 990.0);
+        // Another callsign's assignment is not this flight's.
+        let other = AssignedRunways::from([(
+            ("KJFK".to_string(), "DAL2".to_string()),
+            ("04L".to_string(), "auto".to_string()),
+        )]);
+        let inp = with_ground(&nav, &ap, ground(&other));
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert_eq!(t.ground_allowance().unwrap().runway, None);
+    }
+
+    /// AC2 filed cruise speed: the filed number, `0` when blank or junk, then the profile cap; an
+    /// unfiled speed takes the altitude default, not airport flow's old 420 kt.
+    #[test]
+    fn an_unfiled_cruise_speed_takes_the_altitude_default() {
+        assert_eq!(filed_tas("480"), 480.0);
+        assert_eq!(filed_tas(" 450 "), 450.0);
+        assert_eq!(filed_tas(""), 0.0);
+        assert_eq!(filed_tas("N0450"), 0.0);
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let tas = |raw: &str| {
+            let p = pilot(
+                [35.0, -78.0],
+                30_000,
+                450,
+                FlightPlan {
+                    cruise_tas: raw.into(),
+                    ..plan("KJFK", "KMIA", "")
+                },
+            );
+            trajectory(&inp, Flight::Pilot(&p), None, now())
+                .unwrap()
+                .cruise_tas()
+        };
+        assert_eq!(tas("480"), 480.0);
+        assert_eq!(tas(""), 440.0, "the FL350 altitude default");
+        assert_ne!(tas(""), 420.0);
+    }
+
+    /// AC2 filed altitude: the first level of a step-climb filing, and an unreadable one timed at
+    /// 35,000 ft.
+    #[test]
+    fn the_filed_altitude_is_read_once() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let cruise = |raw: &str| {
+            let p = pilot(
+                [35.0, -78.0],
+                30_000,
+                450,
+                FlightPlan {
+                    altitude: raw.into(),
+                    ..plan("KJFK", "KMIA", "")
+                },
+            );
+            trajectory(&inp, Flight::Pilot(&p), None, now())
+                .unwrap()
+                .cruise_ft()
+        };
+        assert_eq!(cruise("FL350/370"), 35_000.0);
+        assert_eq!(cruise("24000"), 24_000.0);
+        assert_eq!(cruise("VFR"), 35_000.0);
+    }
+
+    /// A prefile is timed from its departure field; one whose field is unknown over the nominal leg,
+    /// with no path to draw and no fixes.
+    #[test]
+    fn a_prefile_is_timed_from_its_departure_field() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let pre = prefile(plan("KJFK", "KMIA", ""));
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        assert_eq!(t.path().first(), Some(&JFK));
+        assert!(!t.airborne());
+
+        let lost = prefile(plan("KZZZ", "KMIA", ""));
+        let t = trajectory(&inp, Flight::Prefile(&lost), None, now()).unwrap();
+        assert!(t.path().is_empty());
+        assert_eq!(t.route_nm(), NOMINAL_ROUTE_NM);
+        assert!(t.fixes().is_empty());
+    }
+
+    /// An airborne flight with neither a route nor a known destination is not timed; one with no
+    /// flight plan is not either.
+    #[test]
+    fn an_airborne_flight_going_nowhere_known_is_not_timed() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let lost = pilot([35.0, -78.0], 30_000, 450, plan("KJFK", "KZZZ", ""));
+        assert!(trajectory(&inp, Flight::Pilot(&lost), None, now()).is_none());
+        let unfiled = Pilot {
+            flight_plan: None,
+            ..pilot([35.0, -78.0], 30_000, 450, plan("KJFK", "KMIA", ""))
+        };
+        assert!(trajectory(&inp, Flight::Pilot(&unfiled), None, now()).is_none());
+    }
+
+    /// The route is resolved up front and the profile only when a time is asked for, so a caller
+    /// that drops a flight on its route (an FCA crossing, a sector box) builds nothing for it.
+    #[test]
+    fn the_profile_is_built_only_when_a_time_is_asked_for() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let p = pilot([35.0, -78.0], 30_000, 450, plan("KJFK", "KMIA", ""));
+        let t = trajectory(&inp, Flight::Pilot(&p), None, now()).unwrap();
+        let _ = (t.path(), t.route_nm(), t.airborne());
+        assert!(t.timing.get().is_none());
+        let _ = t.eta_at_field();
+        assert!(t.timing.get().is_some());
+    }
+
+    /// The trajectory's times and positions agree: after the flying time to a point it is at that
+    /// point, and the ETA at the end of the path is the ETA at the field.
+    #[test]
+    fn a_trajectory_reaches_each_point_at_its_eta() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        for flight in [
+            pilot([35.0, -78.0], 30_000, 450, plan("KJFK", "KMIA", "")),
+            pilot(JFK, 13, 0, plan("KJFK", "KMIA", "")),
+        ] {
+            let t = trajectory(&inp, Flight::Pilot(&flight), None, now()).unwrap();
+            let len = path_len_nm(t.path());
+            assert_eq!(t.eta_at(len), t.eta_at_field());
+            for along in [0.0, len * 0.25, len * 0.5, len * 0.9] {
+                let sec = (t.eta_at(along) - t.wheels_up()).num_milliseconds() as f64 / 1000.0;
+                let at = t.progress_after(sec);
+                assert!(
+                    (at.along_nm - along).abs() < 0.5,
+                    "{along}: {}",
+                    at.along_nm
+                );
+                assert!((at.alt_ft - t.alt_at(along)).abs() < 50.0);
+            }
+            assert!(t.progress_after(1e9).landed);
+        }
+    }
+
+    // ---- #813 AC1: no surface times a flight outside the entry point ------------------------------
+
+    /// The calls into the model that produce a time, a speed or a position along a route. Outside
+    /// `feed/predict.rs` and `feed/trajectory.rs`, only [`trajectory`] and its [`Trajectory`] make them.
+    const TIMING_CALLS: [&str; 8] = [
+        "VerticalProfile::build",
+        "profile_from_here(",
+        "eta_along_route(",
+        "project_along_route(",
+        "arrival_eta(",
+        "capped_cruise_tas(",
+        ".time_between(",
+        ".distance_after(",
+    ];
+
+    /// `src` with its `//` comments and every `#[cfg(test)]` item removed: the code that ships.
+    fn shipped_code(src: &str) -> String {
+        let code: Vec<&str> = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < code.len() {
+            if code[i].trim() != "#[cfg(test)]" {
+                out.push_str(code[i]);
+                out.push('\n');
+                i += 1;
+                continue;
+            }
+            // Skip the item the attribute is on: to its `;` if that comes before any `{`, else to
+            // the brace that closes the first one.
+            let (mut depth, mut opened) = (0i32, false);
+            i += 1;
+            while i < code.len() {
+                for c in code[i].chars() {
+                    match c {
+                        '{' => (depth, opened) = (depth + 1, true),
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                let ends = if opened {
+                    depth <= 0
+                } else {
+                    code[i].trim_end().ends_with(';')
+                };
+                i += 1;
+                if ends {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The [`TIMING_CALLS`] `src` makes outside its comments and test items.
+    fn timing_calls(src: &str) -> Vec<&'static str> {
+        let code = shipped_code(src);
+        TIMING_CALLS
+            .into_iter()
+            .filter(|call| code.contains(call))
+            .collect()
+    }
+
+    /// The test-only files a `#[cfg(test)] mod name;` in `src` declares, as `name`.
+    fn test_modules(src: &str) -> Vec<String> {
+        let lines: Vec<&str> = src.lines().map(str::trim).collect();
+        lines
+            .windows(2)
+            .filter(|w| w[0] == "#[cfg(test)]")
+            .filter_map(|w| {
+                let m = w[1].strip_prefix("pub(crate) ").unwrap_or(w[1]);
+                m.strip_prefix("mod ")?
+                    .strip_suffix(';')
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read backend/src") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_entry_point_times_a_flight() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        let sources: Vec<(std::path::PathBuf, String)> = files
+            .into_iter()
+            .map(|p| {
+                let text = std::fs::read_to_string(&p).expect("read source");
+                (p, text)
+            })
+            .collect();
+        // A test-only file declared next to its parent (`#[cfg(test)] mod x;` -> `x.rs`).
+        let test_only: Vec<std::path::PathBuf> = sources
+            .iter()
+            .flat_map(|(p, text)| {
+                let dir = p.parent().unwrap().to_path_buf();
+                test_modules(text)
+                    .into_iter()
+                    .map(move |m| dir.join(format!("{m}.rs")))
+            })
+            .collect();
+        let owners = [src.join("feed/predict.rs"), src.join("feed/trajectory.rs")];
+        let mut scanned = 0;
+        let mut offenders = Vec::new();
+        for (path, text) in &sources {
+            if owners.contains(path) || test_only.contains(path) {
+                continue;
+            }
+            scanned += 1;
+            for call in timing_calls(text) {
+                offenders.push(format!(
+                    "{}: {call}",
+                    path.strip_prefix(&src).unwrap().display()
+                ));
+            }
+        }
+        assert!(scanned > 100, "positive control: {scanned} files scanned");
+        assert!(
+            test_only.contains(&src.join("handlers/flow_prefile_candidate_tests.rs")),
+            "positive control: test-only files are found"
+        );
+        assert!(
+            offenders.is_empty(),
+            "time a flight through `predict::trajectory`, not the model directly: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn the_guard_flags_a_timing_call_in_shipped_code_only() {
+        let shipped = "fn eta() {\n    predict::arrival_eta(a, b);\n}\n";
+        assert_eq!(timing_calls(shipped), vec!["arrival_eta("]);
+        // Every listed call is caught, each on its own.
+        for call in TIMING_CALLS {
+            let src = format!("fn f() {{ let x = {call}1); }}\n");
+            assert_eq!(timing_calls(&src), vec![call], "{call}");
+        }
+        // A comment, a test module and a test-only helper are not shipped code...
+        let tests = "// predict::arrival_eta(a)\n#[cfg(test)]\nmod tests {\n    fn t() {\n        vp.time_between(1.0, 0.0);\n    }\n}\n#[cfg(test)]\nfn helper() { vp.distance_after(1.0, 2.0); }\n";
+        assert!(timing_calls(tests).is_empty());
+        // ...but code after them is.
+        let after = format!("{tests}fn late() {{ trajectory::capped_cruise_tas(0.0, 1.0, p); }}\n");
+        assert_eq!(timing_calls(&after), vec!["capped_cruise_tas("]);
+        // A `#[cfg(test)]` declaration ending in `;` skips only itself.
+        let decl = "#[cfg(test)]\nmod x;\nfn g() { predict::eta_along_route(a); }\n";
+        assert_eq!(timing_calls(decl), vec!["eta_along_route("]);
+        assert_eq!(test_modules(decl), vec!["x".to_string()]);
     }
 }

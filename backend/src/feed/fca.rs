@@ -142,7 +142,7 @@ fn remaining_anchors(anchors: &[NamedAnchor], lat: f64, lon: f64, hdg: f64) -> V
 /// This is index-based, not a distance/epsilon match on the aircraft's coordinates — a real gate or
 /// ramp position is essentially never the airport's exact reference point, so a naive "prepend
 /// always" would still add a spurious extra point at the route's start and inflate
-/// `predict::arrival_eta`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
+/// `predict::trajectory`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
 /// ordinary pre-departure traffic on an otherwise-unresolved route.
 fn forward_route_from_position(anchors: &[NamedAnchor], lat: f64, lon: f64) -> Vec<NamedAnchor> {
     if anchors.len() < 2 {
@@ -223,7 +223,7 @@ pub fn route_path(
     if anchors.len() < 2 {
         return None;
     }
-    let path = if gs >= 50 {
+    let path = if super::predict::is_airborne(gs) {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
         forward_route_from_position(&anchors, lat, lon)
@@ -257,7 +257,7 @@ pub fn route_path_named(
     if anchors.len() < 2 {
         return None;
     }
-    let path = if gs >= 50 {
+    let path = if super::predict::is_airborne(gs) {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
         forward_route_from_position(&anchors, lat, lon)
@@ -550,10 +550,10 @@ fn angle_diff(a: f64, b: f64) -> f64 {
 
 /// Position and heading `target_nm` along `path` (a `[lat, lon]` polyline from its start), for
 /// #226's forward prediction scrubber — the geometric counterpart to
-/// `predict::project_along_route`'s along-route distance. Clamps to the last point (with that
-/// leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must have
-/// at least 2 points — the caller (only ever fed an already-resolved [`route_path`]) guarantees
-/// this.
+/// `predict::Trajectory::progress_after`'s along-route distance. Clamps to the last point (with
+/// that leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must
+/// have at least 2 points. An airborne trajectory always has one; a ground trajectory on the
+/// nominal leg has none, which `sector_tracks` checks before calling this.
 pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 2], f64) {
     let mut acc = 0.0;
     for w in path.windows(2) {
@@ -770,7 +770,7 @@ mod tests {
         // full untrimmed filed route from departure. Reusing `forward_route_from_position` (shared
         // with `route_path`) is what makes that hold; a version that fell back to the bare anchor
         // list here would report RBV as still ahead and its total distance would diverge from
-        // `route_path`'s (`path_len_nm`) — the exact number `predict::arrival_eta` times the real
+        // `route_path`'s (`path_len_nm`) — the exact number `predict::trajectory` times the real
         // ETA against.
         let nav = NavData::load();
         let ap = HashMap::from([

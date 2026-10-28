@@ -9,15 +9,11 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::airports::AirportDb;
 use super::delays::nearest_runway;
-use super::nav::NavData;
 use super::predict;
 use super::runway_db::RunwayDb;
 use super::taxi_estimate;
-use super::trajectory::{self, RouteWind};
 use super::vatsim::VatsimData;
-use super::winds::Winds;
 use crate::models::AirportGateBody;
 
 /// A gate/parking spot must be within this of a spawn point to count as a match (#164 sub-issue
@@ -26,15 +22,18 @@ const GATE_MATCH_MAX_NM: f64 = 0.06; // ~360 ft
 
 /// Groundspeed above which a pilot's heading reflects actual taxi movement rather than arbitrary
 /// gate-parking orientation (#164 sub-issue E). A stationary aircraft's heading is essentially
-/// random with respect to any runway, so [`resolve_ground_allowance_sec`] only trusts it — and
+/// random with respect to any runway, so [`resolve_ground_allowance`] only trusts it — and
 /// attempts a runway match — once the aircraft has crossed this threshold; below it, the ladder
 /// falls to the airport/default tier instead of risking a coincidental wrong-runway match.
 /// Mirrors `taxi_observations`'s own roll-detection threshold (`GS_START`) — the same physical
 /// moment, one shared constant.
 pub(crate) const TAXI_ROLL_GS_KT: i64 = 7;
 
-/// Nominal arrival-stream groundspeed used to convert miles-in-trail to a time gap.
-const MIT_NOMINAL_KT: f64 = 360.0; // 6 nm/min
+/// Where an airport-flow miles-in-trail is converted to a time gap: the trailing flight's predicted
+/// groundspeed this far (nm) along-route short of the field (#813). Airport-flow MIT is set per
+/// arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is
+/// no fix to read a speed at; OIS holds no meter-fix data per airport.
+pub(crate) const MIT_CROSSING_NM: f64 = 40.0;
 
 /// A per-gate spacing rule (subset of `GateRule` the scheduler needs).
 pub struct GateSpacing {
@@ -88,6 +87,10 @@ pub struct FlowFlight {
     pub cfr: Option<DateTime<Utc>>,
     /// True when the CFR has been issued (locked) rather than merely proposed.
     pub cfr_issued: bool,
+    // The predicted groundspeed (kt) at `MIT_CROSSING_NM` from the field, that converts this flight's
+    // miles-in-trail to a time gap. Internal to metering, never serialized.
+    #[serde(skip)]
+    pub mit_cross_kt: f64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -139,7 +142,7 @@ pub fn pending_departures(deps: &HashSet<String>, data: &VatsimData) -> Vec<Pend
             continue;
         }
         // Already airborne means it has departed — not a pending departure.
-        if p.groundspeed > 60 && p.altitude > 300 {
+        if predict::is_airborne(p.groundspeed) {
             continue;
         }
         let arrival = fp.arrival.to_ascii_uppercase();
@@ -177,194 +180,58 @@ pub fn pending_departures(deps: &HashSet<String>, data: &VatsimData) -> Vec<Pend
 }
 
 /// Compute a full arrival picture for `icao`. `icao` must already be uppercase. `issued`
-/// maps callsign -> locked wheels-up for any CFRs already issued into this field.
-#[allow(clippy::too_many_arguments)]
+/// maps callsign -> locked wheels-up for any CFRs already issued into this field. Every flight is
+/// timed through [`predict::trajectory`], which decides its inputs (#813).
 pub fn compute(
     icao: &str,
     program: Option<&ProgramInputs>,
     data: &VatsimData,
-    airports: &AirportDb,
-    nav: &NavData,
-    winds: &Winds,
-    profiles: &trajectory::ProfileTable,
+    inp: &predict::Inputs,
     issued: &HashMap<String, DateTime<Utc>>,
-    gates: &HashMap<String, Vec<AirportGateBody>>,
-    runways: &RunwayDb,
-    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     // Callsigns manually dropped as bogus by any facility (#342). Airport flow has no single
     // facility context, and a flight with garbage data is garbage on every scope, so a removal
     // anywhere keeps it out of demand / AADC / metering here.
     manual_exclusions: &HashSet<String>,
     now: DateTime<Utc>,
 ) -> Flow {
-    let arr = airports.get(icao).map(|a| (a.lat, a.lon));
+    let arr = inp.airports.get(icao).map(|a| (a.lat, a.lon));
     let mut flights: Vec<FlowFlight> = Vec::new();
     // Estimated departure time (ms) per flight, aligned with `flights`; used to back out
     // wheels-up (CFR) from the metered STA. None for airborne/arrived (already flying).
     let mut etd_ms: Vec<Option<i64>> = Vec::new();
 
-    for p in &data.pilots {
-        let Some(fp) = &p.flight_plan else { continue };
+    let pilots = data.pilots.iter().map(predict::Flight::Pilot);
+    let prefiles = data.prefiles.iter().map(predict::Flight::Prefile);
+    for flight in pilots.chain(prefiles) {
+        let (callsign, fp) = match flight {
+            predict::Flight::Pilot(p) => (&p.callsign, p.flight_plan.as_ref()),
+            predict::Flight::Prefile(pf) => (&pf.callsign, pf.flight_plan.as_ref()),
+        };
+        let Some(fp) = fp else { continue };
         if fp.arrival.to_ascii_uppercase() != icao {
             continue;
         }
-        let (ty, wake) = fp.aircraft_type_wake();
-        let profile = profiles.resolve(&ty, &wake);
-        let dep = fp.departure.to_ascii_uppercase();
-        let gate = arrival_gate(&fp.route, icao);
-        let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg))
-            || manual_exclusions.contains(&p.callsign);
-
-        let dist_to_arr = arr.map(|(alat, alon)| gc_dist(p.latitude, p.longitude, alat, alon));
-        let airborne = p.groundspeed > 60 && p.altitude > 300;
-        let arrived = !airborne && p.groundspeed <= 60 && dist_to_arr.is_some_and(|d| d < 5.0);
-
-        if arrived {
-            flights.push(FlowFlight {
-                callsign: p.callsign.clone(),
-                dep,
-                aircraft_type: ty,
-                category: (!wake.is_empty()).then_some(wake),
-                gate: gate.clone(),
-                status: "arrived".into(),
-                distance_nm: dist_to_arr,
-                eta: Some(now),
-                groundspeed: p.groundspeed,
-                excluded,
-                ..Default::default()
-            });
-            etd_ms.push(None);
-        } else if airborne && arr.is_some() {
-            let (alat, alon) = arr.unwrap();
-            let cruise = trajectory::parse_alt_ft(&fp.altitude);
-            let cruise_tas =
-                trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
-            // Airborne arrival: resolve the filed route and time the remaining along-route
-            // distance to the field through the shared predictor (same one FCA metering uses),
-            // so the ladder slot matches the aircraft's drawn route on the map.
-            let pred = predict::arrival_eta(
-                nav,
-                airports,
-                winds,
-                profile,
-                &predict::ArrivalInput {
-                    dep: &dep,
-                    arr: &fp.arrival,
-                    route: &fp.route,
-                    pos: [p.latitude, p.longitude],
-                    alt_ft: p.altitude as f64,
-                    gs: p.groundspeed,
-                    hdg: p.heading,
-                    arr_ll: [alat, alon],
-                    cruise_ft: cruise,
-                    cruise_tas,
-                },
-                // Airborne — `eta_along_route` only applies the ground allowance on its ground
-                // branch, so this value is structurally inert.
-                0.0,
-                now,
-            );
-            flights.push(FlowFlight {
-                callsign: p.callsign.clone(),
-                dep,
-                aircraft_type: ty,
-                category: (!wake.is_empty()).then_some(wake),
-                gate: gate.clone(),
-                status: "airborne".into(),
-                distance_nm: Some(pred.route_nm),
-                eta: Some(pred.eta),
-                groundspeed: p.groundspeed,
-                excluded,
-                ..Default::default()
-            });
-            etd_ms.push(None);
-        } else {
-            // On the ground (or position-less): estimate a full route flight time.
-            let (route_nm, ft_min, allowance_sec) = ground_estimate(
-                nav,
-                &dep,
-                arr,
-                fp,
-                airports,
-                winds,
-                profile,
-                Some((p.latitude, p.longitude, p.heading, p.groundspeed)),
-                gates,
-                runways,
-                taxi_samples,
-                now,
-            );
-            // A wheels-up time, not a gate time: every CFR backed out of it is read as wheels-up
-            // (#815), so the ground allowance inside `ft_min` sits before it.
-            let wheels_up = now + Duration::milliseconds((allowance_sec * 1000.0) as i64);
-            flights.push(FlowFlight {
-                callsign: p.callsign.clone(),
-                dep,
-                aircraft_type: ty,
-                category: (!wake.is_empty()).then_some(wake),
-                gate,
-                status: "ground".into(),
-                distance_nm: Some(route_nm),
-                eta: Some(now + minutes(ft_min)),
-                etd: Some(wheels_up),
-                groundspeed: p.groundspeed,
-                excluded,
-                ..Default::default()
-            });
-            // Assumed ready to push now, so wheels-up is one ground allowance out; CFR delay (if
-            // any) is the only hold.
-            etd_ms.push(Some(wheels_up.timestamp_millis()));
-        }
-    }
-
-    for pf in &data.prefiles {
-        let Some(fp) = &pf.flight_plan else { continue };
-        if fp.arrival.to_ascii_uppercase() != icao {
-            continue;
-        }
-        if flights.iter().any(|f| f.callsign == pf.callsign) {
+        // A prefile that lingers after its pilot connects is the same aircraft.
+        if matches!(flight, predict::Flight::Prefile(_))
+            && flights.iter().any(|f| &f.callsign == callsign)
+        {
             continue;
         }
         let (ty, wake) = fp.aircraft_type_wake();
-        let profile = profiles.resolve(&ty, &wake);
-        let dep = fp.departure.to_ascii_uppercase();
-        let gate = arrival_gate(&fp.route, icao);
         let excluded = program.is_some_and(|pg| is_excluded(&ty, &wake, pg))
-            || manual_exclusions.contains(&pf.callsign);
-        // A prefile has no live position — gate/runway matching is skipped (`ground_estimate`
-        // passes `None`), falling to the airport/default tier.
-        let (route_nm, ft_min, allowance_sec) = ground_estimate(
-            nav,
-            &dep,
-            arr,
-            fp,
-            airports,
-            winds,
-            profile,
-            None,
-            gates,
-            runways,
-            taxi_samples,
-            now,
-        );
-        // The filed deptime is off-block; wheels-up follows one ground allowance later (#815).
-        let off_block = proposed_etd(&fp.deptime, now);
-        let etd = off_block + Duration::milliseconds((allowance_sec * 1000.0) as i64);
-        flights.push(FlowFlight {
-            callsign: pf.callsign.clone(),
-            dep,
+            || manual_exclusions.contains(callsign);
+        let mut row = FlowFlight {
+            callsign: callsign.clone(),
+            dep: fp.departure.to_ascii_uppercase(),
             aircraft_type: ty,
             category: (!wake.is_empty()).then_some(wake),
-            gate,
-            status: "proposed".into(),
-            distance_nm: Some(route_nm),
-            eta: Some(off_block + minutes(ft_min)),
-            etd: Some(etd),
-            groundspeed: 0,
+            gate: arrival_gate(&fp.route, icao),
             excluded,
             ..Default::default()
-        });
-        etd_ms.push(Some(etd.timestamp_millis()));
+        };
+        let etd = time_flow_flight(&mut row, flight, inp, arr, now);
+        flights.push(row);
+        etd_ms.push(etd);
     }
 
     // Metering runs only when a program (AAR) exists — it's the opt-in TMU feature.
@@ -393,8 +260,52 @@ pub fn compute(
         demand_60min,
         over_capacity: program.map(|p| demand_60min as i32 > p.aar),
         flights,
-        stars: nav.stars_for(icao).to_vec(),
+        stars: inp.nav.stars_for(icao).to_vec(),
     }
+}
+
+/// Status, distance, ETA and wheels-up of one inbound, read off its [`predict::trajectory`]. Returns
+/// the wheels-up (epoch ms) metering backs a CFR out of; `None` once airborne or arrived.
+fn time_flow_flight(
+    row: &mut FlowFlight,
+    flight: predict::Flight,
+    inp: &predict::Inputs,
+    arr: Option<(f64, f64)>,
+    now: DateTime<Utc>,
+) -> Option<i64> {
+    let pilot = match flight {
+        predict::Flight::Pilot(p) => Some(p),
+        predict::Flight::Prefile(_) => None,
+    };
+    let airborne = pilot.is_some_and(|p| predict::is_airborne(p.groundspeed));
+    let to_field = pilot
+        .zip(arr)
+        .map(|(p, (alat, alon))| gc_dist(p.latitude, p.longitude, alat, alon));
+    row.groundspeed = pilot.map_or(0, |p| p.groundspeed);
+    if pilot.is_some() && !airborne && to_field.is_some_and(|d| d < predict::ARRIVED_NM) {
+        row.status = "arrived".into();
+        row.distance_nm = to_field;
+        row.eta = Some(now);
+        return None;
+    }
+    row.status = match (airborne, pilot) {
+        (true, _) => "airborne",
+        (false, Some(_)) => "ground",
+        (false, None) => "proposed",
+    }
+    .into();
+    let traj = predict::trajectory(inp, flight, None, now)?;
+    row.distance_nm = Some(traj.route_nm());
+    row.eta = Some(traj.eta_at_field());
+    row.mit_cross_kt = traj.gs_short_of_field(MIT_CROSSING_NM);
+    if airborne {
+        return None;
+    }
+    // A wheels-up time, not a gate time: every CFR backed out of it is read as wheels-up (#815), so
+    // the ground allowance sits before it.
+    let wheels_up = traj.wheels_up();
+    row.etd = Some(wheels_up);
+    Some(wheels_up.timestamp_millis())
 }
 
 /// Forward window AADC buckets over (#242): fixed at 4 hours regardless of bucket size.
@@ -526,11 +437,12 @@ fn is_excluded(ty: &str, wake: &str, pg: &ProgramInputs) -> bool {
     false
 }
 
-/// Same-route in-trail interval (ms) from a spacing rule: MIT (converted at the nominal
-/// arrival speed) if set, else minutes-in-trail — never below the runway interval.
-fn route_interval_ms(trail: i32, mit: i32, runway_ms: f64) -> f64 {
+/// Same-route in-trail interval (ms) from a spacing rule: MIT converted at the trailing flight's
+/// predicted crossing speed `cross_kt` (floored at [`predict::MIN_CROSS_SPEED_KT`], as FCA metering
+/// floors it, #355) if set, else minutes-in-trail — never below the runway interval.
+fn route_interval_ms(trail: i32, mit: i32, runway_ms: f64, cross_kt: f64) -> f64 {
     let ri = if mit > 0 {
-        (mit as f64 / MIT_NOMINAL_KT) * 3_600_000.0
+        (mit as f64 / cross_kt.max(predict::MIN_CROSS_SPEED_KT)) * 3_600_000.0
     } else {
         trail as f64 * 60_000.0
     };
@@ -539,11 +451,12 @@ fn route_interval_ms(trail: i32, mit: i32, runway_ms: f64) -> f64 {
 
 /// In-trail interval (ms) for a specific arrival gate: a matching per-gate rule wins,
 /// else the program-wide trail/MIT, never below the runway interval.
-fn gate_spacing_ms(pg: &ProgramInputs, runway_ms: f64, gate: &str) -> f64 {
+/// `cross_kt` is the trailing flight's `FlowFlight::mit_cross_kt`.
+fn gate_spacing_ms(pg: &ProgramInputs, runway_ms: f64, gate: &str, cross_kt: f64) -> f64 {
     if let Some(g) = pg.gates.iter().find(|g| g.name == gate) {
-        return route_interval_ms(g.trail, g.mit, runway_ms);
+        return route_interval_ms(g.trail, g.mit, runway_ms, cross_kt);
     }
-    route_interval_ms(pg.trail, pg.mit, runway_ms)
+    route_interval_ms(pg.trail, pg.mit, runway_ms, cross_kt)
 }
 
 fn eta_ms(f: &FlowFlight, now_ms: i64) -> i64 {
@@ -593,7 +506,7 @@ fn apply_metering(
         .collect();
     ground.sort_by_key(|&i| eta_ms(&flights[i], now_ms));
 
-    let mut assigned: Vec<(f64, String)> = Vec::new(); // (sta_ms, gate)
+    let mut assigned: Vec<Slot> = Vec::new();
     let mut prev_sta = f64::NEG_INFINITY;
     let mut last_gate_sta: HashMap<String, f64> = HashMap::new();
 
@@ -604,14 +517,14 @@ fn apply_metering(
         if let Some(g) = &flights[i].gate
             && let Some(&lg) = last_gate_sta.get(g)
         {
-            sta = sta.max(lg + gate_spacing_ms(pg, runway, g));
+            sta = sta.max(lg + gate_spacing_ms(pg, runway, g, flights[i].mit_cross_kt));
         }
         write_meter(&mut flights[i], sta, eta, etd_ms[i]);
         prev_sta = sta;
         if let Some(g) = flights[i].gate.clone() {
             last_gate_sta.insert(g, sta);
         }
-        assigned.push((sta, flights[i].gate.clone().unwrap_or_default()));
+        assigned.push(Slot::of(&flights[i], sta));
     }
 
     // Tier 2a — issued CFRs keep their locked wheels-up; the slot is reserved for them.
@@ -625,19 +538,24 @@ fn apply_metering(
         flights[i].delay_min = ((sta - eta).max(0) as f64 / 60_000.0).round() as i64;
         flights[i].cfr = Some(wheels);
         flights[i].cfr_issued = true;
-        assigned.push((sta as f64, flights[i].gate.clone().unwrap_or_default()));
+        assigned.push(Slot::of(&flights[i], sta as f64));
     }
 
     // Tier 2b — everything else on the ground slots into the first gap clear of every slot.
     for &i in &ground {
         let eta = eta_ms(&flights[i], now_ms) as f64;
         let gate = flights[i].gate.clone();
-        let cand = earliest_clear_slot(eta, &assigned, |sg| match &gate {
-            Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(pg, runway, g),
-            _ => runway,
-        });
+        let cand = earliest_clear_slot(
+            eta,
+            flights[i].mit_cross_kt,
+            &assigned,
+            |sg, kt| match &gate {
+                Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(pg, runway, g, kt),
+                _ => runway,
+            },
+        );
         write_meter(&mut flights[i], cand, eta, etd_ms[i]);
-        assigned.push((cand, gate.unwrap_or_default()));
+        assigned.push(Slot::of(&flights[i], cand));
     }
 
     // Sequence numbers follow the metered arrival order.
@@ -658,22 +576,53 @@ fn apply_metering(
     }
 }
 
+/// An occupied arrival slot: its time (epoch-ms), gate (empty for none) and the holder's
+/// `FlowFlight::mit_cross_kt`.
+struct Slot {
+    t: f64,
+    gate: String,
+    cross_kt: f64,
+}
+
+impl Slot {
+    fn of(f: &FlowFlight, t: f64) -> Self {
+        Slot {
+            t,
+            gate: f.gate.clone().unwrap_or_default(),
+            cross_kt: f.mit_cross_kt,
+        }
+    }
+}
+
 /// Push `start` (epoch-ms) forward to the earliest instant clear of every occupied slot in
-/// `slots` (`(time_ms, gate)`), where each slot demands `sep(gate)` ms of separation on either
-/// side. One ascending pass is sufficient *and* necessary: `cand` only ever moves forward, so
+/// `slots`. `sep(gate, kt)` is the separation behind a leader on `gate` when the trailing flight
+/// crosses at `kt`: the slot holder's speed while the candidate is ahead of it, `cand_kt` once
+/// the candidate is behind it, which is where a conflict always moves it.
+///
+/// One ascending pass is sufficient *and* necessary: `cand` only ever moves forward, so
 /// once it clears an earlier slot it stays clear — while the `while moved { for slot … }`
 /// fixpoint this replaces could **fail to terminate**. At epoch-ms magnitudes (t ≈ 1.7e12) a
 /// non-integer `sep` (AAR that doesn't divide 3,600,000) makes `t + req` round to a value still
 /// `< req` from `t`; the conflict never clears, so the fixpoint spins a worker at 100% CPU
 /// forever (the "stuck on Loading…" outage).
-fn earliest_clear_slot(start: f64, slots: &[(f64, String)], sep: impl Fn(&str) -> f64) -> f64 {
-    let mut ordered: Vec<&(f64, String)> = slots.iter().collect();
-    ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+fn earliest_clear_slot(
+    start: f64,
+    cand_kt: f64,
+    slots: &[Slot],
+    sep: impl Fn(&str, f64) -> f64,
+) -> f64 {
+    let mut ordered: Vec<&Slot> = slots.iter().collect();
+    ordered.sort_by(|a, b| a.t.total_cmp(&b.t));
     let mut cand = start;
-    for (t, gate) in ordered {
-        let req = sep(gate);
-        if (cand - t).abs() < req {
-            cand = t + req;
+    for slot in ordered {
+        let behind = sep(&slot.gate, cand_kt);
+        let conflict = if cand >= slot.t {
+            cand - slot.t < behind
+        } else {
+            slot.t - cand < sep(&slot.gate, slot.cross_kt)
+        };
+        if conflict {
+            cand = slot.t + behind;
         }
     }
     cand
@@ -699,14 +648,8 @@ pub fn ready_time_slot(
     icao: &str,
     program: &ProgramInputs,
     data: &VatsimData,
-    airports: &AirportDb,
-    nav: &NavData,
-    winds: &Winds,
-    profiles: &trajectory::ProfileTable,
+    inp: &predict::Inputs,
     issued: &HashMap<String, DateTime<Utc>>,
-    gates: &HashMap<String, Vec<AirportGateBody>>,
-    runways: &RunwayDb,
-    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
     // Threaded through so the slot search sees the same flow picture as every other surface —
     // a manually excluded bogus flight (#342) must not block a real CFR slot.
     manual_exclusions: &HashSet<String>,
@@ -718,14 +661,8 @@ pub fn ready_time_slot(
         icao,
         Some(program),
         data,
-        airports,
-        nav,
-        winds,
-        profiles,
+        inp,
         issued,
-        gates,
-        runways,
-        taxi_samples,
         manual_exclusions,
         now,
     );
@@ -738,142 +675,27 @@ pub fn ready_time_slot(
     let gate = target.gate.clone();
 
     // Every other metered arrival's assigned slot.
-    let assigned: Vec<(f64, String)> = flow
+    let assigned: Vec<Slot> = flow
         .flights
         .iter()
-        .filter(|f| {
-            f.callsign != callsign && !f.excluded && f.status != "arrived" && f.sta.is_some()
-        })
-        .map(|f| {
-            (
-                f.sta.unwrap().timestamp_millis() as f64,
-                f.gate.clone().unwrap_or_default(),
-            )
-        })
+        .filter(|f| f.callsign != callsign && !f.excluded && f.status != "arrived")
+        .filter_map(|f| Some(Slot::of(f, f.sta?.timestamp_millis() as f64)))
         .collect();
 
     // Slot the flight's arrival from (ready + enroute) forward past any conflicts. Never
     // earlier than now — a release can't be issued in the past.
     let base_ms = ready.timestamp_millis().max(now.timestamp_millis());
-    let cand = earliest_clear_slot((base_ms + flight_ms) as f64, &assigned, |sg| match &gate {
-        Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(program, runway, g),
-        _ => runway,
-    });
+    let start = (base_ms + flight_ms) as f64;
+    let cand = earliest_clear_slot(
+        start,
+        target.mit_cross_kt,
+        &assigned,
+        |sg, kt| match &gate {
+            Some(g) if !sg.is_empty() && g == sg => gate_spacing_ms(program, runway, g, kt),
+            _ => runway,
+        },
+    );
     DateTime::from_timestamp_millis(cand as i64 - flight_ms)
-}
-
-/// Along-route length (nm), full flight time (min) and the ground allowance inside it (s) for a
-/// ground/proposed flight: resolves the filed route from the surface through the shared predictor
-/// (climb → cruise → descent + taxi), the same path an airborne arrival takes. Falls back to a
-/// nominal 300 nm leg when there are no departure/arrival coordinates to resolve a route from. The
-/// allowance comes back separately so a caller can place wheels-up after it (#815).
-///
-/// `pilot_pos` (`lat, lon, hdg, gs`) is the pilot's real position/heading/groundspeed when known —
-/// used to resolve a gate/runway match for the learned ground allowance (#164 sub-issue E); `None`
-/// for a prefile (no live position), which skips matching and falls to the airport/default tier.
-#[allow(clippy::too_many_arguments)]
-fn ground_estimate(
-    nav: &NavData,
-    dep: &str,
-    arr: Option<(f64, f64)>,
-    fp: &super::vatsim::FlightPlan,
-    airports: &AirportDb,
-    winds: &Winds,
-    profile: &trajectory::AircraftProfile,
-    pilot_pos: Option<(f64, f64, i64, i64)>,
-    gates: &HashMap<String, Vec<AirportGateBody>>,
-    runways: &RunwayDb,
-    taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
-    now: DateTime<Utc>,
-) -> (f64, f64, f64) {
-    let cruise = trajectory::parse_alt_ft(&fp.altitude);
-    let cruise_tas = trajectory::capped_cruise_tas(parse_tas(&fp.cruise_tas), cruise, profile);
-    let aircraft = (!fp.aircraft_short.is_empty()).then_some(fp.aircraft_short.as_str());
-    let allowance =
-        // `None`: the demand path has no assignment in hand. Wiring one would need a new AppState
-        // cache, since the feed holds no DB handle — out of #513's scope, and stated in its PR.
-        resolve_ground_allowance_sec(gates, runways, taxi_samples, dep, aircraft, pilot_pos, None);
-    match (airports.get(dep).map(|a| (a.lat, a.lon)), arr) {
-        (Some(dep_ll), Some(arr_ll)) => {
-            let pred = predict::arrival_eta(
-                nav,
-                airports,
-                winds,
-                profile,
-                &predict::ArrivalInput {
-                    dep,
-                    arr: &fp.arrival,
-                    route: &fp.route,
-                    pos: [dep_ll.0, dep_ll.1],
-                    alt_ft: 0.0,
-                    gs: 0,
-                    hdg: 0,
-                    arr_ll: [arr_ll.0, arr_ll.1],
-                    cruise_ft: cruise,
-                    cruise_tas,
-                },
-                allowance,
-                now,
-            );
-            let ft_min = (pred.eta - now).num_seconds() as f64 / 60.0;
-            (pred.route_nm, ft_min, allowance)
-        }
-        _ => {
-            // `airborne = false`: a synthetic 300 nm climb from the surface, so the current
-            // altitude and observed groundspeed are inert here.
-            let vp = predict::profile_from_here(
-                false,
-                300.0,
-                0.0,
-                0.0,
-                cruise,
-                cruise_tas,
-                airports,
-                &fp.arrival,
-                profile,
-                RouteWind::still(),
-            );
-            let ft_min = vp.time_between(300.0, 0.0) / 60.0 + allowance / 60.0;
-            (300.0, ft_min, allowance)
-        }
-    }
-}
-
-/// Estimated departure time for a prefile: filed `deptime` (HHMM Z) nudged into a sane
-/// window, else 20 minutes out. Never earlier than 20 minutes from now.
-fn proposed_etd(deptime: &str, now: DateTime<Utc>) -> DateTime<Utc> {
-    let floor = now + Duration::minutes(20);
-    if deptime.len() == 4 && deptime.chars().all(|c| c.is_ascii_digit()) {
-        let h: u32 = deptime[0..2].parse().unwrap_or(99);
-        let m: u32 = deptime[2..4].parse().unwrap_or(99);
-        if h < 24
-            && m < 60
-            && let Some(naive) = now.date_naive().and_hms_opt(h, m, 0)
-        {
-            let mut t = naive.and_utc();
-            if t < now - Duration::hours(2) {
-                t += Duration::hours(24);
-            } else if t - now > Duration::hours(12) {
-                t -= Duration::hours(24);
-            }
-            return t.max(floor);
-        }
-    }
-    floor
-}
-
-fn minutes(m: f64) -> Duration {
-    Duration::milliseconds((m * 60_000.0) as i64)
-}
-
-/// Filed cruise TAS (knots); defaults to 420 for missing/implausible values.
-pub(crate) fn parse_tas(raw: &str) -> f64 {
-    let n: f64 = raw.trim().parse().unwrap_or(0.0);
-    if (60.0..=1200.0).contains(&n) {
-        n
-    } else {
-        420.0
-    }
 }
 
 /// Arrival gate (STAR/fix) heuristic ported from vatflow's `arrivalGate`: scan the filed
@@ -949,7 +771,7 @@ pub fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 /// The gate nearest `(lat, lon)`, within [`GATE_MATCH_MAX_NM`], else `None`. Shared by
 /// `feed::taxi_observations` (matching a completed departure's spawn point, #164 sub-issue C) and
-/// [`resolve_ground_allowance_sec`] below (matching a live/proposed departure's position, sub-issue
+/// [`resolve_ground_allowance`] below (matching a live/proposed departure's position, sub-issue
 /// E) — one implementation, not two.
 pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Option<String> {
     let mut best: Option<(String, f64)> = None;
@@ -965,8 +787,7 @@ pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Opt
 
 /// The full derivation behind a ground allowance (#164 sub-issue F): which gate/runway matched (if
 /// any), and the pushback/start-up/taxi estimates `taxi_estimate`'s ladder produced from them. Debug-mode
-/// surfaces read this directly; [`resolve_ground_allowance_sec`] is the plain-total shorthand most
-/// callers want.
+/// surfaces read this directly; `predict::Trajectory` reads its total.
 pub(crate) struct GroundAllowanceBreakdown {
     pub gate_id: Option<String>,
     pub runway: Option<String>,
@@ -1041,8 +862,8 @@ pub(crate) fn resolve_ground_allowance(
     }
 }
 
-/// Just the total seconds from [`resolve_ground_allowance`] — most callers don't need the
-/// derivation, only the number `predict::eta_along_route` adds to a not-yet-airborne ETA.
+/// Just the total seconds from [`resolve_ground_allowance`], for the tests that pin the allowance.
+#[cfg(test)]
 pub(crate) fn resolve_ground_allowance_sec(
     gates: &HashMap<String, Vec<AirportGateBody>>,
     runways: &RunwayDb,
@@ -1098,8 +919,64 @@ static ENGINE_REF: LazyLock<HashMap<&'static str, Engine>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::airports::Airport;
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::nav::NavData;
+    use crate::feed::trajectory;
     use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+    use crate::feed::winds::Winds;
+
+    /// [`compute`] over loose tables and no assigned runways, the shape these tests were written in.
+    #[allow(clippy::too_many_arguments)] // one argument per table `predict::Inputs` groups
+    fn compute_with(
+        icao: &str,
+        program: Option<&ProgramInputs>,
+        data: &VatsimData,
+        airports: &AirportDb,
+        nav: &NavData,
+        winds: &Winds,
+        profiles: &trajectory::ProfileTable,
+        issued: &HashMap<String, DateTime<Utc>>,
+        gates: &HashMap<String, Vec<AirportGateBody>>,
+        runways: &RunwayDb,
+        taxi_samples: &HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+        manual_exclusions: &HashSet<String>,
+        now: DateTime<Utc>,
+    ) -> Flow {
+        let assigned = predict::AssignedRunways::new();
+        let inp = predict::Inputs {
+            nav,
+            airports,
+            winds,
+            profiles,
+            ground: predict::GroundInputs {
+                gates,
+                runways,
+                taxi_samples,
+                assigned: &assigned,
+            },
+        };
+        compute(icao, program, data, &inp, issued, manual_exclusions, now)
+    }
+
+    /// Inputs with no gate catalog, runway table or assignments, and these taxi samples.
+    fn inputs_with<'a>(
+        airports: &'a AirportDb,
+        nav: &'a NavData,
+        winds: &'a Winds,
+        profiles: &'a trajectory::ProfileTable,
+        taxi_samples: &'a HashMap<String, Vec<taxi_estimate::TaxiSample>>,
+    ) -> predict::Inputs<'a> {
+        predict::Inputs {
+            nav,
+            airports,
+            winds,
+            profiles,
+            ground: predict::GroundInputs {
+                taxi_samples,
+                ..predict::GroundInputs::unused()
+            },
+        }
+    }
 
     // A fixed reference time so ETA/STA arithmetic is deterministic.
     fn t0() -> DateTime<Utc> {
@@ -1114,12 +991,16 @@ mod tests {
         let req = 3_600_000.0 / 7.0; // AAR 7 → 514285.714… ms, non-integer
         let base = 1_700_000_000_000.0; // ~epoch-ms now
         // A dense wall of occupied slots one `req` apart, forcing many forward pushes.
-        let slots: Vec<(f64, String)> = (0..50)
-            .map(|k| (base + k as f64 * req, String::new()))
+        let slots: Vec<Slot> = (0..50)
+            .map(|k| Slot {
+                t: base + k as f64 * req,
+                gate: String::new(),
+                cross_kt: 300.0,
+            })
             .collect();
-        let got = earliest_clear_slot(base, &slots, |_| req);
+        let got = earliest_clear_slot(base, 300.0, &slots, |_, _| req);
         // Clear of every occupant by at least `req` (allowing a 1ms float slop).
-        for (t, _) in &slots {
+        for Slot { t, .. } in &slots {
             assert!(
                 (got - t).abs() >= req - 1.0,
                 "slot at {t} is within {req} of result {got}"
@@ -1291,7 +1172,7 @@ mod tests {
     fn flow_lists_the_airports_stars_from_nav_data_with_no_traffic() {
         let fixture = gate_fixture();
         let icao = fixture["airport"].as_str().unwrap();
-        let flow = compute(
+        let flow = compute_with(
             icao,
             None,
             &VatsimData::default(),
@@ -1370,35 +1251,44 @@ mod tests {
         assert_eq!(gc_dist(40.0, -73.0, 40.0, -73.0), 0.0);
     }
 
-    #[test]
-    fn parse_tas_defaults_when_implausible() {
-        assert_eq!(parse_tas("480"), 480.0);
-        assert_eq!(parse_tas(""), 420.0);
-        assert_eq!(parse_tas("abc"), 420.0);
-        assert_eq!(parse_tas("50"), 420.0); // below floor
-        assert_eq!(parse_tas("2000"), 420.0); // above ceiling
-    }
-
     // ---- spacing math ----
 
+    /// #813 AC4: an airport-flow MIT is a time gap at the trailing flight's predicted crossing speed:
+    /// at 250 kt, 20 MIT is 20 / 250 h = 288 s, so the gap times 250 kt is the 20 nm.
     #[test]
-    fn route_interval_mit_beats_minutes_and_floors_at_runway() {
+    fn route_interval_converts_mit_at_the_crossing_speed() {
         let runway = 60_000.0; // 1 min
-        // 20 MIT at 360kt = 200s.
-        assert_eq!(route_interval_ms(0, 20, runway), 200_000.0);
-        // 5 minutes-in-trail = 300s.
-        assert_eq!(route_interval_ms(5, 0, runway), 300_000.0);
+        let gap = route_interval_ms(0, 20, runway, 250.0);
+        assert_eq!(gap, 288_000.0);
+        assert_eq!(gap / 3_600_000.0 * 250.0, 20.0, "gap x 250 kt is the MIT");
+        // A slower crossing opens a wider gap for the same miles.
+        assert_eq!(route_interval_ms(0, 20, runway, 200.0), 360_000.0);
+        // 5 minutes-in-trail = 300 s, whatever the speed.
+        assert_eq!(route_interval_ms(5, 0, runway, 250.0), 300_000.0);
         // MIT overrides minutes when both set.
-        assert_eq!(route_interval_ms(5, 20, runway), 200_000.0);
+        assert_eq!(route_interval_ms(5, 20, runway, 250.0), 288_000.0);
         // Never below the runway interval.
-        assert_eq!(route_interval_ms(0, 1, 600_000.0), 600_000.0);
+        assert_eq!(route_interval_ms(0, 1, 600_000.0, 250.0), 600_000.0);
+    }
+
+    /// The crossing speed is floored at `MIN_CROSS_SPEED_KT` (120 kt), as FCA metering floors it, so
+    /// a slow sample cannot open an hour-long gap: 20 MIT at 120 kt is 600 s.
+    #[test]
+    fn route_interval_floors_the_crossing_speed_at_120_kt() {
+        assert_eq!(predict::MIN_CROSS_SPEED_KT, 120.0);
+        assert_eq!(route_interval_ms(0, 20, 60_000.0, 60.0), 600_000.0);
+        assert_eq!(route_interval_ms(0, 20, 60_000.0, 0.0), 600_000.0);
+        assert_eq!(
+            route_interval_ms(0, 20, 60_000.0, 121.0),
+            20.0 / 121.0 * 3_600_000.0
+        );
     }
 
     #[test]
     fn gate_spacing_prefers_matching_gate_rule() {
         let runway = 60_000.0;
         let pg = ProgramInputs {
-            mit: 15, // airport-wide 15 MIT = 150s, above the runway floor
+            mit: 15, // airport-wide 15 MIT = 216 s at 250 kt, above the runway floor
             gates: vec![GateSpacing {
                 name: "CAMRN".into(),
                 trail: 0,
@@ -1407,20 +1297,19 @@ mod tests {
             ..base_program()
         };
         // Matching gate rule (20 MIT) wins.
-        assert_eq!(gate_spacing_ms(&pg, runway, "CAMRN"), 200_000.0);
+        assert_eq!(gate_spacing_ms(&pg, runway, "CAMRN", 250.0), 288_000.0);
         // No matching rule -> airport-wide mit (15 nm).
-        let expected = (15.0 / MIT_NOMINAL_KT) * 3_600_000.0;
-        assert_eq!(gate_spacing_ms(&pg, runway, "LENDY"), expected);
+        assert_eq!(gate_spacing_ms(&pg, runway, "LENDY", 250.0), 216_000.0);
     }
 
     #[test]
     fn proposed_etd_uses_deptime_or_floor() {
         use chrono::Timelike;
         // A filed deptime well ahead of now is honored.
-        let etd = proposed_etd("2330", t0());
+        let etd = predict::proposed_etd("2330", t0());
         assert_eq!((etd.hour(), etd.minute()), (23, 30));
         // Blank deptime -> now + 20 minutes.
-        let etd = proposed_etd("", t0());
+        let etd = predict::proposed_etd("", t0());
         assert_eq!(etd, t0() + Duration::minutes(20));
     }
 
@@ -1489,7 +1378,7 @@ mod tests {
             ..Default::default()
         };
         let pg = base_program();
-        let flow = compute(
+        let flow = compute_with(
             "KJFK",
             Some(&pg),
             &data,
@@ -1529,6 +1418,9 @@ mod tests {
                 pilot("AIR", 42.5, -71.5, 12_000, 350, fp("KBOS", "KJFK", "DCT")),
                 // Departs elsewhere.
                 pilot("X", 42.36, -71.0, 0, 0, fp("KLGA", "KJFK", "DCT")),
+                // A 55 kt roll at field level has departed; 45 kt is still a taxi (50 kt, #813).
+                pilot("ROLL", 42.36, -71.0, 0, 55, fp("KBOS", "KJFK", "DCT")),
+                pilot("TAXI", 42.36, -71.0, 0, 45, fp("KBOS", "KJFK", "DCT")),
             ],
             prefiles: vec![Prefile {
                 callsign: "P1".into(),
@@ -1544,6 +1436,8 @@ mod tests {
         assert!(names.contains(&"P1"));
         assert!(!names.contains(&"AIR")); // airborne
         assert!(!names.contains(&"X")); // wrong field
+        assert!(!names.contains(&"ROLL"));
+        assert!(names.contains(&"TAXI"));
     }
 
     // ---- scheduler (apply_metering) ----
@@ -1636,14 +1530,62 @@ mod tests {
             }],
             ..base_program()
         };
+        // Both predicted to cross 40 nm out at 360 kt: 20 MIT is 200 s.
         let mut flights = vec![
-            ff("A1", "airborne", 1, Some("CAMRN")),
-            ff("A2", "airborne", 2, Some("CAMRN")),
+            FlowFlight {
+                mit_cross_kt: 360.0,
+                ..ff("A1", "airborne", 1, Some("CAMRN"))
+            },
+            FlowFlight {
+                mit_cross_kt: 360.0,
+                ..ff("A2", "airborne", 2, Some("CAMRN"))
+            },
         ];
         let etd = vec![None, None];
         apply_metering(&mut flights, &etd, &pg, &HashMap::new(), now);
         // The gate in-trail (200s) exceeds the runway interval.
         assert_eq!(ms(flights[1].sta) - ms(flights[0].sta), 200_000);
+        // The trailing flight's own speed sizes the gap: at 240 kt the same 20 nm is 300 s.
+        flights[1].mit_cross_kt = 240.0;
+        apply_metering(&mut flights, &etd, &pg, &HashMap::new(), now);
+        assert_eq!(ms(flights[1].sta) - ms(flights[0].sta), 300_000);
+    }
+
+    /// A fast ground flight that would land ahead of a slow airborne one on the same gate is
+    /// spaced by the slow flight's speed, since the slow one would trail it: 20 nm at 150 kt is
+    /// 480 s, more than the 300 s between them, so the ground flight goes behind instead, 180 s
+    /// back (20 nm at its own 400 kt).
+    #[test]
+    fn a_gap_ahead_of_a_slot_is_sized_at_the_slot_holders_speed() {
+        let pg = ProgramInputs {
+            aar: 60,
+            gates: vec![GateSpacing {
+                name: "CAMRN".into(),
+                trail: 0,
+                mit: 20,
+            }],
+            ..base_program()
+        };
+        let mut flights = vec![
+            FlowFlight {
+                mit_cross_kt: 150.0,
+                ..ff("SLOW", "airborne", 10, Some("CAMRN"))
+            },
+            FlowFlight {
+                mit_cross_kt: 400.0,
+                ..ff("FAST", "ground", 5, Some("CAMRN"))
+            },
+        ];
+        let etd = vec![None, Some(t0().timestamp_millis())];
+        apply_metering(&mut flights, &etd, &pg, &HashMap::new(), t0());
+        assert_eq!(ms(flights[0].sta), ms(Some(t0() + Duration::minutes(10))));
+        assert_eq!(ms(flights[1].sta) - ms(flights[0].sta), 180_000);
+
+        // Positive control: at 300 s ahead a 400 kt leader needs only 180 s, so a holder that
+        // also crosses at 400 kt leaves the fast flight on its own ETA.
+        flights[0].mit_cross_kt = 400.0;
+        apply_metering(&mut flights, &etd, &pg, &HashMap::new(), t0());
+        assert_eq!(ms(flights[1].sta), ms(Some(t0() + Duration::minutes(5))));
     }
 
     #[test]
@@ -1679,7 +1621,7 @@ mod tests {
         };
         let wheels = now + Duration::minutes(30);
         let issued = HashMap::from([("GRD1".to_string(), wheels)]);
-        let flow = compute(
+        let flow = compute_with(
             "KJFK",
             Some(&base_program()),
             &data,
@@ -1722,13 +1664,13 @@ mod tests {
             "KJFK",
             &pg,
             &data,
-            &airports(),
-            &NavData::default(),
-            &Winds::default(),
-            &trajectory::ProfileTable::default(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &RunwayDb::default(),
+            &inputs_with(
+                &airports(),
+                &NavData::default(),
+                &Winds::default(),
+                &trajectory::ProfileTable::default(),
+                &HashMap::new(),
+            ),
             &HashMap::new(),
             &HashSet::new(),
             "GRD1",
@@ -1764,7 +1706,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let flow = compute(
+        let flow = compute_with(
             "KJFK",
             Some(&base_program()),
             &data,
@@ -1785,23 +1727,22 @@ mod tests {
             "positive control: AIR's slot ignores any ETD"
         );
         let air_sta = air.sta.unwrap();
-        // GRD1's full ground flight time from the same inputs; its airborne ETE is that less 660 s.
-        let (_, ft_min, allowance) = ground_estimate(
-            &NavData::default(),
-            "KBOS",
-            Some((40.6413, -73.7781)),
-            &plan,
-            &airports(),
-            &Winds::default(),
-            &trajectory::AircraftProfile::default(),
-            Some((42.36, -71.0, 0, 0)),
-            &HashMap::new(),
-            &RunwayDb::default(),
-            &samples,
-            now,
+        // GRD1's trajectory from the same inputs; its airborne ETE is its ETA less its wheels-up.
+        let (ap, nav, winds, profiles) = (
+            airports(),
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
         );
-        assert_eq!(allowance, 660.0, "positive control: the samples were read");
-        let airborne_ete = Duration::milliseconds((ft_min * 60_000.0) as i64 - 660_000);
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &samples);
+        let grd =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, now).unwrap();
+        assert_eq!(
+            grd.allowance_sec(),
+            660.0,
+            "positive control: the samples were read"
+        );
+        let airborne_ete = grd.eta_at_field() - grd.wheels_up();
         let ready = air_sta - airborne_ete + Duration::minutes(1);
         assert!(ready > now, "ready {ready} must be after now {now}");
 
@@ -1809,20 +1750,97 @@ mod tests {
             "KJFK",
             &base_program(),
             &data,
-            &airports(),
-            &NavData::default(),
-            &Winds::default(),
-            &trajectory::ProfileTable::default(),
+            &inputs_with(
+                &airports(),
+                &NavData::default(),
+                &Winds::default(),
+                &trajectory::ProfileTable::default(),
+                &samples,
+            ),
             &HashMap::new(),
-            &HashMap::new(),
-            &RunwayDb::default(),
-            &samples,
             &HashSet::new(),
             "GRD1",
             ready,
             now,
         );
         assert_eq!(slot, Some(ready + Duration::minutes(1)));
+    }
+
+    /// A CFR behind an airborne flight on the same gate is spaced by the gate's MIT at the CFR
+    /// flight's own predicted crossing speed (`FlowFlight::mit_cross_kt`), the trailing flight's.
+    #[test]
+    fn ready_time_slot_spaces_a_gate_mit_at_the_cfr_flights_speed() {
+        let now = t0();
+        let pg = ProgramInputs {
+            aar: 60,
+            gates: vec![GateSpacing {
+                name: "CAMRN".into(),
+                trail: 0,
+                mit: 20,
+            }],
+            ..base_program()
+        };
+        let data = VatsimData {
+            pilots: vec![
+                pilot("GRD1", 42.36, -71.0, 0, 0, fp("KBOS", "KJFK", "CAMRN")),
+                pilot("AIR", 41.9, -87.9, 35_000, 450, fp("KORD", "KJFK", "CAMRN")),
+            ],
+            ..Default::default()
+        };
+        let (ap, nav, winds, profiles) = (
+            airports(),
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let flow = compute(
+            "KJFK",
+            Some(&pg),
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            now,
+        );
+        let row = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+        let (air, grd) = (row("AIR"), row("GRD1"));
+        assert_eq!(air.gate.as_deref(), Some("CAMRN"), "positive control");
+        assert!(
+            grd.mit_cross_kt > 0.0,
+            "positive control: GRD1 has a crossing speed"
+        );
+        let traj =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, now).unwrap();
+        let airborne_ete = traj.eta_at_field() - traj.wheels_up();
+        let air_sta = air.sta.unwrap();
+        // GRD1 is ready to land 1 min behind AIR, inside 20 nm at any speed under 1,200 kt.
+        let ready = air_sta - airborne_ete + Duration::minutes(1);
+        assert!(ready > now);
+        let slot = ready_time_slot(
+            "KJFK",
+            &pg,
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            "GRD1",
+            ready,
+            now,
+        )
+        .unwrap();
+        let gap_ms =
+            (20.0 / grd.mit_cross_kt.max(predict::MIN_CROSS_SPEED_KT) * 3_600_000.0) as i64;
+        assert!(
+            gap_ms > 60_000,
+            "the MIT gap is wider than the runway interval"
+        );
+        assert_eq!(
+            ((slot + airborne_ete) - air_sta).num_milliseconds(),
+            gap_ms,
+            "behind AIR by 20 nm at GRD1's speed"
+        );
     }
 
     /// #815 AC1 wiring: `compute` puts a ground flight's and a prefile's ETD at its estimated
@@ -1852,7 +1870,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let flow = compute(
+        let flow = compute_with(
             "KJFK",
             Some(&base_program()),
             &data,
@@ -1867,54 +1885,54 @@ mod tests {
             &HashSet::new(),
             now,
         );
-        // The pilot's full ground flight time, allowance included, from the same inputs.
-        let (_, ft_min, allowance) = ground_estimate(
-            &NavData::default(),
-            "KBOS",
-            Some((40.6413, -73.7781)),
-            &plan,
-            &airports(),
-            &Winds::default(),
-            &trajectory::AircraftProfile::default(),
-            Some((42.36, -71.0, 0, 0)),
-            &HashMap::new(),
-            &RunwayDb::default(),
-            &samples,
-            now,
+        // Each flight's trajectory, allowance included, from the same inputs: the pilot from where
+        // it sits, the prefile from its departure field.
+        let (ap, nav, winds, profiles) = (
+            airports(),
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
         );
-        assert_eq!(allowance, 660.0, "positive control: the samples were read");
-        let ground_ms = (ft_min * 60_000.0) as i64;
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &samples);
+        let grd_t =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, now).unwrap();
+        let pre_t =
+            predict::trajectory(&inp, predict::Flight::Prefile(&data.prefiles[0]), None, now)
+                .unwrap();
+        assert_eq!(
+            grd_t.allowance_sec(),
+            660.0,
+            "positive control: the samples were read"
+        );
+        assert_eq!(
+            pre_t.allowance_sec(),
+            660.0,
+            "positive control: the samples were read"
+        );
         let by = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
 
         let grd = by("GRD1");
         assert_eq!(grd.etd, Some(now + Duration::seconds(660)));
-        assert_eq!(
-            ms(grd.eta),
-            now.timestamp_millis() + ground_ms,
-            "the ETA doesn't move"
-        );
+        assert_eq!(grd.eta, Some(grd_t.eta_at_field()), "the ETA doesn't move");
 
         let pre = by("PRE1");
         let filed = Utc.with_ymd_and_hms(2023, 11, 14, 23, 0, 0).unwrap();
         assert_eq!(pre.etd, Some(filed + Duration::seconds(660)));
-        assert_eq!(
-            ms(pre.eta),
-            filed.timestamp_millis() + ground_ms,
-            "the ETA doesn't move"
-        );
+        assert_eq!(pre.eta, Some(pre_t.eta_at_field()), "the ETA doesn't move");
 
         // Metered: the CFR backs out only the airborne ETE, so `etd_ms` moved with the field.
-        for f in [grd, pre] {
-            assert_eq!(ms(f.sta) - ms(f.cfr), ground_ms - 660_000, "{}", f.callsign);
+        for (f, t) in [(grd, &grd_t), (pre, &pre_t)] {
+            let airborne_ms = (t.eta_at_field() - t.wheels_up()).num_milliseconds();
+            assert_eq!(ms(f.sta) - ms(f.cfr), airborne_ms, "{}", f.callsign);
         }
     }
 
     /// AC #3 (cross-surface): the arrival ladder (`compute`) and the runway ETE
     /// (`runway::collect_arrivals`) must time the same aircraft identically — both route through
-    /// `predict::arrival_eta` — and off the **resolved** filed route, not a straight line. The
+    /// `predict::trajectory` — and off the **resolved** filed route, not a straight line. The
     /// aircraft files a real NJ-coast routing (`RBV WHITE SIE`, bundled nav), so its along-route
     /// distance runs meaningfully longer than the great circle to the field; reverting
-    /// `predict::arrival_eta` to `gc_dist` fails the distance assertion.
+    /// the route resolution to `gc_dist` fails the distance assertion.
     #[test]
     fn ladder_and_runway_ete_agree_on_the_resolved_route() {
         let ap: AirportDb = HashMap::from([
@@ -1937,7 +1955,7 @@ mod tests {
             pilots: vec![p],
             ..Default::default()
         };
-        let flow = compute(
+        let flow = compute_with(
             "KDCA",
             None,
             &data,
@@ -2165,7 +2183,7 @@ mod tests {
         assert_eq!(allowance, predict::GROUND_TAXI_SEC + 300.0);
     }
 
-    /// No position (a prefile, or the coordinate-less `ground_estimate` fallback) skips gate/runway
+    /// No position (a prefile) skips gate/runway
     /// matching entirely rather than guessing — still resolves via the airport/default tier.
     #[test]
     fn resolve_ground_allowance_sec_skips_gate_and_runway_matching_without_a_position() {
@@ -2508,14 +2526,226 @@ mod tests {
         );
     }
 
-    /// #335: `ground_estimate`'s synthetic fallback — taken when the departure airport is missing
-    /// from the `AirportDb`, or the arrival coordinates are unknown — builds its own 300 nm profile
-    /// down to the arrival field's elevation, and reading sea level instead left the suite green.
-    /// Since #411 the fallback no longer resolves the elevation itself, so the mutation this pin
-    /// catches is neutering `predict::profile_from_here`'s `field_elevation_ft(airports, arr_icao)`
-    /// lookup to `0.0`.
+    /// Airport-flow MIT is converted at the trailing flight's predicted groundspeed 40 nm short of
+    /// the field (`MIT_CROSSING_NM`), read off its trajectory: below cruise for a jet descending
+    /// into the field, the speed predicted where it is now once it is inside 40 nm.
     #[test]
-    fn the_synthetic_ground_estimate_descends_to_the_arrival_field() {
+    fn compute_converts_mit_at_the_speed_forty_miles_out() {
+        let ap = AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let plan = FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        };
+        let pilot = |cs: &str, pos: [f64; 2], alt, gs| Pilot {
+            callsign: cs.into(),
+            latitude: pos[0],
+            longitude: pos[1],
+            altitude: alt,
+            groundspeed: gs,
+            heading: 230,
+            flight_plan: Some(plan.clone()),
+            ..Default::default()
+        };
+        let data = VatsimData {
+            pilots: vec![
+                pilot("FAR1", [40.4, -74.2], 35_000, 440),
+                pilot("NEAR1", [38.95, -76.75], 3_000, 180),
+            ],
+            ..Default::default()
+        };
+        let (nav, winds, profiles) = (
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let flow = compute(
+            "KDCA",
+            None,
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
+        for (i, cs) in ["FAR1", "NEAR1"].into_iter().enumerate() {
+            let traj =
+                predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[i]), None, t0())
+                    .unwrap();
+            let row = flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+            // The literal 40 nm the MIT rule is defined at, not the constant (#813).
+            assert_eq!(row.mit_cross_kt, traj.gs_short_of_field(40.0), "{cs}");
+        }
+        // Positive control: FAR1's speed differs at 30 and 60 nm, so a moved point shows.
+        let far_traj =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, t0()).unwrap();
+        for nm in [30.0, 60.0] {
+            assert_ne!(
+                far_traj.gs_short_of_field(nm),
+                far_traj.gs_short_of_field(40.0),
+                "{nm} nm"
+            );
+        }
+        let far = flow.flights.iter().find(|f| f.callsign == "FAR1").unwrap();
+        assert!(
+            far.mit_cross_kt < 400.0,
+            "a descent speed, not the 440 kt cruise: {}",
+            far.mit_cross_kt
+        );
+        // NEAR1 is ~15 nm out: the speed predicted where it is now.
+        let near_traj =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[1]), None, t0()).unwrap();
+        assert!(
+            near_traj.route_nm() < MIT_CROSSING_NM,
+            "positive control: inside 40 nm"
+        );
+        let near = flow.flights.iter().find(|f| f.callsign == "NEAR1").unwrap();
+        assert_eq!(near.mit_cross_kt, near_traj.gs_at(0.0), "inside 40 nm");
+        assert!(far.mit_cross_kt > near.mit_cross_kt);
+    }
+
+    /// Only a pilot on the ground within 5 nm of the field has arrived: one on a 3 nm final at 140 kt
+    /// is still an airborne inbound with a metered slot.
+    #[test]
+    fn a_flight_on_short_final_has_not_arrived() {
+        let ap = AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let plan = FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        };
+        let pilot = |cs: &str, gs, alt| Pilot {
+            callsign: cs.into(),
+            latitude: 38.90,
+            longitude: -77.04,
+            altitude: alt,
+            groundspeed: gs,
+            heading: 180,
+            flight_plan: Some(plan.clone()),
+            ..Default::default()
+        };
+        let data = VatsimData {
+            pilots: vec![pilot("FINAL", 140, 1_000), pilot("PARKED", 0, 0)],
+            ..Default::default()
+        };
+        let (nav, winds, profiles) = (
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let pg = base_program_aar(60);
+        let flow = compute(
+            "KDCA",
+            Some(&pg),
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
+        let row = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+        assert_eq!(row("FINAL").status, "airborne");
+        assert!(row("FINAL").sta.is_some(), "metered");
+        assert_eq!(row("PARKED").status, "arrived", "positive control");
+    }
+
+    /// Airport flow labels a pilot airborne from 50 kt (`predict::is_airborne`), gives an airborne
+    /// row no wheels-up or CFR under a metered program, and drops a prefile that shares a connected
+    /// pilot's callsign, so demand counts the aircraft once.
+    #[test]
+    fn compute_labels_times_and_dedupes_each_inbound_once() {
+        let ap = AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let plan = FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            deptime: "0000".into(),
+            ..Default::default()
+        };
+        let pilot = |cs: &str, gs, alt| Pilot {
+            callsign: cs.into(),
+            latitude: 40.64,
+            longitude: -73.78,
+            altitude: alt,
+            groundspeed: gs,
+            heading: 230,
+            flight_plan: Some(plan.clone()),
+            ..Default::default()
+        };
+        let data = VatsimData {
+            pilots: vec![
+                pilot("ROLL", 55, 0),
+                pilot("LOW", 70, 200),
+                pilot("TAXI", 45, 0),
+            ],
+            prefiles: vec![Prefile {
+                callsign: "TAXI".into(),
+                flight_plan: Some(plan.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (nav, winds, profiles) = (
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let pg = base_program_aar(60);
+        let flow = compute(
+            "KDCA",
+            Some(&pg),
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
+        let row = |cs: &str| {
+            let rows: Vec<_> = flow.flights.iter().filter(|f| f.callsign == cs).collect();
+            assert_eq!(rows.len(), 1, "{cs} listed once");
+            rows[0]
+        };
+        for cs in ["ROLL", "LOW"] {
+            let f = row(cs);
+            assert_eq!(f.status, "airborne", "{cs}");
+            assert!(f.etd.is_none() && f.cfr.is_none(), "{cs} has no wheels-up");
+            assert!(f.sta.is_some(), "positive control: {cs} is metered");
+        }
+        let taxi = row("TAXI");
+        assert_eq!(taxi.status, "ground");
+        assert!(
+            taxi.etd.is_some(),
+            "positive control: a ground row has a wheels-up"
+        );
+        assert_eq!((flow.airborne, flow.ground, flow.proposed), (2, 1, 0));
+    }
+
+    /// #335: the nominal 300 nm leg, taken for a prefile whose departure is not in the `AirportDb`,
+    /// descends to the arrival field's elevation; reading sea level instead left the suite green. The
+    /// mutation this pins is neutering `predict::profile_from_here`'s
+    /// `field_elevation_ft(airports, arr_icao)` lookup to `0.0`.
+    #[test]
+    fn the_nominal_ground_leg_descends_to_the_arrival_field() {
         let estimate = |elevation_ft: f64| {
             let ap = AirportDb::from([(
                 "KDEN".to_string(),
@@ -2524,41 +2754,42 @@ mod tests {
                     ..Airport::at(39.86, -104.67)
                 },
             )]);
-            let fp = FlightPlan {
-                departure: "KJFK".into(),
-                arrival: "KDEN".into(),
-                altitude: "35000".into(),
-                cruise_tas: "440".into(),
+            let pf = Prefile {
+                callsign: "PRE1".into(),
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(), // absent from `ap`
+                    arrival: "KDEN".into(),
+                    altitude: "35000".into(),
+                    cruise_tas: "440".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
-            // `arr: None` takes the synthetic branch; KJFK is absent from `ap` besides, which is
-            // the other way in.
-            ground_estimate(
-                &NavData::default(),
-                "KJFK",
-                None,
-                &fp,
-                &ap,
-                &Winds::default(),
-                &trajectory::AircraftProfile::default(),
-                None,
-                &HashMap::new(),
-                &RunwayDb::default(),
-                &HashMap::new(),
-                t0(),
+            let (nav, winds, profiles) = (
+                NavData::default(),
+                Winds::default(),
+                trajectory::ProfileTable::default(),
+            );
+            let no_samples = HashMap::new();
+            let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+            let traj =
+                predict::trajectory(&inp, predict::Flight::Prefile(&pf), None, t0()).unwrap();
+            (
+                traj.route_nm(),
+                (traj.eta_at_field() - traj.wheels_up()).num_milliseconds(),
             )
         };
 
-        let (sea_nm, sea_min, _) = estimate(0.0);
-        let (high_nm, high_min, _) = estimate(5431.0);
+        let (sea_nm, sea_ms) = estimate(0.0);
+        let (high_nm, high_ms) = estimate(5431.0);
 
-        // The fallback is the fixed 300 nm synthetic route, not a resolved one.
+        // The nominal 300 nm leg, not a resolved route.
         assert_eq!(sea_nm, 300.0);
         assert_eq!(high_nm, 300.0);
         assert!(
-            high_min < sea_min,
-            "a 5431 ft field shortens the synthetic descent, so the flight time must come in below \
-             a sea-level one — got {high_min:.2} min vs {sea_min:.2} min"
+            high_ms < sea_ms,
+            "a 5431 ft field shortens the descent, so the flight time must come in below a \
+             sea-level one — got {high_ms} ms vs {sea_ms} ms"
         );
     }
 
@@ -2575,7 +2806,7 @@ mod tests {
     }
 
     fn ladder(data: &VatsimData, winds: &Winds, cs: &str) -> DateTime<Utc> {
-        compute(
+        compute_with(
             "KDCA",
             None,
             data,
@@ -2626,38 +2857,20 @@ mod tests {
             "{} s",
             (windy - still).num_seconds()
         );
-        let direct = predict::arrival_eta(
-            &NavData::load(),
-            &jfk_dca(),
-            &shear,
-            &trajectory::AircraftProfile::default(),
-            &predict::ArrivalInput {
-                dep: "KJFK",
-                arr: "KDCA",
-                route: "RBV WHITE SIE",
-                pos: [40.2, -74.0],
-                alt_ft: 24_000.0,
-                gs: 400,
-                hdg: 220,
-                arr_ll: [38.8521, -77.0377],
-                cruise_ft: trajectory::parse_alt_ft(
-                    &data.pilots[0].flight_plan.as_ref().unwrap().altitude,
-                ),
-                cruise_tas: trajectory::capped_cruise_tas(
-                    parse_tas(&data.pilots[0].flight_plan.as_ref().unwrap().cruise_tas),
-                    trajectory::parse_alt_ft(
-                        &data.pilots[0].flight_plan.as_ref().unwrap().altitude,
-                    ),
-                    &trajectory::AircraftProfile::default(),
-                ),
-            },
-            0.0,
-            t0(),
+        let (ap, nav, profiles, no_samples) = (
+            jfk_dca(),
+            NavData::load(),
+            trajectory::ProfileTable::default(),
+            HashMap::new(),
         );
-        assert_eq!(windy, direct.eta);
+        let inp = inputs_with(&ap, &nav, &shear, &profiles, &no_samples);
+        let direct =
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, t0()).unwrap();
+        assert!(direct.airborne(), "positive control: the airborne branch");
+        assert_eq!(windy, direct.eta_at_field());
     }
 
-    // AC5: the ground / prefile site (`ground_estimate` -> `arrival_eta`).
+    // AC5: the ground / prefile site (`predict::trajectory` for a parked pilot).
     #[test]
     fn compute_times_a_proposed_departure_in_the_route_wind() {
         let parked = pilot(
@@ -2687,86 +2900,51 @@ mod tests {
                 (windy - still).num_seconds()
             );
         }
-        // The estimate is the shared predictor's, from the departure field.
-        let plan = fp("KJFK", "KDCA", "RBV WHITE SIE");
-        let est = |w: &Winds| {
-            ground_estimate(
-                &NavData::load(),
-                "KJFK",
-                Some((38.8521, -77.0377)),
-                &plan,
-                &jfk_dca(),
-                w,
-                &trajectory::AircraftProfile::default(),
-                None,
-                &HashMap::new(),
-                &RunwayDb::default(),
-                &HashMap::new(),
-                t0(),
-            )
-        };
-        let pred = predict::arrival_eta(
-            &NavData::load(),
-            &jfk_dca(),
-            &shear,
-            &trajectory::AircraftProfile::default(),
-            &predict::ArrivalInput {
-                dep: "KJFK",
-                arr: "KDCA",
-                route: "RBV WHITE SIE",
-                pos: [40.6413, -73.7781],
-                alt_ft: 0.0,
-                gs: 0,
-                hdg: 0,
-                arr_ll: [38.8521, -77.0377],
-                cruise_ft: trajectory::parse_alt_ft(&plan.altitude),
-                cruise_tas: trajectory::capped_cruise_tas(
-                    parse_tas(&plan.cruise_tas),
-                    trajectory::parse_alt_ft(&plan.altitude),
-                    &trajectory::AircraftProfile::default(),
-                ),
-            },
-            resolve_ground_allowance_sec(
-                &HashMap::new(),
-                &RunwayDb::default(),
-                &HashMap::new(),
-                "KJFK",
-                Some("B738"),
-                None,
-                None,
-            ),
+        // Each ETA is the shared trajectory's, the pilot from where it is parked and the prefile from
+        // its departure field.
+        let (ap, nav, profiles, no_samples) = (
+            jfk_dca(),
+            NavData::load(),
+            trajectory::ProfileTable::default(),
+            HashMap::new(),
+        );
+        let inp = inputs_with(&ap, &nav, &shear, &profiles, &no_samples);
+        let pilot = predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, t0());
+        let pre = predict::trajectory(
+            &inp,
+            predict::Flight::Prefile(&data.prefiles[0]),
+            None,
             t0(),
         );
-        let (_, ft_min, _) = est(&shear);
-        assert!(((pred.eta - t0()).num_seconds() as f64 - ft_min * 60.0).abs() <= 1.0);
+        assert_eq!(ladder(&data, &shear, "DAL2"), pilot.unwrap().eta_at_field());
+        assert_eq!(ladder(&data, &shear, "UAL3"), pre.unwrap().eta_at_field());
     }
 
-    // By design: with no arrival coordinates there is no route to read wind along.
+    // By design: with no departure coordinates there is no route to read wind along.
     #[test]
-    fn the_synthetic_300_nm_estimate_flies_still_air() {
-        let plan = fp("KJFK", "KDCA", "");
-        let est = |w: &Winds| {
-            ground_estimate(
-                &NavData::default(),
-                "KJFK",
-                None,
-                &plan,
-                &jfk_dca(),
-                w,
-                &trajectory::AircraftProfile::default(),
-                None,
-                &HashMap::new(),
-                &RunwayDb::default(),
-                &HashMap::new(),
-                t0(),
-            )
+    fn the_nominal_300_nm_leg_flies_still_air() {
+        let pf = Prefile {
+            callsign: "PRE1".into(),
+            flight_plan: Some(fp("KZZZ", "KDCA", "")),
+            ..Default::default()
         };
-        let (nm, windy, allowance) = est(&Winds::test_shear());
-        assert_eq!(nm, 300.0, "positive control: the fallback branch ran");
+        let (ap, nav, profiles, no_samples) = (
+            jfk_dca(),
+            NavData::default(),
+            trajectory::ProfileTable::default(),
+            HashMap::new(),
+        );
+        let shear = Winds::test_shear();
+        let inp = inputs_with(&ap, &nav, &shear, &profiles, &no_samples);
+        let traj = predict::trajectory(&inp, predict::Flight::Prefile(&pf), None, t0()).unwrap();
+        assert_eq!(traj.route_nm(), 300.0, "positive control: the nominal leg");
+        assert!(traj.path().is_empty());
         // The airborne minutes the model gives this plan over 300 nm in still air, a literal so a
         // wind applied on this path moves the result.
-        let airborne = windy - allowance / 60.0;
-        assert!((airborne - 47.382).abs() < 0.01, "{airborne}");
+        let airborne =
+            (traj.eta_at_field() - traj.wheels_up()).num_milliseconds() as f64 / 60_000.0;
+        // The ETA is whole seconds, so allow one.
+        assert!((airborne - 47.382).abs() < 1.0 / 60.0, "{airborne}");
     }
 
     // AC5 cross-surface: ladder and runway ETE agree when the wind is not uniform.
@@ -2794,13 +2972,14 @@ mod tests {
         assert!((eta - still).num_seconds() > 30);
     }
 
-    /// #815: the synthetic 300 nm fallback returns the ground allowance it timed, so a departure
-    /// with no coordinates still has its wheels-up one allowance after now, not at the gate time.
+    /// #813: a connected ground pilot is timed from where it sits, so a departure field missing from
+    /// the `AirportDb` still gets its great circle to the arrival (padded, the route being direct),
+    /// and its wheels-up is one allowance after now (#815).
     #[test]
-    fn the_synthetic_ground_estimate_returns_its_ground_allowance() {
+    fn a_ground_pilot_at_an_unknown_field_is_timed_from_where_it_sits() {
         let now = t0();
-        // KXXX has no coordinates in `airports()`, so both calls take the fallback. Five samples
-        // there and a parked pilot: the airport tier, 50 + 40 + 570 s.
+        // KXXX has no coordinates in `airports()`. Five samples there and a parked pilot: the
+        // airport tier, 50 + 40 + 570 s.
         let samples = HashMap::from([(
             "KXXX".to_string(),
             (0..5)
@@ -2808,28 +2987,11 @@ mod tests {
                 .collect::<Vec<_>>(),
         )]);
         let plan = fp("KXXX", "KJFK", "DCT");
-        let (route_nm, _, allowance) = ground_estimate(
-            &NavData::default(),
-            "KXXX",
-            Some((40.6413, -73.7781)),
-            &plan,
-            &airports(),
-            &Winds::default(),
-            &trajectory::AircraftProfile::default(),
-            Some((42.36, -71.0, 0, 0)),
-            &HashMap::new(),
-            &RunwayDb::default(),
-            &samples,
-            now,
-        );
-        assert_eq!(route_nm, 300.0, "positive control: the fallback branch ran");
-        assert_eq!(allowance, 660.0);
-
         let data = VatsimData {
             pilots: vec![pilot("GRD1", 42.36, -71.0, 0, 0, plan)],
             ..Default::default()
         };
-        let flow = compute(
+        let flow = compute_with(
             "KJFK",
             None,
             &data,
@@ -2844,7 +3006,12 @@ mod tests {
             &HashSet::new(),
             now,
         );
-        assert_eq!(flow.flights[0].distance_nm, Some(300.0));
+        let gc = gc_dist(42.36, -71.0, 40.6413, -73.7781);
+        let d = flow.flights[0].distance_nm.unwrap();
+        assert!(
+            (d - gc * predict::GROUND_ROUTE_FACTOR).abs() < 1e-6,
+            "{d} nm against a {gc} nm great circle"
+        );
         assert_eq!(flow.flights[0].etd, Some(now + Duration::seconds(660)));
     }
 }

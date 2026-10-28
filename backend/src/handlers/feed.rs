@@ -23,12 +23,13 @@ use crate::{
     errors::ApiError,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
+    feed::predict,
     feed::taxi,
     handlers::release_authority,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
     repos::airport_configs as config_repo,
     repos::flow::Expect,
-    repos::{flow as flow_repo, tmu as tmu_repo},
+    repos::{departure_runway as departure_runway_repo, flow as flow_repo, tmu as tmu_repo},
     state::AppState,
 };
 
@@ -97,25 +98,77 @@ pub(crate) async fn program_inputs(
         }))
 }
 
+/// The tables [`predict::trajectory`] reads, cloned out of `AppState` so a blocking task can own them.
+/// The handlers that time a ground flight's allowance build their [`predict::Inputs`] from one of
+/// these ([`TimingTables::live`]), so none leaves a table out (#813); the historical replay loads
+/// one with no stored assignments. Runway ETE, sector demand and `project_traffic` read no
+/// allowance (airborne flights, or a released wheels-up) and pass `GroundInputs::unused()`.
+pub(crate) struct TimingTables {
+    pub nav: Arc<crate::feed::nav::NavData>,
+    pub airports: Arc<crate::feed::airports::AirportDb>,
+    pub winds: Arc<crate::feed::winds::Winds>,
+    pub profiles: Arc<crate::feed::trajectory::ProfileTable>,
+    pub gates: Arc<HashMap<String, Vec<crate::models::AirportGateBody>>>,
+    pub runways: Arc<crate::feed::runway_db::RunwayDb>,
+    pub taxi_samples: Arc<HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>>,
+    pub assigned: Arc<predict::AssignedRunways>,
+}
+
+impl TimingTables {
+    /// The live tables, with `winds` and the departure runways `assigned`, read by the caller: the
+    /// historical replay passes the winds at its instant and no assignments, which are live state.
+    pub async fn load(
+        state: &AppState,
+        winds: Arc<crate::feed::winds::Winds>,
+        assigned: Arc<predict::AssignedRunways>,
+    ) -> Self {
+        TimingTables {
+            nav: state.nav.load_full(),
+            airports: state.feed.read().await.airports.clone(),
+            winds,
+            profiles: state.aircraft_profiles.load_full(),
+            gates: state.gates.load_full(),
+            runways: state.runways.clone(),
+            taxi_samples: state.taxi_estimate_samples.load_full(),
+            assigned,
+        }
+    }
+
+    /// The live tables with the live winds and every stored departure-runway assignment.
+    pub async fn live(state: &AppState, pool: &PgPool) -> Result<Self, ApiError> {
+        let assigned = departure_runway_repo::assignment_map(pool).await?;
+        Ok(Self::load(state, state.winds.load_full(), Arc::new(assigned)).await)
+    }
+
+    pub fn inputs(&self) -> predict::Inputs<'_> {
+        predict::Inputs {
+            nav: &self.nav,
+            airports: &self.airports,
+            winds: &self.winds,
+            profiles: &self.profiles,
+            ground: predict::GroundInputs {
+                gates: &self.gates,
+                runways: &self.runways,
+                taxi_samples: &self.taxi_samples,
+                assigned: &self.assigned,
+            },
+        }
+    }
+}
+
 /// Compute the metered flow for one arrival airport against a given snapshot at `now` (loads the
 /// program + issued CFRs from the DB). Shared by the live handler and the historical replay — the
-/// only difference is which snapshot and instant are passed in.
+/// only difference is which snapshot, tables and instant are passed in.
 pub(crate) async fn flow_from_data(
     state: &AppState,
     pool: &PgPool,
     icao: &str,
     snap: Arc<crate::feed::Snapshot>,
-    winds: Arc<crate::feed::winds::Winds>,
+    tables: Arc<TimingTables>,
     now: DateTime<Utc>,
 ) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
-    let airports = state.feed.read().await.airports.clone();
-    let nav = state.nav.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
@@ -127,14 +180,8 @@ pub(crate) async fn flow_from_data(
             &icao,
             program.as_ref(),
             &snap.data,
-            airports.as_ref(),
-            nav.as_ref(),
-            winds.as_ref(),
-            profiles.as_ref(),
+            &tables.inputs(),
             &issued,
-            gates.as_ref(),
-            runways.as_ref(),
-            taxi_estimate_samples.as_ref(),
             &manual_exclusions,
             now,
         )
@@ -153,8 +200,8 @@ pub(crate) async fn flow_for(
     let snapshot = state.feed.read().await.snapshot.clone();
     match snapshot {
         Some(snap) => {
-            let winds = state.winds.load_full();
-            flow_from_data(state, pool, icao, snap, winds, Utc::now()).await
+            let tables = Arc::new(TimingTables::live(state, pool).await?);
+            flow_from_data(state, pool, icao, snap, tables, Utc::now()).await
         }
         None => Ok(flow::Flow {
             icao: icao.to_string(),
@@ -366,26 +413,19 @@ pub async fn airport_demand(
             .insert(callsign, wheels_up);
     }
 
-    // Clone the snapshot + airport handles under one brief lock, then release it before the CPU.
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
-    };
+    // Clone the snapshot under one brief lock, then release it before the CPU.
+    let snapshot = state.feed.read().await.snapshot.clone();
     let Some(snap) = snapshot else {
         return Ok(Json(Vec::new()));
     };
 
-    let nav = state.nav.load_full();
-    let winds = state.winds.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let tables = TimingTables::live(&state, pool).await?;
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let now = Utc::now();
 
     let rows = tokio::task::spawn_blocking(move || {
+        let inp = tables.inputs();
         // Only airports something is actually flying to can be over capacity, so intersect the
         // capacity-bearing set with the arrivals in this snapshot. One pass.
         //
@@ -435,14 +475,8 @@ pub async fn airport_demand(
                     icao,
                     program,
                     &snap.data,
-                    airports.as_ref(),
-                    nav.as_ref(),
-                    winds.as_ref(),
-                    profiles.as_ref(),
+                    &inp,
                     issued_by_airport.get(icao).unwrap_or(&empty_issued),
-                    gates.as_ref(),
-                    runways.as_ref(),
-                    taxi_estimate_samples.as_ref(),
                     &manual_exclusions,
                     now,
                 );
@@ -521,9 +555,9 @@ pub async fn list_departures(
         .snapshot
         .clone()
         .unwrap_or_else(|| Arc::new(crate::feed::Snapshot::of(Default::default())));
-    let winds = state.winds.load_full();
+    let tables = Arc::new(TimingTables::live(&state, pool).await?);
     Ok(Json(
-        departures_response(&state, pool, &dep, snap, winds, Utc::now()).await?,
+        departures_response(&state, pool, &dep, snap, tables, Utc::now()).await?,
     ))
 }
 
@@ -534,7 +568,7 @@ pub(crate) async fn departures_response(
     pool: &PgPool,
     dep: &str,
     snap: Arc<crate::feed::Snapshot>,
-    winds: Arc<crate::feed::winds::Winds>,
+    tables: Arc<TimingTables>,
     now: DateTime<Utc>,
 ) -> Result<DeparturesResponse, ApiError> {
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
@@ -569,7 +603,7 @@ pub(crate) async fn departures_response(
         .collect();
     let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
     for dest in &dests {
-        let flow = flow_from_data(state, pool, dest, snap.clone(), winds.clone(), now).await?;
+        let flow = flow_from_data(state, pool, dest, snap.clone(), tables.clone(), now).await?;
         for f in flow.flights {
             meta.insert(
                 f.callsign,
@@ -719,18 +753,10 @@ pub async fn issue_cfr(
         Some(ready) => {
             let program = program_inputs(pool, &airport).await?;
             let issued = tmu_repo::issued_cfr_map(pool, &airport).await?;
-            let (snapshot, airports) = {
-                let guard = state.feed.read().await;
-                (guard.snapshot.clone(), guard.airports.clone())
-            };
+            let snapshot = state.feed.read().await.snapshot.clone();
             match (program, snapshot) {
                 (Some(pg), Some(snap)) => {
-                    let nav = state.nav.load_full();
-                    let winds = state.winds.load_full();
-                    let profiles = state.aircraft_profiles.load_full();
-                    let gates = state.gates.load_full();
-                    let runways = state.runways.clone();
-                    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+                    let tables = TimingTables::live(&state, pool).await?;
                     let airport = airport.clone();
                     let callsign = callsign.clone();
                     let manual_exclusions = crate::handlers::flow::all_excluded_callsigns(
@@ -742,14 +768,8 @@ pub async fn issue_cfr(
                             &airport,
                             &pg,
                             &snap.data,
-                            airports.as_ref(),
-                            nav.as_ref(),
-                            winds.as_ref(),
-                            profiles.as_ref(),
+                            &tables.inputs(),
                             &issued,
-                            gates.as_ref(),
-                            runways.as_ref(),
-                            taxi_estimate_samples.as_ref(),
                             &manual_exclusions,
                             &callsign,
                             ready,

@@ -385,3 +385,44 @@ model back ETA/crossing prediction. All metering (`fca::meter`, the runway board
 the departures view) is computed **live** per request against the current snapshot — the
 `flow` schema stores config and frozen releases, not traffic history. Persisted network
 history lives in the separate `stats` domain.
+
+## The ETA model and its callers
+
+Every surface that times a flight calls one function, `feed::predict::trajectory` (#813). It takes
+a connected pilot or a prefile, plus a released wheels-up when the flight holds one, and decides
+every input the model reads once: the route and its padding, the filed altitude and cruise speed,
+whether the flight is airborne, when it leaves and from which runway. `feed/predict.rs` documents
+each value. The callers read times, speeds and positions off the `Trajectory` it returns:
+
+| Caller | Surface |
+| --- | --- |
+| `feed::flow::compute` (through `time_flow_flight`) | Airport flow and demand (`handlers/feed.rs` `flow_from_data`, the demand ranking), GDP inbounds (`handlers/gdp.rs` `live_inbounds`), the departures view |
+| `feed::flow::ready_time_slot` (through `compute`) | A CFR issued with a ready time (`handlers/feed.rs` `issue_cfr`) |
+| `feed::runway::collect_arrivals` | Runway ETE |
+| `feed::sector_tracks::project_tracks` (through `Ctx::track`) | Sector occupancy and demand |
+| `handlers::flow::build_candidates` | FCA metering and traffic, IDST, the flight advisory, RDY/SET and clear |
+| `handlers::flow::project_traffic` | The map's projected traffic |
+| `handlers::flow::fix_predictions` | The per-fix table for a pilot and a prefile (`aircraft_route`) |
+
+The historical replay (`/stats/hist/flow`, `/stats/hist/departures`, `/stats/hist/runway`) runs
+the same functions against a reconstructed snapshot and the winds at that instant. It passes no stored departure-runway assignments, which are live state.
+
+Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
+groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), or where it is now when
+closer, floored at 120 kt as FCA metering floors its crossing speed. Airport-flow MIT is set per
+arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is no
+fix to read a speed at. When a flight would land ahead of a slot already assigned on its gate, the
+gap is sized at the slot holder's speed, since the holder trails it.
+
+The FCA badge counts (`fca_counts`) and the flight advisory's crossing pre-filter need the path
+only, so they read it through `predict::flight_path`, the path the trajectory is timed along,
+great-circle fallback included.
+
+`only_the_entry_point_times_a_flight` (`feed/predict.rs`) fails when non-test code outside
+`feed/predict.rs` and `feed/trajectory.rs` calls the model directly. To re-derive the caller list:
+
+```bash
+git grep -n 'predict::trajectory(' -- backend/src ':!*_tests.rs'
+```
+
+and keep the hits outside `#[cfg(test)]` modules.

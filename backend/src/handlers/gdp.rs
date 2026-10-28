@@ -136,50 +136,39 @@ fn validate_steps(
 
 /// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD +
 /// departure ARTCC, no metering). Airborne/ground/proposed only — arrived flights dropped.
-async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<gdp::Inbound> {
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
+async fn live_inbounds(
+    state: &AppState,
+    icao: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<gdp::Inbound>, ApiError> {
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let Some(snap) = state.feed.read().await.snapshot.clone() else {
+        return Ok(Vec::new());
     };
-    let Some(snap) = snapshot else {
-        return Vec::new();
-    };
-    let nav = state.nav.load_full();
-    let winds = state.winds.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let tables = crate::handlers::feed::TimingTables::live(state, pool).await?;
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
     // `compute` resolves every arrival's filed route — pure CPU. Push it onto the blocking pool
     // (see `feed::flow_from_data`) rather than tying up an async worker.
-    let Ok(flow) = tokio::task::spawn_blocking(move || {
+    let flow = tokio::task::spawn_blocking(move || {
         flow::compute(
             &icao,
             None, // no metering — we want the raw arrival picture
             &snap.data,
-            airports.as_ref(),
-            nav.as_ref(),
-            winds.as_ref(),
-            profiles.as_ref(),
+            &tables.inputs(),
             &HashMap::new(),
-            gates.as_ref(),
-            runways.as_ref(),
-            taxi_estimate_samples.as_ref(),
             &manual_exclusions,
             now,
         )
     })
     .await
-    else {
-        return Vec::new();
-    };
+    .map_err(|_| ApiError::Internal)?;
     // Resolve each origin field's owning ARTCC once, memoized across shared departures.
     let map = state.facilities.read().await;
     let mut artcc_of: HashMap<String, Option<String>> = HashMap::new();
-    flow.flights
+    Ok(flow
+        .flights
         .into_iter()
         .filter(|f| f.status != "arrived")
         .filter_map(|f| {
@@ -196,7 +185,7 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
                 etd_ms: f.etd.map(|e| e.timestamp_millis()),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn ms(v: i64, fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -211,7 +200,7 @@ async fn fresh_assignments(
 ) -> Result<(i64, i64, Vec<gdp::Assignment>), ApiError> {
     let (win_start, win_end) =
         resolve_window(now, &gdp.start_time, &gdp.end_time).ok_or(ApiError::Internal)?;
-    let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await;
+    let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await?;
     let scope: Vec<String> = gdp.scope.split_whitespace().map(String::from).collect();
     let rates = rate_schedule(gdp, win_start, win_end);
     let assignments = gdp::ration_by_schedule(
@@ -940,7 +929,7 @@ mod tests {
 
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
-        let inbounds = live_inbounds(&state, "KJFK", now).await;
+        let inbounds = live_inbounds(&state, "KJFK", now).await.unwrap();
         let grd = inbounds
             .iter()
             .find(|f| f.cs == "GRD1")
@@ -970,6 +959,76 @@ mod tests {
         assert!(inside.controlled, "{:?}", inside.exempt_reason);
         let beyond = ration(airborne_min - 1);
         assert_eq!(beyond.exempt_reason.as_deref(), Some(gdp::EXEMPT_TIER));
+    }
+
+    /// #813: GDP inbounds time a ground departure from its stored departure runway, the map
+    /// `list_idst` reads. KBOS has five 04R samples (900 s of taxi) and five 33L (300 s); with 04R
+    /// assigned the wheels-up is now + 50 + 40 + 900 s.
+    #[sqlx::test]
+    async fn gdp_inbounds_time_a_departure_from_its_assigned_runway(pool: PgPool) {
+        use crate::feed::airports::Airport;
+        use crate::feed::taxi_estimate::TaxiSample;
+        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+        use crate::repos::departure_runway::{self as departure_runway_repo, RunwaySource};
+        use std::sync::Arc;
+
+        let state = test_state(pool.clone(), HashMap::new());
+        {
+            let mut feed = state.feed.write().await;
+            feed.airports = Arc::new(HashMap::from([
+                ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
+                ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ]));
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: vec![Pilot {
+                    callsign: "GRD1".into(),
+                    latitude: 42.3656,
+                    longitude: -71.0096,
+                    flight_plan: Some(FlightPlan {
+                        departure: "KBOS".into(),
+                        arrival: "KJFK".into(),
+                        route: "DCT".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })));
+        }
+        let sample = |runway: &str, taxi_sec| TaxiSample {
+            gate_id: None,
+            aircraft: None,
+            runway: Some(runway.into()),
+            pushback_sec: Some(50),
+            startup_sec: Some(40),
+            taxi_sec,
+        };
+        let mut at_bos: Vec<_> = (0..5).map(|_| sample("04R", 900)).collect();
+        at_bos.extend((0..5).map(|_| sample("33L", 300)));
+        state
+            .taxi_estimate_samples
+            .store(Arc::new(HashMap::from([("KBOS".to_string(), at_bos)])));
+
+        let etd = |inbounds: Vec<gdp::Inbound>| {
+            inbounds
+                .into_iter()
+                .find(|f| f.cs == "GRD1")
+                .unwrap()
+                .etd_ms
+                .unwrap()
+        };
+        let now = Utc::now();
+        let unassigned = etd(live_inbounds(&state, "KJFK", now).await.unwrap());
+        assert_ne!(
+            unassigned,
+            now.timestamp_millis() + 990_000,
+            "positive control: no runway, a different tier"
+        );
+        departure_runway_repo::assign(&pool, "KBOS", "GRD1", "04R", RunwaySource::Auto, None)
+            .await
+            .unwrap();
+        let assigned = etd(live_inbounds(&state, "KJFK", now).await.unwrap());
+        assert_eq!(assigned, now.timestamp_millis() + 990_000);
     }
 
     /// AC1 — publishing a GDP produces its advisory, in the same transaction as the publish.
