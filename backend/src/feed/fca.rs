@@ -512,14 +512,14 @@ fn merge_late_joiners(
     seq
 }
 
-/// Where released joiner `j` goes in `seq`: behind the last flight marked in `ordered` with an ETA
+/// Where released joiner `j` goes in `seq`: behind the last flight marked in `is_ordered` with an ETA
 /// at or before its own, and behind the leading run of `seq` that crosses at least its spacing
 /// before its release. Chained times are not monotonic behind a frozen flight, so the run stops at
 /// the first flight that does not clear it rather than at the last that does.
 fn release_slot(
     cands: &[MeterInput],
     seq: &[usize],
-    ordered: &[bool],
+    is_ordered: &[bool],
     j: usize,
     sep: &dyn Fn(&MeterInput) -> i64,
 ) -> usize {
@@ -528,7 +528,7 @@ fn release_slot(
     let at = chain(cands, seq, sep);
     let by_eta = seq
         .iter()
-        .rposition(|&x| ordered[x] && cands[x].eta_ms <= c.eta_ms)
+        .rposition(|&x| is_ordered[x] && cands[x].eta_ms <= c.eta_ms)
         .map_or(0, |p| p + 1);
     let by_release = seq
         .iter()
@@ -1592,6 +1592,40 @@ mod tests {
         let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
         assert_eq!(seqs_of(&out), [1, 4, 3, 2]);
         assert_eq!(out[2].sched_ms, 170_000, "U is spaced behind the release");
+    }
+
+    // Released joiners are placed by release time, not candidate index: the same field as the test
+    // above with J2 listed before J1 still ends A, J1, X, J2, Y.
+    #[test]
+    fn late_joiners_released_in_turn_are_placed_by_release_time_not_index() {
+        let mut cands = [
+            cand(0),
+            cand(140_000),
+            cand(160_000),
+            cand(150_000),
+            cand(10_000),
+        ];
+        let order = [0, 1, 2];
+        let before = meter(&cands, "rate", 30, 0, Some(&order));
+        assert_eq!(seqs_of(&before), [1, 3, 5, 4, 2]);
+
+        cands[4].frozen_ms = Some(before[4].sched_ms + 15_000);
+        let one = meter(&cands, "rate", 30, 0, Some(&order));
+        cands[3].frozen_ms = Some(one[3].sched_ms + 15_000);
+        let both = meter(&cands, "rate", 30, 0, Some(&order));
+        assert_eq!(seqs_of(&both), [1, 3, 5, 4, 2]);
+        assert_eq!(both[2].sched_ms, 510_000, "Y is spaced behind J2's release");
+    }
+
+    // A released joiner with the same ETA as an ordered flight goes behind it, however early the
+    // release: J (ETA 100 s, released for 50 s) sits behind A (ETA 100 s).
+    #[test]
+    fn a_released_late_joiner_with_an_eta_equal_to_an_ordered_flight_goes_behind_it() {
+        let mut j = cand(100_000);
+        j.frozen_ms = Some(50_000);
+        let out = meter(&[cand(100_000), j], "rate", 30, 0, Some(&[0]));
+        assert_eq!(seqs_of(&out), [1, 2]);
+        assert_eq!(out[1].gap_ms, Some(-50_000));
     }
 
     // RDY on a late joiner freezes its merged slot plus a margin. Re-metered, the joiner keeps that

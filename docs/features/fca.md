@@ -150,12 +150,12 @@ short-circuit. `dir`.
 `proposed` row, so a prefile that lingered after its pilot connected listed the aircraft twice, and
 an unconnected prefile took a slot that connected departures metered behind.
 
-**Release map.** `load_releases` (`handlers/flow.rs:2191`) reads every row for the FCA by callsign
+**Release map.** `load_releases` (`handlers/flow.rs:2128`) reads every row for the FCA by callsign
 (`repos/flow.rs:525-535`). There is no time filter.
 
 **`finalize`** (`handlers/flow.rs:2075`) runs `manual_order` (`:1984`) and `fca::meter`, then sets
-`cross_time`, `delay_sec`, `delay_min = (delay_sec + 30) / 60` (`:2169`), and
-`delay_nm = delay_sec / 3600 × cross_speed` (`:2173`), and sorts by `seq`.
+`cross_time`, `delay_sec`, `delay_min = (delay_sec + 30) / 60` (`:2092`), and
+`delay_nm = delay_sec / 3600 × cross_speed` (`:2096`), and sorts by `seq`.
 
 **Callers of `build_candidates`.** The `assigned` runway map differs between them:
 
@@ -243,7 +243,7 @@ frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`release_ms`, `handlers/flow.rs:2037`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:685-1867`: MIT at the follower's speed, rate metering, airborne priority,
+**Tests.** `feed/fca.rs:685-1914`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
 indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
 (`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and
