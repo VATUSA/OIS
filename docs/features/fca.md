@@ -2,8 +2,9 @@
 
 How an FCA decides which flights it includes, how it orders and spaces them, what each write
 changes, and what each read and screen shows. Each area ends with what was checked and what was
-found. Written for #838 against `next` at `333a7831`; the findings marked "Resolved by #813" describe the code after #813. Tables, permissions, and the route list are in
-[flow.md](flow.md). This doc does not repeat them.
+found. Written for #838 against `next` at `333a7831`. Lines tagged "(#813)" or "Resolved by #813"
+describe the code after #813. Tables, permissions, and the route list are in [flow.md](flow.md).
+This doc does not repeat them.
 
 Out of scope here, with links: ETA computation itself (`feed/predict.rs`, `feed/trajectory.rs`;
 design doc planned by #814 at `docs/architecture/prediction.md`), the release-time formula (#815),

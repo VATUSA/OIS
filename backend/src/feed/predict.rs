@@ -248,6 +248,7 @@ pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> 
         (ac.dep, ac.arr, ac.route),
         (ac.pos, ac.hdg, ac.gs),
         Some(ac.arr_ll),
+        false,
     )
     .unwrap_or_else(|| (vec![ac.pos, ac.arr_ll], false));
     let route_nm = path_len_nm(&path) * route_scale(airborne, resolved);
@@ -488,6 +489,7 @@ pub fn trajectory<'a>(
             (&fp.departure, &fp.arrival, &fp.route),
             (o.pos, o.hdg, o.gs),
             arr_ll,
+            !prefile,
         )
     });
     let (path, scale, route_nm) = match resolved {
@@ -534,29 +536,30 @@ pub fn flight_path(
         fp.arrival.as_str(),
         fp.route.as_str(),
     );
-    resolve_path(nav, airports, route, (pos, hdg, gs), arr_ll).map(|(path, _)| path)
+    resolve_path(nav, airports, route, (pos, hdg, gs), arr_ll, true).map(|(path, _)| path)
 }
 
-/// A not-yet-airborne pilot this close (nm) to an arrival field other than its departure field has
-/// arrived there: no surface times it. Airport flow labels a ground pilot this close
+/// A connected, not-yet-airborne pilot this close (nm) to an arrival field other than its departure
+/// field has arrived there: no surface times it. Airport flow labels a ground pilot this close
 /// "arrived" whatever its departure field.
 pub(crate) const ARRIVED_NM: f64 = 5.0;
 
 /// The path a flight at `pos` is timed along, and whether the nav engine placed an enroute point on
 /// it (`> 2` anchors; exactly 2 is no better than the great circle). Falls back to the great circle
-/// to `arr_ll` when the filed route does not resolve, except for a flight on the ground within
-/// [`ARRIVED_NM`] of an arrival field it did not depart from: `route_path` returns `None` for it
-/// because it has arrived, and it has nowhere left to fly. A local flight (departure = arrival)
-/// starts at its arrival field without having arrived. A prefile is placed at its departure field,
-/// where a filed route between two known fields resolves, so the exception never reaches one.
+/// to `arr_ll` when the filed route does not resolve, except for a connected `pilot` on the ground
+/// within [`ARRIVED_NM`] of an arrival field it did not depart from: `route_path` returns `None` for
+/// it because it has arrived, and it has nowhere left to fly. A local flight (departure = arrival)
+/// starts at its arrival field without having arrived, and a prefile has not flown at all.
+/// [`arrival_route`] passes `pilot = false`: it falls back to the great circle itself.
 fn resolve_path(
     nav: &NavData,
     airports: &AirportDb,
     (dep, arr, route): (&str, &str, &str),
     (pos, hdg, gs): ([f64; 2], i64, i64),
     arr_ll: Option<[f64; 2]>,
+    pilot: bool,
 ) -> Option<(Vec<[f64; 2]>, bool)> {
-    let can_arrive = !is_airborne(gs) && !dep.eq_ignore_ascii_case(arr);
+    let can_arrive = pilot && !is_airborne(gs) && !dep.eq_ignore_ascii_case(arr);
     match fca::route_path(nav, airports, dep, arr, route, pos[0], pos[1], hdg, gs) {
         Some(path) => {
             let enroute = path.len() > 2;
@@ -1678,7 +1681,7 @@ mod tests {
     const JFK: [f64; 2] = [40.64, -73.78];
 
     /// A route that does not resolve falls back to the great circle to the destination, except for a
-    /// pilot on the ground at its arrival field, which has arrived: `route_path`'s `None` there means
+    /// pilot on the ground at an arrival field other than its departure field, which has arrived: `route_path`'s `None` there means
     /// nothing is left to fly, and a great circle would time it as a fresh departure.
     #[test]
     fn a_landed_pilot_gets_no_great_circle_to_its_own_field() {
@@ -1723,7 +1726,7 @@ mod tests {
     fn a_local_flight_and_a_prefile_have_not_arrived() {
         let (nav, ap) = (NavData::default(), airports());
         let inp = with_ground(&nav, &ap, GroundInputs::unused());
-        let local = plan("KMIA", "KMIA", "DCT");
+        let local = plan("kmia", "KMIA", "DCT");
         let pre = prefile(local.clone());
         let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
         assert_eq!(
@@ -1744,16 +1747,23 @@ mod tests {
             Some(2),
             "the badge counts see the same local pilot"
         );
-        // A field 3.2 nm from KMIA: a prefile from it sits inside KMIA's arrived radius.
+        // A field 2.0 nm from KMIA, inside its arrived radius. `route_path` collapses a ground leg
+        // under 3 nm, so only the great circle times a flight from it.
         let mut near_ap = airports();
-        near_ap.insert("KNBR".into(), Airport::at(25.79, -80.23));
+        near_ap.insert("KNBR".into(), Airport::at(25.79, -80.253));
         let inp = with_ground(&nav, &near_ap, GroundInputs::unused());
         let near = prefile(plan("KNBR", "KMIA", "DCT"));
         let t = trajectory(&inp, Flight::Prefile(&near), None, now()).unwrap();
         assert_eq!(
             t.path(),
-            [[25.79, -80.23], [25.79, -80.29]],
+            [[25.79, -80.253], [25.79, -80.29]],
             "a prefile has not arrived"
+        );
+        let parked = pilot([25.79, -80.253], 0, 0, plan("KNBR", "KMIA", "DCT"));
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        assert!(
+            t.path().is_empty(),
+            "control: a pilot on the ground there has"
         );
     }
 
