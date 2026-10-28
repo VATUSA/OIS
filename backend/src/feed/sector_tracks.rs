@@ -1,13 +1,13 @@
 //! The sector occupancy engine's input (#721): live flights projected minute by minute over six hours,
 //! as the [`Track`](super::sector_load::Track)s [`sector_loads`](super::sector_load::sector_loads) bins.
 //!
-//! A read-only caller of the shared trajectory model. It makes exactly the calls the map's
-//! predicted-traffic projection makes (`handlers::flow::project_traffic`): `fca::route_path`, then
-//! `predict::profile_from_here`, then `distance_after` / `alt_at` / `point_and_heading_at` per minute.
-//! So it predicts nothing of its own and changes nothing the metering, demand or runway callers see.
+//! A read-only caller of the shared trajectory model: each flight is one `predict::trajectory`, read
+//! per minute with `progress_after` and placed with `fca::point_and_heading_at`, the calls the map's
+//! predicted-traffic projection (`handlers::flow::project_traffic`) makes. So it predicts nothing of
+//! its own and changes nothing the metering, demand or runway callers see.
 //!
 //! The two populations, and a flight is in exactly one:
-//! - **active**: airborne (groundspeed >= 50 kt), projected from where it is now;
+//! - **active**: airborne (`predict::is_airborne`), projected from where it is now;
 //! - **proposed**: on the ground or prefiled, holding a locked wheels-up, projected from it. Before
 //!   wheels-up it is on the ground and in no sector, so it has no fixes. The wheels-up is the latest of
 //!   its issued CFR, FCA releases and GDP slot (`repos::flow::locked_wheels_up`).
@@ -17,17 +17,17 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Utc};
+
 use crate::feed::airports::AirportDb;
 use crate::feed::flow::gc_dist;
 use crate::feed::nav::NavData;
 use crate::feed::sector_load::{Fix, HORIZON_MIN, Population};
 use crate::feed::sectors::SectorTable;
-use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
+use crate::feed::vatsim::VatsimData;
 use crate::feed::winds::Winds;
-use crate::feed::{fca, flow as feed_flow, predict, trajectory};
+use crate::feed::{fca, predict, trajectory};
 
-/// The airborne threshold, the same one `fca::route_path` uses to pick a route from here.
-pub const AIRBORNE_GS_KT: i64 = 50;
 const MINUTE_MS: i64 = 60_000;
 
 /// A flight's projected fixes, owned so the [`Track`](super::sector_load::Track)s that borrow them can be
@@ -139,19 +139,38 @@ impl Ctx<'_> {
         wheels_up: &HashMap<String, i64>,
         excluded: &HashSet<String>,
     ) -> Vec<OwnedTrack> {
-        let (ctx, airports) = (self, self.airports);
+        let inp = predict::Inputs {
+            nav: self.nav,
+            airports: self.airports,
+            winds: self.winds,
+            profiles: self.profiles,
+            // Every ground flight projected here carries its released wheels-up, which replaces the
+            // ground allowance, so the allowance tables are never read.
+            ground: predict::GroundInputs::unused(),
+        };
+        let locked = |cs: &str| {
+            wheels_up
+                .get(cs)
+                .and_then(|ms| DateTime::<Utc>::from_timestamp_millis(*ms))
+        };
+        let now = DateTime::<Utc>::from_timestamp_millis(self.now_ms).unwrap_or_default();
         let pilots = data
             .pilots
             .iter()
             .filter(|p| p.latitude != 0.0 || p.longitude != 0.0)
             .filter(|p| !excluded.contains(&p.callsign))
             .filter_map(|p| {
-                let fp = p.flight_plan.as_ref()?;
-                if p.groundspeed >= AIRBORNE_GS_KT {
-                    ctx.active(p, fp)
+                if predict::is_airborne(p.groundspeed) {
+                    self.track(&inp, predict::Flight::Pilot(p), None, now, &p.callsign)
                 } else {
-                    let edct = *wheels_up.get(&p.callsign)?;
-                    ctx.proposed(&p.callsign, fp, p.latitude, p.longitude, p.heading, edct)
+                    let edct = locked(&p.callsign)?;
+                    self.track(
+                        &inp,
+                        predict::Flight::Pilot(p),
+                        Some(edct),
+                        now,
+                        &p.callsign,
+                    )
                 }
             });
         let prefiles = data
@@ -159,12 +178,16 @@ impl Ctx<'_> {
             .iter()
             .filter(|p| !excluded.contains(&p.callsign))
             .filter_map(|p| {
-                let fp = p.flight_plan.as_ref()?;
-                let edct = *wheels_up.get(&p.callsign)?;
-                let dep = airports.get(&fp.departure.to_ascii_uppercase())?;
-                ctx.proposed(&p.callsign, fp, dep.lat, dep.lon, 0, edct)
+                let edct = locked(&p.callsign)?;
+                self.track(
+                    &inp,
+                    predict::Flight::Prefile(p),
+                    Some(edct),
+                    now,
+                    &p.callsign,
+                )
             });
-        pilots.chain(prefiles).collect()
+        pilots.chain(prefiles).collect::<Vec<_>>()
     }
 }
 
@@ -178,107 +201,47 @@ struct Ctx<'a> {
     /// Resolve every minute even with a box, as the walk did before it skipped the minutes outside
     /// it; only the tests that pin the two to the same output set it.
     every_minute: bool,
-    /// How many minutes were resolved with `distance_after`, for the tests that show minutes are skipped.
+    /// How many minutes were resolved with `progress_after`, for the tests that show minutes are
+    /// skipped.
     #[cfg(test)]
     evaluated: std::cell::Cell<usize>,
 }
 
 impl Ctx<'_> {
-    /// An airborne flight, from where it is now, at the altitude and groundspeed it reports.
-    fn active(&self, p: &Pilot, fp: &FlightPlan) -> Option<OwnedTrack> {
-        let path = self.path(fp, p.latitude, p.longitude, p.heading, p.groundspeed)?;
-        let fixes = self.walk(
-            &path,
-            fp,
-            true,
-            p.altitude as f64,
-            p.groundspeed as f64,
-            self.now_ms,
-        );
-        Some(OwnedTrack {
-            id: p.callsign.clone(),
-            population: Population::Active,
-            fixes,
-        })
-    }
-
-    /// A flight on the ground with a release: from its departure, starting at wheels-up — or now, if
-    /// that has passed and it is still on the ground. It can't have flown the minutes it sat out.
-    fn proposed(
+    /// One flight's track: an airborne flight from where it is now, at the altitude and groundspeed
+    /// it reports; a ground flight with a release from its departure, starting at wheels-up — or
+    /// now, if that has passed and it is still on the ground. It can't have flown the minutes it sat
+    /// out. `None` when the route doesn't resolve or never comes near the box.
+    fn track(
         &self,
+        inp: &predict::Inputs,
+        flight: predict::Flight,
+        released: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
         id: &str,
-        fp: &FlightPlan,
-        lat: f64,
-        lon: f64,
-        heading: i64,
-        edct_ms: i64,
     ) -> Option<OwnedTrack> {
-        let path = self.path(fp, lat, lon, heading, 0)?;
-        let fixes = self.walk(&path, fp, false, 0.0, 0.0, edct_ms.max(self.now_ms));
+        let traj = predict::trajectory(inp, flight, released, now)?;
+        let path = traj.path();
+        if path.len() < 2 || self.bbox.is_some_and(|b| !b.touches_path(path)) {
+            return None;
+        }
+        let population = if traj.airborne() {
+            Population::Active
+        } else {
+            Population::Proposed
+        };
+        let start_ms = traj.wheels_up().timestamp_millis();
         Some(OwnedTrack {
             id: id.to_string(),
-            population: Population::Proposed,
-            fixes,
+            population,
+            fixes: self.walk(&traj, start_ms),
         })
-    }
-
-    /// The route ahead, or `None` when it doesn't resolve or never comes near the box.
-    fn path(
-        &self,
-        fp: &FlightPlan,
-        lat: f64,
-        lon: f64,
-        heading: i64,
-        gs: i64,
-    ) -> Option<Vec<[f64; 2]>> {
-        let path = fca::route_path(
-            self.nav,
-            self.airports,
-            &fp.departure,
-            &fp.arrival,
-            &fp.route,
-            lat,
-            lon,
-            heading,
-            gs,
-        )?;
-        self.bbox
-            .is_none_or(|b| b.touches_path(&path))
-            .then_some(path)
     }
 
     /// One fix per minute from `max(now, start_ms)` to the horizon, `start_ms` being when the flight
-    /// is at the start of `path` (now for an airborne flight, wheels-up for a proposed one).
-    fn walk(
-        &self,
-        path: &[[f64; 2]],
-        fp: &FlightPlan,
-        airborne: bool,
-        cur_alt_ft: f64,
-        observed_gs_kt: f64,
-        start_ms: i64,
-    ) -> Vec<Fix> {
-        let route_len = predict::path_len_nm(path);
-        let (ty, wake) = fp.aircraft_type_wake();
-        let profile = self.profiles.resolve(&ty, &wake);
-        let cruise_ft = trajectory::parse_alt_ft(&fp.altitude);
-        let cruise_tas =
-            trajectory::capped_cruise_tas(feed_flow::parse_tas(&fp.cruise_tas), cruise_ft, profile);
-        // The profile reads the wind at each point's own altitude along the route (#836).
-        let wind = self.winds.along(path, route_len);
-        let vp = predict::profile_from_here(
-            airborne,
-            route_len,
-            cur_alt_ft,
-            observed_gs_kt,
-            cruise_ft,
-            cruise_tas,
-            self.airports,
-            &fp.arrival,
-            profile,
-            wind,
-        );
-
+    /// is at the start of its path (now for an airborne flight, wheels-up for a proposed one).
+    fn walk(&self, traj: &predict::Trajectory, start_ms: i64) -> Vec<Fix> {
+        let path = traj.path();
         let first_ms = self.now_ms.max(start_ms);
         let end_ms = self.now_ms + HORIZON_MIN * MINUTE_MS;
         let minutes = if first_ms > end_ms {
@@ -287,17 +250,16 @@ impl Ctx<'_> {
             ((end_ms - first_ms) / MINUTE_MS + 1) as usize
         };
         let mut minute = Minutes {
-            vp: &vp,
-            route_len,
+            traj,
             start_ms,
             first_ms,
-            d: vec![None; minutes],
+            at: vec![None; minutes],
             #[cfg(test)]
             evaluated: &self.evaluated,
         };
         let mut fixes = Vec::new();
         let windows = match self.bbox {
-            Some(b) if path.len() >= 2 && !self.every_minute => along_route_windows(path, &b),
+            Some(b) if !self.every_minute => along_route_windows(path, &b),
             // No box keeps every minute, so there is nothing to skip.
             _ => vec![(f64::NEG_INFINITY, f64::INFINITY)],
         };
@@ -307,21 +269,21 @@ impl Ctx<'_> {
             // first whose position is not short of it.
             i = minute.first_reaching(i, lo);
             while i < minutes {
-                let (d, s) = minute.at(i);
-                if s > hi {
+                let at = minute.at(i);
+                if at.along_nm > hi {
                     break;
                 }
-                let (pos, _) = fca::point_and_heading_at(path, s);
+                let (pos, _) = fca::point_and_heading_at(path, at.along_nm);
                 if self.bbox.is_none_or(|b| b.contains(pos[0], pos[1])) {
                     fixes.push(Fix {
                         t_ms: minute.t_ms(i),
                         lat: pos[0],
                         lon: pos[1],
-                        alt_ft: Some(vp.alt_at(d)),
+                        alt_ft: Some(at.alt_ft),
                     });
                 }
-                if d <= 0.0 {
-                    return fixes; // landed
+                if at.landed {
+                    return fixes;
                 }
                 i += 1;
             }
@@ -330,19 +292,18 @@ impl Ctx<'_> {
     }
 }
 
-/// One track's minutes, `first_ms` and every minute after it to the horizon, each resolved to its
-/// distance-to-destination `d` (the shared model's `distance_after`, the cost of a projection) at most
-/// once and only when asked for.
+/// One track's minutes, `first_ms` and every minute after it to the horizon, each resolved to where
+/// the flight is (the shared model's `progress_after`, the cost of a projection) at most once and
+/// only when asked for.
 ///
-/// `d` never increases from one minute to the next, so `s`, how far along the path the flight is, never
-/// decreases: `distance_after` bisects the same tree for every elapsed time, and a later time leaves it
-/// at or below where an earlier one did. That is what lets [`Self::first_reaching`] bisect the minutes.
+/// The distance flown never decreases from one minute to the next: `distance_after` bisects the same
+/// tree for every elapsed time, and a later time leaves it at or below where an earlier one did. That
+/// is what lets [`Self::first_reaching`] bisect the minutes.
 struct Minutes<'a> {
-    vp: &'a trajectory::VerticalProfile,
-    route_len: f64,
+    traj: &'a predict::Trajectory<'a>,
     start_ms: i64,
     first_ms: i64,
-    d: Vec<Option<f64>>,
+    at: Vec<Option<predict::Progress>>,
     #[cfg(test)]
     evaluated: &'a std::cell::Cell<usize>,
 }
@@ -352,31 +313,29 @@ impl Minutes<'_> {
         self.first_ms + i as i64 * MINUTE_MS
     }
 
-    /// Minute `i`'s `(d, s)`, exactly as the every-minute walk computes them.
-    fn at(&mut self, i: usize) -> (f64, f64) {
-        let d = match self.d[i] {
-            Some(d) => d,
-            None => {
-                #[cfg(test)]
-                self.evaluated.set(self.evaluated.get() + 1);
-                let elapsed_sec = (self.t_ms(i) - self.start_ms) as f64 / 1000.0;
-                let d = self.vp.distance_after(self.route_len, elapsed_sec);
-                self.d[i] = Some(d);
-                d
-            }
-        };
-        (d, (self.route_len - d).max(0.0))
+    /// Where the flight is at minute `i`.
+    fn at(&mut self, i: usize) -> predict::Progress {
+        if let Some(at) = self.at[i] {
+            return at;
+        }
+        #[cfg(test)]
+        self.evaluated.set(self.evaluated.get() + 1);
+        let elapsed_sec = (self.t_ms(i) - self.start_ms) as f64 / 1000.0;
+        let at = self.traj.progress_after(elapsed_sec);
+        self.at[i] = Some(at);
+        at
     }
 
-    /// The first minute from `from` on whose `s` is at least `lo`, or the minute count when none is.
+    /// The first minute from `from` on whose distance along the path is at least `lo`, or the
+    /// minute count when none is.
     fn first_reaching(&mut self, from: usize, lo: f64) -> usize {
         if lo == f64::NEG_INFINITY {
             return from;
         }
-        let (mut a, mut b) = (from, self.d.len());
+        let (mut a, mut b) = (from, self.at.len());
         while a < b {
             let mid = a + (b - a) / 2;
-            if self.at(mid).1 < lo {
+            if self.at(mid).along_nm < lo {
                 a = mid + 1;
             } else {
                 b = mid;
@@ -472,11 +431,12 @@ mod tests {
 
     use super::*;
     use crate::feed::airports::Airport;
+    use crate::feed::predict::AIRBORNE_GS_KT;
     use crate::feed::sector_load::BIN_MIN;
     use crate::feed::sector_load::{Track, sector_loads};
     use crate::feed::sectors::SectorVolume;
     use crate::feed::trajectory::ProfileTable;
-    use crate::feed::vatsim::{Prefile, VatsimData};
+    use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
 
     /// 1407Z; the Monitor's first bin starts at 1400.
     fn now() -> i64 {
@@ -635,6 +595,24 @@ mod tests {
             (first.lat - 40.64).abs() < 0.05 && (first.lon + 73.78).abs() < 0.05,
             "it starts at KJFK: {first:?}"
         );
+    }
+
+    /// A released prefile out of a field the airport table does not hold has no path to fly, so it
+    /// yields no track rather than a walk along an empty path, with no box to filter it out first.
+    #[test]
+    fn a_release_from_an_unknown_field_has_no_track() {
+        let edct = now() + 40 * MINUTE_MS;
+        let mut lost = prefile("LOST");
+        if let Some(fp) = lost.flight_plan.as_mut() {
+            fp.departure = "KZZZ".into();
+        }
+        let data = VatsimData {
+            prefiles: vec![lost, prefile("DAL2")],
+            ..Default::default()
+        };
+        let tracks = project(&data, &[("LOST", edct), ("DAL2", edct)], &[], None);
+        let ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["DAL2"], "positive control: DAL2 is projected");
     }
 
     /// A release whose wheels-up has passed, for a flight still on the ground (a pilot at the gate, or

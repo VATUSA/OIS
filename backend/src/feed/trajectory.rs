@@ -16,18 +16,29 @@
 /// as unfiled and replaced with the altitude-based default. Comfortably above any real airliner.
 pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
 
-/// Parse a filed cruise-altitude string (`"350"`, `"FL350"`, `"35000"`) to feet. Values
-/// ≤ 600 are treated as flight levels (×100); junk falls back to 35,000 ft.
-pub fn parse_alt_ft(s: &str) -> f64 {
-    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return 35000.0;
-    }
-    let mut n: f64 = digits.parse().unwrap_or(35000.0);
+/// The filed cruise altitude in feet, or `None` when it is unfiled or unreadable (#813).
+///
+/// Reads the **first** run of digits, so a step climb filed `"FL350/370"` is FL350 rather than the
+/// 350,370 ft that concatenating every digit gives. A value ≤ 600 is a flight level (×100); anything
+/// that comes out under 1,000 ft (`"VFR"`, `"0"`, `"8"`) is unknown. The FCA altitude band and the
+/// timing model both read the filing through this one parser.
+pub fn filed_altitude_ft(s: &str) -> Option<f64> {
+    let digits: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let mut n: f64 = digits.parse().ok()?;
     if n <= 600.0 {
         n *= 100.0;
     }
-    if n < 1000.0 { 35000.0 } else { n }
+    (n >= 1000.0).then_some(n)
+}
+
+/// The cruise altitude the model times a flight at: [`filed_altitude_ft`], or 35,000 ft when the
+/// filing is unknown.
+pub fn parse_alt_ft(s: &str) -> f64 {
+    filed_altitude_ft(s).unwrap_or(35000.0)
 }
 
 /// Filed TAS (kt) with a sane fallback estimated from cruise altitude. A filed value outside the
@@ -870,6 +881,28 @@ mod tests {
         assert_eq!(parse_alt_ft(""), 35000.0);
         assert_eq!(parse_alt_ft("VFR"), 35000.0);
         assert_eq!(parse_alt_ft("80"), 8000.0);
+    }
+
+    /// A step climb reads its first level, not every digit run concatenated (#813, from #838).
+    #[test]
+    fn a_step_climb_filing_reads_its_first_level() {
+        assert_eq!(filed_altitude_ft("FL350/370"), Some(35000.0));
+        assert_eq!(parse_alt_ft("FL350/370"), 35000.0);
+        assert_eq!(filed_altitude_ft("35000/37000"), Some(35000.0));
+        assert_eq!(filed_altitude_ft("A045"), Some(4500.0));
+    }
+
+    /// Unknown is unknown for the band and 35,000 ft for the timing; a filing under 1,000 ft is
+    /// unknown on both, at the boundary as well as below it.
+    #[test]
+    fn an_unreadable_filing_is_unknown_to_the_band_and_35000_ft_to_the_model() {
+        for s in ["", "VFR", "0", "8", "700"] {
+            assert_eq!(filed_altitude_ft(s), None, "{s:?}");
+            assert_eq!(parse_alt_ft(s), 35000.0, "{s:?}");
+        }
+        assert_eq!(filed_altitude_ft("10"), Some(1000.0));
+        assert_eq!(filed_altitude_ft("600"), Some(60000.0));
+        assert_eq!(filed_altitude_ft("1000"), Some(1000.0));
     }
 
     #[test]

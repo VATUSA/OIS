@@ -151,6 +151,25 @@ pub async fn list_for_airport(
     .map_err(|_| ApiError::Internal)
 }
 
+/// Every stored assignment, keyed `(icao, callsign)` with `(runway, source)`: the map the live timing
+/// surfaces hand the predictor through `TimingTables::live`, so a ground flight's taxi allowance reads the same runway on the FCA
+/// ladder, IDST, airport flow and the per-fix table (#813). The table holds at most
+/// `jobs::DEPARTURE_RUNWAY_RETAIN_HOURS` of departures.
+pub async fn assignment_map(
+    pool: &PgPool,
+) -> Result<crate::feed::predict::AssignedRunways, ApiError> {
+    let rows = sqlx::query_as::<_, DepartureRunwayAssignment>(
+        "select icao, callsign, runway, source, updated_at from flow.departure_runway_assignment",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|a| ((a.icao, a.callsign), (a.runway, a.source)))
+        .collect())
+}
+
 /// Delete assignments last touched before `before`. Batched like `repos::audit::prune_audit_logs`.
 pub async fn prune(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
     sqlx::query(

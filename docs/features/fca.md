@@ -18,7 +18,7 @@ VATSIM snapshot (handlers/flow.rs::feed_view :61)
      (prefiles are not candidates, #834)              ▼
         fca_crossing_for (flow.rs:202): excluded? ─▶ filters ─▶ fca::crosses ─▶ scope
                                                       ▼  crossing + along_nm
-        predict::eta_along_route ─▶ eta, crossing groundspeed      (ETA model: #814)
+        predict::trajectory ─▶ eta, crossing groundspeed  (one entry point: #813)
         flow.fca_release (by callsign) ─▶ frozen_ms
                                                       ▼  MeterInput[]
         finalize (flow.rs:2160) ─▶ manual_order (:2082) ─▶ fca::meter (fca.rs:348)
@@ -129,22 +129,22 @@ short-circuit. `dir`.
 `build_candidates` (`handlers/flow.rs:1829`) turns a snapshot into `FcaFlight` rows plus a parallel
 `MeterInput` list. It builds no schedule.
 
-**Live pilots** (`handlers/flow.rs:1852`):
+**Live pilots** (`build_candidates`, `handlers/flow.rs`):
 
-1. No flight plan: skipped (`:1853`).
-2. `airborne = groundspeed >= 50` (`:1854`).
-3. `route_path` with the live position, heading and groundspeed (`:1855`). No path: skipped.
-4. `fca_crossing_for` with the current altitude (`:1871`). Skipped before either push, because the
-   two lists are consumed as parallel slices (`:1868-1870`).
-5. ETA inputs: profile, cruise altitude, capped TAS, and the wind along the route (`:1882-1887`;
-   read at each point's altitude since #836). A ground
-   aircraft also gets a ground allowance from `feed_flow::resolve_ground_allowance`
-   (`:1892-1906`), with the runway from `assigned` when there is one.
-6. `predict::eta_along_route` (`:1907`). The ETA model is #814's subject.
-7. `cross_speed = gs_kt.max(120.0)` (`:1927`), the groundspeed predicted at the line. MIT spacing
-   uses it (#355).
-8. `frozen_ms` is the release's CTA when `flow.fca_release` holds a row for this callsign
-   (`:1928-1933`).
+1. No flight plan: skipped.
+2. `predict::trajectory(inp, Flight::Pilot(p), None, now)` (#813) resolves the route from the live
+   position, heading and groundspeed, and decides airborne (`gs >= 50`), the direct-route padding
+   and the departure runway from `inp.ground.assigned`, the map `list_idst` reads. No route and no
+   known destination: skipped.
+3. `fca_crossing_for` with the current altitude, on `traj.path()`. Skipped before either push,
+   because the two lists are consumed as parallel slices.
+4. The trajectory builds its profile, wind and ground allowance only now, for a flight that
+   crosses.
+5. `traj.eta_at(cross.along_nm)`, the same clock airport flow, sector demand and the per-fix table
+   read.
+6. `cross_speed = traj.gs_at(cross.along_nm).max(MIN_CROSS_SPEED_KT)` (120 kt), the groundspeed
+   predicted at the line. MIT spacing uses it (#355).
+7. `frozen_ms` is the release's CTA when `flow.fca_release` holds a row for this callsign.
 
 **Prefiles** are not candidates (#834). Until #834 a second loop added every prefile as a
 `proposed` row, so a prefile that lingered after its pilot connected listed the aircraft twice, and
@@ -157,14 +157,10 @@ an unconnected prefile took a slot that connected departures metered behind.
 `cross_time`, `delay_sec`, `delay_min = (delay_sec + 30) / 60` (`:2169`), and
 `delay_nm = delay_sec / 3600 × cross_speed` (`:2173`), and sorts by `seq`.
 
-**Callers of `build_candidates`.** The `assigned` runway map differs between them:
-
-| Caller | Line | `assigned` |
-| --- | --- | --- |
-| `metered_flights` (serves `fca_traffic` and `build_flight_advisory`) | `handlers/flow.rs:2241` | empty |
-| `list_idst` | `handlers/flow.rs:2437` | derived departure runways |
-| `mark_release` | `handlers/flow.rs:2577` | empty |
-| `clear_release` | `handlers/flow.rs:2693` | empty |
+**Callers of `build_candidates`.** `metered_flights` (serves `fca_traffic` and
+`build_flight_advisory`), `list_idst`, `mark_release` and `clear_release` all build their inputs
+with `TimingTables::live`, so each reads the stored departure runways
+(`flow.departure_runway_assignment`) once per request (#813).
 
 **Tests.** `mod prefile_skip_integration_tests` and `mod mit_cross_speed_wiring_tests` in
 `handlers/flow.rs`, the latter covering an airborne and a ground pilot, and
@@ -172,9 +168,8 @@ an unconnected prefile took a slot that connected departures metered behind.
 (`:4496`) pins the board to the shared decision.
 
 **Untested branches.** The pinned time a release gives: router tests send a non-empty release map
-and assert `released`, but none checks `cross_time`, so `frozen_ms` (`handlers/flow.rs:1933`,
-`:2038`) could be dropped with the suite green. A non-empty `assigned` map. A pilot with no flight
-plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
+and assert `released`, but none checks `cross_time`, so `frozen_ms` (set in `build_candidates`
+and `build_candidates_with`) could be dropped with the suite green. A pilot with no flight plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ### Findings, area 2
 
