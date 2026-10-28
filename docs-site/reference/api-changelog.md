@@ -14,6 +14,18 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `FcaBody` and `UpsertFcaRequest` gain `freeze_min`, the FCA's freeze horizon in minutes
+  (0-120, 0 turns it off). A value outside the range answers 400. A create that omits it gets 30; an
+  update that omits it keeps the stored value, so an existing caller is unaffected.
+  `PUT /api/v1/flow/fcas/{id}` and `DELETE /api/v1/flow/fcas/{id}` also clear the FCA's held crossing
+  times. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
+  `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
+  held times. A flight whose ETA has passed its
+  release or held time reports how far in `late_sec`, and its `cross_time` is never before its ETA.
+  In airport flow, an issued CFR's `FlowFlight.sta` and `delay_min` now go through the same slot
+  check as every other arrival and are never before its ETA, so a CFR the flight can no longer make
+  shows its ETA and a CFR whose slot is taken shows the delay. (#817)
+
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
   RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA

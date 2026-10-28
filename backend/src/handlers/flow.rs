@@ -328,6 +328,12 @@ pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
+    if req
+        .freeze_min
+        .is_some_and(|m| !(0..=MAX_FREEZE_MIN).contains(&m))
+    {
+        return Err(ApiError::BadRequest);
+    }
     flow_repo::fca_color(req.color.as_deref())?;
     if let Some(m) = &req.mode
         && m != "rate"
@@ -337,6 +343,9 @@ pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     }
     Ok(())
 }
+
+/// The longest freeze horizon an FCA may set, minutes; the column's check constraint matches it.
+const MAX_FREEZE_MIN: i32 = 120;
 
 #[utoipa::path(
     get,
@@ -1755,6 +1764,9 @@ fn fca_flight(
         edct: rel.and_then(|(_, e)| DateTime::from_timestamp_millis(*e)),
         released: rel.is_some(),
         release_version: None,
+        late_sec: 0,
+        slot_conflict: false,
+        sta_frozen: false,
         groundspeed: gs,
         altitude: alt,
         heading: hdg,
@@ -1930,6 +1942,7 @@ fn build_candidates(
             airborne,
             cross_speed,
             frozen_ms: rel.map(|(cta, _)| *cta),
+            held_ms: None,
             ground_allowance_ms: (allowance * 1000.0) as i64,
         });
         let mut flight = fca_flight(
@@ -1991,31 +2004,83 @@ fn manual_order(fca: &FcaBody, flights: &[FcaFlight]) -> Option<Vec<usize>> {
 /// hands the departure a gap that closes as soon as that arrival takes its own spacing. Unpinned
 /// ground traffic is excluded: it has no committed time to conflict with and floats around the
 /// release itself.
+///
+/// Each comes with its own separation, because a pair is spaced by the larger of the two (#817).
 fn committed_crossings(
+    fca: &FcaBody,
     metas: &[fca::MeterInput],
     metered: &[fca::MeterOutput],
     releasing: usize,
-) -> Vec<i64> {
+) -> Vec<(i64, i64)> {
     metas
         .iter()
         .zip(metered)
         .enumerate()
         .filter(|(j, _)| *j != releasing)
         .filter(|(_, (m, _))| m.airborne || m.frozen_ms.is_some())
-        .map(|(_, (_, out))| out.sched_ms)
+        .map(|(_, (m, out))| (out.sched_ms, separation_ms(fca, m.cross_speed)))
         .collect()
 }
 
 /// The separation a crossing must hold at this FCA, in ms — MIT converted at the aircraft's own
-/// crossing speed, or the flat rate interval.
+/// crossing speed, or the flat rate interval. One formula, `fca::separation_ms`, for the ladder and
+/// for RDY.
 fn separation_ms(fca: &FcaBody, cross_speed: f64) -> i64 {
-    if fca.mode == "mit" {
-        ((fca.mit as f64 / cross_speed.max(60.0)) * 3600.0 * 1000.0) as i64
-    } else if fca.rate > 0 {
-        (3600.0 / fca.rate as f64 * 1000.0) as i64
-    } else {
-        0
+    fca::separation_ms(&fca.mode, fca.rate, fca.mit, cross_speed)
+}
+
+/// The metering settings for this FCA at `now_ms`.
+fn meter_config(fca: &FcaBody, now_ms: i64) -> fca::MeterConfig<'_> {
+    fca::MeterConfig {
+        mode: &fca.mode,
+        rate: fca.rate,
+        mit: fca.mit,
+        freeze_ms: i64::from(fca.freeze_min) * 60_000,
+        now_ms,
     }
+}
+
+/// Stored freeze-horizon STAs for one FCA, by callsign (#817).
+type HeldMap = HashMap<String, i64>;
+
+/// Give each candidate its stored freeze-horizon STA, if it has one. `metas` lines up with
+/// `flights` by position.
+fn attach_held(flights: &[FcaFlight], metas: &mut [fca::MeterInput], held: &HeldMap) {
+    for (f, m) in flights.iter().zip(metas.iter_mut()) {
+        m.held_ms = held.get(&f.callsign).copied();
+    }
+}
+
+/// One FCA's stored freeze-horizon STAs (#817).
+async fn held_stas_for(
+    pool: &sqlx::PgPool,
+    fca_id: &str,
+    now: DateTime<Utc>,
+) -> Result<HeldMap, ApiError> {
+    let mut by_fca = flow_repo::list_held_stas(pool, &[fca_id.to_string()], now).await?;
+    Ok(by_fca.remove(fca_id).unwrap_or_default())
+}
+
+/// What this pass changes in the stored STAs: the flights that entered the freeze horizon and have
+/// no stored STA yet, as `(callsign, sta_ms)` to store, and the stored callsigns this pass no
+/// longer holds (left the horizon, released, or gone from the feed) to drop.
+fn held_changes(flights: &[FcaFlight], held: &HeldMap) -> (Vec<(String, i64)>, Vec<String>) {
+    let store = flights
+        .iter()
+        .filter(|f| f.sta_frozen && !held.contains_key(&f.callsign))
+        .filter_map(|f| Some((f.callsign.clone(), f.cross_time?.timestamp_millis())))
+        .collect();
+    let frozen: HashSet<&str> = flights
+        .iter()
+        .filter(|f| f.sta_frozen)
+        .map(|f| f.callsign.as_str())
+        .collect();
+    let drop = held
+        .keys()
+        .filter(|c| !frozen.contains(c.as_str()))
+        .cloned()
+        .collect();
+    (store, drop)
 }
 
 /// The release (wheels-up, epoch ms) that crosses the FCA at `cta_ms`: the CTA less the airborne ETE.
@@ -2056,8 +2121,11 @@ fn rdy_slot(
     if manual {
         return metered[ti].sched_ms + RELEASE_MARGIN_MS;
     }
-    let committed = committed_crossings(metas, metered, ti);
-    fca::earliest_slot(metas[ti].eta_ms, &committed, sep_ms + RELEASE_MARGIN_MS)
+    let committed: Vec<(i64, i64)> = committed_crossings(fca, metas, metered, ti)
+        .into_iter()
+        .map(|(t, sep)| (t, sep + RELEASE_MARGIN_MS))
+        .collect();
+    fca::earliest_slot(metas[ti].eta_ms, sep_ms + RELEASE_MARGIN_MS, &committed)
 }
 
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
@@ -2065,17 +2133,23 @@ fn finalize(
     fca: &FcaBody,
     mut flights: Vec<FcaFlight>,
     metas: &[fca::MeterInput],
+    now_ms: i64,
 ) -> Vec<FcaFlight> {
-    meter_in_place(fca, &mut flights, metas);
+    meter_in_place(fca, &mut flights, metas, now_ms);
     flights.sort_by_key(|f| f.seq);
     flights
 }
 
 /// [`finalize`]'s metering without its sort: `flights` stays aligned with `metas`, so a caller can
 /// read each flight's own input by position.
-fn meter_in_place(fca: &FcaBody, flights: &mut [FcaFlight], metas: &[fca::MeterInput]) {
+fn meter_in_place(
+    fca: &FcaBody,
+    flights: &mut [FcaFlight],
+    metas: &[fca::MeterInput],
+    now_ms: i64,
+) {
     let order = manual_order(fca, flights);
-    let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
+    let metered = fca::meter(metas, &meter_config(fca, now_ms), order.as_deref());
     for ((f, m), input) in flights.iter_mut().zip(&metered).zip(metas) {
         f.cross_time = DateTime::from_timestamp_millis(m.sched_ms);
         f.delay_min = (m.delay_sec + 30) / 60;
@@ -2084,6 +2158,9 @@ fn meter_in_place(fca: &FcaBody, flights: &mut [FcaFlight], metas: &[fca::MeterI
         // controller sees): how much further back this aircraft must sit to hold separation.
         f.delay_nm = (m.delay_sec as f64 / 3600.0 * input.cross_speed).round() as i64;
         f.seq = m.seq;
+        f.late_sec = m.late_sec;
+        f.slot_conflict = m.slot_conflict;
+        f.sta_frozen = m.sta_frozen;
     }
 }
 
@@ -2122,6 +2199,10 @@ async fn metered_flights(
     if fca.points.0.len() < 2 {
         return Ok(Vec::new());
     }
+    let held = match state.db.as_ref() {
+        Some(pool) => held_stas_for(pool, &fca.id, now).await?,
+        None => HeldMap::new(),
+    };
     let (snapshot, airports) = feed_view(state).await;
     let Some(snap) = snapshot else {
         return Ok(Vec::new());
@@ -2134,8 +2215,9 @@ async fn metered_flights(
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let flight_exclusions = state.flight_exclusions.load_full();
-    tokio::task::spawn_blocking(move || {
-        let (flights, metas) = build_candidates(
+    let (fca_id, fca_updated_at) = (fca.id.clone(), fca.updated_at);
+    let (flights, (store, drop)) = tokio::task::spawn_blocking(move || {
+        let (flights, mut metas) = build_candidates(
             &fca,
             &snap.data,
             airports.as_ref(),
@@ -2152,10 +2234,27 @@ async fn metered_flights(
             now,
             debug,
         );
-        finalize(&fca, flights, &metas)
+        attach_held(&flights, &mut metas, &held);
+        let flights = finalize(&fca, flights, &metas, now.timestamp_millis());
+        let changes = held_changes(&flights, &held);
+        (flights, changes)
     })
     .await
-    .map_err(|_| ApiError::Internal)
+    .map_err(|_| ApiError::Internal)?;
+    // The holds depend only on the feed and the stored FCA, never on the caller or the query, so
+    // every reader of this FCA, the public ones included, stores the same rows. A failed write is
+    // logged and the read still answers; the next read retries the same changes.
+    if let Some(pool) = state.db.as_ref() {
+        let sync = flow_repo::HeldStaSync {
+            store: &store,
+            drop: &drop,
+        };
+        // `sync_held_stas` logs the database error; this records that the read answered anyway.
+        if let Err(e) = flow_repo::sync_held_stas(pool, &fca_id, fca_updated_at, &sync, now).await {
+            tracing::debug!(fca_id = %fca_id, error = %e, "held STAs not stored; read answered");
+        }
+    }
+    Ok(flights)
 }
 
 /// Query for the FCA traffic endpoint.
@@ -2293,15 +2392,20 @@ pub async fn list_idst(
         FcaBody,
         ReleaseMap,
         HashMap<String, flow_repo::ReleaseHolder>,
+        HeldMap,
     )> = Vec::new();
-    for fca in flow_repo::list_fcas(pool)
+    let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
         .await?
         .into_iter()
         .filter(|f| f.enabled && f.points.0.len() >= 2)
-    {
+        .collect();
+    let fca_ids: Vec<String> = fcas.iter().map(|f| f.id.clone()).collect();
+    let mut held_by_fca = flow_repo::list_held_stas(pool, &fca_ids, now).await?;
+    for fca in fcas {
         let releases = load_releases(pool, &fca.id).await?;
         let holders = flow_repo::release_holders(pool, &fca.id).await?;
-        fca_releases.push((fca, releases, holders));
+        let held = held_by_fca.remove(&fca.id).unwrap_or_default();
+        fca_releases.push((fca, releases, holders, held));
     }
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
     // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
@@ -2330,8 +2434,8 @@ pub async fn list_idst(
         let mut unscheduled: Vec<IdstFlight> = Vec::new();
         let mut released: Vec<IdstFlight> = Vec::new();
         // One row per (metering FCA, ground departure in scope).
-        for (fca, releases, holders) in &fca_releases {
-            let (mut flights, metas) = build_candidates(
+        for (fca, releases, holders, held) in &fca_releases {
+            let (mut flights, mut metas) = build_candidates(
                 fca,
                 &snap.data,
                 ap.as_ref(),
@@ -2350,7 +2454,8 @@ pub async fn list_idst(
             );
             // Pair each flight with its own ground allowance before sorting by `seq`: `metas` lines
             // up with `flights` by position only.
-            meter_in_place(fca, &mut flights, &metas);
+            attach_held(&flights, &mut metas, held);
+            meter_in_place(fca, &mut flights, &metas, now.timestamp_millis());
             let mut rows: Vec<(FcaFlight, i64)> = flights
                 .into_iter()
                 .zip(metas.iter().map(|m| m.ground_allowance_ms))
@@ -2476,6 +2581,7 @@ pub async fn mark_release(
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
+    let held = held_stas_for(pool, &id, now).await?;
 
     // Release the feed lock before the metering CPU (build_candidates resolves every
     // matching route) by cloning the snapshot + airport handles.
@@ -2508,9 +2614,10 @@ pub async fn mark_release(
         .ok_or(ApiError::NotFound)?; // not currently crossing
     let eta_ms = metas[ti].eta_ms;
     let allowance_ms = metas[ti].ground_allowance_ms;
+    attach_held(&flights, &mut metas, &held);
 
     let order = manual_order(&fca, &flights);
-    let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
+    let metered = fca::meter(&metas, &meter_config(&fca, now_ms), order.as_deref());
 
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
         // SET: pin the crossing so wheels-up lands on the requested time: the typed time is a
@@ -2537,7 +2644,7 @@ pub async fn mark_release(
     metas[ti].frozen_ms = Some(cta);
     flights[ti].released = true;
     flights[ti].edct = DateTime::from_timestamp_millis(edct);
-    let mut flights = finalize(&fca, flights, &metas);
+    let mut flights = finalize(&fca, flights, &metas, now_ms);
     annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
     Ok((release_authority::etag(version), Json(flights)))
 }
@@ -2597,6 +2704,7 @@ pub async fn clear_release(
     state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
+    let held = held_stas_for(pool, &id, now).await?;
 
     // Release the feed lock before the metering CPU (build_candidates resolves every
     // matching route) by cloning the snapshot + airport handles.
@@ -2620,12 +2728,13 @@ pub async fn clear_release(
             false,
         )
     });
-    let Some((flights, metas)) = built else {
+    let Some((flights, mut metas)) = built else {
         return Ok(Json(Vec::new()));
     };
+    attach_held(&flights, &mut metas, &held);
     // The other flights' versions, as `mark_release` and the traffic list return them: a writer
     // reading this list must not see a released flight with `release_version: null` (#585 QA).
-    let mut flights = finalize(&fca, flights, &metas);
+    let mut flights = finalize(&fca, flights, &metas, now.timestamp_millis());
     annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
     Ok(Json(flights))
 }
@@ -3410,6 +3519,7 @@ mod prefile_skip_integration_tests {
             mode: "rate".into(),
             rate: 30,
             mit: 0,
+            freeze_min: 30,
             enabled: true,
             manual_order: vec![],
             manual_seq: false,
@@ -3585,7 +3695,7 @@ mod prefile_skip_integration_tests {
         fca.rate = 10;
         let board = |data: &VatsimData| -> Vec<(String, String, i64, i64)> {
             let (flights, metas) = candidates(&fca, data, &airports, &HashMap::new());
-            finalize(&fca, flights, &metas)
+            finalize(&fca, flights, &metas, 0)
                 .into_iter()
                 .map(|f| (f.callsign, f.status, f.seq, f.delay_sec))
                 .collect()
@@ -4074,7 +4184,9 @@ mod data_refresh_claim_tests {
 
 #[cfg(test)]
 mod release_spacing_tests {
-    use super::{RELEASE_MARGIN_MS, committed_crossings, rdy_slot, release_ms, separation_ms};
+    use super::{
+        RELEASE_MARGIN_MS, committed_crossings, meter_config, rdy_slot, release_ms, separation_ms,
+    };
     use crate::feed::fca::{self, MeterInput};
     use crate::models::FcaBody;
     use chrono::Utc;
@@ -4087,6 +4199,7 @@ mod release_spacing_tests {
             airborne,
             cross_speed: 300.0,
             frozen_ms,
+            held_ms: None,
             ground_allowance_ms: 0,
         }
     }
@@ -4108,6 +4221,7 @@ mod release_spacing_tests {
             mode: "rate".into(),
             rate: 30,
             mit: 0,
+            freeze_min: 30,
             enabled: true,
             manual_seq: !manual_order.is_empty(),
             manual_order,
@@ -4177,7 +4291,7 @@ mod release_spacing_tests {
                 ..m
             })
             .collect();
-        let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, None);
+        let metered = fca::meter(&metas, &meter_config(&fca, 0), None);
         let a_sta = metered[1].sched_ms;
         assert!(
             a_sta > metas[1].eta_ms,
@@ -4212,7 +4326,7 @@ mod release_spacing_tests {
     #[test]
     fn a_release_is_spaced_behind_an_arrivals_metered_time_not_its_eta() {
         let metas = leader_arrival_and_departure();
-        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let metered = fca::meter(&metas, &meter_config(&rate_fca(vec![]), 0), None);
         let a_sta = metered[1].sched_ms;
         assert_eq!(
             a_sta, 120_000,
@@ -4227,7 +4341,7 @@ mod release_spacing_tests {
         );
 
         // What the bug did, for contrast: spacing against raw ETAs leaves less than separation.
-        let eta_based = fca::earliest_slot(180_000, &[0, 60_000], SEP_MS);
+        let eta_based = fca::earliest_slot(180_000, SEP_MS, &[(0, SEP_MS), (60_000, SEP_MS)]);
         assert!(eta_based - a_sta < SEP_MS);
     }
 
@@ -4236,7 +4350,7 @@ mod release_spacing_tests {
     #[test]
     fn the_release_slot_reserves_the_margin_on_top_of_separation() {
         let metas = leader_arrival_and_departure();
-        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let metered = fca::meter(&metas, &meter_config(&rate_fca(vec![]), 0), None);
         let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false);
         assert_eq!(
             cta - metered[1].sched_ms,
@@ -4257,7 +4371,7 @@ mod release_spacing_tests {
             cand(110_000, true, None),  // Trailer, airborne, ordered behind Dep
         ];
         let order = vec![0usize, 1, 2];
-        let metered = fca::meter(&metas, "rate", 30, 0, Some(&order));
+        let metered = fca::meter(&metas, &meter_config(&rate_fca(vec![]), 0), Some(&order));
         let (dep_slot, trailer_slot) = (metered[1].sched_ms, metered[2].sched_ms);
         assert_eq!(
             (dep_slot, trailer_slot),
@@ -4280,6 +4394,45 @@ mod release_spacing_tests {
         );
     }
 
+    /// Case 4 of #817 on the RDY path. MIT 20: the airborne arrival crosses at 200 kt (360 s gap),
+    /// the departure at 400 kt (180 s). With its own 180 s plus the margin, a release at the
+    /// departure's ETA, 300 s ahead of the arrival, would look clear; the arrival, trailing, needs
+    /// 360 s. The release must take the larger gap, so it goes behind the arrival. A second arrival
+    /// well clear keeps its slot and does not bound the release.
+    #[test]
+    fn a_release_is_spaced_by_the_larger_gap_of_the_pair() {
+        const T0: i64 = 1_800_000_000_000;
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.mit = 20;
+        let metas = vec![
+            MeterInput {
+                cross_speed: 200.0,
+                ..cand(T0 + 1_000_000, true, None)
+            },
+            MeterInput {
+                cross_speed: 400.0,
+                ..cand(T0 + 700_000, false, None)
+            },
+            MeterInput {
+                cross_speed: 200.0,
+                ..cand(T0 + 5_000_000, true, None)
+            },
+        ];
+        let metered = fca::meter(&metas, &meter_config(&fca, 0), None);
+        assert_eq!(
+            metered[2].sched_ms,
+            T0 + 5_000_000,
+            "the far arrival keeps its ETA"
+        );
+        let cta = rdy_slot(&fca, &metas, &metered, 1, false);
+        assert_eq!(
+            cta,
+            T0 + 1_000_000 + 360_000 + RELEASE_MARGIN_MS,
+            "360 s (the slow arrival's gap) plus the margin behind the arrival"
+        );
+    }
+
     /// `committed_crossings` selects exactly the pinned crossings, excluding the aircraft being
     /// released: unreleased ground traffic has no commitment and floats around the release.
     #[test]
@@ -4290,16 +4443,16 @@ mod release_spacing_tests {
             cand(90_000, false, Some(90_000)), // 2 issued CFR -> committed
             cand(180_000, false, None),        // 3 the one being released -> excluded
         ];
-        let metered = fca::meter(&metas, "rate", 30, 0, None);
+        let metered = fca::meter(&metas, &meter_config(&rate_fca(vec![]), 0), None);
 
-        let committed = committed_crossings(&metas, &metered, 3);
+        let committed = committed_crossings(&rate_fca(vec![]), &metas, &metered, 3);
         assert_eq!(
             committed,
-            vec![metered[0].sched_ms, metered[2].sched_ms],
-            "only the airborne crossing and the issued CFR are commitments"
+            vec![(metered[0].sched_ms, SEP_MS), (metered[2].sched_ms, SEP_MS)],
+            "only the airborne crossing and the issued CFR are commitments, each with its gap"
         );
         assert!(
-            !committed.contains(&metered[3].sched_ms),
+            !committed.iter().any(|&(t, _)| t == metered[3].sched_ms),
             "the aircraft being released must not be spaced against itself"
         );
     }
@@ -4392,6 +4545,7 @@ mod mit_cross_speed_wiring_tests {
             mode: "mit".into(),
             rate: 0,
             mit: 20,
+            freeze_min: 30,
             enabled: true,
             manual_order: vec![],
             manual_seq: false,
@@ -5047,6 +5201,7 @@ mod fca_inclusion_tests {
             mode: "rate".into(),
             rate: 30,
             mit: 0,
+            freeze_min: 30,
             enabled: true,
             manual_order: vec![],
             manual_seq: false,

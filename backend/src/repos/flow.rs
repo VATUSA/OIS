@@ -11,7 +11,7 @@ use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
+    f.freeze_min, f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
     coalesce(u.display_name, a.display_name) as updated_by, \
     f.event_id, f.event_status, f.auto_publish \
     from flow.fca f left join identity.users u on u.id = f.updated_by \
@@ -140,6 +140,7 @@ fn bind_fca<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     req: &'q UpsertFcaRequest,
     by: &'q Attribution,
+    freeze_min: Option<i32>,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     q.bind(req.name.trim())
         .bind(normalize_fca_color(req.color.as_deref()))
@@ -158,6 +159,15 @@ fn bind_fca<'q>(
         .bind(req.enabled.unwrap_or(true))
         .bind(&by.user_id)
         .bind(&by.actor_id)
+        .bind(freeze_min)
+}
+
+/// A new FCA's freeze horizon: the request's, else the default. `validate_fca` has bounded it.
+fn new_freeze_min(req: &UpsertFcaRequest) -> Option<i32> {
+    Some(
+        req.freeze_min
+            .unwrap_or(crate::feed::fca::DEFAULT_FREEZE_MIN),
+    )
 }
 
 pub async fn create_fca(
@@ -169,13 +179,13 @@ pub async fn create_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17)
+              updated_by_actor, created_by_actor, freeze_min)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18)
          returning id",
     );
-    // bind_fca sets $1..$17 (the 15 shared columns, then the user → `*_by` and the actor →
-    // `*_by_actor`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
-    let row = bind_fca(q, req, by)
+    // bind_fca sets $1..$18 (the 15 shared columns, the user → `*_by`, the actor → `*_by_actor`,
+    // then `freeze_min`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
+    let row = bind_fca(q, req, by, new_freeze_min(req))
         .fetch_one(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -196,11 +206,11 @@ pub async fn create_event_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor, event_id, event_status)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,'planned')
+              updated_by_actor, created_by_actor, freeze_min, event_id, event_status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,$19,'planned')
          returning id",
     );
-    let row = bind_fca(q, req, by)
+    let row = bind_fca(q, req, by, new_freeze_min(req))
         .bind(event_id)
         .fetch_one(pool)
         .await
@@ -210,6 +220,9 @@ pub async fn create_event_fca(
         .map_err(|_| ApiError::Internal)
 }
 
+/// Update an FCA and drop its held STAs in the same statement: they were spaced under the old
+/// geometry and settings, so the next read re-meters and re-holds (#817). A request without
+/// `freeze_min` (an older client) keeps the stored horizon.
 pub async fn update_fca(
     pool: &PgPool,
     id: &str,
@@ -217,13 +230,15 @@ pub async fn update_fca(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let q = sqlx::query(
-        "update flow.fca set
+        "with d as (delete from flow.fca_held_sta where fca_id = $19)
+         update flow.fca set
              name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
              fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
-             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17
-         where id = $18",
+             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17,
+             freeze_min = coalesce($18, freeze_min)
+         where id = $19",
     );
-    let result = bind_fca(q, req, by)
+    let result = bind_fca(q, req, by, req.freeze_min)
         .bind(id)
         .execute(pool)
         .await
@@ -317,12 +332,15 @@ pub async fn run_event_fca_lifecycle(pool: &PgPool) -> Result<u64, ApiError> {
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
-    let result =
-        sqlx::query("update flow.fca set deleted_at = now() where id = $1 and deleted_at is null")
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+    // Its held STAs (#817) go with it; `sync_held_stas` stores none once the delete commits.
+    let result = sqlx::query(
+        "with d as (delete from flow.fca_held_sta where fca_id = $1)
+         update flow.fca set deleted_at = now() where id = $1 and deleted_at is null",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -533,6 +551,96 @@ pub async fn list_releases(
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)
+}
+
+/// How long past its STA a held row still counts. A flight that has not crossed an hour after its
+/// held STA has left the flow; its row is ignored, then pruned on the next write (#817).
+pub const HELD_STA_RETAIN_MS: i64 = 3_600_000;
+
+/// The STAs held for each of `fca_ids`' flights inside its freeze horizon, by FCA then callsign
+/// (#817), in one query. Rows more than [`HELD_STA_RETAIN_MS`] past their STA are left out.
+pub async fn list_held_stas(
+    pool: &PgPool,
+    fca_ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<HashMap<String, HashMap<String, i64>>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        "select fca_id, callsign, sta_ms from flow.fca_held_sta
+         where fca_id = any($1) and sta_ms >= $2",
+    )
+    .bind(fca_ids)
+    .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
+    let mut held: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    for (fca_id, callsign, sta) in rows {
+        held.entry(fca_id).or_default().insert(callsign, sta);
+    }
+    Ok(held)
+}
+
+/// What one metered read changes in an FCA's held STAs.
+pub struct HeldStaSync<'a> {
+    /// Flights that just entered the freeze horizon, with the STA to hold.
+    pub store: &'a [(String, i64)],
+    /// Held flights this read no longer holds: left the horizon, released, or gone from the feed.
+    pub drop: &'a [String],
+}
+
+/// Apply one metered read's changes to an FCA's held STAs, in one transaction (#817). Stale rows
+/// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
+/// has the `fca_updated_at` the read metered under, so a read that metered before a committed edit
+/// or delete stores nothing. A sync that commits while an edit's or a delete's own statement runs
+/// can leave rows that statement's clear did not see. They act only as an earliest crossing until
+/// the flight leaves the horizon or the feed: the slot check spaces them, but after an edit that
+/// moves the line one can show the flight late or delayed at the new line until then. The first STA
+/// stored wins
+/// (`on conflict do nothing`), so concurrent replicas agree. No-op when there is nothing to change.
+pub async fn sync_held_stas(
+    pool: &PgPool,
+    fca_id: &str,
+    fca_updated_at: DateTime<Utc>,
+    sync: &HeldStaSync<'_>,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    if sync.store.is_empty() && sync.drop.is_empty() {
+        return Ok(());
+    }
+    let (callsigns, stas): (Vec<String>, Vec<i64>) = sync.store.iter().cloned().unzip();
+    // The caller answers its read either way, so this log is the only record of the cause.
+    let fail = |e: sqlx::Error| {
+        tracing::error!(fca_id, error = %e, "held STA sync failed");
+        ApiError::Internal
+    };
+    let mut tx = pool.begin().await.map_err(fail)?;
+    sqlx::query(
+        "delete from flow.fca_held_sta
+         where fca_id = $1 and (sta_ms < $2 or callsign = any($3))",
+    )
+    .bind(fca_id)
+    .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+    .bind(sync.drop)
+    .execute(&mut *tx)
+    .await
+    .map_err(fail)?;
+    sqlx::query(
+        "insert into flow.fca_held_sta (fca_id, callsign, sta_ms)
+         select $1, c, s from unnest($2::text[], $3::bigint[]) as h(c, s)
+         where exists (
+             select 1 from flow.fca
+             where id = $1 and updated_at = $4 and deleted_at is null
+         )
+         on conflict (fca_id, callsign) do nothing",
+    )
+    .bind(fca_id)
+    .bind(&callsigns)
+    .bind(&stas)
+    .bind(fca_updated_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(fail)?;
+    tx.commit().await.map_err(fail)
 }
 
 /// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy

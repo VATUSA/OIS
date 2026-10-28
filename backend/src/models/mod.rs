@@ -2510,6 +2510,9 @@ pub struct FcaBody {
     pub mode: String,
     pub rate: i32,
     pub mit: i32,
+    /// Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+    /// 0 turns freezing off (#817).
+    pub freeze_min: i32,
     pub enabled: bool,
     /// Controller's manual crossing order (callsigns); empty = auto.
     pub manual_order: Vec<String>,
@@ -2556,6 +2559,10 @@ pub struct UpsertFcaRequest {
     pub rate: Option<i32>,
     #[serde(default)]
     pub mit: Option<i32>,
+    /// Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+    /// without it gets 30; an update without it keeps the stored value.
+    #[serde(default)]
+    pub freeze_min: Option<i32>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -2647,6 +2654,17 @@ pub struct FcaFlight {
     /// The release's version, for `If-Match` (#585); null when not released.
     #[serde(default)]
     pub release_version: Option<i64>,
+    /// Seconds the live ETA has run past this flight's release or held STA; 0 when on time. A
+    /// late flight's `cross_time` is never before its ETA: a late release crosses at its ETA, and a
+    /// late held flight is still spaced from the traffic placed ahead of it (#817).
+    pub late_sec: i64,
+    /// A released crossing that sits inside another crossing's required gap (#817).
+    pub slot_conflict: bool,
+    /// An airborne, unreleased flight inside the FCA's freeze horizon. Its STA is held from the
+    /// first read that saw it there; `cross_time` keeps that STA while the ETA moves, unless the
+    /// flight runs late or a crossing placed ahead of it (a release, or the manual order) needs the
+    /// gap (#817).
+    pub sta_frozen: bool,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,

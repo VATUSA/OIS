@@ -104,7 +104,7 @@ const FLIGHTS = [flight("AAL1", false), flight("DAL2", true)];
 
 /** Mounts the panel as `FcaMapView` would: `canEdit` is the map's own gate (`flow.fca.update` on the
  *  ops map, `events.plan.update` in the event builder), `me` seeded in the real query cache. */
-function mount(me: Me, row: Fca, canEdit: boolean) {
+function mount(me: Me, row: Fca, canEdit: boolean, flights: FcaFlight[] = FLIGHTS) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(["me"], me);
   qc.setQueryData(exclusionsKey(row.id), { exclusions: [], editable: false });
@@ -116,7 +116,7 @@ function mount(me: Me, row: Fca, canEdit: boolean) {
     root.render(
       <QueryClientProvider client={qc}>
         <ToastProvider>
-          <FcaDetail fca={row} flights={FLIGHTS} canEdit={canEdit} />
+          <FcaDetail fca={row} flights={flights} canEdit={canEdit} />
         </ToastProvider>
       </QueryClientProvider>,
     );
@@ -177,5 +177,45 @@ describe("FcaDetail live-operation controls (VATUSA/OIS#746)", () => {
   it("offers none to a caller who can't edit here, planner or not", () => {
     expect(controls(mount(PLANNER, fca(7461, "planned"), false))).toEqual(NONE);
     expect(controls(mount(CONTROLLER, fca(null, null), false))).toEqual(NONE);
+  });
+});
+
+// VATUSA/OIS#817. A flight whose ETA has run past its release or frozen STA shows how late it is, and a
+// release left inside another crossing's gap is marked. Neither shows for an on-time flight.
+describe("lateness and the slot-conflict flag", () => {
+  const late = (callsign: string, lateSec: number, conflict: boolean) =>
+    ({...flight(callsign, true), late_sec: lateSec, slot_conflict: conflict}) as unknown as FcaFlight;
+
+  it("shows a late release's lateness and its conflict flag", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, [late("DAL2", 125, true)]);
+    expect(host.textContent).toContain("late +2:05");
+    expect(host.textContent).not.toContain("on time");
+    expect(host.textContent).toContain("IN GAP");
+  });
+
+  it("shows neither for an on-time release that fits", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, [late("DAL2", 0, false)]);
+    expect(host.textContent).not.toContain("late +");
+    expect(host.textContent).not.toContain("IN GAP");
+    expect(host.querySelector('[title="ETA is past its release or frozen time"]')).toBeNull();
+    // Positive control: the strip itself rendered, as on time.
+    expect(host.textContent).toContain("DAL2");
+    expect(host.textContent).toContain("on time");
+  });
+
+  it("shows the lateness beside the delay for a late flight that is also delayed", () => {
+    const both = {...late("DAL2", 90, false), delay_sec: 125} as unknown as FcaFlight;
+    const host = mount(CONTROLLER, fca(null, null), true, [both]);
+    expect(host.textContent).toContain("CFR +2:05 · late +1:30");
+    expect(host.textContent).not.toContain("on time");
+    expect(host.querySelector('[title="ETA is past its release or frozen time"]')).not.toBeNull();
+  });
+
+  it("hides lateness under the delay threshold", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, [late("DAL2", 29, false)]);
+    expect(host.textContent).not.toContain("late +");
+    expect(mount(CONTROLLER, fca(null, null), true, [late("UAL3", 30, false)]).textContent).toContain(
+      "late +0:30",
+    );
   });
 });
