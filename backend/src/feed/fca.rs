@@ -1476,6 +1476,19 @@ mod tests {
         assert_eq!(out[2].gap_ms, Some(-100_000));
     }
 
+    // A release exactly its spacing behind a flight goes behind that flight: J (ETA 0, ahead of
+    // every ordered ETA) released at 170 s is 120 s behind A (ETA 50 s), so it sits second.
+    #[test]
+    fn a_late_joiner_released_exactly_its_spacing_behind_a_flight_goes_behind_it() {
+        let mut j = cand(0);
+        j.frozen_ms = Some(170_000);
+        let cands = [cand(50_000), cand(300_000), j];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&out), [1, 3, 2]);
+        assert_eq!(out[2].gap_ms, Some(120_000));
+        assert_eq!(out[1].sched_ms, 300_000);
+    }
+
     fn seqs_of(out: &[MeterOutput]) -> Vec<i64> {
         out.iter().map(|o| o.seq).collect()
     }
