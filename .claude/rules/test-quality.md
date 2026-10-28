@@ -289,16 +289,18 @@ whose live and historical paths read different sources.
 - **Prove it by reinstating the old signal.** OR the old input back into the predicate. The test
   that pins the shipped direction must go red, not only the test for the direction nobody hits.
 
-**A shell probe that disagrees with the code is usually the probe.** Two specific traps make a
-verification command lie silently, and both read as a finding rather than a mistake:
+**A shell probe that disagrees with the code is usually the probe.** These traps make a
+verification command lie silently, and each reads as a finding rather than a mistake:
 
 - `echo "... $(grep -c 'unwrap($e)' file)"`: the outer double quotes expand `$e` to nothing
   *before* grep sees it, so the pattern becomes `unwrap()` and matches the wrong thing. Use single
   quotes on the outer string, or a heredoc.
 - `FILES=$(...); grep pattern $FILES`: zsh does not word-split, so a newline-separated file list
   arrives as one enormous filename. Write the list to a file and use `xargs`.
+- `bash -c "python -c '...\`x\`...'"`: the double-quoted string runs each backtick span as a
+  command before Python sees it. Put the snippet in a file or a quoted heredoc.
 
-A probe returning nothing is evidence about the probe. These are the two shapes that produce a
+A probe returning nothing is evidence about the probe. These are the shapes that produce a
 *confident wrong number* instead of nothing, which is harder to catch. When a probe contradicts a
 test result, believe the test.
 

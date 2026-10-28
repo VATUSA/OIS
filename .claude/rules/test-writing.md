@@ -104,6 +104,18 @@ on the set.
 gives the other verdict from the buggy one; a fixture where both give the same answer passes
 against unfixed code.
 
+**A lookup keyed on a level, key or id needs two entries with different values**, each asserted in
+its own slot. With one entry, replacing the match with `true` passes (#836: every grid test decoded
+one pressure level).
+
+**A rule that reads an optional field is tested with that field set.** A `default()` fixture that
+leaves it `None` skips the rule: #836's anchoring tests used a profile with no cruise Mach, so the
+temperature they were meant to pin was never read.
+
+**An interpolation or lookup test drives a point strictly inside the first and the last segment**,
+with fixtures where those segments are not flat. A fixture that starts at cruise in still air left
+an off-by-one at the end segment green (#836).
+
 **Test the far side of a boundary.** For `(a - b).abs() <= WINDOW`, a value just inside the window
 passes with `.abs()` deleted, because a negative satisfies `<= n` on its own (#510). Assert that
 both far sides reject and one inside accepts.
@@ -246,7 +258,9 @@ Four shapes have precedent:
   returned.
 - **A test on the `jobs.rs` pass itself** when a background job is the writer. The private `*_once`
   functions are the recurring blind spot; `mod ace_reminder_tests` in `backend/src/jobs.rs` is the
-  precedent.
+  precedent. When the pass fetches over the network, the spawn loop keeps only the fetch and the
+  sleep; everything after the fetch (install, store, the registry outcome) goes in a
+  `*_pass(fetch_result, now)` that a `#[sqlx::test]` drives once per outcome (#836).
 
 ## Absence needs a guard, not a grep
 
