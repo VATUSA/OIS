@@ -29,9 +29,9 @@ Two aircraft are always spaced by the larger of the two gaps they need. Under MI
 
 ### Freeze horizon
 
-Each FCA has a **freeze horizon**, 30 minutes by default (0 to 120; 0 turns it off). An airborne aircraft whose ETA to the line is inside it keeps the crossing time it had when it entered. Its time no longer changes every update as ETAs move, and aircraft further out are sequenced around it. It moves later only if the gap to the aircraft ahead grows, for example when a predicted crossing speed changes under MIT. Departures are frozen by their release, not by the horizon. Editing the FCA clears every frozen time, and the next update freezes them again under the new settings.
+Each FCA has a **freeze horizon**, 30 minutes by default (0 to 120; 0 turns it off). An airborne aircraft whose ETA to the line is inside it keeps the crossing time it had when it entered. Its time no longer changes every update as ETAs move, and aircraft further out are sequenced around it. It moves later only when an aircraft placed ahead of it needs the gap: a departure released into its gap, a manual order that puts another aircraft ahead of it, or, under MIT, a gap that grows as predicted crossing speeds change. Departures are frozen by their release, not by the horizon. An aircraft that leaves the horizon or disconnects loses its frozen time. Editing the FCA clears every frozen time, and the next update freezes them again under the new settings.
 
-If an aircraft runs late, so its ETA is past its release or frozen time, OIS shows it crossing at its ETA and its strip shows **late** with the minutes and seconds.
+If an aircraft runs late, so its ETA is past its release or frozen time, OIS shows it crossing no earlier than its ETA, behind any frozen aircraft still on time. Once it is 30 seconds or more late and not otherwise delayed, its strip shows **late** with the minutes and seconds.
 
 ## Enabling & disabling
 

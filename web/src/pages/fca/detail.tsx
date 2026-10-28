@@ -59,7 +59,7 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
-  // Behind its release or frozen time (#817): it crosses at its ETA, so it is never "on time".
+  // Its ETA has run past its release or held STA (#817). A delay outranks it in the status line.
   const late = f.late_sec >= DELAY_THRESHOLD_SEC;
   const status = delayed
     ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}`

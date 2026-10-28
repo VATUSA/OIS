@@ -6,7 +6,7 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 vi.mock("@/lib/api", () => ({ois: {GET: vi.fn()}}));
 
-import {blankDraft, DraftEditor, draftFrom} from "./editors";
+import {blankDraft, DraftEditor, draftFrom, draftToUpsert} from "./editors";
 import {toUpsert, type Fca} from "@/lib/fca";
 
 declare global {
@@ -92,6 +92,11 @@ describe("the freeze horizon field", () => {
     expect(toUpsert(stored).freeze_min).toBe(12);
   });
 
+  it("sends the draft's horizon when the editor saves", () => {
+    expect(draftToUpsert({...draftFrom(stored), freezeMin: 45}).freeze_min).toBe(45);
+    expect(draftToUpsert(blankDraft(0)).freeze_min).toBe(30);
+  });
+
   it("edits the horizon through its input", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
@@ -122,5 +127,10 @@ describe("the freeze horizon field", () => {
       input!.dispatchEvent(new Event("input", {bubbles: true}));
     });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({freezeMin: 45}));
+    act(() => {
+      setter.call(input, "");
+      input!.dispatchEvent(new Event("input", {bubbles: true}));
+    });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({freezeMin: 0}));
   });
 });

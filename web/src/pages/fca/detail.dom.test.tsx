@@ -202,6 +202,13 @@ describe("lateness and the slot-conflict flag", () => {
     expect(host.textContent).toContain("on time");
   });
 
+  it("shows the delay, not the lateness, for a late flight that is also delayed", () => {
+    const both = {...late("DAL2", 90, false), delay_sec: 125} as unknown as FcaFlight;
+    const host = mount(CONTROLLER, fca(null, null), true, [both]);
+    expect(host.textContent).toContain("CFR +2:05");
+    expect(host.textContent).not.toContain("late +");
+  });
+
   it("hides lateness under the delay threshold", () => {
     const host = mount(CONTROLLER, fca(null, null), true, [late("DAL2", 29, false)]);
     expect(host.textContent).not.toContain("late +");

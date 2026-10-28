@@ -2,9 +2,9 @@ import {useEffect, useState} from "react";
 import {Button, ColorSwatches, Input, SegmentedControl, Textarea} from "@ois/ui";
 
 import {useValidateFixes} from "@/lib/fca";
-import type {Fca} from "@/lib/fca";
+import type {Fca, UpsertFca} from "@/lib/fca";
 import type {MapRoute} from "@/lib/route";
-import {lineNm, type LatLng} from "@/components/map/lib/geo";
+import {lineNm, normPoints, type LatLng} from "@/components/map/lib/geo";
 import {readFcaColors, readRouteColors, useRouteColors} from "@/components/map/lib/colors";
 import {colorLabel, usePalette} from "@/lib/palette";
 
@@ -79,6 +79,25 @@ export function draftFrom(fca: Fca): Draft {
     rate: fca.rate,
     mit: fca.mit,
     freezeMin: fca.freeze_min,
+  };
+}
+/** The create/update body a saved draft sends. */
+export function draftToUpsert(draft: Draft): UpsertFca {
+  return {
+    name: draft.name.trim() || "FCA",
+    color: draft.color,
+    artcc: draft.artcc.trim().toUpperCase(),
+    points: normPoints(draft.points),
+    dests: parseList(draft.dests),
+    origins: parseList(draft.origins),
+    fixes: parseList(draft.fixes),
+    scope: parseList(draft.scope),
+    min_fl: parseFl(draft.minFl),
+    max_fl: parseFl(draft.maxFl),
+    mode: draft.mode,
+    rate: draft.rate,
+    mit: draft.mit,
+    freeze_min: draft.freezeMin,
   };
 }
 

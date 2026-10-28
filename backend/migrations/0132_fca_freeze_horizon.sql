@@ -7,12 +7,12 @@ alter table flow.fca
 
 -- The STA each airborne flight was given on entering an FCA's freeze horizon. The metered reads
 -- write a row the first time they see a flight inside the horizon (`on conflict do nothing`, so
--- every replica keeps the first STA stored) and read it on every later pass. Rows an hour past
--- their STA are ignored and pruned; an FCA edit clears its rows.
+-- every replica keeps the first STA stored), read it on every later pass, and delete it once the
+-- flight leaves the horizon, is released or leaves the feed. Rows an hour past their STA are ignored
+-- and pruned on the next write; editing or deleting the FCA clears its rows.
 create table if not exists flow.fca_held_sta (
     fca_id   text not null references flow.fca(id) on delete cascade,
     callsign text not null,
     sta_ms   bigint not null,     -- frozen metered crossing time, epoch ms
-    held_at  timestamptz not null default now(),
     primary key (fca_id, callsign)
 );

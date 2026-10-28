@@ -383,13 +383,15 @@ pub fn separation_ms(mode: &str, rate: i32, mit: i32, cross_speed: f64) -> i64 {
 
 /// Sequence crossing traffic (ported from vatflow's `scheduleAuto` / `scheduleCandidates`, #817).
 ///
-/// Two crossings are spaced by the larger of their two separations. A release keeps its time; an
-/// airborne flight inside the freeze horizon keeps its stored STA while that STA still fits. A
-/// released or frozen flight whose ETA has run past its time is placed at the ETA and reports
-/// `late_sec`. Any release left inside another crossing's gap is flagged `slot_conflict`.
+/// Two crossings are spaced by the larger of their two separations. A release keeps its time,
+/// or its ETA once the ETA has run past it. An airborne flight inside the freeze horizon is
+/// anchored at its stored STA, or at its ETA once it runs late, and is still spaced from
+/// everything placed before it. Released and held flights report how late they run in
+/// `late_sec`; a release left inside another crossing's gap is flagged `slot_conflict`.
 ///
-/// **Auto:** releases, then frozen airborne, then other airborne, then ground, each by time; every
-/// flight but a release takes the earliest slot clear of everything placed before it.
+/// **Auto:** releases, then held flights still on time, then held flights running late, then
+/// other airborne, then ground, each by anchor; every flight but a release takes the earliest
+/// slot clear of everything placed before it.
 /// **Manual** (`order` = candidate indices): the controller's order, newcomers appended by ETA; each
 /// unreleased flight goes behind every crossing ordered ahead of it.
 pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -> Vec<MeterOutput> {
@@ -399,79 +401,106 @@ pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -
         .map(|c| separation_ms(cfg.mode, cfg.rate, cfg.mit, c.cross_speed))
         .collect();
     let frozen: Vec<bool> = cands.iter().map(|c| in_freeze_horizon(c, cfg)).collect();
-    // The time each flight is anchored to: its release or held STA (or its ETA once it runs past
-    // that), else its ETA.
-    let fixed_at = |i: usize| match cands[i].frozen_ms {
-        Some(f) => Some(f),
-        None if frozen[i] => cands[i].held_ms,
-        None => None,
+    // The time each flight is fixed to: its release, else its held STA while inside the horizon.
+    let fixed: Vec<Option<i64>> = (0..n)
+        .map(|i| {
+            cands[i]
+                .frozen_ms
+                .or(cands[i].held_ms.filter(|_| frozen[i]))
+        })
+        .collect();
+    let anchor: Vec<i64> = (0..n)
+        .map(|i| fixed[i].map_or(cands[i].eta_ms, |f| f.max(cands[i].eta_ms)))
+        .collect();
+    let (sched, seq_of) = match order {
+        Some(seq) => meter_manual(cands, &sep, &anchor, seq),
+        None => meter_auto(cands, &sep, &anchor, &fixed),
     };
-    let anchor = |i: usize| fixed_at(i).map_or(cands[i].eta_ms, |f| f.max(cands[i].eta_ms));
-
-    let mut sched = vec![0i64; n];
-    let mut seq_of = vec![0i64; n];
-    if let Some(seq) = order {
-        let mut ordered: Vec<usize> = seq.iter().copied().filter(|&i| i < n).collect();
-        let seen: std::collections::HashSet<usize> = ordered.iter().copied().collect();
-        let mut rest: Vec<usize> = (0..n).filter(|i| !seen.contains(i)).collect();
-        rest.sort_by_key(|&i| cands[i].eta_ms);
-        ordered.extend(rest);
-        // The controller's order is authoritative: every unreleased crossing, airborne included,
-        // goes behind every crossing ordered ahead of it, which is the delay a controller creates
-        // with vectors or speed. A release is an issued time and stays put.
-        let mut placed: Vec<(i64, i64)> = Vec::new();
-        for &i in &ordered {
-            sched[i] = if cands[i].frozen_ms.is_some() {
-                anchor(i)
-            } else {
-                placed
-                    .iter()
-                    .map(|&(t, s)| t + s.max(sep[i]))
-                    .fold(anchor(i), i64::max)
-            };
-            placed.push((sched[i], sep[i]));
-        }
-        // The sequence is the controller's order, not the scheduled time, so a dragged aircraft
-        // keeps the slot it was moved to.
-        for (rank, &i) in ordered.iter().enumerate() {
-            seq_of[i] = rank as i64 + 1;
-        }
-    } else {
-        let tier = |i: usize| match (cands[i].frozen_ms, frozen[i] && cands[i].held_ms.is_some()) {
-            (Some(_), _) => 0,
-            (None, true) => 1,
-            _ if cands[i].airborne => 2,
-            _ => 3,
-        };
-        let mut o: Vec<usize> = (0..n).collect();
-        o.sort_by_key(|&i| (tier(i), anchor(i)));
-        let mut committed: Vec<(i64, i64)> = Vec::new();
-        for &i in &o {
-            sched[i] = if cands[i].frozen_ms.is_some() {
-                anchor(i)
-            } else {
-                earliest_slot(anchor(i), sep[i], &committed)
-            };
-            committed.push((sched[i], sep[i]));
-        }
-        let mut by_time: Vec<usize> = (0..n).collect();
-        by_time.sort_by_key(|&i| sched[i]);
-        for (rank, &i) in by_time.iter().enumerate() {
-            seq_of[i] = rank as i64 + 1;
-        }
-    }
 
     (0..n)
         .map(|i| MeterOutput {
             sched_ms: sched[i],
             delay_sec: ((sched[i] - cands[i].eta_ms).max(0)) / 1000,
             seq: seq_of[i],
-            late_sec: fixed_at(i).map_or(0, |f| (cands[i].eta_ms - f).max(0) / 1000),
+            late_sec: fixed[i].map_or(0, |f| (cands[i].eta_ms - f).max(0) / 1000),
             slot_conflict: cands[i].frozen_ms.is_some()
                 && (0..n).any(|j| j != i && (sched[i] - sched[j]).abs() < sep[i].max(sep[j])),
             sta_frozen: frozen[i],
         })
         .collect()
+}
+
+/// The controller's order is authoritative: every unreleased crossing, airborne included, goes
+/// behind every crossing ordered ahead of it, which is the delay a controller creates with vectors
+/// or speed. A release is an issued time and stays put. The sequence is the controller's order,
+/// not the scheduled time, so a dragged aircraft keeps the slot it was moved to.
+fn meter_manual(
+    cands: &[MeterInput],
+    sep: &[i64],
+    anchor: &[i64],
+    seq: &[usize],
+) -> (Vec<i64>, Vec<i64>) {
+    let n = cands.len();
+    let mut ordered: Vec<usize> = seq.iter().copied().filter(|&i| i < n).collect();
+    let seen: std::collections::HashSet<usize> = ordered.iter().copied().collect();
+    let mut rest: Vec<usize> = (0..n).filter(|i| !seen.contains(i)).collect();
+    rest.sort_by_key(|&i| cands[i].eta_ms);
+    ordered.extend(rest);
+    let mut sched = vec![0i64; n];
+    let mut placed: Vec<(i64, i64)> = Vec::new();
+    for &i in &ordered {
+        sched[i] = if cands[i].frozen_ms.is_some() {
+            anchor[i]
+        } else {
+            placed
+                .iter()
+                .map(|&(t, s)| t + s.max(sep[i]))
+                .fold(anchor[i], i64::max)
+        };
+        placed.push((sched[i], sep[i]));
+    }
+    let mut seq_of = vec![0i64; n];
+    for (rank, &i) in ordered.iter().enumerate() {
+        seq_of[i] = rank as i64 + 1;
+    }
+    (sched, seq_of)
+}
+
+/// Auto mode places by tier, then anchor within a tier. A held flight still on time goes ahead of
+/// one running late, so a late flight's ETA never bumps a flight that is keeping its STA.
+fn meter_auto(
+    cands: &[MeterInput],
+    sep: &[i64],
+    anchor: &[i64],
+    fixed: &[Option<i64>],
+) -> (Vec<i64>, Vec<i64>) {
+    let n = cands.len();
+    let tier = |i: usize| match (cands[i].frozen_ms, fixed[i]) {
+        (Some(_), _) => 0,
+        (None, Some(held)) if cands[i].eta_ms <= held => 1,
+        (None, Some(_)) => 2,
+        _ if cands[i].airborne => 3,
+        _ => 4,
+    };
+    let mut o: Vec<usize> = (0..n).collect();
+    o.sort_by_key(|&i| (tier(i), anchor[i]));
+    let mut sched = vec![0i64; n];
+    let mut committed: Vec<(i64, i64)> = Vec::new();
+    for &i in &o {
+        sched[i] = if cands[i].frozen_ms.is_some() {
+            anchor[i]
+        } else {
+            earliest_slot(anchor[i], sep[i], &committed)
+        };
+        committed.push((sched[i], sep[i]));
+    }
+    let mut by_time: Vec<usize> = (0..n).collect();
+    by_time.sort_by_key(|&i| sched[i]);
+    let mut seq_of = vec![0i64; n];
+    for (rank, &i) in by_time.iter().enumerate() {
+        seq_of[i] = rank as i64 + 1;
+    }
+    (sched, seq_of)
 }
 
 /// An airborne, unreleased flight whose ETA is within the FCA's freeze horizon.
@@ -741,7 +770,7 @@ mod tests {
         assert_eq!(earliest_slot(T0, 0, &[(T0, 0)]), T0, "no spacing at rate 0");
     }
 
-    /// The freeze horizon's default, in minutes. Fixtures at 29 and 31 minutes straddle it.
+    /// Rate 30 (120 s) at the default freeze horizon, measured from `now_ms`.
     fn freeze_cfg(now_ms: i64) -> MeterConfig<'static> {
         MeterConfig {
             mode: "rate",
@@ -764,13 +793,15 @@ mod tests {
     #[test]
     fn a_flight_inside_the_freeze_horizon_keeps_its_sta_when_its_eta_moves() {
         // Pass 1 at T0: leader L (airborne, ETA T0+28 min) and I (airborne, ETA T0+29 min) are inside
-        // the 30 min horizon; I is spaced 120 s behind L, to T0+30 min. O (ETA T0+31 min) is outside.
+        // the 30 min horizon; I is spaced 120 s behind L, to T0+30 min. O (ETA T0+31.5 min) is
+        // outside.
         let pass1 = vec![
             mk(T0 + 28 * MIN, true, 400.0),
             mk(T0 + 29 * MIN, true, 400.0),
             mk(T0 + 31 * MIN + 30 * S, true, 400.0),
         ];
         let out1 = meter(&pass1, &freeze_cfg(T0), None);
+        assert_eq!(out1[0].sched_ms, T0 + 28 * MIN, "the leader keeps its ETA");
         assert_eq!(out1[1].sched_ms, T0 + 30 * MIN);
         assert!(
             out1[0].sta_frozen && out1[1].sta_frozen,
@@ -781,7 +812,7 @@ mod tests {
 
         // Pass 2, 30 s later: L has crossed and gone, I's ETA moved 90 s earlier and O's 2 min later.
         // I keeps the STA stored in pass 1. O, still outside, is re-metered to its new ETA, and a
-        // stray stored STA for it is ignored.
+        // stray stored STA for it is ignored. N, well clear and never held, keeps its ETA.
         let now = T0 + 30 * S;
         let pass2 = vec![
             MeterInput {
@@ -792,6 +823,7 @@ mod tests {
                 held_ms: Some(T0 + 40 * MIN),
                 ..mk(now + 33 * MIN, true, 400.0)
             },
+            mk(now + 50 * MIN, true, 400.0),
         ];
         let out2 = meter(&pass2, &freeze_cfg(now), None);
         assert_eq!(
@@ -807,6 +839,97 @@ mod tests {
             "outside the horizon a stored STA is ignored and the flight is re-metered"
         );
         assert!(!out2[1].sta_frozen);
+        assert_eq!(
+            out2[2].sched_ms,
+            now + 50 * MIN,
+            "the neighbor keeps its ETA"
+        );
+    }
+
+    #[test]
+    fn a_late_held_flight_goes_behind_an_on_time_one_instead_of_bumping_it() {
+        // H is held at T0+20 min and on time (ETA T0+19 min). L was held at T0+18 min but now runs
+        // late, ETA T0+19.5 min, inside H's 120 s gap. H keeps its STA; L goes 120 s behind it and
+        // reports 90 s late. N, well clear, keeps its ETA.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 20 * MIN),
+                ..mk(T0 + 19 * MIN, true, 400.0)
+            },
+            MeterInput {
+                held_ms: Some(T0 + 18 * MIN),
+                ..mk(T0 + 19 * MIN + 30 * S, true, 400.0)
+            },
+            mk(T0 + 40 * MIN, true, 400.0),
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), None);
+        assert_eq!(out[0].sched_ms, T0 + 20 * MIN, "the on-time held STA holds");
+        assert_eq!(out[0].late_sec, 0);
+        assert_eq!(
+            out[1].sched_ms,
+            T0 + 22 * MIN,
+            "the late one goes behind it"
+        );
+        assert_eq!(out[1].late_sec, 90);
+        assert_eq!(out[2].sched_ms, T0 + 40 * MIN);
+    }
+
+    #[test]
+    fn a_held_flight_is_placed_ahead_of_a_newly_frozen_one_with_an_earlier_eta() {
+        // Both inside the 30 min horizon. I is held at T0+25 min (ETA T0+23 min); N enters the
+        // horizon this pass with no stored STA and ETA T0+24 min. I keeps 25; N goes behind, to 27.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 25 * MIN),
+                ..mk(T0 + 23 * MIN, true, 400.0)
+            },
+            mk(T0 + 24 * MIN, true, 400.0),
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), None);
+        assert_eq!(out[0].sched_ms, T0 + 25 * MIN);
+        assert_eq!(out[1].sched_ms, T0 + 27 * MIN);
+        assert!(out[1].sta_frozen, "N is stored from this pass on");
+    }
+
+    #[test]
+    fn a_held_flight_exactly_at_its_sta_counts_as_on_time() {
+        // A's ETA is exactly its held STA, T0+20 min. B is held at T0+21 min, ETA T0+19 min, and
+        // the gap grew to 120 s. Both are on time, so they go in STA order: A keeps 20, B goes to
+        // 22. Counting A as late would put B first at 21 and push A to 23.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 20 * MIN),
+                ..mk(T0 + 20 * MIN, true, 400.0)
+            },
+            MeterInput {
+                held_ms: Some(T0 + 21 * MIN),
+                ..mk(T0 + 19 * MIN, true, 400.0)
+            },
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), None);
+        assert_eq!(out[0].sched_ms, T0 + 20 * MIN);
+        assert_eq!(out[0].late_sec, 0);
+        assert_eq!(out[1].sched_ms, T0 + 22 * MIN);
+    }
+
+    #[test]
+    fn held_flights_are_placed_in_sta_order_not_eta_order() {
+        // H1 held at T0+20 min (ETA T0+19.5 min), H2 at T0+21 min (ETA T0+19 min): the gap grew to
+        // 120 s since they were stored. In STA order H1 keeps 20 and H2 goes to 22; placing by ETA
+        // would put H2 first at 21 and push H1 to 23.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 20 * MIN),
+                ..mk(T0 + 19 * MIN + 30 * S, true, 400.0)
+            },
+            MeterInput {
+                held_ms: Some(T0 + 21 * MIN),
+                ..mk(T0 + 19 * MIN, true, 400.0)
+            },
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), None);
+        assert_eq!(out[0].sched_ms, T0 + 20 * MIN);
+        assert_eq!(out[1].sched_ms, T0 + 22 * MIN);
     }
 
     #[test]
@@ -925,8 +1048,8 @@ mod tests {
 
     #[test]
     fn a_frozen_flight_is_placed_ahead_of_an_unfrozen_airborne_one() {
-        // I is held at T0+25 min (ETA T0+23 min); U, outside the horizon with no store, has ETA
-        // T0+24 min in a 5 min horizon. U must not take I's slot.
+        // I is held at T0+25 min (ETA T0+23 min); U, with no store, has ETA T0+24 min, outside a
+        // 23.5 min horizon. U must not take I's slot.
         let c = MeterConfig {
             freeze_ms: 23 * MIN + 30 * S,
             ..freeze_cfg(T0)
@@ -989,6 +1112,8 @@ mod tests {
                 let out = meter(&cands, &c, manual);
                 for i in 0..n {
                     flagged += usize::from(out[i].slot_conflict);
+                    // Only a release is ever flagged.
+                    assert!(!out[i].slot_conflict || cands[i].frozen_ms.is_some());
                     for j in i + 1..n {
                         let need = separation_ms(mode, rate, mit, cands[i].cross_speed)
                             .max(separation_ms(mode, rate, mit, cands[j].cross_speed));
@@ -1000,8 +1125,6 @@ mod tests {
                             manual.is_some()
                         );
                         checked += 1;
-                        // Only a release is ever flagged.
-                        assert!(!out[i].slot_conflict || cands[i].frozen_ms.is_some());
                     }
                 }
             }

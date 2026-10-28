@@ -212,21 +212,23 @@ The formula is `fca::separation_ms`; the handler's `separation_ms` and `rdy_slot
 crossings are spaced by the **larger** of the pair's separations (#817), so under MIT the slower
 aircraft's gap holds whichever of the two is placed first.
 
-**Fixed times** (#817). A flight's time is fixed by a release (`frozen_ms`, the CTA) or, when it is
-airborne with no release and its ETA is within the FCA's `freeze_min` of now, by its held STA
-(`held_ms`, from `flow.fca_held_sta`). A fixed flight is placed at `max(fixed, eta)`: a late flight
-moves to its ETA and reports `late_sec = (eta - fixed) / 1000`. `freeze_min` 0 turns holding off.
+**Fixed times** (#817). `fca::meter(cands, &MeterConfig { mode, rate, mit, freeze_ms, now_ms },
+order)`. A flight's time is fixed by a release (`frozen_ms`, the CTA) or, when it is airborne with no
+release and its ETA is within `freeze_ms` of `now_ms`, by its held STA (`held_ms`, from
+`flow.fca_held_sta`). Its anchor is `max(fixed, eta)`, and it reports
+`late_sec = max(eta - fixed, 0) / 1000`. `freeze_min` 0 turns holding off.
 
-**Auto mode** (`fca::meter`). Flights sort by tier, then by anchor time: releases, frozen airborne
-flights with a held STA, other airborne, ground. A release is placed at its anchor and never moved;
-every other flight is placed at `earliest_slot(anchor, sep, committed)`, so a held STA moves later
-when the pair's gap grows (under MIT the gap follows each aircraft's predicted crossing speed). Sequence numbers follow the
-scheduled time.
+**Auto mode** (`meter_auto`). Flights sort by tier, then by anchor: releases; held flights still on
+time (`eta <= held`); held flights running late; other airborne; ground. A release is placed at its
+anchor and never moved. Every other flight is placed at `earliest_slot(anchor, sep, committed)`, so
+a late held flight goes behind an on-time one instead of bumping it, and a held STA moves later when
+a release sits in its gap or the pair's gap grows (under MIT the gap follows each aircraft's
+predicted crossing speed). Sequence numbers follow the scheduled time.
 
 **`earliest_slot`** (`feed/fca.rs`): from the start time, move past any committed crossing closer
 than `max(sep, that crossing's sep)`, and repeat until nothing moves.
 
-**Manual mode**. The stored order comes first and every other flight is appended by ETA. A release
+**Manual mode** (`meter_manual`). The stored order comes first and every other flight is appended by ETA. A release
 keeps its anchor; every other flight goes at the earliest time clear of every flight placed before
 it in the order, by the larger separation of each pair. Sequence numbers are the order itself.
 
@@ -234,10 +236,14 @@ it in the order, by the larger separation of each pair. Sequence numbers are the
 returned with `slot_conflict` set; it is the only crossing allowed there.
 
 **Held STAs.** `metered_flights` is the only writer, reached from the traffic route and the flight
-advisory (`build_flight_advisory`): it stores the STA of each
-newly frozen flight, first STA wins (`on conflict do nothing`), and prunes rows more than an hour
-past their STA. IDST, `mark_release` and `clear_release` read the rows without writing. An FCA edit
-deletes the FCA's rows; deleting the FCA cascades.
+advisory (`build_flight_advisory`), both public. `flow_repo::sync_held_stas` stores the STA of each
+newly frozen flight (first STA wins, `on conflict do nothing`), deletes the rows of held flights the
+read no longer holds (out of the horizon, released, or gone from the feed) and rows more than an
+hour past their STA. A new row is stored only while `flow.fca.updated_at` still matches the read's
+FCA, so a read that raced an edit stores nothing. A failed write is logged and the read still
+answers. IDST, `mark_release` and `clear_release` read the rows without writing. `update_fca` and
+`delete_fca` (a soft delete) delete the FCA's rows. `set_manual_order` does not: in manual mode a
+held STA is still the earliest a flight is placed.
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
@@ -250,10 +256,15 @@ deletes the FCA's rows; deleting the FCA cascades.
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs` `mod tests` covers the six #817 cases, the freeze horizon on both sides of
-its default, and a randomized check that no two crossings are closer than the gap except a flagged
-release. `mod release_spacing_tests` (`handlers/flow.rs`) covers `rdy_slot`, and
-`handlers/fca_freeze_tests.rs` drives the held STAs through the traffic route and the FCA edit.
+**Tests.** `feed/fca.rs` `mod tests` covers #817's cases 1 to 5, the freeze horizon on both sides of
+its default, the tier order, and a randomized check that no two crossings are closer than the gap
+except a flagged release. Case 6 (the airport-flow CFR scheduler) is in `feed/flow.rs`.
+`mod release_spacing_tests` (`handlers/flow.rs`) covers `rdy_slot`, and
+`handlers/fca_freeze_tests.rs` drives the held STAs through the traffic route, the release routes,
+IDST, the FCA edit and the delete.
+
+**Untested branches.** Duplicate or out-of-range indices in the manual order. Equal-ETA ties. Rate or
+MIT 0 through `meter`.
 
 ### Findings, area 3
 
@@ -274,8 +285,8 @@ release. `mod release_spacing_tests` (`handlers/flow.rs`) covers `rdy_slot`, and
 | Route | Handler | Gate | Writes | Topic |
 | --- | --- | --- | --- | --- |
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
-| `PUT /api/v1/flow/fcas/{id}` | `update_fca` (`:388`) | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca` | `flow.fca` (`:414`) |
-| `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` (`:429`) | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()` (`repos/flow.rs:318`) | `flow.fca` (`:444`) |
+| `PUT /api/v1/flow/fcas/{id}` | `update_fca` (`:388`) | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows (#817) | `flow.fca` (`:414`) |
+| `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` (`:429`) | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` (`:444`) |
 | `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2859`) |
 | `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |
 | `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2639`) | same | delete `flow.fca_release` | `flow.release` (`:2672`) |

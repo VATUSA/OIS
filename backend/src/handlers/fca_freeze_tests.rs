@@ -236,25 +236,49 @@ async fn a_stale_held_row_is_ignored_then_replaced(pool: PgPool) {
     );
 }
 
+const MIN: i64 = 60_000;
+
+#[test]
+fn the_retention_window_sits_between_the_fixtures() {
+    let retain = std::hint::black_box(flow_repo::HELD_STA_RETAIN_MS);
+    assert!(
+        59 * MIN < retain && retain < 61 * MIN,
+        "the 59 and 61 min fixtures must straddle the retention, got {retain} ms"
+    );
+}
+
+async fn updated_at(pool: &PgPool, fca_id: &str) -> chrono::DateTime<Utc> {
+    flow_repo::get_fca(pool, fca_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .updated_at
+}
+
 #[sqlx::test]
-async fn hold_stas_keeps_the_first_sta_and_prunes_only_this_fcas_stale_rows(pool: PgPool) {
+async fn sync_held_stas_keeps_the_first_sta_and_prunes_only_this_fcas_stale_rows(pool: PgPool) {
     let a = corridor_fca(&pool, 30).await;
     let b = corridor_fca(&pool, 30).await;
     let now = Utc::now();
-    let stale = now.timestamp_millis() - flow_repo::HELD_STA_RETAIN_MS - 1;
-    let fresh = now.timestamp_millis() - flow_repo::HELD_STA_RETAIN_MS + 60_000;
+    let stale = now.timestamp_millis() - 61 * MIN;
+    let fresh = now.timestamp_millis() - 59 * MIN;
     seed_held(&pool, &a, "OLD1", stale).await;
     seed_held(&pool, &a, "KEEP", fresh).await;
     seed_held(&pool, &b, "OLD2", stale).await;
     seed_held(&pool, &b, "LIVE", fresh).await;
 
     let first = now.timestamp_millis() + 600_000;
-    flow_repo::hold_stas(&pool, &a, &[("NEW1".into(), first)], now)
-        .await
-        .unwrap();
-    flow_repo::hold_stas(&pool, &a, &[("NEW1".into(), first + 60_000)], now)
-        .await
-        .unwrap();
+    let at = updated_at(&pool, &a).await;
+    for sta in [first, first + 60_000] {
+        let store = [("NEW1".to_string(), sta)];
+        let sync = flow_repo::HeldStaSync {
+            store: &store,
+            drop: &[],
+        };
+        flow_repo::sync_held_stas(&pool, &a, at, &sync, now)
+            .await
+            .unwrap();
+    }
 
     assert_eq!(
         held_rows(&pool, &a).await,
@@ -266,17 +290,304 @@ async fn hold_stas_keeps_the_first_sta_and_prunes_only_this_fcas_stale_rows(pool
         vec![("LIVE".to_string(), fresh), ("OLD2".to_string(), stale)],
         "another FCA's rows are not pruned"
     );
-    let listed = flow_repo::list_held_stas(&pool, &a, now).await.unwrap();
+    let listed = flow_repo::list_held_stas(&pool, &[a.clone(), b.clone()], now)
+        .await
+        .unwrap();
     assert_eq!(
-        listed.get("KEEP"),
-        Some(&fresh),
-        "inside the retention window"
+        listed[&a],
+        HashMap::from([("KEEP".to_string(), fresh), ("NEW1".to_string(), first)]),
+        "59 min past its STA is still held"
     );
     assert_eq!(
-        listed.len(),
-        2,
-        "this FCA's two live rows, not the other FCA's: {listed:?}"
+        listed[&b],
+        HashMap::from([("LIVE".to_string(), fresh)]),
+        "61 min past is not, and each FCA gets its own rows"
     );
+    let only_a = flow_repo::list_held_stas(&pool, std::slice::from_ref(&a), now)
+        .await
+        .unwrap();
+    let keys: Vec<&String> = only_a.keys().collect();
+    assert_eq!(
+        keys,
+        vec![&a],
+        "asking for one FCA reads only that FCA's rows"
+    );
+}
+
+#[sqlx::test]
+async fn sync_held_stas_drops_only_the_named_callsigns_of_this_fca(pool: PgPool) {
+    let a = corridor_fca(&pool, 30).await;
+    let b = corridor_fca(&pool, 30).await;
+    let now = Utc::now();
+    let sta = now.timestamp_millis() + 600_000;
+    seed_held(&pool, &a, "GONE", sta).await;
+    seed_held(&pool, &a, "KEEP", sta).await;
+    seed_held(&pool, &b, "GONE", sta).await;
+
+    let drop = ["GONE".to_string()];
+    let sync = flow_repo::HeldStaSync {
+        store: &[],
+        drop: &drop,
+    };
+    flow_repo::sync_held_stas(&pool, &a, updated_at(&pool, &a).await, &sync, now)
+        .await
+        .unwrap();
+
+    assert_eq!(held_rows(&pool, &a).await, vec![("KEEP".to_string(), sta)]);
+    assert_eq!(
+        held_rows(&pool, &b).await,
+        vec![("GONE".to_string(), sta)],
+        "the same callsign on another FCA stays"
+    );
+}
+
+#[sqlx::test]
+async fn sync_held_stas_stores_nothing_for_a_read_that_raced_an_edit(pool: PgPool) {
+    let id = corridor_fca(&pool, 30).await;
+    let now = Utc::now();
+    let metered_under = updated_at(&pool, &id).await;
+    sqlx::query("update flow.fca set rate = 20 where id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let store = [("AIR1".to_string(), now.timestamp_millis() + 600_000)];
+    let sync = flow_repo::HeldStaSync {
+        store: &store,
+        drop: &[],
+    };
+
+    flow_repo::sync_held_stas(&pool, &id, metered_under, &sync, now)
+        .await
+        .unwrap();
+    assert!(
+        held_rows(&pool, &id).await.is_empty(),
+        "spaced under the old settings, so not stored"
+    );
+    // Positive control: the same write under the current version is stored.
+    flow_repo::sync_held_stas(&pool, &id, updated_at(&pool, &id).await, &sync, now)
+        .await
+        .unwrap();
+    assert_eq!(held_rows(&pool, &id).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn a_read_drops_the_held_sta_of_a_flight_gone_from_the_feed(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    seed_held(&pool, &id, "GONE", Utc::now().timestamp_millis() + 600_000).await;
+
+    let rows = traffic(&state, &id).await;
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![("AIR1".to_string(), ms(&row(&rows, "AIR1")["cross_time"]))],
+        "GONE is no longer crossing, so its row goes; AIR1 is held"
+    );
+}
+
+#[sqlx::test]
+async fn a_one_minute_horizon_does_not_freeze_a_flight_minutes_out(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 1).await;
+
+    let rows = traffic(&state, &id).await;
+    let air = row(&rows, "AIR1");
+    assert!(
+        ms(&air["eta"]) - Utc::now().timestamp_millis() > 2 * MIN,
+        "the fixture crosses more than a minute out"
+    );
+    assert_eq!(
+        air["sta_frozen"], false,
+        "1 min is 60 000 ms, not 1 ms or 60 s per unit"
+    );
+    assert!(held_rows(&pool, &id).await.is_empty());
+}
+
+#[sqlx::test]
+async fn a_held_sta_stays_put_when_the_pilot_moves_on(pool: PgPool) {
+    // AC2 of #817, end to end: the pilot flies about 13 nm on between reads, which moves the ETA
+    // earlier; the STA stored on the first read is served unchanged.
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let first = row(&traffic(&state, &id).await, "AIR1").clone();
+    {
+        let mut feed = state.feed.write().await;
+        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            pilots: vec![Pilot {
+                latitude: 40.30,
+                longitude: -74.30,
+                ..airborne("AIR1")
+            }],
+            ..Default::default()
+        })));
+    }
+
+    let second = row(&traffic(&state, &id).await, "AIR1").clone();
+    assert!(
+        ms(&second["eta"]) < ms(&first["eta"]) - 30_000,
+        "positive control: the ETA moved earlier ({} -> {})",
+        first["eta"],
+        second["eta"]
+    );
+    assert_eq!(second["cross_time"], first["cross_time"], "the STA holds");
+    assert_eq!(second["sta_frozen"], true);
+}
+
+/// A session cookie for a user holding `perm` nationally.
+async fn national(pool: &PgPool, perm: &str) -> String {
+    let user = seed_user(pool).await;
+    grant(pool, &user, perm, None).await;
+    session_cookie(pool, &user).await
+}
+
+/// One request through the real router with an optional JSON body, returning the decoded body.
+async fn call(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    cookie: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    use tower::ServiceExt;
+    let builder = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(axum::http::header::COOKIE, cookie);
+    let request = match body {
+        Some(b) => builder
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(b.to_string())),
+        None => builder.body(axum::body::Body::empty()),
+    }
+    .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn release(state: &AppState, cookie: &str, fca: &str, cs: &str, body: Value) -> Vec<Value> {
+    let (status, body) = call(
+        state,
+        Method::POST,
+        &format!("/api/v1/flow/fcas/{fca}/release/{cs}"),
+        cookie,
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array().unwrap().clone()
+}
+
+/// AIR1 held at GND1's ETA, so a release that reads the held STA must space GND1 behind it.
+async fn held_at_ground_eta(state: &AppState, pool: &PgPool, id: &str) -> i64 {
+    let eta_g = ms(&row(&traffic(state, id).await, "GND1")["eta"]);
+    sqlx::query("delete from flow.fca_held_sta")
+        .execute(pool)
+        .await
+        .unwrap();
+    seed_held(pool, id, "AIR1", eta_g).await;
+    eta_g
+}
+
+#[sqlx::test]
+async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let held = held_at_ground_eta(&state, &pool, &id).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+
+    let rows = release(&state, &cookie, &id, "GND1", json!({})).await;
+    let g = row(&rows, "GND1");
+    assert_eq!(g["released"], true);
+    assert!(
+        ms(&g["cross_time"]) >= held + 115_000,
+        "the slot is 120 s behind AIR1's held STA, not at GND1's ETA: {g}"
+    );
+    assert_eq!(ms(&row(&rows, "AIR1")["cross_time"]), held);
+}
+
+#[sqlx::test]
+async fn clearing_a_release_re_meters_with_the_held_sta(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let held = held_at_ground_eta(&state, &pool, &id).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    release(&state, &cookie, &id, "GND1", json!({})).await;
+
+    let (status, body) = call(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/flow/fcas/{id}/release/GND1"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().unwrap();
+    assert_eq!(
+        ms(&row(rows, "AIR1")["cross_time"]),
+        held,
+        "AIR1 is at its held STA"
+    );
+    assert!(ms(&row(rows, "GND1")["cross_time"]) >= held + 115_000);
+}
+
+#[sqlx::test]
+async fn idst_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let held = held_at_ground_eta(&state, &pool, &id).await;
+    let cookie = national(&pool, "flow.fca.read").await;
+
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        "/api/v1/flow/idst?airports=KJFK",
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["unscheduled"].as_array().unwrap();
+    let g = row(rows, "GND1");
+    assert_eq!(g["fca_id"], id.as_str());
+    assert!(
+        ms(&g["cross_time"]) >= held + 115_000,
+        "IDST reads the held STA too: {g}"
+    );
+}
+
+#[sqlx::test]
+async fn two_departures_set_for_the_same_time_are_both_flagged(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![parked("GND1"), parked("GND2")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    let ready = (Utc::now() + chrono::Duration::minutes(40))
+        .format("%H%M")
+        .to_string();
+
+    let first = release(&state, &cookie, &id, "GND1", json!({ "ready": ready })).await;
+    assert_eq!(
+        row(&first, "GND1")["slot_conflict"],
+        false,
+        "alone it is clear"
+    );
+    let rows = release(&state, &cookie, &id, "GND2", json!({ "ready": ready })).await;
+    assert_eq!(
+        row(&rows, "GND1")["cross_time"],
+        row(&rows, "GND2")["cross_time"]
+    );
+    assert_eq!(row(&rows, "GND1")["slot_conflict"], true);
+    assert_eq!(row(&rows, "GND2")["slot_conflict"], true);
 }
 
 #[sqlx::test]
@@ -308,29 +619,37 @@ async fn a_read_with_no_newly_frozen_flight_writes_nothing(pool: PgPool) {
     );
 }
 
+async fn put_fca(state: &AppState, cookie: &str, id: &str, extra: Value) -> StatusCode {
+    let mut body = json!({
+        "name": "FRZ", "artcc": "ZDC", "points": [[39.5, -75.6], [39.5, -74.0]],
+        "mode": "rate", "rate": 20
+    });
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    send(
+        state,
+        Method::PUT,
+        &format!("/api/v1/flow/fcas/{id}"),
+        cookie,
+        Some(body),
+    )
+    .await
+}
+
 #[sqlx::test]
-async fn an_fca_edit_clears_its_held_stas_and_sets_the_horizon(pool: PgPool) {
+async fn an_fca_edit_clears_its_held_stas_and_keeps_an_omitted_horizon(pool: PgPool) {
     let state = state_with(pool.clone(), vec![]).await;
-    let id = corridor_fca(&pool, 30).await;
+    let id = corridor_fca(&pool, 45).await;
     let other = corridor_fca(&pool, 30).await;
     seed_held(&pool, &id, "AIR1", Utc::now().timestamp_millis()).await;
     seed_held(&pool, &other, "AIR2", Utc::now().timestamp_millis()).await;
-    let user = seed_user(&pool).await;
-    grant(&pool, &user, "flow.fca.update", None).await;
-    let cookie = session_cookie(&pool, &user).await;
+    let cookie = national(&pool, "flow.fca.update").await;
 
-    let status = send(
-        &state,
-        Method::PUT,
-        &format!("/api/v1/flow/fcas/{id}"),
-        &cookie,
-        Some(json!({
-            "name": "FRZ", "artcc": "ZDC", "points": [[39.5, -75.6], [39.5, -74.0]],
-            "mode": "rate", "rate": 20, "freeze_min": 500
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        put_fca(&state, &cookie, &id, json!({})).await,
+        StatusCode::OK
+    );
     assert!(
         held_rows(&pool, &id).await.is_empty(),
         "the edit clears this FCA's rows"
@@ -341,7 +660,67 @@ async fn an_fca_edit_clears_its_held_stas_and_sets_the_horizon(pool: PgPool) {
         "and no other FCA's"
     );
     let fca = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
-    assert_eq!(fca.freeze_min, 120, "the horizon is clamped to 120 min");
+    assert_eq!(
+        fca.freeze_min, 45,
+        "a request without the field keeps the stored horizon"
+    );
+    assert_eq!(fca.rate, 20, "positive control: the edit applied");
+
+    assert_eq!(
+        put_fca(&state, &cookie, &id, json!({ "freeze_min": 12 })).await,
+        StatusCode::OK
+    );
+    let fca = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+    assert_eq!(fca.freeze_min, 12);
+}
+
+#[sqlx::test]
+async fn a_horizon_outside_0_to_120_min_is_refused(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    for bad in [-1, 121, 500] {
+        assert_eq!(
+            put_fca(&state, &cookie, &id, json!({ "freeze_min": bad })).await,
+            StatusCode::BAD_REQUEST,
+            "{bad} min"
+        );
+    }
+    for good in [0, 120] {
+        assert_eq!(
+            put_fca(&state, &cookie, &id, json!({ "freeze_min": good })).await,
+            StatusCode::OK,
+            "{good} min is in range"
+        );
+    }
+    let fca = flow_repo::get_fca(&pool, &id).await.unwrap().unwrap();
+    assert_eq!(fca.freeze_min, 120);
+}
+
+#[sqlx::test]
+async fn deleting_an_fca_clears_its_held_stas(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let other = corridor_fca(&pool, 30).await;
+    seed_held(&pool, &id, "AIR1", Utc::now().timestamp_millis()).await;
+    seed_held(&pool, &other, "AIR2", Utc::now().timestamp_millis()).await;
+    let cookie = national(&pool, "flow.fca.delete").await;
+
+    let status = send(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/flow/fcas/{id}"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(held_rows(&pool, &id).await.is_empty());
+    assert_eq!(
+        held_rows(&pool, &other).await.len(),
+        1,
+        "another FCA's rows stay"
+    );
 }
 
 #[sqlx::test]

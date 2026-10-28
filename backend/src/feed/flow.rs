@@ -1644,6 +1644,35 @@ mod tests {
         assert_eq!(ms(flights[1].sta) - ms(flights[0].sta), 200_000);
     }
 
+    /// #817: airborne arrivals take the first clear slot, not the slot after the last one placed.
+    /// A1 and A2 on CAMRN are 200 s apart (60 s and 260 s). A3, on another gate with ETA 150 s, is
+    /// clear of both by the 60 s runway interval and keeps its ETA.
+    #[test]
+    fn an_airborne_arrival_takes_a_clear_gap_between_two_others() {
+        let now = t0();
+        let pg = ProgramInputs {
+            aar: 60, // 1-min runway
+            gates: vec![GateSpacing {
+                name: "CAMRN".into(),
+                trail: 0,
+                mit: 20, // 200s in-trail
+            }],
+            ..base_program()
+        };
+        let mut flights = vec![
+            ff("A1", "airborne", 1, Some("CAMRN")),
+            ff("A2", "airborne", 2, Some("CAMRN")),
+            FlowFlight {
+                eta: Some(now + Duration::seconds(150)),
+                ..ff("A3", "airborne", 0, None)
+            },
+        ];
+        let etd = vec![None, None, None];
+        apply_metering(&mut flights, &etd, &pg, &HashMap::new(), now);
+        let at = |i: usize| ms(flights[i].sta) - now.timestamp_millis();
+        assert_eq!((at(0), at(1), at(2)), (60_000, 260_000, 150_000));
+    }
+
     #[test]
     fn issued_cfr_is_reserved_at_its_locked_wheels_up() {
         let now = t0();
@@ -1693,13 +1722,14 @@ mod tests {
 
     /// Case 6 of #817: two issued CFRs are checked against each other. G1 locks +10 min, G2 +12 min,
     /// inside the 6 min runway interval. G2 keeps its wheels-up and takes the delay on its STA,
-    /// +16 min. B, well clear, keeps its ETA.
+    /// +16 min. B, well clear, keeps its ETA. G2 is listed first, so G1 goes first only because the
+    /// CFRs are placed in locked-STA order.
     #[test]
     fn two_issued_cfrs_are_spaced_from_each_other() {
         let now = t0();
         let mut flights = vec![
-            ff("G1", "ground", 10, None),
             ff("G2", "ground", 10, None),
+            ff("G1", "ground", 10, None),
             ff("B", "airborne", 40, None),
         ];
         let etd = vec![
@@ -1711,18 +1741,18 @@ mod tests {
         let issued = HashMap::from([("G1".to_string(), now), ("G2".to_string(), g2_wheels)]);
         apply_metering(&mut flights, &etd, &base_program_aar(10), &issued, now);
 
-        assert_eq!(min_after(now, flights[0].sta), 10);
+        assert_eq!(min_after(now, flights[1].sta), 10);
         assert_eq!(
-            min_after(now, flights[1].sta),
+            min_after(now, flights[0].sta),
             16,
             "G2 is spaced 6 min behind G1"
         );
         assert_eq!(
-            flights[1].cfr,
+            flights[0].cfr,
             Some(g2_wheels),
             "G2's wheels-up is not moved"
         );
-        assert_eq!(flights[1].delay_min, 6);
+        assert_eq!(flights[0].delay_min, 6);
         assert_eq!(
             min_after(now, flights[2].sta),
             40,

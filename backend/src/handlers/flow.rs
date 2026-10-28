@@ -328,6 +328,12 @@ pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     if req.name.trim().is_empty() || req.points.len() < 2 {
         return Err(ApiError::BadRequest);
     }
+    if req
+        .freeze_min
+        .is_some_and(|m| !(0..=MAX_FREEZE_MIN).contains(&m))
+    {
+        return Err(ApiError::BadRequest);
+    }
     flow_repo::fca_color(req.color.as_deref())?;
     if let Some(m) = &req.mode
         && m != "rate"
@@ -337,6 +343,9 @@ pub(crate) fn validate_fca(req: &UpsertFcaRequest) -> Result<(), ApiError> {
     }
     Ok(())
 }
+
+/// The longest freeze horizon an FCA may set, minutes; the column's check constraint matches it.
+const MAX_FREEZE_MIN: i32 = 120;
 
 #[utoipa::path(
     get,
@@ -2042,14 +2051,36 @@ fn attach_held(flights: &[FcaFlight], metas: &mut [fca::MeterInput], held: &Held
     }
 }
 
-/// The flights that entered the freeze horizon on this pass and have no stored STA yet, as
-/// `(callsign, sta_ms)` to store.
-fn new_holds(flights: &[FcaFlight], held: &HeldMap) -> Vec<(String, i64)> {
-    flights
+/// One FCA's stored freeze-horizon STAs (#817).
+async fn held_stas_for(
+    pool: &sqlx::PgPool,
+    fca_id: &str,
+    now: DateTime<Utc>,
+) -> Result<HeldMap, ApiError> {
+    let mut by_fca = flow_repo::list_held_stas(pool, &[fca_id.to_string()], now).await?;
+    Ok(by_fca.remove(fca_id).unwrap_or_default())
+}
+
+/// What this pass changes in the stored STAs: the flights that entered the freeze horizon and have
+/// no stored STA yet, as `(callsign, sta_ms)` to store, and the stored callsigns this pass no
+/// longer holds (left the horizon, released, or gone from the feed) to drop.
+fn held_changes(flights: &[FcaFlight], held: &HeldMap) -> (Vec<(String, i64)>, Vec<String>) {
+    let store = flights
         .iter()
         .filter(|f| f.sta_frozen && !held.contains_key(&f.callsign))
         .filter_map(|f| Some((f.callsign.clone(), f.cross_time?.timestamp_millis())))
-        .collect()
+        .collect();
+    let frozen: HashSet<&str> = flights
+        .iter()
+        .filter(|f| f.sta_frozen)
+        .map(|f| f.callsign.as_str())
+        .collect();
+    let drop = held
+        .keys()
+        .filter(|c| !frozen.contains(c.as_str()))
+        .cloned()
+        .collect();
+    (store, drop)
 }
 
 /// The release (wheels-up, epoch ms) that crosses the FCA at `cta_ms`: the CTA less the airborne ETE.
@@ -2169,7 +2200,7 @@ async fn metered_flights(
         return Ok(Vec::new());
     }
     let held = match state.db.as_ref() {
-        Some(pool) => flow_repo::list_held_stas(pool, &fca.id, now).await?,
+        Some(pool) => held_stas_for(pool, &fca.id, now).await?,
         None => HeldMap::new(),
     };
     let (snapshot, airports) = feed_view(state).await;
@@ -2184,8 +2215,8 @@ async fn metered_flights(
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let flight_exclusions = state.flight_exclusions.load_full();
-    let fca_id = fca.id.clone();
-    let (flights, holds) = tokio::task::spawn_blocking(move || {
+    let (fca_id, fca_updated_at) = (fca.id.clone(), fca.updated_at);
+    let (flights, (store, drop)) = tokio::task::spawn_blocking(move || {
         let (flights, mut metas) = build_candidates(
             &fca,
             &snap.data,
@@ -2205,13 +2236,22 @@ async fn metered_flights(
         );
         attach_held(&flights, &mut metas, &held);
         let flights = finalize(&fca, flights, &metas, now.timestamp_millis());
-        let holds = new_holds(&flights, &held);
-        (flights, holds)
+        let changes = held_changes(&flights, &held);
+        (flights, changes)
     })
     .await
     .map_err(|_| ApiError::Internal)?;
+    // The holds depend only on the feed and the stored FCA, never on the caller or the query, so
+    // every reader of this FCA, the public ones included, stores the same rows. A failed write is
+    // logged and the read still answers; the next read retries the same changes.
     if let Some(pool) = state.db.as_ref() {
-        flow_repo::hold_stas(pool, &fca_id, &holds, now).await?;
+        let sync = flow_repo::HeldStaSync {
+            store: &store,
+            drop: &drop,
+        };
+        if let Err(e) = flow_repo::sync_held_stas(pool, &fca_id, fca_updated_at, &sync, now).await {
+            tracing::error!(fca_id = %fca_id, error = %e, "storing held STAs failed");
+        }
     }
     Ok(flights)
 }
@@ -2353,14 +2393,17 @@ pub async fn list_idst(
         HashMap<String, flow_repo::ReleaseHolder>,
         HeldMap,
     )> = Vec::new();
-    for fca in flow_repo::list_fcas(pool)
+    let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
         .await?
         .into_iter()
         .filter(|f| f.enabled && f.points.0.len() >= 2)
-    {
+        .collect();
+    let fca_ids: Vec<String> = fcas.iter().map(|f| f.id.clone()).collect();
+    let mut held_by_fca = flow_repo::list_held_stas(pool, &fca_ids, now).await?;
+    for fca in fcas {
         let releases = load_releases(pool, &fca.id).await?;
         let holders = flow_repo::release_holders(pool, &fca.id).await?;
-        let held = flow_repo::list_held_stas(pool, &fca.id, now).await?;
+        let held = held_by_fca.remove(&fca.id).unwrap_or_default();
         fca_releases.push((fca, releases, holders, held));
     }
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
@@ -2537,7 +2580,7 @@ pub async fn mark_release(
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
-    let held = flow_repo::list_held_stas(pool, &id, now).await?;
+    let held = held_stas_for(pool, &id, now).await?;
 
     // Release the feed lock before the metering CPU (build_candidates resolves every
     // matching route) by cloning the snapshot + airport handles.
@@ -2660,7 +2703,7 @@ pub async fn clear_release(
     state.publish(crate::realtime::topic::RELEASE);
     let releases = load_releases(pool, &id).await?;
     let now = Utc::now();
-    let held = flow_repo::list_held_stas(pool, &id, now).await?;
+    let held = held_stas_for(pool, &id, now).await?;
 
     // Release the feed lock before the metering CPU (build_candidates resolves every
     // matching route) by cloning the snapshot + airport handles.

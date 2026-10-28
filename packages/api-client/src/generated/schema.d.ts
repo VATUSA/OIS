@@ -5367,8 +5367,9 @@ export interface components {
             lat: number;
             /**
              * Format: int64
-             * @description Seconds the live ETA has run past this flight's release or frozen STA; 0 when on time. A
-             *     late flight's `cross_time` is its ETA (#817).
+             * @description Seconds the live ETA has run past this flight's release or held STA; 0 when on time. A
+             *     late flight's `cross_time` is never before its ETA: a late release crosses at its ETA, and a
+             *     late held flight is still spaced from the traffic placed ahead of it (#817).
              */
             late_sec: number;
             /** Format: double */
@@ -5393,8 +5394,10 @@ export interface components {
             /** @description A released crossing that sits inside another crossing's required gap (#817). */
             slot_conflict: boolean;
             /**
-             * @description Inside the FCA's freeze horizon: `cross_time` is a stored STA that holds while the ETA
-             *     moves (#817).
+             * @description An airborne, unreleased flight inside the FCA's freeze horizon. Its STA is held from the
+             *     first read that saw it there; `cross_time` keeps that STA while the ETA moves, unless the
+             *     flight runs late or a crossing placed ahead of it (a release, or the manual order) needs the
+             *     gap (#817).
              */
             sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
@@ -7655,7 +7658,8 @@ export interface components {
             fixes?: string[];
             /**
              * Format: int32
-             * @description Freeze horizon in minutes, 0-120; defaults to 30, 0 turns freezing off (#817).
+             * @description Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+             *     without it gets 30; an update without it keeps the stored value.
              */
             freeze_min?: number | null;
             /** Format: int32 */
