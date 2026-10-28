@@ -219,8 +219,9 @@ numbers follow the scheduled time (`:427-431`).
 **`earliest_slot`** (`feed/fca.rs:444`): from the ETA, move to `c + sep` for any committed `c`
 closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
 
-**Manual mode** (`feed/fca.rs:370-401`). The stored order comes first and every other flight is
-appended by ETA (`:372-376`). Each flight is chained `max(eta, prev + sep)` behind the one before,
+**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` keeps the stored order (first occurrence
+of a repeated index only) and places each flight it does not name directly behind the last ordered
+flight whose ETA is at or before its own, joiners in ETA order (#819). Each flight is chained `max(eta, prev + sep)` behind the one before,
 except a frozen flight, which keeps its time and becomes the new `prev` (`:385-393`). Sequence
 numbers are the order itself (`:399-401`).
 
@@ -238,11 +239,11 @@ numbers are the order itself (`:399-401`).
   (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
 **Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
-a frozen ground release, two conflicting airborne crossings, and four manual-order cases.
+a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge, repeated indices and gap outputs.
 `mod release_spacing_tests` (`handlers/flow.rs:3817`) covers `rdy_slot` and `separation_ms`.
 
 **Untested branches.** Airborne against frozen in auto mode. A frozen flight whose ETA is past its
-frozen time. Duplicate or out-of-range indices in the order. MIT with a slow leader and a fast
+frozen time. MIT with a slow leader and a fast
 follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
 
 ### Findings, area 3
@@ -257,13 +258,10 @@ follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
   (case 1).
 - **MIT spacing uses the placed aircraft's speed even when it ends up in front.** **Owned by #817**
   (case 4).
-- **A manual order is stored verbatim, duplicates included.** `ReorderRequest.order`
-  (`models/mod.rs:2717`) is saved as sent (`repos/flow.rs:435`), and `manual_order` matches it by
-  exact string (`handlers/flow.rs:2086`). A repeated callsign is scheduled at every occurrence, and its
-  last one wins: it is re-chained behind whatever precedes that occurrence, and the rank of its
-  earlier occurrence is left empty in the sequence numbers. A lowercase entry
-  matches nothing, and the flight falls to the tail. The tail append itself is **#819**, and this was
-  added there.
+- *Fixed by #819.* A manual order was stored verbatim and matched by exact string, so a repeated
+  callsign left an empty rank and a lowercase one fell to the tail. `reorder_fca` now refuses a
+  case-insensitive repeat with 400, `manual_order` matches case-insensitively, and `meter` keeps a
+  stored repeat at its first position.
 - *Checked, not filed.* The separation formula exists twice (`feed/fca.rs:355-364`,
   `handlers/flow.rs:2116-2124`). The two copies agree today, and #817 (case 4) changes both.
 

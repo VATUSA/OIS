@@ -24,6 +24,22 @@ Once an FCA exists, OIS finds every aircraft whose **filed route** crosses the l
 
 The map draws the matched aircraft **tinted and numbered in crossing order**, and the FCA's row shows a live **count** of how many aircraft it's currently metering. When you need to override the computed order, you can **reorder** the sequence manually.
 
+### Manual order and late joiners
+
+Drag a strip in the FCA panel to put the sequence in your own order; **manual** in the panel header returns it to automatic sequencing. Each aircraft is spaced behind the one you put ahead of it, so moving one up delays everyone behind it.
+
+An aircraft that starts crossing the line after you set the order is merged in by its ETA: it goes directly behind the last ordered aircraft whose ETA is at or before its own. It never goes ahead of an ordered aircraft that would reach the line first, and it never moves an aircraft you placed.
+
+### Why one aircraft is ahead of another
+
+Each strip shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. A gap equal to the required spacing means the aircraft is being held back to keep that spacing.
+
+Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing required behind the one ahead, and one line of reason:
+
+- **Manual placement** — you put them in this order, or one of them is in your order and the other was merged around it.
+- **ETA order** — the one ahead simply reaches the line first.
+- **Spacing push** — the one behind would reach the line first, but was pushed behind an airborne aircraft or an issued release to hold spacing.
+
 ## Enabling & disabling
 
 Each FCA has an on/off **switch** in the list. Turn one **off** and it's **hidden from the map but stays in the list** — its filters, spacing, and any releases are preserved, ready to switch back on. (A disabled FCA you've selected still draws, so you can inspect or edit it before re-enabling.)

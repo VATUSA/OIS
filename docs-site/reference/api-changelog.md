@@ -14,6 +14,14 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: FCA manual order** (#819). `PUT /api/v1/flow/fcas/{id}/order` answers `400` when
+  `order` names a callsign twice, compared case-insensitively, and stores nothing; a stored order now
+  matches flights case-insensitively. In manual sequence, a flight missing from the order is placed
+  directly behind the last ordered flight whose ETA is at or before its own instead of at the end.
+  `FcaFlight` (`GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
+  `gap_to_leader_sec`, `gap_to_leader_nm`, `required_spacing_sec`, `required_spacing_nm`,
+  `cross_speed` and `manually_placed`. A caller that sends a duplicate callsign must drop it.
+
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
   RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
