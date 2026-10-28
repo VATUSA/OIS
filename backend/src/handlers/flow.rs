@@ -1367,9 +1367,9 @@ pub(crate) const MAX_PROJECTION_SEC: i64 = 90 * 60;
 /// `traffic_from`'s forward-time counterpart (#226): every airborne pilot is projected
 /// `offset_sec` ahead along its own resolved route, using the same shared trajectory/ETA model
 /// FCA metering and the arrival ladder use — never a separate, inconsistent prediction. Ground
-/// aircraft are left parked (not yet departed, nothing to project) and an aircraft whose route
-/// can't be resolved past its dep/arr endpoints is dropped rather than shown at a fabricated
-/// position, mirroring how `route_path` itself signals "can't resolve" with `None`.
+/// aircraft are left parked (not yet departed, nothing to project). An airborne aircraft whose route
+/// does not resolve is projected along the great circle to its destination, as every other surface
+/// times it (`predict::trajectory`); one with no known destination is dropped.
 pub(crate) fn project_traffic(
     data: &VatsimData,
     nav: &NavData,
@@ -2300,6 +2300,8 @@ pub async fn clear_release(
         Some(flow_repo::Expect::Version(v)) => Some(v),
         None => None,
     };
+    // Read before the delete commits, so a failed read cannot answer 500 for a cleared release.
+    let tables = TimingTables::live(&state, pool).await?;
     let holder = flow_repo::release_holder(pool, &id, &callsign).await?;
     let by = principal.attribution(&state).await?;
     if holder.is_some() {
@@ -2319,7 +2321,6 @@ pub async fn clear_release(
     // Release the feed lock before the metering CPU (build_candidates resolves every
     // matching route) by cloning the snapshot handle.
     let snapshot = feed_view(&state).await.0;
-    let tables = TimingTables::live(&state, pool).await?;
     let built = snapshot.as_ref().map(|snap| {
         build_candidates(
             &fca,

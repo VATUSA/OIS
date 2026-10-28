@@ -404,9 +404,9 @@ each value. The callers read times, speeds and positions off the `Trajectory` it
 | `handlers::flow::project_traffic` | The map's projected traffic |
 | `handlers::flow::fix_predictions` | The per-fix table for a pilot and a prefile (`aircraft_route`) |
 
-The historical replay (`/stats/hist/flow`, `/stats/hist/departures`, `/stats/hist/runway`) runs
-the same functions against a reconstructed snapshot and the winds at that instant. It passes no
-stored departure-runway assignments, which are live state.
+The historical replay (`/stats/hist/flow`, `/stats/hist/departures`, `/stats/hist/runway`,
+`/stats/hist/traffic`) runs the same functions against a reconstructed snapshot and the winds at
+that instant. It passes no stored departure-runway assignments, which are live state.
 
 Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
 groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), or where it is now when

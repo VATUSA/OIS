@@ -541,9 +541,15 @@ pub fn flight_path(
     resolve_path(nav, airports, route, pos, hdg, gs, arr_ll).map(|(path, _)| path)
 }
 
+/// A not-yet-airborne pilot this close (nm) to its arrival field has arrived there; airport flow
+/// labels it "arrived" and no surface times it.
+pub(crate) const ARRIVED_NM: f64 = 5.0;
+
 /// The path a flight at `pos` is timed along, and whether the nav engine placed an enroute point on
 /// it (`> 2` anchors; exactly 2 is no better than the great circle). Falls back to the great circle
-/// to `arr_ll` when the filed route does not resolve.
+/// to `arr_ll` when the filed route does not resolve, except for a flight on the ground within
+/// [`ARRIVED_NM`] of the field: `route_path` returns `None` for it because it has arrived, and it
+/// has nowhere left to fly.
 fn resolve_path(
     nav: &NavData,
     airports: &AirportDb,
@@ -558,7 +564,9 @@ fn resolve_path(
             let enroute = path.len() > 2;
             Some((path, enroute))
         }
-        None => arr_ll.map(|a| (vec![pos, a], false)),
+        None => arr_ll
+            .filter(|a| is_airborne(gs) || gc_dist(pos[0], pos[1], a[0], a[1]) >= ARRIVED_NM)
+            .map(|a| (vec![pos, a], false)),
     }
 }
 
@@ -1670,6 +1678,42 @@ mod tests {
     }
 
     const JFK: [f64; 2] = [40.64, -73.78];
+
+    /// A route that does not resolve falls back to the great circle to the destination, except for a
+    /// pilot on the ground at its arrival field, which has arrived: `route_path`'s `None` there means
+    /// nothing is left to fly, and a great circle would time it as a fresh departure.
+    #[test]
+    fn a_landed_pilot_gets_no_great_circle_to_its_own_field() {
+        let (nav, ap) = (NavData::default(), airports());
+        let path = |pos: [f64; 2], gs: i64| {
+            let fp = plan("KZZZ", "KMIA", "DCT");
+            flight_path(&nav, &ap, &fp, pos, 190, gs)
+        };
+        assert_eq!(path([25.80, -80.29], 0), None, "parked at KMIA");
+        assert_eq!(
+            path([25.80, -80.29 + ARRIVED_NM / 60.0 * 1.2], 0),
+            Some(vec![
+                [25.80, -80.29 + ARRIVED_NM / 60.0 * 1.2],
+                [25.79, -80.29]
+            ]),
+            "just outside the arrived radius, still on the ground"
+        );
+        assert_eq!(
+            path(JFK, 0).map(|p| p.len()),
+            Some(2),
+            "a departure far away"
+        );
+        assert_eq!(
+            path([25.84, -80.29], 140).map(|p| p.len()),
+            Some(2),
+            "an airborne arrival 3 nm out"
+        );
+        assert_eq!(ARRIVED_NM, 5.0);
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let landed = pilot([25.80, -80.29], 0, 0, plan("KZZZ", "KMIA", "DCT"));
+        let traj = trajectory(&inp, Flight::Pilot(&landed), None, now()).unwrap();
+        assert!(traj.path().is_empty(), "nothing to cross");
+    }
 
     /// AC2 airborne: from 50 kt, whatever the altitude, and the altitude alone never makes a flight
     /// airborne. 50-60 kt was ground to airport flow and projected traffic, airborne to FCA.

@@ -552,7 +552,8 @@ fn angle_diff(a: f64, b: f64) -> f64 {
 /// #226's forward prediction scrubber — the geometric counterpart to
 /// `predict::Trajectory::progress_after`'s along-route distance. Clamps to the last point (with
 /// that leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must
-/// have at least 2 points: a trajectory on the nominal leg has none, so its caller checks first.
+/// have at least 2 points. An airborne trajectory always has one; a ground trajectory on the
+/// nominal leg has none, which `sector_tracks` checks before calling this.
 pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 2], f64) {
     let mut acc = 0.0;
     for w in path.windows(2) {
@@ -769,7 +770,7 @@ mod tests {
         // full untrimmed filed route from departure. Reusing `forward_route_from_position` (shared
         // with `route_path`) is what makes that hold; a version that fell back to the bare anchor
         // list here would report RBV as still ahead and its total distance would diverge from
-        // `route_path`'s (`path_len_nm`) — the exact number `predict::arrival_eta` times the real
+        // `route_path`'s (`path_len_nm`) — the exact number `predict::trajectory` times the real
         // ETA against.
         let nav = NavData::load();
         let ap = HashMap::from([

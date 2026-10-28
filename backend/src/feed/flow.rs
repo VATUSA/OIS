@@ -22,7 +22,7 @@ const GATE_MATCH_MAX_NM: f64 = 0.06; // ~360 ft
 
 /// Groundspeed above which a pilot's heading reflects actual taxi movement rather than arbitrary
 /// gate-parking orientation (#164 sub-issue E). A stationary aircraft's heading is essentially
-/// random with respect to any runway, so [`resolve_ground_allowance_sec`] only trusts it — and
+/// random with respect to any runway, so [`resolve_ground_allowance`] only trusts it — and
 /// attempts a runway match — once the aircraft has crossed this threshold; below it, the ladder
 /// falls to the airport/default tier instead of risking a coincidental wrong-runway match.
 /// Mirrors `taxi_observations`'s own roll-detection threshold (`GS_START`) — the same physical
@@ -32,8 +32,7 @@ pub(crate) const TAXI_ROLL_GS_KT: i64 = 7;
 /// Where an airport-flow miles-in-trail is converted to a time gap: the trailing flight's predicted
 /// groundspeed this far (nm) along-route short of the field (#813). Airport-flow MIT is set per
 /// arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is
-/// no fix to read a speed at; OIS holds no meter-fix data per airport. 40 nm sits at the outer edge
-/// of a typical TRACON's lateral limit, where arrival-stream spacing is handed over.
+/// no fix to read a speed at; OIS holds no meter-fix data per airport.
 pub(crate) const MIT_CROSSING_NM: f64 = 40.0;
 
 /// A per-gate spacing rule (subset of `GateRule` the scheduler needs).
@@ -283,7 +282,7 @@ fn time_flow_flight(
         .zip(arr)
         .map(|(p, (alat, alon))| gc_dist(p.latitude, p.longitude, alat, alon));
     row.groundspeed = pilot.map_or(0, |p| p.groundspeed);
-    if pilot.is_some() && !airborne && to_field.is_some_and(|d| d < 5.0) {
+    if pilot.is_some() && !airborne && to_field.is_some_and(|d| d < predict::ARRIVED_NM) {
         row.status = "arrived".into();
         row.distance_nm = to_field;
         row.eta = Some(now);
@@ -772,7 +771,7 @@ pub fn gc_dist(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 /// The gate nearest `(lat, lon)`, within [`GATE_MATCH_MAX_NM`], else `None`. Shared by
 /// `feed::taxi_observations` (matching a completed departure's spawn point, #164 sub-issue C) and
-/// [`resolve_ground_allowance_sec`] below (matching a live/proposed departure's position, sub-issue
+/// [`resolve_ground_allowance`] below (matching a live/proposed departure's position, sub-issue
 /// E) — one implementation, not two.
 pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Option<String> {
     let mut best: Option<(String, f64)> = None;
@@ -788,8 +787,7 @@ pub(crate) fn nearest_gate(gates: &[AirportGateBody], lat: f64, lon: f64) -> Opt
 
 /// The full derivation behind a ground allowance (#164 sub-issue F): which gate/runway matched (if
 /// any), and the pushback/start-up/taxi estimates `taxi_estimate`'s ladder produced from them. Debug-mode
-/// surfaces read this directly; [`resolve_ground_allowance_sec`] is the plain-total shorthand most
-/// callers want.
+/// surfaces read this directly; `predict::Trajectory` reads its total.
 pub(crate) struct GroundAllowanceBreakdown {
     pub gate_id: Option<String>,
     pub runway: Option<String>,
@@ -2611,6 +2609,58 @@ mod tests {
         let near = flow.flights.iter().find(|f| f.callsign == "NEAR1").unwrap();
         assert_eq!(near.mit_cross_kt, near_traj.gs_at(0.0), "inside 40 nm");
         assert!(far.mit_cross_kt > near.mit_cross_kt);
+    }
+
+    /// Only a pilot on the ground within 5 nm of the field has arrived: one on a 3 nm final at 140 kt
+    /// is still an airborne inbound with a metered slot.
+    #[test]
+    fn a_flight_on_short_final_has_not_arrived() {
+        let ap = AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let plan = FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        };
+        let pilot = |cs: &str, gs, alt| Pilot {
+            callsign: cs.into(),
+            latitude: 38.90,
+            longitude: -77.04,
+            altitude: alt,
+            groundspeed: gs,
+            heading: 180,
+            flight_plan: Some(plan.clone()),
+            ..Default::default()
+        };
+        let data = VatsimData {
+            pilots: vec![pilot("FINAL", 140, 1_000), pilot("PARKED", 0, 0)],
+            ..Default::default()
+        };
+        let (nav, winds, profiles) = (
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let pg = base_program_aar(60);
+        let flow = compute(
+            "KDCA",
+            Some(&pg),
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
+        let row = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+        assert_eq!(row("FINAL").status, "airborne");
+        assert!(row("FINAL").sta.is_some(), "metered");
+        assert_eq!(row("PARKED").status, "arrived", "positive control");
     }
 
     /// Airport flow labels a pilot airborne from 50 kt (`predict::is_airborne`), gives an airborne

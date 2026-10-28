@@ -1,7 +1,9 @@
 //! #813 AC2: every FCA path, airport flow and the per-fix table time a ground flight with the
-//! departure runway stored in `flow.departure_runway_assignment`, the map `list_idst` reads. Each
-//! test goes through the real router twice, before and after the assignment is stored, and the
-//! surface's time moves by exactly the change in the ground allowance the assignment makes.
+//! departure runway stored in `flow.departure_runway_assignment`, the map `list_idst` reads. Most
+//! tests go through the real router before and after the assignment is stored, and the surface's
+//! time moves by the change in the ground allowance the assignment makes (within 3 s, the time
+//! between the two requests); the demand test asserts the count that change moves. The last test
+//! checks that the badge count and the advisory read the board's path.
 //!
 //! The feed: GND1 parked at KJFK, filed KJFK->KDCA via `RBV WHITE SIE`, crossing an FCA on the
 //! corridor between WHITE and SIE. KJFK has five taxi samples off 04L (900 s) and five off 31L
@@ -368,7 +370,7 @@ async fn a_cfr_with_a_ready_time_slots_behind_an_assigned_departure(pool: PgPool
 }
 
 /// Demand counts arrivals due inside 60 minutes. The arrival field is placed so GND1 lands inside
-/// the hour from the heading-guess allowance and outside it from its assigned runway.
+/// the hour from the airport-tier allowance and outside it from its assigned runway.
 #[sqlx::test]
 async fn demand_counts_a_departure_from_its_assigned_runway(pool: PgPool) {
     let state = state(pool.clone()).await;

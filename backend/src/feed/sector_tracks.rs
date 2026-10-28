@@ -211,7 +211,8 @@ impl Ctx<'_> {
     /// One flight's track: an airborne flight from where it is now, at the altitude and groundspeed
     /// it reports; a ground flight with a release from its departure, starting at wheels-up — or
     /// now, if that has passed and it is still on the ground. It can't have flown the minutes it sat
-    /// out. `None` when the route doesn't resolve or never comes near the box.
+    /// out. `None` with no trajectory, with no path (the nominal leg), or when the path never comes
+    /// near the box.
     fn track(
         &self,
         inp: &predict::Inputs,

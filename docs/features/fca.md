@@ -106,8 +106,9 @@ short-circuit. `dir`.
 - **The altitude band and the ETA parse the filed altitude differently.** `filed_altitude_ft` reads
   `"VFR"` as unknown, so the flight passes the band. `trajectory::parse_alt_ft`
   (`feed/trajectory.rs:19-29`) reads the same string as 35,000 ft, and `build_candidates` times the
-  flight at that cruise altitude (`handlers/flow.rs:1884`; `:1996` was the prefile loop #834 removed). Both parsers concatenate every
-  digit, so `"FL350/370"` reads as 350,370 ft, which is out of every band. Added to #813.
+  flight at that cruise altitude (`handlers/flow.rs:1884`; `:1996` was the prefile loop #834 removed). Both parsers concatenated every
+  digit, so `"FL350/370"` read as 350,370 ft, which is out of every band. **Resolved by #813**: one
+  parser (`trajectory::filed_altitude_ft`) reads the first digit run, so `"FL350/370"` is 35,000 ft.
 - **A ground aircraft's field elevation counts as its current altitude in the band.** Live pilots
   pass `Some(p.altitude)` whatever their phase (`handlers/flow.rs:1877`), and only `0` is dropped
   (`:179`). An FCA whose band reaches down to a field's elevation (for example `max_fl` 100) takes
@@ -160,7 +161,8 @@ an unconnected prefile took a slot that connected departures metered behind.
 **Callers of `build_candidates`.** `metered_flights` (serves `fca_traffic` and
 `build_flight_advisory`), `list_idst`, `mark_release` and `clear_release` all build their inputs
 with `TimingTables::live`, so each reads the stored departure runways
-(`flow.departure_runway_assignment`) once per request (#813).
+(`flow.departure_runway_assignment`) (#813). `build_flight_advisory` reads them again inside
+`metered_flights` for each FCA the flight crosses.
 
 **Tests.** `mod prefile_skip_integration_tests` and `mod mit_cross_speed_wiring_tests` in
 `handlers/flow.rs`, the latter covering an airborne and a ground pilot, and
@@ -169,14 +171,15 @@ with `TimingTables::live`, so each reads the stored departure runways
 
 **Untested branches.** The pinned time a release gives: router tests send a non-empty release map
 and assert `released`, but none checks `cross_time`, so `frozen_ms` (set in `build_candidates`
-and `build_candidates_with`) could be dropped with the suite green. A pilot with no flight plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
+and `build_candidates_with`) could be dropped with the suite green. A pilot with no flight plan.
+`finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ### Findings, area 2
 
-- **IDST and every other caller meter the same FCA with different runway inputs.** The table above
-  shows the split. The doc comment on `assigned` (`handlers/flow.rs:1842-1845`) calls it "the same
-  map `list_idst` reads", but only `list_idst` passes it. A departure with an assigned runway gets
-  one ETA on IDST and another on the FCA page and from RDY. **Owned by #813** (its input 5).
+- **IDST and every other caller metered the same FCA with different runway inputs.** Only
+  `list_idst` passed the assigned runways, so a departure with an assigned runway got one ETA on
+  IDST and another on the FCA page and from RDY. **Resolved by #813**: every caller reads them
+  through `TimingTables::live`.
 - **The same callsign as a pilot and a prefile gave two candidates.** Fixed by #834, which stops
   treating any prefile as a candidate. A departure crossing two FCAs still has a row in each (#862).
 - **A disabled FCA still meters and still takes releases.** `fca_counts`, `build_flight_advisory`
