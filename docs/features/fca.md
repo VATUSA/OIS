@@ -171,9 +171,7 @@ an unconnected prefile took a slot that connected departures metered behind.
 `handlers/flow_prefile_candidate_tests.rs` through the router (#834). `mod fca_inclusion_tests`
 (`:4496`) pins the board to the shared decision.
 
-**Untested branches.** The pinned time a release gives: router tests send a non-empty release map
-and assert `released`, but none checks `cross_time`, so `frozen_ms` (`handlers/flow.rs:1933`,
-`:2038`) could be dropped with the suite green. A non-empty `assigned` map. A pilot with no flight
+**Untested branches.** A non-empty `assigned` map. A pilot with no flight
 plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ### Findings, area 2
@@ -197,13 +195,13 @@ plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ## 3. Metering
 
-`fca::meter` (`feed/fca.rs:348`) takes the `MeterInput` list, the FCA's mode, rate and MIT, and
-an optional manual order.
+`fca::meter` takes the `MeterInput` list, a `MeterConfig` (mode, rate, MIT, freeze horizon and
+now) and an optional manual order.
 
 **Separation** (`feed/fca.rs:355-364`):
 
-- `mode == "mit"`: `mit / max(cross_speed, 60) × 3600` seconds, at the placed aircraft's own
-  crossing speed.
+- `mode == "mit"`: `mit / max(cross_speed, 60) × 3600` seconds, at each aircraft's own crossing
+  speed; a pair takes the larger of its two.
 - otherwise, if `rate > 0`: `3600 / rate` seconds.
 - otherwise 0, which means no spacing at all. Writes clamp rate to 0-240 (default 30) and MIT to
   0-200 (default 15) (`repos/flow.rs:156-157`), so 0 is a legal value that turns metering off.
@@ -229,8 +227,9 @@ predicted crossing speed). Sequence numbers follow the scheduled time.
 than `max(sep, that crossing's sep)`, and repeat until nothing moves.
 
 **Manual mode** (`meter_manual`). The stored order comes first and every other flight is appended by ETA. A release
-keeps its anchor; every other flight goes at the earliest time clear of every flight placed before
-it in the order, by the larger separation of each pair. Sequence numbers are the order itself.
+keeps its anchor; every other flight goes no earlier than its anchor and behind every flight
+placed before it in the order, by the larger separation of each pair. Sequence numbers are the order
+itself.
 
 `delay_sec = max(sched - eta, 0) / 1000`. A release that ends inside another crossing's gap is
 returned with `slot_conflict` set; it is the only crossing allowed there.
@@ -239,8 +238,9 @@ returned with `slot_conflict` set; it is the only crossing allowed there.
 advisory (`build_flight_advisory`), both public. `flow_repo::sync_held_stas` stores the STA of each
 newly frozen flight (first STA wins, `on conflict do nothing`), deletes the rows of held flights the
 read no longer holds (out of the horizon, released, or gone from the feed) and rows more than an
-hour past their STA. A new row is stored only while `flow.fca.updated_at` still matches the read's
-FCA, so a read that raced an edit stores nothing. A failed write is logged and the read still
+hour past their STA. A new row is stored only while the FCA is not deleted and `flow.fca.updated_at`
+still matches the read's FCA (checked under a share lock), so a read that raced an edit or a delete
+stores nothing; a signed-in read of a deleted FCA (historical replay) stores none. A failed write is logged and the read still
 answers. IDST, `mark_release` and `clear_release` read the rows without writing. `update_fca` and
 `delete_fca` (a soft delete) delete the FCA's rows. `set_manual_order` does not: in manual mode a
 held STA is still the earliest a flight is placed.
@@ -277,16 +277,14 @@ MIT 0 through `meter`.
   earlier occurrence is left empty in the sequence numbers. A lowercase entry
   matches nothing, and the flight falls to the tail. The tail append itself is **#819**, and this was
   added there.
-- *Checked, not filed.* The separation formula exists twice (`feed/fca.rs:355-364`,
-  `handlers/flow.rs:2116-2124`). The two copies agree today, and #817 (case 4) changes both.
 
 ## 4. Writes
 
 | Route | Handler | Gate | Writes | Topic |
 | --- | --- | --- | --- | --- |
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
-| `PUT /api/v1/flow/fcas/{id}` | `update_fca` (`:388`) | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows (#817) | `flow.fca` (`:414`) |
-| `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` (`:429`) | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` (`:444`) |
+| `PUT /api/v1/flow/fcas/{id}` | `update_fca` | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows (#817) | `flow.fca` |
+| `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` |
 | `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2859`) |
 | `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |
 | `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2639`) | same | delete `flow.fca_release` | `flow.release` (`:2672`) |

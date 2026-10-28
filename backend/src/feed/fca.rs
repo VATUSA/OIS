@@ -360,7 +360,8 @@ pub struct MeterOutput {
     pub late_sec: i64,
     /// A release that sits inside another crossing's required gap.
     pub slot_conflict: bool,
-    /// Inside the freeze horizon: `sched_ms` is the STA to hold on later passes.
+    /// Inside the freeze horizon. On the pass a flight enters, `sched_ms` is the STA to store;
+    /// later passes are anchored at the first STA stored.
     pub sta_frozen: bool,
 }
 
@@ -889,6 +890,47 @@ mod tests {
         assert_eq!(out[0].sched_ms, T0 + 25 * MIN);
         assert_eq!(out[1].sched_ms, T0 + 27 * MIN);
         assert!(out[1].sta_frozen, "N is stored from this pass on");
+    }
+
+    #[test]
+    fn a_late_held_flight_goes_ahead_of_an_unheld_airborne_one() {
+        // L was held at T0+18 min and now runs late, ETA T0+19.5 min. U, airborne with no stored
+        // STA, has the earlier ETA, T0+19 min. L's held time ranks first: it crosses at its ETA and
+        // U goes 120 s behind it. N, well clear, keeps its ETA.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 18 * MIN),
+                ..mk(T0 + 19 * MIN + 30 * S, true, 400.0)
+            },
+            mk(T0 + 19 * MIN, true, 400.0),
+            mk(T0 + 40 * MIN, true, 400.0),
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), None);
+        assert_eq!(out[0].sched_ms, T0 + 19 * MIN + 30 * S);
+        assert_eq!(out[0].late_sec, 90);
+        assert_eq!(out[1].sched_ms, T0 + 21 * MIN + 30 * S);
+        assert_eq!(out[2].sched_ms, T0 + 40 * MIN);
+    }
+
+    #[test]
+    fn manual_order_keeps_a_held_sta_as_the_earliest_crossing() {
+        // Manual order [N, H]. H is held at T0+25 min with ETA T0+20 min; N, ordered ahead, crosses
+        // at T0+10 min. H is clear of N either way, so only the held STA puts it at 25.
+        let cands = vec![
+            mk(T0 + 10 * MIN, true, 400.0),
+            MeterInput {
+                held_ms: Some(T0 + 25 * MIN),
+                ..mk(T0 + 20 * MIN, true, 400.0)
+            },
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), Some(&[0, 1]));
+        assert_eq!(out[0].sched_ms, T0 + 10 * MIN, "the neighbor keeps its ETA");
+        assert_eq!(
+            out[1].sched_ms,
+            T0 + 25 * MIN,
+            "the held STA holds in manual mode"
+        );
+        assert!(out[1].sta_frozen);
     }
 
     #[test]

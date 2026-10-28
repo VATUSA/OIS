@@ -9,7 +9,8 @@ alter table flow.fca
 -- write a row the first time they see a flight inside the horizon (`on conflict do nothing`, so
 -- every replica keeps the first STA stored), read it on every later pass, and delete it once the
 -- flight leaves the horizon, is released or leaves the feed. Rows an hour past their STA are ignored
--- and pruned on the next write; editing or deleting the FCA clears its rows.
+-- and pruned on the next write for the FCA; editing or deleting the FCA clears its rows, and no
+-- read stores rows for a deleted FCA.
 create table if not exists flow.fca_held_sta (
     fca_id   text not null references flow.fca(id) on delete cascade,
     callsign text not null,

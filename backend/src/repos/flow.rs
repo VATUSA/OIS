@@ -332,7 +332,7 @@ pub async fn run_event_fca_lifecycle(pool: &PgPool) -> Result<u64, ApiError> {
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
-    // Its held STAs (#817) go with it; nothing meters a deleted FCA.
+    // Its held STAs (#817) go with it, and `sync_held_stas` stores none for a deleted FCA.
     let result = sqlx::query(
         "with d as (delete from flow.fca_held_sta where fca_id = $1)
          update flow.fca set deleted_at = now() where id = $1 and deleted_at is null",
@@ -589,9 +589,10 @@ pub struct HeldStaSync<'a> {
 }
 
 /// Apply one metered read's changes to an FCA's held STAs, in one transaction (#817). Stale rows
-/// and `drop` are deleted first. A new row is stored only while the FCA still has the
-/// `fca_updated_at` the read metered under, so a read that raced an edit (which clears the rows)
-/// cannot store STAs spaced under the old settings. The first STA stored wins
+/// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
+/// has the `fca_updated_at` the read metered under: the check takes a share lock on the FCA row, so
+/// it waits for an edit in flight and then sees its new `updated_at`. A read that raced an edit or
+/// a delete (both clear the rows) therefore stores nothing. The first STA stored wins
 /// (`on conflict do nothing`), so concurrent replicas agree. No-op when there is nothing to change.
 pub async fn sync_held_stas(
     pool: &PgPool,
@@ -604,7 +605,12 @@ pub async fn sync_held_stas(
         return Ok(());
     }
     let (callsigns, stas): (Vec<String>, Vec<i64>) = sync.store.iter().cloned().unzip();
-    let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
+    // The caller answers its read either way, so this log is the only record of the cause.
+    let fail = |e: sqlx::Error| {
+        tracing::error!(fca_id, error = %e, "held STA sync failed");
+        ApiError::Internal
+    };
+    let mut tx = pool.begin().await.map_err(fail)?;
     sqlx::query(
         "delete from flow.fca_held_sta
          where fca_id = $1 and (sta_ms < $2 or callsign = any($3))",
@@ -614,11 +620,15 @@ pub async fn sync_held_stas(
     .bind(sync.drop)
     .execute(&mut *tx)
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(fail)?;
     sqlx::query(
         "insert into flow.fca_held_sta (fca_id, callsign, sta_ms)
          select $1, c, s from unnest($2::text[], $3::bigint[]) as h(c, s)
-         where exists (select 1 from flow.fca where id = $1 and updated_at = $4)
+         where exists (
+             select 1 from flow.fca
+             where id = $1 and updated_at = $4 and deleted_at is null
+             for share
+         )
          on conflict (fca_id, callsign) do nothing",
     )
     .bind(fca_id)
@@ -627,8 +637,8 @@ pub async fn sync_held_stas(
     .bind(fca_updated_at)
     .execute(&mut *tx)
     .await
-    .map_err(|_| ApiError::Internal)?;
-    tx.commit().await.map_err(|_| ApiError::Internal)
+    .map_err(fail)?;
+    tx.commit().await.map_err(fail)
 }
 
 /// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy

@@ -2250,7 +2250,7 @@ async fn metered_flights(
             drop: &drop,
         };
         if let Err(e) = flow_repo::sync_held_stas(pool, &fca_id, fca_updated_at, &sync, now).await {
-            tracing::error!(fca_id = %fca_id, error = %e, "storing held STAs failed");
+            tracing::error!(fca_id = %fca_id, error = %e, "storing held STAs failed; answering without them");
         }
     }
     Ok(flights)

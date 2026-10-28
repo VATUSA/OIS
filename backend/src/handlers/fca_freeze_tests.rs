@@ -686,6 +686,22 @@ async fn a_horizon_outside_0_to_120_min_is_refused(pool: PgPool) {
             "{bad} min"
         );
     }
+    let create = json!({
+        "name": "NEW", "artcc": "ZDC", "points": [[39.5, -75.6], [39.5, -74.0]],
+        "mode": "rate", "rate": 20, "freeze_min": 121
+    });
+    assert_eq!(
+        send(
+            &state,
+            Method::POST,
+            "/api/v1/flow/fcas",
+            &cookie,
+            Some(create)
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "a create is bounded too"
+    );
     for good in [0, 120] {
         assert_eq!(
             put_fca(&state, &cookie, &id, json!({ "freeze_min": good })).await,
@@ -720,6 +736,37 @@ async fn deleting_an_fca_clears_its_held_stas(pool: PgPool) {
         held_rows(&pool, &other).await.len(),
         1,
         "another FCA's rows stay"
+    );
+}
+
+#[sqlx::test]
+async fn a_signed_in_read_of_a_deleted_fca_stores_no_held_stas(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let cookie = national(&pool, "flow.fca.delete").await;
+    let uri = format!("/api/v1/flow/fcas/{id}");
+    assert_eq!(
+        send(&state, Method::DELETE, &uri, &cookie, None).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        &format!("{uri}/traffic"),
+        &cookie,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        row(body.as_array().unwrap(), "AIR1")["sta_frozen"],
+        true,
+        "positive control: the read metered AIR1 inside the horizon"
+    );
+    assert!(
+        held_rows(&pool, &id).await.is_empty(),
+        "nothing is stored for a deleted FCA"
     );
 }
 

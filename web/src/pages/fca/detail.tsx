@@ -59,13 +59,15 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
-  // Its ETA has run past its release or held STA (#817). A delay outranks it in the status line.
+  // Its ETA has run past its release or held STA (#817); shown beside any delay.
   const late = f.late_sec >= DELAY_THRESHOLD_SEC;
-  const status = delayed
-    ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}`
-    : late
-      ? `late +${fmtDelaySec(f.late_sec)}`
-      : "on time";
+  const status =
+    [
+      delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : null,
+      late ? `late +${fmtDelaySec(f.late_sec)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "on time";
   const statusTone = delayed ? "text-danger" : late ? "text-warning" : "text-success";
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -118,7 +120,7 @@ function Strip({
           </span>
           <span
             className={`block text-xs ${statusTone}`}
-            title={late && !delayed ? "ETA is past its release or frozen time" : undefined}
+            title={late ? "ETA is past its release or frozen time" : undefined}
           >
             {status}
           </span>

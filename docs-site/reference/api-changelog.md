@@ -18,8 +18,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   (0-120, 0 turns it off). A value outside the range answers 400. A create that omits it gets 30; an
   update that omits it keeps the stored value, so an existing caller is unaffected.
   `PUT /api/v1/flow/fcas/{id}` and `DELETE /api/v1/flow/fcas/{id}` also clear the FCA's held crossing
-  times. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic`, the release routes and the flight
-  advisory) gains `late_sec`, `slot_conflict` and `sta_frozen`. A flight whose ETA has passed its
+  times. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
+  `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
+  held times. A flight whose ETA has passed its
   release or held time reports how far in `late_sec`, and its `cross_time` is never before its ETA.
   (#817)
 
