@@ -1581,6 +1581,19 @@ mod tests {
         assert_eq!(both[2].sched_ms, 510_000, "Y is spaced behind J2's release");
     }
 
+    // A released joiner's ETA floor counts ordered flights only: U (ETA 100 s, unreleased) merges
+    // behind A, and J (ETA 300 s) released for 50 s goes straight behind A, ahead of U, rather than
+    // behind U for having the later ETA.
+    #[test]
+    fn a_released_late_joiners_eta_floor_ignores_other_joiners() {
+        let mut j = cand(300_000);
+        j.frozen_ms = Some(50_000);
+        let cands = [cand(0), cand(400_000), cand(100_000), j];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&out), [1, 4, 3, 2]);
+        assert_eq!(out[2].sched_ms, 170_000, "U is spaced behind the release");
+    }
+
     // RDY on a late joiner freezes its merged slot plus a margin. Re-metered, the joiner keeps that
     // slot: J (ETA 100 s) merges behind A (0) at 120 s ahead of B (ETA 110 s); frozen at 135 s it
     // still sits second and B is spaced 120 s behind it, not moved up inside J's spacing.
