@@ -21,7 +21,7 @@ VATSIM snapshot (handlers/flow.rs::feed_view :61)
         predict::eta_along_route ─▶ eta, crossing groundspeed      (ETA model: #814)
         flow.fca_release (by callsign) ─▶ frozen_ms
                                                       ▼  MeterInput[]
-        finalize (flow.rs:2160) ─▶ manual_order (:2082) ─▶ fca::meter (fca.rs:348)
+        finalize (flow.rs:2075) ─▶ manual_order (:1984) ─▶ fca::meter (fca.rs:359)
                                                       ▼
         fca_traffic · flight_advisory · list_idst · mark_release · clear_release
                                                       ▼
@@ -153,7 +153,7 @@ an unconnected prefile took a slot that connected departures metered behind.
 **Release map.** `load_releases` (`handlers/flow.rs:2191`) reads every row for the FCA by callsign
 (`repos/flow.rs:525-535`). There is no time filter.
 
-**`finalize`** (`handlers/flow.rs:2160`) runs `manual_order` (`:2082`) and `fca::meter`, then sets
+**`finalize`** (`handlers/flow.rs:2075`) runs `manual_order` (`:1984`) and `fca::meter`, then sets
 `cross_time`, `delay_sec`, `delay_min = (delay_sec + 30) / 60` (`:2169`), and
 `delay_nm = delay_sec / 3600 × cross_speed` (`:2173`), and sorts by `seq`.
 
@@ -197,10 +197,10 @@ plan. `finalize`'s rounding and `delay_nm`. `manual_order` through `finalize`.
 
 ## 3. Metering
 
-`fca::meter` (`feed/fca.rs:348`) takes the `MeterInput` list, the FCA's mode, rate and MIT, and
+`fca::meter` (`feed/fca.rs:359`) takes the `MeterInput` list, the FCA's mode, rate and MIT, and
 an optional manual order.
 
-**Separation** (`feed/fca.rs:355-364`):
+**Separation** (`feed/fca.rs:366-375`):
 
 - `mode == "mit"`: `mit / max(cross_speed, 60) × 3600` seconds, at the placed aircraft's own
   crossing speed.
@@ -208,22 +208,24 @@ an optional manual order.
 - otherwise 0, which means no spacing at all. Writes clamp rate to 0-240 (default 30) and MIT to
   0-200 (default 15) (`repos/flow.rs:156-157`), so 0 is a legal value that turns metering off.
 
-The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2116`), which
+The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2022`), which
 RDY uses.
 
 **Auto mode** (`feed/fca.rs:399-429`). Pinned flights (airborne, or holding a release) sort ahead
-of the rest, then by ETA (`:405-411`). Each in turn is placed at its frozen time if it has one,
+of the rest, then by ETA (`:407-411`). Each in turn is placed at its frozen time if it has one,
 else at `earliest_slot(eta, committed, sep)` (`:415-420`), and is added to `committed`. Sequence
 numbers follow the scheduled time (`:424-428`).
 
-**`earliest_slot`** (`feed/fca.rs:549`): from the ETA, move to `c + sep` for any committed `c`
+**`earliest_slot`** (`feed/fca.rs:557`): from the ETA, move to `c + sep` for any committed `c`
 closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
 
-**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` (`feed/fca.rs:480`) keeps the stored order
+**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` (`feed/fca.rs:481`) keeps the stored order
 (first occurrence of a repeated index only) and places each flight it does not name behind every
-ordered flight whose ETA is at or before its own (#819). A joiner holding a release goes further back
-when its release time says so: behind the last flight of the order without it that crosses at least
-its spacing earlier, so RDY's own release never moves it out of the slot it was released into.
+ordered flight whose ETA is at or before its own (#819). Joiners holding a release are then placed
+one at a time in release-time order (`release_slot`, `:519`), each into the sequence built so far
+without it: further back when its release time says so, behind each flight at the front of that
+sequence that crosses at least its spacing earlier, stopping at the first that does not. A RDY
+release, the slot plus a 15 s margin, keeps its slot while the spacing exceeds that margin.
 `chain` (`:455`) then chains each flight `max(eta, prev + sep)` behind the one before, except a
 frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers are the order itself
 (`:396-398`).
@@ -232,23 +234,23 @@ frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
-- **RDY**, `rdy_slot` (`handlers/flow.rs:2144`): in manual mode the ladder's slot plus
+- **RDY**, `rdy_slot` (`handlers/flow.rs:2059`): in manual mode the ladder's slot plus
   `RELEASE_MARGIN_MS` = 15 s (`:508`). In auto mode, `earliest_slot` against every other pinned
-  flight at its **metered** time (`committed_crossings`, `:2099`, #356), with the margin added to
+  flight at its **metered** time (`committed_crossings`, `:2005`, #356), with the margin added to
   the separation.
 - **SET**: the typed time plus the airborne ETE, `eta - now - ground_allowance`
-  (`handlers/flow.rs:2630`, #815). It runs no slot search; that is **owned by #816**.
+  (`handlers/flow.rs:2547`, #815). It runs no slot search; that is **owned by #816**.
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
-  (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
+  (`release_ms`, `handlers/flow.rs:2037`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:676-1766`: MIT at the follower's speed, rate metering, airborne priority,
+**Tests.** `feed/fca.rs:685-1867`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
 indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
 (`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and
 between a joiner and an ordered flight.
 `a_faster_flight_slotted_inside_a_pushed_flights_spacing_shows_the_shortfall` pins auto MIT with a
 slow pushed flight and a fast follower placed inside its spacing (#817 case 4).
-`mod release_spacing_tests` (`handlers/flow.rs:3817`) covers `rdy_slot` and `separation_ms`.
+`mod release_spacing_tests` (`handlers/flow.rs:4113`) covers `rdy_slot` and `separation_ms`.
 
 **Untested branches.** Airborne against frozen in auto mode. A frozen flight whose ETA is past its
 frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode.
@@ -257,7 +259,7 @@ frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode
 
 - **Frozen times are never checked against their neighbors.** In manual mode a frozen flight can sit
   inside the gap, or before the flight ordered ahead of it, and the flight after it is chained from
-  that frozen time. `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1055`) asserts this
+  that frozen time. `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1180`) asserts this
   as intended (noted on #817). In auto mode, pinned flights sort by ETA, not by frozen time, so an
   airborne flight can be slotted inside a release's gap before the release is committed. **Owned
   by #817** (its cases 2 and 3).
@@ -269,8 +271,8 @@ frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode
   callsign left an empty rank and a lowercase one fell to the tail. `reorder_fca` now refuses a
   case-insensitive repeat with 400, `manual_order` matches case-insensitively, and `meter` keeps a
   stored repeat at its first position.
-- *Checked, not filed.* The separation formula exists twice (`feed/fca.rs:355-364`,
-  `handlers/flow.rs:2116-2124`). The two copies agree today, and #817 (case 4) changes both.
+- *Checked, not filed.* The separation formula exists twice (`feed/fca.rs:366-375`,
+  `handlers/flow.rs:2022-2030`). The two copies agree today, and #817 (case 4) changes both.
 
 ## 4. Writes
 

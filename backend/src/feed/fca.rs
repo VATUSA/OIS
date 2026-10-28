@@ -470,13 +470,14 @@ fn chain(cands: &[MeterInput], seq: &[usize], sep: &dyn Fn(&MeterInput) -> i64) 
 /// The manual crossing order with every flight the controller has not ordered merged in (#819).
 ///
 /// `order` keeps its first occurrence of each index. A late joiner goes behind every ordered flight
-/// whose ETA is at or before its own, so it never crosses ahead of an ordered flight that reaches the
-/// line first, and it never moves one the controller placed. One without a release goes directly
-/// there. One holding a release crosses at that time whatever its position, so it goes further back
-/// when the release says so: behind the last flight of the order without it that crosses at least
-/// its spacing earlier. Its own release is never measured against a sequence it already sits in, so
-/// a release spaced into a slot keeps that slot, and a release set late does not chain the ordered
-/// flights behind it.
+/// whose ETA is at or before its own, so it is never sequenced ahead of an ordered flight that reaches
+/// the line first, and it never moves one the controller placed. One without a release goes directly
+/// there. Joiners holding a release are then placed one at a time in release-time order, each into
+/// the sequence built so far, which holds every earlier release but never its own. Each crosses at
+/// its release whatever its position, so it goes further back when the release says so: behind
+/// each flight at the front of that sequence that crosses at least its spacing earlier, stopping at
+/// the first that does not. The flight after a release is spaced behind it. A release spaced into
+/// a slot with more than its margin to spare keeps that slot.
 fn merge_late_joiners(
     cands: &[MeterInput],
     order: &[usize],
@@ -489,44 +490,51 @@ fn merge_late_joiners(
         .copied()
         .filter(|&i| i < n && !std::mem::replace(&mut seen[i], true))
         .collect();
-    // How many ordered flights have an ETA at or before the joiner's.
+    let (mut released, unreleased): (Vec<usize>, Vec<usize>) = (0..n)
+        .filter(|&i| !seen[i])
+        .partition(|&i| cands[i].frozen_ms.is_some());
     let floor = |j: usize| {
         ordered
             .iter()
             .rposition(|&o| cands[o].eta_ms <= cands[j].eta_ms)
             .map_or(0, |p| p + 1)
     };
-    let (released, unreleased): (Vec<usize>, Vec<usize>) = (0..n)
-        .filter(|&i| !seen[i])
-        .partition(|&i| cands[i].frozen_ms.is_some());
-    let base = splice(
-        &ordered,
-        unreleased
-            .into_iter()
-            .map(|j| (floor(j), cands[j].eta_ms, j))
-            .collect(),
-    );
-    let at = chain(cands, &base, sep);
-    let mut base_pos = vec![0usize; n];
-    for (k, &i) in base.iter().enumerate() {
-        base_pos[i] = k;
-    }
-    let slots = released
+    let joiners = unreleased
         .into_iter()
-        .map(|j| {
-            let f = cands[j].frozen_ms.unwrap_or(cands[j].eta_ms);
-            let by_eta = match floor(j) {
-                0 => 0,
-                k => base_pos[ordered[k - 1]] + 1,
-            };
-            let by_release = base
-                .iter()
-                .rposition(|&x| at[x] + sep(&cands[j]) <= f)
-                .map_or(0, |p| p + 1);
-            (by_eta.max(by_release), f, j)
-        })
+        .map(|j| (floor(j), cands[j].eta_ms, j))
         .collect();
-    splice(&base, slots)
+    let mut seq = splice(&ordered, joiners);
+    released.sort_unstable_by_key(|&j| (cands[j].frozen_ms, j));
+    for j in released {
+        let slot = release_slot(cands, &seq, &seen, j, sep);
+        seq.insert(slot, j);
+    }
+    seq
+}
+
+/// Where released joiner `j` goes in `seq`: behind the last flight marked in `ordered` with an ETA
+/// at or before its own, and behind the leading run of `seq` that crosses at least its spacing
+/// before its release. Chained times are not monotonic behind a frozen flight, so the run stops at
+/// the first flight that does not clear it rather than at the last that does.
+fn release_slot(
+    cands: &[MeterInput],
+    seq: &[usize],
+    ordered: &[bool],
+    j: usize,
+    sep: &dyn Fn(&MeterInput) -> i64,
+) -> usize {
+    let c = &cands[j];
+    let f = c.frozen_ms.unwrap_or(c.eta_ms);
+    let at = chain(cands, seq, sep);
+    let by_eta = seq
+        .iter()
+        .rposition(|&x| ordered[x] && cands[x].eta_ms <= c.eta_ms)
+        .map_or(0, |p| p + 1);
+    let by_release = seq
+        .iter()
+        .position(|&x| at[x] + sep(c) > f)
+        .unwrap_or(seq.len());
+    by_eta.max(by_release)
 }
 
 /// `base` with each `(slot, time, index)` joiner inserted after the first `slot` entries; joiners in
@@ -1389,7 +1397,7 @@ mod tests {
         );
     }
 
-    // AC1 / plan: ties among joiners go by candidate index.
+    // Ties among joiners go by candidate index.
     #[test]
     fn late_joiners_with_equal_etas_keep_candidate_index_order() {
         let cands = [cand(100_000), cand(300_000), cand(300_000)];
@@ -1419,7 +1427,7 @@ mod tests {
         assert!(meter(&[], "rate", 30, 0, Some(&[0, 1])).is_empty());
     }
 
-    // Plan 1: the chain is unchanged — a merged joiner takes max(eta, prev + sep) and the ordered
+    // The chain is unchanged — a merged joiner takes max(eta, prev + sep) and the ordered
     // flights behind it are pushed by it.
     #[test]
     fn a_merged_late_joiner_is_spaced_behind_the_flight_ahead_and_pushes_the_followers() {
@@ -1433,7 +1441,7 @@ mod tests {
         assert_eq!(delay, [0, 20, 90, 60]);
     }
 
-    // Plan 1: an issued CFR keeps its frozen time, and a joiner behind it is spaced from that time.
+    // An issued CFR keeps its frozen time, and a joiner behind it is spaced from that time.
     #[test]
     fn a_late_joiner_behind_a_frozen_flight_is_spaced_from_the_frozen_time() {
         // F is released for 200 s; J (ETA 210 s) merges behind it: 200 + 120 = 320 s.
@@ -1491,6 +1499,86 @@ mod tests {
 
     fn seqs_of(out: &[MeterOutput]) -> Vec<i64> {
         out.iter().map(|o| o.seq).collect()
+    }
+
+    // A released and an unreleased joiner in one field: U (ETA 100 s) merges behind A and pushes B to
+    // 240 s. J (ETA 250 s) released for 50 s still goes behind B, whose ETA is earlier than its own
+    // although U now sits between them; J (ETA 50 s) released for 330 s goes between U (120 s) and B,
+    // the first flight it does not clear by its spacing, and pushes B to 450 s.
+    #[test]
+    fn a_released_late_joiner_is_placed_against_the_order_with_the_unreleased_joiners_merged() {
+        let mut early = cand(250_000);
+        early.frozen_ms = Some(50_000);
+        let cands = [cand(0), cand(200_000), cand(100_000), early];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&out), [1, 3, 2, 4]);
+        assert_eq!(out[2].sched_ms, 120_000);
+        assert_eq!(out[1].sched_ms, 240_000);
+        assert_eq!(out[3].sched_ms, 50_000);
+
+        let mut late = cand(50_000);
+        late.frozen_ms = Some(330_000);
+        let cands = [cand(0), cand(200_000), cand(100_000), late];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&out), [1, 4, 2, 3]);
+        assert_eq!(out[3].sched_ms, 330_000);
+        assert_eq!(out[1].sched_ms, 450_000, "B is spaced behind the release");
+    }
+
+    // The release is cleared by the joiner's own spacing, not the leader's: in MIT 20, J (220 kt, so
+    // 327 s) released for 350 s is only 250 s behind A (ETA 100 s, 400 kt, so 180 s), so it goes
+    // ahead of A, which is spaced 180 s behind it.
+    #[test]
+    fn a_released_late_joiner_clears_the_flight_ahead_by_its_own_spacing() {
+        let mut j = cand(90_000);
+        j.cross_speed = 220.0;
+        j.frozen_ms = Some(350_000);
+        let cands = [cand(100_000), j];
+        let out = meter(&cands, "mit", 0, 20, Some(&[0]));
+        assert_eq!(seqs_of(&out), [2, 1]);
+        assert_eq!(out[0].sched_ms, 530_000);
+    }
+
+    // A frozen ordered flight sequenced behind one that crosses later does not pull a released
+    // joiner back past that later flight: C (frozen 100 s) sits behind B (ETA 500 s), and J released
+    // for 230 s goes behind A, ahead of B, not behind C.
+    #[test]
+    fn a_released_late_joiner_stops_at_the_first_flight_it_does_not_clear() {
+        let mut c = cand(90_000);
+        c.frozen_ms = Some(100_000);
+        let mut j = cand(50_000);
+        j.frozen_ms = Some(230_000);
+        let cands = [cand(0), cand(500_000), c, j];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1, 2]));
+        assert_eq!(seqs_of(&out), [1, 3, 4, 2]);
+        assert_eq!(out[1].sched_ms, 500_000, "B keeps its ETA");
+    }
+
+    // Two late joiners released in turn each keep the slot RDY gave them: J1 (ETA 10 s) merges behind
+    // A and J2 (ETA 150 s) behind X; RDY on J1 at 135 s, then on J2 at its new 375 s plus the margin,
+    // leaves the order A, J1, X, J2, Y and spaces Y behind J2.
+    #[test]
+    fn two_late_joiners_released_in_turn_each_keep_their_slot() {
+        let mut cands = [
+            cand(0),
+            cand(140_000),
+            cand(160_000),
+            cand(10_000),
+            cand(150_000),
+        ];
+        let order = [0, 1, 2];
+        let before = meter(&cands, "rate", 30, 0, Some(&order));
+        assert_eq!(seqs_of(&before), [1, 3, 5, 2, 4]);
+
+        cands[3].frozen_ms = Some(before[3].sched_ms + 15_000);
+        let one = meter(&cands, "rate", 30, 0, Some(&order));
+        assert_eq!(seqs_of(&one), [1, 3, 5, 2, 4]);
+        assert_eq!(one[4].sched_ms, 375_000);
+
+        cands[4].frozen_ms = Some(one[4].sched_ms + 15_000);
+        let both = meter(&cands, "rate", 30, 0, Some(&order));
+        assert_eq!(seqs_of(&both), [1, 3, 5, 2, 4]);
+        assert_eq!(both[2].sched_ms, 510_000, "Y is spaced behind J2's release");
     }
 
     // RDY on a late joiner freezes its merged slot plus a margin. Re-metered, the joiner keeps that
@@ -1677,7 +1765,7 @@ mod tests {
         assert_eq!(out[1].sep_ms, 240_000);
     }
 
-    // Plan 2: manually_placed marks a flight whose index came from `order`; a merged joiner is not.
+    // manually_placed marks a flight whose index came from `order`; a merged joiner is not.
     #[test]
     fn manually_placed_is_true_for_ordered_flights_and_false_for_late_joiners() {
         let cands = [cand(0), cand(100_000), cand(200_000)];
@@ -1688,7 +1776,7 @@ mod tests {
         }
     }
 
-    // Plan 2: auto mode has no manual placement.
+    // Auto mode has no manual placement.
     #[test]
     fn manually_placed_is_false_for_every_flight_in_auto_mode() {
         let cands = [cand(0), cand(100_000), cand(200_000)];
