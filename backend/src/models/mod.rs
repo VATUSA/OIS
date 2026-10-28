@@ -2650,7 +2650,8 @@ pub struct FcaFlight {
     pub required_spacing_sec: i64,
     /// `required_spacing_sec` as distance at this flight's predicted crossing speed, nm (one decimal).
     pub required_spacing_nm: f64,
-    /// Predicted groundspeed at the crossing, kt: the speed the spacing above is sized with.
+    /// Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with it, and the
+    /// `_nm` figures convert at it.
     pub cross_speed: i64,
     /// True when the FCA is in manual sequence and this flight's position comes from the
     /// controller's saved order; false for a flight merged in by ETA and for every flight in auto.

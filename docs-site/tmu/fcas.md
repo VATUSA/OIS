@@ -26,13 +26,13 @@ The map draws the matched aircraft **tinted and numbered in crossing order**, an
 
 ### Manual order and late joiners
 
-Drag a strip in the FCA panel to put the sequence in your own order; **manual** in the panel header returns it to automatic sequencing. Each aircraft is spaced behind the one you put ahead of it, so moving one up delays everyone behind it.
+Drag a strip in the FCA panel to put the sequence in your own order; **manual** in the panel header returns it to automatic sequencing. Each aircraft is spaced behind the one you put ahead of it, so moving one up can delay the aircraft behind it that no longer have their spacing. An aircraft with an issued release keeps its time.
 
-An aircraft that starts crossing the line after you set the order is merged in by its ETA: it goes directly behind the last ordered aircraft whose ETA is at or before its own. It never goes ahead of an ordered aircraft that would reach the line first, and it never moves an aircraft you placed.
+An aircraft that joins the FCA after you set the order (it connects, or its route starts crossing the line) is merged in by its ETA, or by its release time if it already has one: it goes directly behind the last ordered aircraft whose ETA is at or before that time. It never goes ahead of an ordered aircraft that would reach the line first, and it never moves an aircraft you placed.
 
 ### Why one aircraft is ahead of another
 
-Each strip shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. A gap equal to the required spacing means the aircraft is being held back to keep that spacing.
+Each strip shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. An aircraft held back to keep its spacing behind the one ahead shows a gap equal to the required spacing; a gap below it means the spacing is short.
 
 Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing required behind the one ahead, and one line of reason:
 

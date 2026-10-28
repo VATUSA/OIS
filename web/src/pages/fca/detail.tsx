@@ -51,7 +51,7 @@ function Strip({
   canEdit: boolean;
   /** This strip is one of the (at most two) flights in the compare panel (#819). */
   comparing: boolean;
-  /** False once two other flights are selected for comparison. */
+  /** False once two flights are selected for comparison; a selected strip can still be cleared. */
   canCompare: boolean;
   onCompare: (callsign: string) => void;
   /** Whether the caller's `flow.fca.update` grant covers *this* FCA's ARTCC (#342). */

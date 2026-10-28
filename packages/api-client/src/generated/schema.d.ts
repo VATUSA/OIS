@@ -5320,7 +5320,8 @@ export interface components {
             cross_lon: number;
             /**
              * Format: int64
-             * @description Predicted groundspeed at the crossing, kt: the speed the spacing above is sized with.
+             * @description Predicted groundspeed at the crossing, kt, rounded. MIT spacing is sized with it, and the
+             *     `_nm` figures convert at it.
              */
             cross_speed: number;
             /**

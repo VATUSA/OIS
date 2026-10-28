@@ -354,7 +354,7 @@ pub struct MeterOutput {
 /// fixed constraints; unreleased ground floats into the first gap clear of every
 /// committed crossing by the separation (rate → constant MINIT; MIT → distance ÷ cross
 /// speed). Manual mode (`order` = candidate indices): chain in the controller's order,
-/// spacing each behind the previous, with newcomers merged by ETA ([`merge_late_joiners`]). Ported from
+/// spacing each behind the previous, with newcomers merged by ETA (`merge_late_joiners`). Ported from
 /// vatflow's `scheduleAuto` / `scheduleCandidates`.
 pub fn meter(
     cands: &[MeterInput],
@@ -1352,8 +1352,9 @@ mod tests {
         assert_eq!(seqs, [1, 2, 3]);
     }
 
-    // AC1 edge: a saved order whose every index is out of range (every ordered flight has left)
-    // sequences the whole field by ETA.
+    // AC1 edge: an order whose every index is out of range is ignored and the whole field is
+    // sequenced by ETA. `manual_order` drops departed callsigns before `meter`, so this guards the
+    // function's own contract rather than a path production reaches.
     #[test]
     fn an_order_matching_no_candidate_sequences_everyone_by_eta() {
         let cands = [cand(300_000), cand(100_000), cand(200_000)];
@@ -1424,6 +1425,43 @@ mod tests {
         let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
         let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
         assert_eq!(seqs, [1, 3, 2]);
+    }
+
+    // An ordered flight holding a late release still counts at its ETA for the merge: J (ETA 150 s)
+    // goes behind O (ETA 100 s, released for 1,800 s), never ahead of a flight with an earlier ETA.
+    #[test]
+    fn a_late_joiner_never_goes_ahead_of_an_ordered_flight_released_late_with_an_earlier_eta() {
+        let mut o = cand(100_000);
+        o.frozen_ms = Some(1_800_000);
+        let cands = [cand(0), o, cand(150_000)];
+        let out = meter(&cands, "rate", 30, 0, Some(&[0, 1]));
+        let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
+        assert_eq!(seqs, [1, 2, 3]);
+    }
+
+    // AC2 limit (#817): in auto MIT mode a faster ground flight G is placed inside the spacing a
+    // slower airborne A2 was pushed back to hold behind the lead. A2 then sits behind G, and its gap
+    // to G (167.272 s) reports the shortfall against its required 327.272 s instead of hiding it.
+    #[test]
+    fn a_faster_flight_slotted_inside_a_pushed_flights_spacing_shows_the_shortfall() {
+        let mut a2 = cand(50_000);
+        a2.cross_speed = 220.0;
+        let mut g = cand(100_000);
+        g.airborne = false;
+        g.cross_speed = 450.0;
+        let out = meter(&[cand(0), a2, g], "mit", 0, 20, None);
+        let seqs: Vec<i64> = out.iter().map(|o| o.seq).collect();
+        assert_eq!(seqs, [1, 3, 2]);
+        assert_eq!(
+            out[1].sched_ms, 327_272,
+            "A2 was pushed back to its spacing behind the lead"
+        );
+        assert_eq!(out[1].sep_ms, 327_272);
+        assert_eq!(
+            out[1].gap_ms,
+            Some(167_272),
+            "the gap is to G, the flight directly ahead"
+        );
     }
 
     // A frozen release ordered behind a flight that crosses later keeps its time, and its gap to

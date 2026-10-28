@@ -374,6 +374,10 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(toggle(host, "UAL3").disabled).toBe(false);
     pick(host, "UAL3");
     expect(text(host, "compare-reason")).toBe("DAL2 is ahead of UAL3 in ETA order.");
+    // AAL1 coming back does not revive its old pick as a third selection.
+    render(MANUAL);
+    expect(text(host, "compare-reason")).toBe("DAL2 is ahead of UAL3 in ETA order.");
+    expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("false");
   });
 
   it("starts with nothing picked after switching to another FCA", () => {

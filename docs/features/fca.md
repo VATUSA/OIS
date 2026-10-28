@@ -211,21 +211,22 @@ an optional manual order.
 The handler holds a second copy of this formula, `separation_ms` (`handlers/flow.rs:2116`), which
 RDY uses.
 
-**Auto mode** (`feed/fca.rs:402-432`). Pinned flights (airborne, or holding a release) sort ahead
-of the rest, then by ETA (`:408-414`). Each in turn is placed at its frozen time if it has one,
-else at `earliest_slot(eta, committed, sep)` (`:418-422`), and is added to `committed`. Sequence
-numbers follow the scheduled time (`:427-431`).
+**Auto mode** (`feed/fca.rs:413-443`). Pinned flights (airborne, or holding a release) sort ahead
+of the rest, then by ETA (`:419-425`). Each in turn is placed at its frozen time if it has one,
+else at `earliest_slot(eta, committed, sep)` (`:429-434`), and is added to `committed`. Sequence
+numbers follow the scheduled time (`:438-442`).
 
-**`earliest_slot`** (`feed/fca.rs:444`): from the ETA, move to `c + sep` for any committed `c`
+**`earliest_slot`** (`feed/fca.rs:503`): from the ETA, move to `c + sep` for any committed `c`
 closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
 
 **Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` keeps the stored order (first occurrence
 of a repeated index only) and places each flight it does not name directly behind the last ordered
-flight whose ETA is at or before its own, joiners in ETA order (#819). Each flight is chained `max(eta, prev + sep)` behind the one before,
-except a frozen flight, which keeps its time and becomes the new `prev` (`:385-393`). Sequence
-numbers are the order itself (`:399-401`).
+flight whose ETA is at or before the joiner's release time if it holds one, else its ETA, joiners in
+that order (#819). Each flight is chained `max(eta, prev + sep)` behind the one before,
+except a frozen flight, which keeps its time and becomes the new `prev` (`:396-403`). Sequence
+numbers are the order itself (`:410-412`).
 
-`delay_sec = max(sched - eta, 0) / 1000` (`feed/fca.rs:437`).
+`delay_sec = max(sched - eta, 0) / 1000` (`feed/fca.rs:455`).
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
@@ -238,13 +239,16 @@ numbers are the order itself (`:399-401`).
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
-a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge, repeated indices and gap outputs.
+**Tests.** `feed/fca.rs:630-1676`: MIT at the follower's speed, rate metering, airborne priority,
+a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners included), repeated indices and gap outputs.
+Rate and MIT 0 reach `meter` only through `sep_ms` (`sep_ms_is_the_rate_interval_in_rate_mode`),
+and equal ETAs only between late joiners and an ordered flight.
+`a_faster_flight_slotted_inside_a_pushed_flights_spacing_shows_the_shortfall` pins auto MIT with a
+slow pushed flight and a fast follower placed inside its spacing (#817 case 4).
 `mod release_spacing_tests` (`handlers/flow.rs:3817`) covers `rdy_slot` and `separation_ms`.
 
 **Untested branches.** Airborne against frozen in auto mode. A frozen flight whose ETA is past its
-frozen time. MIT with a slow leader and a fast
-follower. Rate or MIT 0 through `meter`. Equal-ETA ties.
+frozen time. A full sequence with rate or MIT 0. Equal-ETA ties in auto mode.
 
 ### Findings, area 3
 

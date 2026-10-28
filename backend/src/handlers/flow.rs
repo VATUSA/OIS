@@ -1976,8 +1976,8 @@ fn build_candidates(
 }
 
 /// The controller's manual crossing order as candidate indices, when the FCA is in manual sequence.
-/// `None` means auto — `fca::meter` sequences by time itself. Callsigns match case-insensitively, so
-/// an order stored before writes were checked still finds its flights (#819).
+/// `None` means auto — `fca::meter` sequences by time itself. An order is stored as sent and its
+/// callsigns match flights case-insensitively (#819).
 ///
 /// Shared by [`finalize`] and `mark_release` so a release is metered against exactly the sequence the
 /// ladder resolves, rather than a second, subtly different derivation of it (#356).
@@ -2815,8 +2815,8 @@ pub async fn reorder_fca(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// True when `order` names one callsign twice, ignoring case: the saved order could then place one
-/// flight at two ranks (#819).
+/// True when `order` names one callsign twice, ignoring case: such an order does not say where that
+/// flight goes, so it is refused rather than stored (#819).
 fn has_repeated_callsign(order: &[String]) -> bool {
     let mut seen = std::collections::HashSet::new();
     order.iter().any(|cs| !seen.insert(cs.to_ascii_uppercase()))
