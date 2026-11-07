@@ -3803,11 +3803,11 @@ export interface components {
         };
         /** @description One reset run (#806). `result` is set once it succeeded, `failure` once it failed. */
         AccessResetRun: {
-            failure?: null | components["schemas"]["AccessResetFailure"];
+            failure?: components["schemas"]["AccessResetFailure"] | null;
             /** Format: date-time */
             finished_at?: string | null;
             id: string;
-            result?: null | components["schemas"]["AccessResetBody"];
+            result?: components["schemas"]["AccessResetBody"] | null;
             /** Format: date-time */
             started_at: string;
             /** @description `running`, `succeeded` or `failed`. */
@@ -3905,9 +3905,9 @@ export interface components {
          *     `system.jobs.read`); a caller with none of them gets an all-null body.
          */
         AdminSummaryBody: {
-            audit_events?: null | components["schemas"]["DailySeries"];
-            jobs?: null | components["schemas"]["JobsHealth"];
-            new_users?: null | components["schemas"]["DailySeries"];
+            audit_events?: components["schemas"]["DailySeries"] | null;
+            jobs?: components["schemas"]["JobsHealth"] | null;
+            new_users?: components["schemas"]["DailySeries"] | null;
         };
         /** @description A page of the access-admin user browser. */
         AdminUserPage: {
@@ -4622,7 +4622,7 @@ export interface components {
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
-            structured?: null | components["schemas"]["NtmlRestriction"];
+            structured?: components["schemas"]["NtmlRestriction"] | null;
         };
         /**
          * @description Add a mapping. Codes are trimmed and uppercased, as VATUSA roles are on ingest. `reason` is
@@ -5323,7 +5323,7 @@ export interface components {
              * @description Metered crossing time (after sequencing).
              */
             cross_time?: string | null;
-            debug?: null | components["schemas"]["FcaFlightDebug"];
+            debug?: components["schemas"]["FcaFlightDebug"] | null;
             /** Format: int64 */
             delay_min: number;
             /**
@@ -5412,7 +5412,7 @@ export interface components {
             headwind?: number | null;
             /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
             profile: string;
-            taxi_estimate?: null | components["schemas"]["TaxiEstimateDebug"];
+            taxi_estimate?: components["schemas"]["TaxiEstimateDebug"] | null;
             /**
              * @description Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
              *     source of ETA/track error.
@@ -5572,8 +5572,8 @@ export interface components {
             edct?: string | null;
             fcas: components["schemas"]["FlightFcaCrossing"][];
             found: boolean;
-            gdp?: null | components["schemas"]["FlightGdp"];
-            ground_stop?: null | components["schemas"]["FlightGroundStop"];
+            gdp?: components["schemas"]["FlightGdp"] | null;
+            ground_stop?: components["schemas"]["FlightGroundStop"] | null;
             /** Format: int64 */
             groundspeed: number;
             /** Format: int64 */
@@ -5582,7 +5582,7 @@ export interface components {
             lat: number;
             /** Format: double */
             lon: number;
-            rate_program?: null | components["schemas"]["FlightProgram"];
+            rate_program?: components["schemas"]["FlightProgram"] | null;
             /** @description `airborne` | `ground`. */
             status: string;
             /**
@@ -6195,7 +6195,7 @@ export interface components {
              *     ARTCC dimension, so without this the client can't tell the two apart (#405).
              */
             tmu_national: boolean;
-            vatusa?: null | components["schemas"]["VatusaProfile"];
+            vatusa?: components["schemas"]["VatusaProfile"] | null;
         };
         /**
          * @description One ACE position the signed-in user has claimed, for an event still to come.
@@ -6242,7 +6242,7 @@ export interface components {
         NtmlRestriction: {
             /** @description Aircraft type: `ALL` | `JET` | `PROP` | `TURBOPROP`. */
             aircraft?: string | null;
-            altitude?: null | components["schemas"]["Bound"];
+            altitude?: components["schemas"]["Bound"] | null;
             /** @description Impacting-condition category, e.g. `VOLUME`, `WEATHER`, `EQUIPMENT`. */
             condition?: string | null;
             /** @description Impacting-condition detail, e.g. `THUNDERSTORMS`, `STARS`. */
@@ -6257,7 +6257,7 @@ export interface components {
             kind: string;
             /** @description Qualifier, e.g. `NO STACKS`, `PER AIRPORT`, `AS ONE`, `SINGLE STREAM`. */
             qualifier?: string | null;
-            speed?: null | components["schemas"]["Bound"];
+            speed?: components["schemas"]["Bound"] | null;
             /** @description Free text when `kind = TXT`. */
             text?: string | null;
             /**
@@ -7380,7 +7380,7 @@ export interface components {
             status: string;
             /** Format: date-time */
             stop_time?: string | null;
-            structured?: null | components["schemas"]["NtmlRestriction"];
+            structured?: components["schemas"]["NtmlRestriction"] | null;
         };
         /** @description A named bundle of draft TMIs for an event; activating it creates live tmu.* rows. */
         TmiPackageBody: {
@@ -7481,7 +7481,7 @@ export interface components {
             aar: number;
             /** @description Optional rate changes across the window (empty = flat AAR). */
             aar_steps?: components["schemas"]["AarStep"][];
-            advisory?: null | components["schemas"]["PublishGdpRequest"];
+            advisory?: components["schemas"]["PublishGdpRequest"] | null;
             end_time: string;
             exempt_airborne?: boolean;
             /**
@@ -7505,7 +7505,7 @@ export interface components {
             start_time?: string | null;
             /** Format: date-time */
             stop_time?: string | null;
-            structured?: null | components["schemas"]["NtmlRestriction"];
+            structured?: components["schemas"]["NtmlRestriction"] | null;
         };
         /**
          * @description The editor's SAVE payload. `reason` is required (audited). Each entry in `scopes`
@@ -7702,7 +7702,7 @@ export interface components {
             detached_at?: string | null;
             /** @description Who first detached them (display name), if still known. */
             detached_by?: string | null;
-            profile?: null | components["schemas"]["VatusaProfile"];
+            profile?: components["schemas"]["VatusaProfile"] | null;
             /** @description Group grants a Resync would add (VATUSA-sourced). */
             resync_grants: components["schemas"]["VatusaGrantChange"][];
             /** @description VATUSA-sourced group grants a Resync would remove. Hand-made grants are never removed. */
@@ -9214,7 +9214,7 @@ export interface operations {
         /** @description Optional lifetime; default 90 days */
         requestBody?: {
             content: {
-                "application/json": null | components["schemas"]["RotateServiceAccountRequest"];
+                "application/json": components["schemas"]["RotateServiceAccountRequest"] | null;
             };
         };
         responses: {
@@ -19331,7 +19331,7 @@ export interface operations {
         /** @description Optional editorial fields for the advisory generated on publish (#508). Omit the body entirely and the advisory still generates, with those lines blank. */
         requestBody?: {
             content: {
-                "application/json": null | components["schemas"]["PublishGdpRequest"];
+                "application/json": components["schemas"]["PublishGdpRequest"] | null;
             };
         };
         responses: {
@@ -19655,7 +19655,7 @@ export interface operations {
         /** @description Optional editorial fields for the advisory generated on publish (#508). A ground stop has no delay data of its own, so its delay triplets are author-supplied. */
         requestBody?: {
             content: {
-                "application/json": null | components["schemas"]["PublishGroundStopRequest"];
+                "application/json": components["schemas"]["PublishGroundStopRequest"] | null;
             };
         };
         responses: {
