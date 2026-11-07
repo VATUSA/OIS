@@ -46,12 +46,28 @@ export function pairGapSec(
   return Math.round((Date.parse(behind.cross_time) - Date.parse(ahead.cross_time)) / 1000);
 }
 
-/** A gap as `m:ss · N.Nnm`; negative when the flight behind crosses first (a release out of order). */
-export function fmtGap(sec: number, nm: number): string {
+/** Seconds as `m:ss`, with a leading `-` when negative. */
+export function fmtMmss(sec: number): string {
   const sign = sec < 0 ? "-" : "";
   const abs = Math.abs(sec);
-  const mmss = `${Math.floor(abs / 60)}:${String(abs % 60).padStart(2, "0")}`;
-  return `${sign}${mmss} · ${nm.toFixed(1)}nm`;
+  return `${sign}${Math.floor(abs / 60)}:${String(abs % 60).padStart(2, "0")}`;
+}
+
+/** A gap as `m:ss · N.Nnm`; negative when the flight behind crosses first (a release out of order). */
+export function fmtGap(sec: number, nm: number): string {
+  return `${fmtMmss(sec)} · ${nm.toFixed(1)}nm`;
+}
+
+/**
+ * Seconds by which a flight's gap to the flight ahead falls short of the spacing it is owed; null
+ * for the first flight or one that holds its spacing.
+ */
+export function shortfallSec(
+  f: Pick<FcaFlight, "gap_to_leader_sec" | "required_spacing_sec">,
+): number | null {
+  if (f.gap_to_leader_sec == null) return null;
+  const short = f.required_spacing_sec - f.gap_to_leader_sec;
+  return short > 0 ? short : null;
 }
 
 /** Seconds as distance at `speedKt`, nm to one decimal (the backend's own conversion). */

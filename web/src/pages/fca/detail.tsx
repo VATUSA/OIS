@@ -13,7 +13,15 @@ import {
   useFlightExclusions,
   useRestoreFlight,
 } from "@/lib/flight-exclusions";
-import {fmtGap, nmAt, orderReason, orderReasonText, pairGapSec} from "@/lib/fca-compare";
+import {
+  fmtGap,
+  fmtMmss,
+  nmAt,
+  orderReason,
+  orderReasonText,
+  pairGapSec,
+  shortfallSec,
+} from "@/lib/fca-compare";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {flightStatus} from "@/lib/status";
@@ -68,6 +76,7 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
+  const short = shortfallSec(f);
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -147,6 +156,11 @@ function Strip({
         {f.gap_to_leader_sec != null && f.gap_to_leader_nm != null && (
           <span className="font-mono" title="Gap to the aircraft ahead">
             gap {fmtGap(f.gap_to_leader_sec, f.gap_to_leader_nm)}
+            {short != null && (
+              <span className="text-danger" title="Short of the required spacing">
+                , {fmtMmss(short)} short
+              </span>
+            )}
           </span>
         )}
       </div>

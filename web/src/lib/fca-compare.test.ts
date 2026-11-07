@@ -1,6 +1,14 @@
 import {describe, expect, it} from "vitest";
 
-import {fmtGap, nmAt, orderReason, orderReasonText, pairGapSec} from "@/lib/fca-compare";
+import {
+  fmtGap,
+  fmtMmss,
+  nmAt,
+  orderReason,
+  orderReasonText,
+  pairGapSec,
+  shortfallSec,
+} from "@/lib/fca-compare";
 
 // `ahead` is the lower sequence number; ETAs are ISO strings as the API sends them.
 const f = (callsign: string, eta: string | null, manually_placed: boolean) => ({
@@ -92,5 +100,36 @@ describe("pairGapSec, fmtGap and nmAt (VATUSA/OIS#819)", () => {
     // 500 s at 283.4 kt = 39.36 nm, which rounds up.
     expect(nmAt(500, 283.4)).toBe(39.4);
     expect(nmAt(120, 283)).toBe(9.4);
+  });
+});
+
+describe("shortfallSec (VATUSA/OIS#819)", () => {
+  const g = (gap_to_leader_sec: number | null, required_spacing_sec: number) => ({
+    gap_to_leader_sec,
+    required_spacing_sec,
+  });
+
+  it("returns how far the gap falls short of the required spacing", () => {
+    expect(shortfallSec(g(167, 327))).toBe(160);
+  });
+
+  it("counts a negative gap (a release crossing first) in full", () => {
+    expect(shortfallSec(g(-30, 120))).toBe(150);
+  });
+
+  it("returns null for a gap equal to or above the required spacing", () => {
+    expect(shortfallSec(g(120, 120))).toBeNull();
+    expect(shortfallSec(g(121, 120))).toBeNull();
+  });
+
+  it("returns null for the first flight, which has no gap", () => {
+    expect(shortfallSec(g(null, 120))).toBeNull();
+  });
+});
+
+describe("fmtMmss (VATUSA/OIS#819)", () => {
+  it("formats seconds as m:ss with a sign when negative", () => {
+    expect(fmtMmss(160)).toBe("2:40");
+    expect(fmtMmss(-65)).toBe("-1:05");
   });
 });

@@ -267,6 +267,17 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(stripOf(host, "UAL3").textContent).toContain("gap 8:00 · 40.0nm");
   });
 
+  it("shows the shortfall beside a gap below the required spacing, and none where the spacing holds", () => {
+    const host = mountWith([
+      strip("DAL2", 1, {eta: "2026-10-27T12:00:00Z", cross: "2026-10-27T12:00:00Z", placed: false, gap: null}),
+      strip("AAL1", 2, {eta: "2026-10-27T12:02:47Z", cross: "2026-10-27T12:02:47Z", placed: false, gap: [167, 12], req: [327, 23.5]}),
+      strip("UAL3", 3, {eta: "2026-10-27T12:10:00Z", cross: "2026-10-27T12:10:00Z", placed: false, gap: [433, 31], req: [120, 10]}),
+    ]);
+    expect(stripOf(host, "AAL1").textContent).toContain("gap 2:47 · 12.0nm, 2:40 short");
+    expect(stripOf(host, "UAL3").textContent).toContain("gap 7:13 · 31.0nm");
+    expect(stripOf(host, "UAL3").textContent).not.toContain("short");
+  });
+
   it("shows no gap on the first strip in the sequence", () => {
     const host = mountWith(MANUAL);
     expect(stripOf(host, "DAL2").textContent).not.toContain("gap ");

@@ -32,7 +32,7 @@ An aircraft that joins the FCA after you set the order (it connects, or its rout
 
 ### Why one aircraft is ahead of another
 
-Each strip shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. An aircraft held back to keep its spacing behind the one ahead shows a gap equal to the required spacing; a gap below it means the spacing is short.
+Every strip but the first in the sequence shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. An aircraft held back to keep its spacing behind the one ahead shows a gap equal to the required spacing. When the gap is below the required spacing, the strip adds how much it is short by, for example `gap 2:47 · 12.0nm, 2:40 short`.
 
 Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing required behind the one ahead, and one line of reason:
 

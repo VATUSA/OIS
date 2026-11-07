@@ -524,7 +524,9 @@ fn release_slot(
     sep: &dyn Fn(&MeterInput) -> i64,
 ) -> usize {
     let c = &cands[j];
-    let f = c.frozen_ms.unwrap_or(c.eta_ms);
+    let f = c
+        .frozen_ms
+        .expect("merge_late_joiners passes only joiners holding a release");
     let at = chain(cands, seq, sep);
     let by_eta = seq
         .iter()
@@ -1615,6 +1617,19 @@ mod tests {
         let both = meter(&cands, "rate", 30, 0, Some(&order));
         assert_eq!(seqs_of(&both), [1, 3, 5, 4, 2]);
         assert_eq!(both[2].sched_ms, 510_000, "Y is spaced behind J2's release");
+    }
+
+    // Two joiners released for the same time are placed in candidate index order: J1 goes in
+    // first, behind A, then J2 goes ahead of J1 because J1 crosses inside J2's spacing.
+    #[test]
+    fn late_joiners_released_for_the_same_time_are_placed_in_candidate_index_order() {
+        let mut j1 = cand(100_000);
+        j1.frozen_ms = Some(300_000);
+        let mut j2 = cand(100_000);
+        j2.frozen_ms = Some(300_000);
+        let out = meter(&[cand(0), j1, j2], "rate", 30, 0, Some(&[0]));
+        assert_eq!(seqs_of(&out), [1, 3, 2]);
+        assert_eq!((out[1].sched_ms, out[2].sched_ms), (300_000, 300_000));
     }
 
     // A released joiner with the same ETA as an ordered flight goes behind it, however early the

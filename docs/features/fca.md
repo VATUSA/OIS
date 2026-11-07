@@ -243,7 +243,7 @@ frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`release_ms`, `handlers/flow.rs:2037`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:685-1914`: MIT at the follower's speed, rate metering, airborne priority,
+**Tests.** `feed/fca.rs:686-1929`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
 indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
 (`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and
@@ -281,10 +281,10 @@ frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
 | `PUT /api/v1/flow/fcas/{id}` | `update_fca` (`:388`) | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca` | `flow.fca` (`:414`) |
 | `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` (`:429`) | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()` (`repos/flow.rs:318`) | `flow.fca` (`:444`) |
-| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2859`) |
-| `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |
-| `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2639`) | same | delete `flow.fca_release` | `flow.release` (`:2672`) |
-| `POST /api/v1/flow/fcas/{id}/swap` | `swap_releases` (`:2741`) | same, plus same airport and runway (`:2791`) | swap two rows | `flow.release` (`:2782`) |
+| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2792`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2814`) |
+| `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2483`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2561`) |
+| `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2591`) | same | delete `flow.fca_release` | `flow.release` (`:2624`) |
+| `POST /api/v1/flow/fcas/{id}/swap` | `swap_releases` (`:2693`) | same, plus same airport and runway (`:2743`) | swap two rows | `flow.release` (`:2734`) |
 | `POST`/`DELETE /api/v1/flow/fcas/{id}/exclusions/{callsign}` | `handlers/flight_exclusions.rs:145`, `:182` | `flow.fca.update` + hidden-event 404 + ARTCC | `flow.manual_flight_exclusion` | `flow.fca` (`:172`, `:198`) |
 
 Event FCAs are written through `/api/v1/events/{id}/fcas/...` (`handlers/events.rs:1611-1769`),
@@ -439,8 +439,9 @@ defect below and has to change with its fix.
   `HistoricalProvider`, `useFcas` reads the instant (`web/src/lib/fca.ts:158`) and switches to
   `/stats/hist/fcas` (`:169-175`). `useFcaCounts` and `useFcaTraffic` ignore it. The dashboard FCA
   widget joins the two (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
-- Prefiles left out of a manual order fall behind everyone: **owned by #819** (its item 2). Since
-  #834 a prefile is never a candidate, so it is never in the order.
+- Prefiles left out of a manual order fell behind everyone (#819, item 2). Resolved: since #834 a
+  prefile is never a candidate, and a flight that joins after the order is saved is merged in by ETA
+  (`merge_late_joiners`, `feed/fca.rs:481`).
 
 ## Determination for #812 (recommendation, for the operator to confirm)
 
