@@ -427,6 +427,16 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(toggle(host, "AAL1").getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("frees a pick whose flight turns proposed, since the list leaves proposed flights out", () => {
+    const {host, render} = mount(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "AAL1");
+    expect(panel(host)).not.toBeNull();
+    render(MANUAL.map((f) => (f.callsign === "AAL1" ? {...f, status: "proposed"} : f)));
+    expect(panel(host)).toBeNull();
+    expect(toggle(host, "UAL3").disabled).toBe(false);
+  });
+
   it("starts with nothing picked after switching to another FCA", () => {
     const {host, render} = mount(MANUAL);
     pick(host, "DAL2");
