@@ -224,9 +224,9 @@ closer than `sep`, and repeat until nothing moves. One `sep` is used in both dir
 ordered flight whose ETA is at or before its own (#819). Joiners holding a release are then placed
 one at a time in release-time order (`release_slot`, `:524`), each into the sequence built so far
 without it: further back when its release time says so, behind each flight at the front of that
-sequence that crosses at least its spacing earlier or is another late joiner released for its time or
-earlier, stopping at the first that is neither. A RDY release, the slot plus a 15 s margin, keeps
-its slot while the spacing exceeds that margin.
+sequence that crosses at least its spacing earlier or holds a release for its time or earlier
+(ordered or not), stopping at the first that does neither. A RDY release, the slot plus a 15 s
+margin, keeps its slot while the spacing exceeds that margin.
 `chain` (`:455`) then chains each flight `max(eta, prev + sep)` behind the one before, except a
 frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers are the order itself
 (`:396-398`).
@@ -244,7 +244,7 @@ frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`release_ms`, `handlers/flow.rs:2037`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:695-1995`: MIT at the follower's speed, rate metering, airborne priority,
+**Tests.** `feed/fca.rs:695-2033`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
 indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
 (`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and

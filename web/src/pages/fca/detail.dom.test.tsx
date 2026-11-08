@@ -195,6 +195,7 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
       distance?: number;
       req?: [number, number];
       released?: boolean;
+      status?: string;
     },
   ) =>
     ({
@@ -214,7 +215,7 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
       released: o.released ?? false,
       edct: null,
       seq,
-      status: "airborne",
+      status: o.status ?? "airborne",
       gap_to_leader_sec: o.gap?.[0] ?? null,
       gap_to_leader_nm: o.gap?.[1] ?? null,
       required_spacing_sec: o.req?.[0] ?? 120,
@@ -382,9 +383,10 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
   });
 
   it("labels the required spacing without a callsign when the flight ahead is not in the list", () => {
-    // UAL3 is seq 3 and nothing listed is seq 2 (a proposed flight is filtered out of the list).
+    // PRE2 at seq 2 is proposed, so the panel's list leaves it out and UAL3 has no listed leader.
     const gapped = [
       strip("DAL2", 1, {eta: "2026-10-27T12:10:00Z", cross: "2026-10-27T12:10:00Z", placed: false, gap: null}),
+      strip("PRE2", 2, {eta: "2026-10-27T12:15:00Z", cross: "2026-10-27T12:15:00Z", placed: false, gap: [300, 25], status: "proposed"}),
       strip("UAL3", 3, {eta: "2026-10-27T12:20:00Z", cross: "2026-10-27T12:20:00Z", placed: false, gap: [480, 40]}),
     ];
     const host = mountWith(gapped);

@@ -475,8 +475,8 @@ fn chain(cands: &[MeterInput], seq: &[usize], sep: &dyn Fn(&MeterInput) -> i64) 
 /// there. Joiners holding a release are then placed one at a time in release-time order, each into
 /// the sequence built so far, which holds every earlier release but never its own. Each crosses at
 /// its release whatever its position, so it goes further back when the release says so: behind each
-/// flight at the front of that sequence that crosses at least its spacing earlier or is another late
-/// joiner released for its time or earlier, stopping at the first that is neither. The flight after
+/// flight at the front of that sequence that crosses at least its spacing earlier or holds a release
+/// for its time or earlier, stopping at the first that does neither. The flight after
 /// a release is spaced behind it. A release spaced into a slot with more than its margin to spare
 /// keeps that slot.
 fn merge_late_joiners(
@@ -516,11 +516,11 @@ fn merge_late_joiners(
 
 /// Where released joiner `j` goes in `seq`: behind the last flight marked in `is_ordered` with an ETA
 /// at or before its own, and behind the leading run of `seq` made of flights that cross at least its
-/// spacing before its release and of other late joiners released for its release time or earlier.
-/// Chained times are not monotonic behind a frozen flight, so the run stops at the first flight that
-/// is neither rather than at the last that is. Counting earlier releases in the run keeps released
-/// joiners in time order, so the flight after them is spaced behind the later one, without moving a
-/// release behind an ordered flight it crosses ahead of.
+/// spacing before its release and of flights, ordered or not, released for its release time or
+/// earlier. Chained times are not monotonic behind a frozen flight, so the run stops at the first
+/// flight that does neither rather than at the last that does. Counting earlier releases in the run
+/// keeps releases in time order, so the flight after them is spaced behind the later one, without
+/// moving a release behind an unreleased ordered flight it crosses ahead of.
 fn release_slot(
     cands: &[MeterInput],
     seq: &[usize],
@@ -541,7 +541,7 @@ fn release_slot(
         .iter()
         .position(|&x| {
             let clears = at[x] + sep(c) <= f;
-            let released_before = !is_ordered[x] && cands[x].frozen_ms.is_some_and(|g| g <= f);
+            let released_before = cands[x].frozen_ms.is_some_and(|g| g <= f);
             !(clears || released_before)
         })
         .unwrap_or(seq.len());
@@ -1696,6 +1696,44 @@ mod tests {
         let out = meter(&cands, "rate", 30, 0, Some(&[0, 1, 2]));
         assert_eq!(seqs_of(&out), [1, 3, 4, 5, 2]);
         assert_eq!(out[1].sched_ms, 470_000, "D is spaced behind J2");
+    }
+
+    // An ordered flight released less than one spacing before a joiner's release stays ahead of it:
+    // O (ordered, ETA 260 s, released for 200 s) and J (ETA 210 s, released for 225 s). J goes
+    // behind O, not ahead of it, so Y is spaced 120 s behind J at 345 s rather than behind O at 320.
+    #[test]
+    fn a_released_joiner_goes_behind_an_ordered_flight_released_before_it() {
+        let mut o = cand(260_000);
+        o.frozen_ms = Some(200_000);
+        let mut j = cand(210_000);
+        j.frozen_ms = Some(225_000);
+        let out = meter(
+            &[cand(0), o, cand(300_000), j],
+            "rate",
+            30,
+            0,
+            Some(&[0, 1, 2]),
+        );
+        assert_eq!(seqs_of(&out), [1, 2, 4, 3]);
+        assert_eq!(out[2].sched_ms, 345_000, "Y is spaced behind J's release");
+        assert_eq!(out[2].gap_ms, Some(120_000));
+    }
+
+    // An unreleased joiner does not count as an earlier release: U (no release) merges behind A,
+    // and J released for 150 s goes ahead of U, which then chains behind J.
+    #[test]
+    fn a_released_joiner_does_not_go_behind_an_unreleased_joiner() {
+        let mut j = cand(50_000);
+        j.frozen_ms = Some(150_000);
+        let out = meter(
+            &[cand(0), cand(400_000), cand(100_000), j],
+            "rate",
+            30,
+            0,
+            Some(&[0, 1]),
+        );
+        assert_eq!(seqs_of(&out), [1, 4, 3, 2]);
+        assert_eq!(out[2].sched_ms, 270_000, "U is spaced behind J's release");
     }
 
     // A released joiner with the same ETA as an ordered flight goes behind it, however early the
