@@ -34,8 +34,9 @@ An aircraft that joins the FCA after you set the order (it connects, or its rout
 
 Every strip but the first in the sequence shows its **gap** to the aircraft ahead, in nm and minutes:seconds, at the aircraft's predicted crossing speed. An aircraft held back to keep its spacing behind the one ahead shows a gap equal to the required spacing. When the gap is below the required spacing, the strip adds how much it is short by, for example `gap 2:47 · 12.0nm, 2:40 short`.
 
-Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing required behind the one ahead, and one line of reason:
+Press **Compare** on two strips to open the compare panel. It shows each aircraft's crossing time, crossing speed and distance to the line, the gap between them, the spacing the one behind is owed (labeled with the aircraft it is owed behind, which is the other one only when the two are next to each other), and one line of reason:
 
+- **Release time** — the one behind has an issued release (RDY, SET or swap) and crosses at that time.
 - **Manual placement** — you put them in this order, or the one behind reaches the line first and you placed at least one of them.
 - **ETA order** — the one ahead simply reaches the line first.
 - **Spacing push** — the one behind would reach the line first, but the scheduler moved it back to hold spacing.

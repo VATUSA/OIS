@@ -166,8 +166,8 @@ async fn a_saved_order_in_another_case_merges_a_late_joiner_in_the_traffic_respo
     );
 }
 
-/// NEAR1 airborne near the line, GND1 parked at KJFK and FAR1 at cruise out by Boston: by ETA,
-/// GND1 falls between the other two.
+/// NEAR1 airborne near the line, GND1 parked at KJFK, FAR1 at cruise out by Boston and FARX further
+/// out still: by ETA, NEAR1, GND1, FAR1, FARX.
 fn near_ground_far() -> Vec<Pilot> {
     let near = airborne("NEAR1", 0.8);
     let ground = Pilot {
@@ -190,8 +190,19 @@ fn near_ground_far() -> Vec<Pilot> {
         flight_plan: Some(plan("KBOS")),
         ..Default::default()
     };
-    vec![near, ground, far]
+    let farther = Pilot {
+        callsign: "FARX".into(),
+        latitude: 42.9,
+        longitude: -70.8,
+        ..far.clone()
+    };
+    vec![near, ground, far, farther]
 }
+
+/// FARX dragged to the front of an order that also names NEAR1 and FAR1, so the three ways GND1 can
+/// be sequenced differ: by ETA (the order ignored) it is 2nd, merged it is 3rd (behind NEAR1, the
+/// last ordered flight with an earlier ETA), and appended at the tail it is 4th.
+const ORDER: [&str; 3] = ["FARX", "NEAR1", "FAR1"];
 
 /// Saves `order` as the FCA's manual sequence through the real route.
 async fn save_order(state: &AppState, id: &str, editor: &str, order: &[&str]) {
@@ -208,8 +219,8 @@ async fn save_order(state: &AppState, id: &str, editor: &str, order: &[&str]) {
     );
 }
 
-/// AC1 at the IDST caller: a ground departure at KJFK that the order does not name is sequenced by
-/// ETA between an ordered arrival nearer the line and an ordered one still out by Boston.
+/// AC1 at the IDST caller: a ground departure at KJFK that the order does not name is sequenced
+/// at its merged slot, 3rd under [`ORDER`].
 #[sqlx::test]
 async fn the_idst_list_sequences_a_late_joiner_at_its_merged_slot(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
@@ -218,24 +229,19 @@ async fn the_idst_list_sequences_a_late_joiner_at_its_merged_slot(pool: PgPool) 
     let editor = holder(&pool, "flow.fca.update").await;
     let reader = holder(&pool, "flow.fca.read").await;
 
-    // Auto first: the fixture's own ETA order puts GND1 between the other two.
+    // Auto first: the fixture's own ETA order.
     let rows = traffic(&state, &id).await;
     assert_eq!(
         field(&rows, "callsign"),
-        [&json!("NEAR1"), &json!("GND1"), &json!("FAR1")],
+        [
+            &json!("NEAR1"),
+            &json!("GND1"),
+            &json!("FAR1"),
+            &json!("FARX")
+        ],
         "fixture: {rows:?}"
     );
-    assert_eq!(
-        send(
-            &state,
-            Method::PUT,
-            &format!("/api/v1/flow/fcas/{id}/order"),
-            &editor,
-            Some(json!({ "order": ["NEAR1", "FAR1"] })),
-        )
-        .await,
-        StatusCode::NO_CONTENT
-    );
+    save_order(&state, &id, &editor, &ORDER).await;
 
     let (status, idst) = send_json(
         &state,
@@ -248,7 +254,7 @@ async fn the_idst_list_sequences_a_late_joiner_at_its_merged_slot(pool: PgPool) 
     let row = &idst["unscheduled"][0];
     assert_eq!(row["callsign"], "GND1", "{idst}");
     assert_eq!(
-        row["seq"], 2,
+        row["seq"], 3,
         "merged behind NEAR1, not at the tail: {idst}"
     );
 }
@@ -285,24 +291,29 @@ async fn send_body(
 }
 
 /// AC1 at the release caller: RDY on a late joiner in a manual FCA releases it into its merged slot
-/// (behind NEAR1, ahead of FAR1) plus the RDY margin, so its gap to NEAR1 grows by exactly
-/// `RELEASE_MARGIN_MS`. Each gap comes from one response, and every ETA in it moves with that
-/// request's clock, so time passing between the two requests cannot shift the comparison.
+/// (3rd under [`ORDER`], behind NEAR1 and ahead of FAR1) plus the RDY margin, so its gap to NEAR1
+/// grows by exactly `RELEASE_MARGIN_MS`. Each gap comes from one response, and every ETA in it moves
+/// with that request's clock, so time passing between the two requests cannot shift the comparison.
 #[sqlx::test]
 async fn rdy_on_a_late_joiner_releases_it_into_its_merged_slot(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     install_feed(&state, near_ground_far()).await;
     let id = corridor_fca(&pool).await;
     let editor = holder(&pool, "flow.fca.update").await;
-    save_order(&state, &id, &editor, &["NEAR1", "FAR1"]).await;
+    save_order(&state, &id, &editor, &ORDER).await;
 
     let before = traffic(&state, &id).await;
     assert_eq!(
         field(&before, "callsign"),
-        [&json!("NEAR1"), &json!("GND1"), &json!("FAR1")],
+        [
+            &json!("FARX"),
+            &json!("NEAR1"),
+            &json!("GND1"),
+            &json!("FAR1")
+        ],
         "merged before the release: {before:?}"
     );
-    let gap = before[1]["gap_to_leader_sec"]
+    let gap = before[2]["gap_to_leader_sec"]
         .as_i64()
         .expect("GND1 has a flight ahead");
 
@@ -318,26 +329,32 @@ async fn rdy_on_a_late_joiner_releases_it_into_its_merged_slot(pool: PgPool) {
     let after = body.as_array().expect("the re-metered flights").clone();
     assert_eq!(
         field(&after, "callsign"),
-        [&json!("NEAR1"), &json!("GND1"), &json!("FAR1")],
+        [
+            &json!("FARX"),
+            &json!("NEAR1"),
+            &json!("GND1"),
+            &json!("FAR1")
+        ],
         "{after:?}"
     );
-    assert_eq!(after[1]["released"], true, "{after:?}");
+    assert_eq!(after[2]["released"], true, "{after:?}");
     assert_eq!(
-        after[1]["gap_to_leader_sec"].as_i64(),
+        after[2]["gap_to_leader_sec"].as_i64(),
         Some(gap + 15),
         "released at its merged slot plus RELEASE_MARGIN_MS: {after:?}"
     );
 }
 
 /// AC1 at the flight advisory (`GET /api/v1/public/flight/{callsign}`, which `GET /api/v1/me/flight`
-/// builds through the same `build_flight_advisory`): the late joiner is second, not at the tail.
+/// builds through the same `build_flight_advisory`): the late joiner is 3rd under [`ORDER`], not 2nd
+/// by ETA or 4th at the tail.
 #[sqlx::test]
 async fn the_flight_advisory_sequences_a_late_joiner_at_its_merged_slot(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
     install_feed(&state, near_ground_far()).await;
     let id = corridor_fca(&pool).await;
     let editor = holder(&pool, "flow.fca.update").await;
-    save_order(&state, &id, &editor, &["NEAR1", "FAR1"]).await;
+    save_order(&state, &id, &editor, &ORDER).await;
 
     let (status, body) = send_json(&state, Method::GET, "/api/v1/public/flight/GND1", "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -345,7 +362,7 @@ async fn the_flight_advisory_sequences_a_late_joiner_at_its_merged_slot(pool: Pg
     assert_eq!(fcas.len(), 1, "{body}");
     assert_eq!(fcas[0]["fca_id"], id.as_str());
     assert_eq!(
-        fcas[0]["seq"], 2,
+        fcas[0]["seq"], 3,
         "merged behind NEAR1, not at the tail: {body}"
     );
 }

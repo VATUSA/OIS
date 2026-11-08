@@ -11,15 +11,26 @@ import {
 } from "@/lib/fca-compare";
 
 // `ahead` is the lower sequence number; ETAs are ISO strings as the API sends them.
-const f = (callsign: string, eta: string | null, manually_placed: boolean) => ({
+const f = (callsign: string, eta: string | null, manually_placed: boolean, released = false) => ({
   callsign,
   eta,
   manually_placed,
+  released,
 });
 const EARLY = "2026-10-27T12:00:00Z";
 const LATE = "2026-10-27T12:05:00Z";
 
 describe("orderReason (VATUSA/OIS#819)", () => {
+  it("returns release whenever the behind flight holds an issued release, whatever else applies", () => {
+    expect(orderReason(f("A", LATE, false), f("B", EARLY, false, true))).toBe("release");
+    expect(orderReason(f("A", EARLY, false), f("B", LATE, false, true))).toBe("release");
+    expect(orderReason(f("A", EARLY, true), f("B", LATE, true, true))).toBe("release");
+  });
+
+  it("does not return release when only the ahead flight is released", () => {
+    expect(orderReason(f("A", LATE, false, true), f("B", EARLY, false))).toBe("spacing");
+  });
+
   it("returns manual when both flights were placed by the controller, whatever their ETAs", () => {
     expect(orderReason(f("A", EARLY, true), f("B", LATE, true))).toBe("manual");
     expect(orderReason(f("A", LATE, true), f("B", EARLY, true))).toBe("manual");
@@ -71,6 +82,7 @@ describe("orderReasonText (VATUSA/OIS#819)", () => {
 
   it("names both callsigns in one sentence for ETA order", () => {
     expect(orderReasonText("eta", "AAL1", "DAL2")).toBe("AAL1 is ahead of DAL2 in ETA order.");
+    expect(orderReasonText("release", "AAL1", "DAL2")).toBe("DAL2 crosses at its issued release time.");
   });
 });
 

@@ -245,8 +245,19 @@ function Strip({
 }
 
 /** Two selected flights side by side, and why the one ahead is ahead (#819). */
-function ComparePanel({ pair, onClose }: { pair: [FcaFlight, FcaFlight]; onClose: () => void }) {
+function ComparePanel({
+  pair,
+  flights,
+  onClose,
+}: {
+  pair: [FcaFlight, FcaFlight];
+  flights: FcaFlight[];
+  onClose: () => void;
+}) {
   const [ahead, behind] = [...pair].sort((a, b) => a.seq - b.seq);
+  // The required spacing is what `behind` owes the flight one place ahead of it, which is `ahead`
+  // only for an adjacent pair, so the label names that flight.
+  const leader = flights.find((f) => f.seq === behind.seq - 1)?.callsign;
   const gapSec = pairGapSec(ahead, behind);
   const reason = orderReason(ahead, behind);
   const rows: [string, (f: FcaFlight) => string][] = [
@@ -295,7 +306,9 @@ function ComparePanel({ pair, onClose }: { pair: [FcaFlight, FcaFlight]; onClose
                 ? behind.gap_to_leader_nm
                 : nmAt(gapSec, behind.cross_speed))}
         </dd>
-        <dt className="text-ink-3">Required</dt>
+        <dt className="text-ink-3" data-testid="compare-required-label">
+          {leader ? `Required behind ${leader}` : "Required"}
+        </dt>
         <dd data-testid="compare-required">
           {fmtGap(behind.required_spacing_sec, behind.required_spacing_nm)}
         </dd>
@@ -438,7 +451,7 @@ export function FcaDetail({
           </div>
 
           {pair.length === 2 && (
-            <ComparePanel pair={[pair[0], pair[1]]} onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })} />
+            <ComparePanel pair={[pair[0], pair[1]]} flights={list} onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })} />
           )}
 
           <DndContext

@@ -194,6 +194,7 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
       speed?: number;
       distance?: number;
       req?: [number, number];
+      released?: boolean;
     },
   ) =>
     ({
@@ -210,7 +211,7 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
       delay_nm: 0,
       delay_sec: 0,
       distance_nm: o.distance ?? 100,
-      released: false,
+      released: o.released ?? false,
       edct: null,
       seq,
       status: "airborne",
@@ -318,6 +319,7 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(text(host, "compare-gap")).toBe("2:00 · 10.0nm");
     // The required spacing is the behind flight's (AAL1's 120 s), not DAL2's 150 s.
     expect(text(host, "compare-required")).toBe("2:00 · 10.0nm");
+    expect(text(host, "compare-required-label")).toBe("Required behind DAL2");
   });
 
   it("closes the compare panel and frees both toggles from its close button", () => {
@@ -357,6 +359,26 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(text(host, "compare-reason")).toBe(
       "GND2 has the earlier ETA but was pushed behind AIR1 to hold spacing.",
     );
+  });
+
+  it("explains a released flight behind as crossing at its issued release time", () => {
+    const released = [
+      strip("AIR1", 1, {eta: "2026-10-27T12:06:00Z", cross: "2026-10-27T12:06:00Z", placed: false, gap: null}),
+      strip("GND2", 2, {eta: "2026-10-27T12:05:00Z", cross: "2026-10-27T12:09:00Z", placed: false, gap: [180, 15], released: true}),
+    ];
+    const host = mountWith(released);
+    pick(host, "AIR1");
+    pick(host, "GND2");
+    expect(text(host, "compare-reason")).toBe("GND2 crosses at its issued release time.");
+  });
+
+  it("names the flight a non-adjacent pair's behind flight is spaced from in the Required label", () => {
+    // UAL3's required spacing is owed to AAL1, the flight one place ahead of it, not to DAL2.
+    const host = mountWith(MANUAL);
+    pick(host, "DAL2");
+    pick(host, "UAL3");
+    expect(text(host, "compare-required-label")).toBe("Required behind AAL1");
+    expect(text(host, "compare-required")).toBe("2:00 · 10.0nm");
   });
 
   it("hides the compare panel when one of the two is deselected", () => {
