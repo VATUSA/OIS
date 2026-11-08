@@ -1719,6 +1719,19 @@ mod tests {
         assert_eq!(out[2].gap_ms, Some(120_000));
     }
 
+    // An ordered flight released later than a joiner's release does not count as an earlier
+    // release: O (ordered, released for 1,000 s) and J (released for 150 s) go A, J, O.
+    #[test]
+    fn a_released_joiner_stays_ahead_of_an_ordered_flight_released_after_it() {
+        let mut o = cand(100_000);
+        o.frozen_ms = Some(1_000_000);
+        let mut j = cand(50_000);
+        j.frozen_ms = Some(150_000);
+        let out = meter(&[cand(0), o, j], "rate", 30, 0, Some(&[0, 1]));
+        assert_eq!(seqs_of(&out), [1, 3, 2]);
+        assert_eq!(out[2].sched_ms, 150_000);
+    }
+
     // An unreleased joiner does not count as an earlier release: U (no release) merges behind A,
     // and J released for 150 s goes ahead of U, which then chains behind J.
     #[test]
