@@ -75,11 +75,11 @@ importers:
         specifier: ^1.2.16
         version: 1.2.16(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@tanstack/charts':
-        specifier: ^0.17.0
-        version: 0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
+        specifier: ^1.5.0
+        version: 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       '@tanstack/react-charts':
-        specifier: ^0.17.0
-        version: 0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
+        specifier: ^1.5.0
+        version: 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       '@tanstack/react-table':
         specifier: ^9.2.4
         version: 9.2.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -163,11 +163,11 @@ importers:
         specifier: workspace:^
         version: link:../packages/ui
       '@tanstack/charts':
-        specifier: ^0.17.0
-        version: 0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
+        specifier: ^1.5.0
+        version: 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       '@tanstack/react-charts':
-        specifier: ^0.17.0
-        version: 0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
+        specifier: ^1.5.0
+        version: 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       '@tanstack/react-query':
         specifier: ^5.102.8
         version: 5.102.8(react@19.3.0)
@@ -1574,8 +1574,8 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@tanstack/charts@0.17.0':
-    resolution: {integrity: sha512-jUeJQu3bdcDr8J5A3MySrpevGN3TxYn0Z17Zf6m20Z2h6ON5Bhk5aU8Fz3T0TM7OicYPX3ZGWXhQy/7VyOMdWA==}
+  '@tanstack/charts@1.5.0':
+    resolution: {integrity: sha512-V6zu8kuTE4lYjZ7MCdSzfI5cwdtj+FKQ4Pr5NwdK+OZ5D4fjegSE7CdVOmk960U8zmgYFabow4hi1wwfqJzUBQ==}
     peerDependencies:
       '@angular/core': '>=19'
       '@angular/platform-browser': '>=19'
@@ -1585,9 +1585,9 @@ packages:
       preact: '>=10'
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
-      react-native: ^0.86.0
+      react-native: ^0.86.0 || ^0.88.0
       react-native-svg: '>=15.15.4 <16'
-      solid-js: '>=1.8'
+      solid-js: ^1.8
       svelte: ^5.20.0
       vue: '>=3.5'
     peerDependenciesMeta:
@@ -1628,8 +1628,8 @@ packages:
   '@tanstack/query-core@5.102.8':
     resolution: {integrity: sha512-ZNjkJ33CqvPNec/6lZBnHqLc3EVGPZ9ySLhYahU9TcuRFdmwXewuj0c4hwSWcGHqEUwcSrKeZ+oGcvPBqXcQcg==}
 
-  '@tanstack/react-charts@0.17.0':
-    resolution: {integrity: sha512-HRZE6fVtiI3mgfBi1ic+GbKfZ4fAiAow4TIfZaBT8Q8nZbXafg4eqzU7g6VtCrG4hf14PdDPAMFGHpC9XVm3mA==}
+  '@tanstack/react-charts@1.5.0':
+    resolution: {integrity: sha512-Pn8sI0hH1MUNJEzN+Pp7HX2NOYPkAFn0aQ8gfZgsYxU7ItzxpeVeIbhTgHiYerpGl6tVaU66Eqe3EcmiE0U47A==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
@@ -5151,7 +5151,7 @@ snapshots:
       tailwindcss: 4.3.3
       vite: 8.3.5(@types/node@26.6.3)(jiti@2.7.0)
 
-  '@tanstack/charts@0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
+  '@tanstack/charts@1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
     dependencies:
       '@types/d3-force': 3.0.10
       '@types/d3-geo': 3.1.1
@@ -5184,9 +5184,9 @@ snapshots:
 
   '@tanstack/query-core@5.102.8': {}
 
-  '@tanstack/react-charts@0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
+  '@tanstack/react-charts@1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
     dependencies:
-      '@tanstack/charts': 0.17.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
+      '@tanstack/charts': 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       react: 19.3.0
       react-dom: 19.3.0(react@19.3.0)
     transitivePeerDependencies:
