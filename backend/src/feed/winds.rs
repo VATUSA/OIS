@@ -153,7 +153,7 @@ impl WindGrid {
                 }
             }
             if wsum > 1e-9 {
-                let temp_k = (tsum > 1e-9).then(|| t / tsum + C_TO_K);
+                let temp_k = (tsum > 1e-9).then_some(t / tsum + C_TO_K);
                 col.push((alt, (u / wsum, v / wsum), temp_k));
             }
         }

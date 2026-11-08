@@ -709,7 +709,7 @@ impl VerticalProfile {
                 cnt += 1;
             }
         }
-        (cnt > 0).then(|| sum / cnt as f64)
+        (cnt > 0).then_some(sum / cnt as f64)
     }
 }
 
