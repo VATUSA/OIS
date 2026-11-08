@@ -82,6 +82,9 @@ describe("orderReasonText (VATUSA/OIS#819)", () => {
 
   it("names both callsigns in one sentence for ETA order", () => {
     expect(orderReasonText("eta", "AAL1", "DAL2")).toBe("AAL1 is ahead of DAL2 in ETA order.");
+  });
+
+  it("names the behind flight's issued release time for the release reason", () => {
     expect(orderReasonText("release", "AAL1", "DAL2")).toBe("DAL2 crosses at its issued release time.");
   });
 });

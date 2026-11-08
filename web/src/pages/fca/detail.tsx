@@ -451,7 +451,11 @@ export function FcaDetail({
           </div>
 
           {pair.length === 2 && (
-            <ComparePanel pair={[pair[0], pair[1]]} flights={list} onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })} />
+            <ComparePanel
+              pair={[pair[0], pair[1]]}
+              flights={list}
+              onClose={() => setPicked({ fcaId: fca.id, callsigns: [] })}
+            />
           )}
 
           <DndContext

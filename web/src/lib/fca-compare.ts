@@ -12,7 +12,8 @@ function etaMs(f: Ordered): number {
 /**
  * The reason `ahead` (the lower sequence number) crosses before `behind`.
  *
- * A released flight behind crosses at its issued release time, whatever placed it there. Two flights the controller placed are in that order because the controller put them there. A
+ * A released flight behind crosses at its issued release time, whatever placed it there. Two
+ * flights the controller placed are in that order because the controller put them there. A
  * flight that would reach the line first by ETA but crosses second was moved behind: by the
  * controller when either flight's position is manual, otherwise by the scheduler holding spacing
  * (behind a pinned crossing, or a later flight it placed first). Anything else is ETA order.

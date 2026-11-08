@@ -381,6 +381,18 @@ describe("FcaDetail gap and compare panel (VATUSA/OIS#819)", () => {
     expect(text(host, "compare-required")).toBe("2:00 · 10.0nm");
   });
 
+  it("labels the required spacing without a callsign when the flight ahead is not in the list", () => {
+    // UAL3 is seq 3 and nothing listed is seq 2 (a proposed flight is filtered out of the list).
+    const gapped = [
+      strip("DAL2", 1, {eta: "2026-10-27T12:10:00Z", cross: "2026-10-27T12:10:00Z", placed: false, gap: null}),
+      strip("UAL3", 3, {eta: "2026-10-27T12:20:00Z", cross: "2026-10-27T12:20:00Z", placed: false, gap: [480, 40]}),
+    ];
+    const host = mountWith(gapped);
+    pick(host, "DAL2");
+    pick(host, "UAL3");
+    expect(text(host, "compare-required-label")).toBe("Required");
+  });
+
   it("hides the compare panel when one of the two is deselected", () => {
     const host = mountWith(MANUAL);
     pick(host, "DAL2");

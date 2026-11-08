@@ -216,17 +216,17 @@ of the rest, then by ETA (`:407-411`). Each in turn is placed at its frozen time
 else at `earliest_slot(eta, committed, sep)` (`:415-420`), and is added to `committed`. Sequence
 numbers follow the scheduled time (`:424-428`).
 
-**`earliest_slot`** (`feed/fca.rs:567`): from the ETA, move to `c + sep` for any committed `c`
+**`earliest_slot`** (`feed/fca.rs:568`): from the ETA, move to `c + sep` for any committed `c`
 closer than `sep`, and repeat until nothing moves. One `sep` is used in both directions.
 
-**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` (`feed/fca.rs:481`) keeps the stored order
+**Manual mode** (`feed/fca.rs::meter`). `merge_late_joiners` (`feed/fca.rs:482`) keeps the stored order
 (first occurrence of a repeated index only) and places each flight it does not name behind every
 ordered flight whose ETA is at or before its own (#819). Joiners holding a release are then placed
-one at a time in release-time order (`release_slot`, `:519`), each into the sequence built so far
-without it: further back when its release time says so, behind every other late joiner whose release
-crosses at or before its own, and behind each flight at the front of that sequence that crosses at least its spacing
-earlier, stopping at the first that does not. A RDY
-release, the slot plus a 15 s margin, keeps its slot while the spacing exceeds that margin.
+one at a time in release-time order (`release_slot`, `:524`), each into the sequence built so far
+without it: further back when its release time says so, behind each flight at the front of that
+sequence that crosses at least its spacing earlier or is another late joiner released for its time or
+earlier, stopping at the first that is neither. A RDY release, the slot plus a 15 s margin, keeps
+its slot while the spacing exceeds that margin.
 `chain` (`:455`) then chains each flight `max(eta, prev + sep)` behind the one before, except a
 frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers are the order itself
 (`:396-398`).
@@ -244,7 +244,7 @@ frozen flight, which keeps its time and becomes the new `prev`. Sequence numbers
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
   (`release_ms`, `handlers/flow.rs:2037`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
-**Tests.** `feed/fca.rs:694-1958`: MIT at the follower's speed, rate metering, airborne priority,
+**Tests.** `feed/fca.rs:695-1995`: MIT at the follower's speed, rate metering, airborne priority,
 a frozen ground release, two conflicting airborne crossings, four manual-order cases, and the #819 late-joiner merge (released joiners and a re-meter after RDY included), repeated
 indices and gap outputs. Rate 0 reaches `meter` only through `sep_ms`
 (`sep_ms_is_the_rate_interval_in_rate_mode`); equal ETAs are tested between late joiners and
@@ -260,7 +260,7 @@ frozen time. A full sequence with rate 0, and MIT 0. Equal-ETA ties in auto mode
 
 - **Frozen times are never checked against their neighbors.** In manual mode a frozen flight can sit
   inside the gap, or before the flight ordered ahead of it, and the flight after it is chained from
-  that frozen time. `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1190`) asserts this
+  that frozen time. `manual_order_chains_airborne_and_pins_frozen` (`feed/fca.rs:1191`) asserts this
   as intended (noted on #817). In auto mode, pinned flights sort by ETA, not by frozen time, so an
   airborne flight can be slotted inside a release's gap before the release is committed. **Owned
   by #817** (its cases 2 and 3).
@@ -443,7 +443,7 @@ defect below and has to change with its fix.
   widget joins the two (`web/src/features/dashboard/sources.ts:325-333`). Part of #852.
 - Prefiles left out of a manual order fell behind everyone (#819, item 2). Resolved: since #834 a
   prefile is never a candidate, and a flight that joins after the order is saved is merged in by ETA
-  (`merge_late_joiners`, `feed/fca.rs:481`).
+  (`merge_late_joiners`, `feed/fca.rs:482`).
 
 ## Determination for #812 (recommendation, for the operator to confirm)
 
