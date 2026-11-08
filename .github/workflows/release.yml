@@ -146,7 +146,7 @@ jobs:
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the update packages; the app verifies this against the pubkey in tauri.conf.json.
@@ -168,5 +168,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseId: ${{ needs.release.outputs.id }}
           # Emits latest.json alongside the installers — the endpoint the updater polls.
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}
