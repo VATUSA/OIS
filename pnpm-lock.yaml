@@ -169,8 +169,8 @@ importers:
         specifier: ^1.5.0
         version: 1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))
       '@tanstack/react-query':
-        specifier: ^5.102.8
-        version: 5.102.8(react@19.3.0)
+        specifier: ^5.106.0
+        version: 5.106.0(@types/react@19.3.0)(react@19.3.0)
       '@tanstack/react-router':
         specifier: ^1.170.39
         version: 1.170.39(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -1625,8 +1625,8 @@ packages:
   '@tanstack/query-core@5.101.4':
     resolution: {integrity: sha512-gNwcvOJcRbLWPOLG/2OBm+zM+Yv+MKsXKEOWC57USuZDEsI71hEErQsiEGx5wX9rzWWkfwM0fVSPoiIFSsxfiw==}
 
-  '@tanstack/query-core@5.102.8':
-    resolution: {integrity: sha512-ZNjkJ33CqvPNec/6lZBnHqLc3EVGPZ9ySLhYahU9TcuRFdmwXewuj0c4hwSWcGHqEUwcSrKeZ+oGcvPBqXcQcg==}
+  '@tanstack/query-core@5.106.0':
+    resolution: {integrity: sha512-3GuqVrhCG0bBfmLt4AU0SIm8UuZ1rzeRjDiQBnYuzW3lkri1RdawWN73jZYvB4kC8WyDUoDgBx3kyO3TbNH/6Q==}
 
   '@tanstack/react-charts@1.5.0':
     resolution: {integrity: sha512-Pn8sI0hH1MUNJEzN+Pp7HX2NOYPkAFn0aQ8gfZgsYxU7ItzxpeVeIbhTgHiYerpGl6tVaU66Eqe3EcmiE0U47A==}
@@ -1639,10 +1639,14 @@ packages:
     peerDependencies:
       react: ^18 || ^19
 
-  '@tanstack/react-query@5.102.8':
-    resolution: {integrity: sha512-TYBea4OuXWD7MhaSHq069TWbFe7rcwWN6kzT7JF0OKi1K6c1gTv2IzD6A6ExJsCMozdkqBWeuIUZmu4KQg0O5A==}
+  '@tanstack/react-query@5.106.0':
+    resolution: {integrity: sha512-OuP/ST9dEMBwHhisE5A/bBSWMhMmB/xKPfeZ2U0Wy8W/txb9QiGd7iXhxJPQ7jGbfcKlV13sJUHip9Nki54yyg==}
     peerDependencies:
+      '@types/react': ^18 || ^19
       react: ^18 || ^19
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
 
   '@tanstack/react-router@1.170.39':
     resolution: {integrity: sha512-wLZi/hXW/kTeLlMIvI2VB8Oj38GLz8YkHmTM14lLScAzx79UZEwBHWMj6JZw/imuyuhrcmbe8KTFsFBHzJUftg==}
@@ -5175,7 +5179,7 @@ snapshots:
 
   '@tanstack/query-core@5.101.4': {}
 
-  '@tanstack/query-core@5.102.8': {}
+  '@tanstack/query-core@5.106.0': {}
 
   '@tanstack/react-charts@1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
     dependencies:
@@ -5200,10 +5204,12 @@ snapshots:
       '@tanstack/query-core': 5.101.4
       react: 19.3.0
 
-  '@tanstack/react-query@5.102.8(react@19.3.0)':
+  '@tanstack/react-query@5.106.0(@types/react@19.3.0)(react@19.3.0)':
     dependencies:
-      '@tanstack/query-core': 5.102.8
+      '@tanstack/query-core': 5.106.0
       react: 19.3.0
+    optionalDependencies:
+      '@types/react': 19.3.0
 
   '@tanstack/react-router@1.170.39(react-dom@19.3.0(react@19.3.0))(react@19.3.0)':
     dependencies:
