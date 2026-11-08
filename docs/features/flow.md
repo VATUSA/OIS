@@ -408,8 +408,10 @@ The historical replay (`/stats/hist/flow`, `/stats/hist/departures`, `/stats/his
 the same functions against a reconstructed snapshot and the winds at that instant. It passes no stored departure-runway assignments, which are live state.
 
 Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
-groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), or where it is now when
-closer, floored at 120 kt as FCA metering floors its crossing speed. Airport-flow MIT is set per
+groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), floored at 120 kt as FCA
+metering floors its crossing speed. A flight already inside 40 nm reads its own descent schedule
+40 nm out (its type's profile, filed cruise altitude and speed, the wind where it is now), not
+its speed where it is now. Airport-flow MIT is set per
 arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is no
 fix to read a speed at. When a flight would land ahead of a slot already assigned on its gate, the
 gap is sized at the slot holder's speed, since the holder trails it.

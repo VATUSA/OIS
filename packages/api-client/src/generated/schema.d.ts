@@ -3287,10 +3287,11 @@ export interface paths {
         /**
          * Current arrival demand vs capacity for every airport at once, ranked by exceedance
          *     (VATUSA/OIS#475).
-         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
-         *     front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
-         *     `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
-         *     be two queries and a blocking task each.
+         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed four queries up
+         *     front (programs, configs, issued CFRs, departure-runway assignments), one brief feed read, then a
+         *     *single* blocking task for the whole loop. Fanning `flow_for` out per airport (as
+         *     `public::get_board` does for the handful of metered fields) would be three queries and a blocking
+         *     task each.
          *
          *     Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
          *     derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a

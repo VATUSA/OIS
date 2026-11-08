@@ -219,7 +219,7 @@ async fn fresh_assignments(
 /// params and persist the controlled slots (replacing any existing ones). Used on publish
 /// and when revising a published program.
 /// The frozen slot rows, the resolved program window, and the delay statistics for `gdp` — computed
-/// entirely from the live feed, touching no database.
+/// from the live feed and one read of the stored departure-runway assignments, with no transaction.
 ///
 /// Split out of [`freeze_slots`] for #508. Publishing must write the slots and the generated advisory in
 /// one transaction, and this is the expensive part: `fresh_assignments` runs the feed and RBS. Holding a

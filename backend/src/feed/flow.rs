@@ -32,7 +32,8 @@ pub(crate) const TAXI_ROLL_GS_KT: i64 = 7;
 /// Where an airport-flow miles-in-trail is converted to a time gap: the trailing flight's predicted
 /// groundspeed this far (nm) along-route short of the field (#813). Airport-flow MIT is set per
 /// arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is
-/// no fix to read a speed at; OIS holds no meter-fix data per airport.
+/// no fix to read a speed at; OIS holds no meter-fix data per airport. A flight already closer than
+/// this reads its own descent schedule this far out (`predict::Trajectory::gs_short_of_field`).
 pub(crate) const MIT_CROSSING_NM: f64 = 40.0;
 
 /// A per-gate spacing rule (subset of `GateRule` the scheduler needs).
@@ -87,8 +88,9 @@ pub struct FlowFlight {
     pub cfr: Option<DateTime<Utc>>,
     /// True when the CFR has been issued (locked) rather than merely proposed.
     pub cfr_issued: bool,
-    // The predicted groundspeed (kt) at `MIT_CROSSING_NM` from the field, that converts this flight's
-    // miles-in-trail to a time gap. Internal to metering, never serialized.
+    // The predicted groundspeed (kt) at `MIT_CROSSING_NM` from the field (on its descent schedule
+    // for a flight already inside it), that converts this flight's miles-in-trail to a time gap.
+    // Internal to metering, never serialized.
     #[serde(skip)]
     pub mit_cross_kt: f64,
 }
@@ -2526,11 +2528,10 @@ mod tests {
         );
     }
 
-    /// Airport-flow MIT is converted at the trailing flight's predicted groundspeed 40 nm short of
-    /// the field (`MIT_CROSSING_NM`), read off its trajectory: below cruise for a jet descending
-    /// into the field, the speed predicted where it is now once it is inside 40 nm.
-    #[test]
-    fn compute_converts_mit_at_the_speed_forty_miles_out() {
+    /// KJFK→KDCA on the great circle, FL350 at 440 kt, the default profile: FAR1 at cruise ~160 nm
+    /// out (240 kt, under the anchoring threshold, so its profile is unscaled) and NEAR1 ~15 nm out
+    /// at 3,000 ft and `near_gs`, timed by `compute` in still air at `t0`.
+    fn far_and_near(near_gs: i64) -> (VatsimData, AirportDb) {
         let ap = AirportDb::from([
             ("KJFK".to_string(), Airport::at(40.64, -73.78)),
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
@@ -2554,11 +2555,22 @@ mod tests {
         };
         let data = VatsimData {
             pilots: vec![
-                pilot("FAR1", [40.4, -74.2], 35_000, 440),
-                pilot("NEAR1", [38.95, -76.75], 3_000, 180),
+                pilot("FAR1", [40.4, -74.2], 35_000, 240),
+                pilot("NEAR1", [38.95, -76.75], 3_000, near_gs),
             ],
             ..Default::default()
         };
+        (data, ap)
+    }
+
+    /// Airport-flow MIT is converted at the trailing flight's predicted groundspeed 40 nm short of
+    /// the field (`MIT_CROSSING_NM`): below cruise for a jet descending into the field. A flight
+    /// already inside 40 nm reads its own descent schedule 40 nm out (#813), so NEAR1 converts at
+    /// the speed FAR1, the same type on the same cruise, reaches there: 363.4 kt, hand-worked from
+    /// the default profile (1,800 fpm, 250/290 KIAS, ISA, sea-level field, still air).
+    #[test]
+    fn compute_converts_mit_at_each_flights_speed_forty_miles_out() {
+        let (data, ap) = far_and_near(180);
         let (nav, winds, profiles) = (
             NavData::default(),
             Winds::default(),
@@ -2575,40 +2587,72 @@ mod tests {
             &HashSet::new(),
             t0(),
         );
+        let traj = |i: usize| {
+            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[i]), None, t0()).unwrap()
+        };
+        let row = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
         for (i, cs) in ["FAR1", "NEAR1"].into_iter().enumerate() {
-            let traj =
-                predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[i]), None, t0())
-                    .unwrap();
-            let row = flow.flights.iter().find(|f| f.callsign == cs).unwrap();
             // The literal 40 nm the MIT rule is defined at, not the constant (#813).
-            assert_eq!(row.mit_cross_kt, traj.gs_short_of_field(40.0), "{cs}");
+            assert_eq!(
+                row(cs).mit_cross_kt,
+                traj(i).gs_short_of_field(40.0),
+                "{cs}"
+            );
         }
         // Positive control: FAR1's speed differs at 30 and 60 nm, so a moved point shows.
-        let far_traj =
-            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[0]), None, t0()).unwrap();
         for nm in [30.0, 60.0] {
             assert_ne!(
-                far_traj.gs_short_of_field(nm),
-                far_traj.gs_short_of_field(40.0),
+                traj(0).gs_short_of_field(nm),
+                traj(0).gs_short_of_field(40.0),
                 "{nm} nm"
             );
         }
-        let far = flow.flights.iter().find(|f| f.callsign == "FAR1").unwrap();
+        let (far, near) = (row("FAR1").mit_cross_kt, row("NEAR1").mit_cross_kt);
+        assert!(far < 400.0, "a descent speed, not the 440 kt cruise: {far}");
         assert!(
-            far.mit_cross_kt < 400.0,
-            "a descent speed, not the 440 kt cruise: {}",
-            far.mit_cross_kt
-        );
-        // NEAR1 is ~15 nm out: the speed predicted where it is now.
-        let near_traj =
-            predict::trajectory(&inp, predict::Flight::Pilot(&data.pilots[1]), None, t0()).unwrap();
-        assert!(
-            near_traj.route_nm() < MIT_CROSSING_NM,
+            traj(1).route_nm() < MIT_CROSSING_NM,
             "positive control: inside 40 nm"
         );
+        assert!(
+            (near - far).abs() < 0.5,
+            "same type and cruise at 40 nm: {near} vs {far}"
+        );
+        assert!((near - 363.4).abs() < 0.5, "{near}");
+        assert!(
+            near > traj(1).gs_at(0.0),
+            "not the speed where it is now: {near}"
+        );
+    }
+
+    /// #813: 10 MIT behind a flight inside 40 nm doing 150 kt is timed at its descent speed 40 nm
+    /// out (363.4 kt, `compute_converts_mit_at_each_flights_speed_forty_miles_out`): 10 / 363.4 h,
+    /// about 99 s, not the 240 s (4.0 min) its current 150 kt would give.
+    #[test]
+    fn ten_mit_behind_a_flight_inside_forty_miles_is_timed_at_its_descent_speed() {
+        let (data, ap) = far_and_near(150);
+        let (nav, winds, profiles) = (
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let no_samples = HashMap::new();
+        let inp = inputs_with(&ap, &nav, &winds, &profiles, &no_samples);
+        let flow = compute(
+            "KDCA",
+            None,
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            t0(),
+        );
         let near = flow.flights.iter().find(|f| f.callsign == "NEAR1").unwrap();
-        assert_eq!(near.mit_cross_kt, near_traj.gs_at(0.0), "inside 40 nm");
-        assert!(far.mit_cross_kt > near.mit_cross_kt);
+        let gap = route_interval_ms(0, 10, 60_000.0, near.mit_cross_kt);
+        assert!(
+            gap > 60_000.0,
+            "positive control: the MIT governs, not the floor: {gap}"
+        );
+        assert!((gap - 99_060.0).abs() < 150.0, "{gap}");
     }
 
     /// Only a pilot on the ground within 5 nm of the field has arrived: one on a 3 nm final at 140 kt

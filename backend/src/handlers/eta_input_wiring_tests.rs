@@ -285,6 +285,67 @@ async fn airport_flow_times_a_departure_from_its_assigned_runway(pool: PgPool) {
     assert_shift(time(&b["eta"]), time(&a["eta"]), shift, "airport-flow ETA");
 }
 
+/// #813: the historical replay times a past instant, and a departure-runway assignment is live
+/// state, so `GET /api/v1/stats/hist/flow/{icao}` times GND1 with the airport-wide allowance
+/// (50 + 40 + 600 s, the median of every KJFK sample) even with 04L stored for its callsign,
+/// while the live airport flow moves to 04L's (positive control).
+#[sqlx::test]
+async fn the_historical_flow_replay_ignores_a_stored_departure_runway(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let shift = shift_sec(&state).await;
+    let at = DateTime::parse_from_rfc3339("2026-10-15T18:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    sqlx::query(
+        "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, last_seen, \
+             status, departure, arrival, aircraft_short, route, cruise_alt, cruise_tas) \
+         values (1, 1000001, 'GND1', $1, $1, $2, 'active', 'KJFK', 'KDCA', 'B738', \
+             'RBV WHITE SIE', 35000, 440)",
+    )
+    .bind(at - chrono::Duration::hours(1))
+    .bind(at + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+         values (1, $1, 40.64, -73.78, 13, 0, 310)",
+    )
+    .bind(at - chrono::Duration::minutes(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let hist = format!("/api/v1/stats/hist/flow/KDCA?at={}", at.timestamp());
+    let live = "/api/v1/tmu/flow/KDCA";
+    let flow_reader = holder(&pool, "tmu.program.read").await;
+    let (status, live_before) = send_json(&state, Method::GET, live, &flow_reader).await;
+    assert_eq!(status, 200, "{live_before}");
+    assign_04l(&pool).await;
+
+    let member = session_cookie(&pool, &seed_user(&pool).await).await;
+    let (status, body) = send_json(&state, Method::GET, &hist, &member).await;
+    assert_eq!(status, 401, "no stats.data.read: {body}");
+
+    let stats_reader = holder(&pool, "stats.data.read").await;
+    let (status, body) = send_json(&state, Method::GET, &hist, &stats_reader).await;
+    assert_eq!(status, 200, "{body}");
+    let row = gnd1_in(&body["flights"]);
+    assert_eq!(row["status"], "ground", "{row}");
+    assert_eq!(
+        time(&row["etd"]),
+        at + chrono::Duration::seconds(50 + 40 + 600),
+        "the airport-wide allowance, not 04L's 50 + 40 + 900 s"
+    );
+
+    let (_, live_after) = send_json(&state, Method::GET, live, &flow_reader).await;
+    assert_shift(
+        time(&gnd1_in(&live_before["flights"])["etd"]),
+        time(&gnd1_in(&live_after["flights"])["etd"]),
+        shift,
+        "positive control: live airport-flow wheels-up",
+    );
+}
+
 #[sqlx::test]
 async fn the_fix_table_times_a_departure_from_its_assigned_runway(pool: PgPool) {
     let state = state(pool.clone()).await;

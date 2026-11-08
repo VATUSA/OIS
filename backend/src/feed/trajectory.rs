@@ -713,6 +713,42 @@ impl VerticalProfile {
     }
 }
 
+/// The groundspeed (kt) an aircraft flies `d_nm` from the field on its descent from
+/// `cruise_req_ft`, whatever it is doing now: the descent curve [`VerticalProfile::build`]
+/// integrates, read at `d_nm`, or the cruise speed when `d_nm` lies above the top of descent. The
+/// arguments are [`VerticalProfile::build`]'s; there is no groundspeed anchoring.
+pub fn descent_ground_speed_at(
+    d_nm: f64,
+    arr_elev_ft: f64,
+    cruise_req_ft: f64,
+    cruise_tas_kt: f64,
+    profile: &AircraftProfile,
+    wind: &RouteWind,
+) -> f64 {
+    let arr_elev = arr_elev_ft.max(0.0);
+    let cruise_alt = cruise_req_ft.min(profile.service_ceiling_ft).max(arr_elev);
+    let speeds = Speeds {
+        profile,
+        wind,
+        cruise_tas: cruise_tas_kt.max(GS_FLOOR_KT),
+    };
+    let desc = integrate_descent(arr_elev, cruise_alt, &speeds);
+    let (alt, tas) = match desc.iter().position(|s| s.0 >= d_nm) {
+        Some(0) => (desc[0].1, desc[0].2),
+        Some(i) => {
+            let ((d0, a0, t0), (d1, a1, t1)) = (desc[i - 1], desc[i]);
+            let f = if d1 > d0 {
+                (d_nm - d0) / (d1 - d0)
+            } else {
+                0.0
+            };
+            (a0 + f * (a1 - a0), t0 + f * (t1 - t0))
+        }
+        None => (cruise_alt, speeds.cruise_at(d_nm, cruise_alt)),
+    };
+    step_gs(tas, wind.headwind(d_nm, alt))
+}
+
 /// The speed schedule a profile integrates with: the aircraft's phases, the wind along the route,
 /// and the capped cruise TAS.
 struct Speeds<'a> {
@@ -1475,6 +1511,45 @@ mod tests {
             vp.gs_at(80.0),
             vp.gs_at(150.0)
         );
+    }
+
+    /// #813: the groundspeed the descent schedule gives `d` nm from the field is the speed a
+    /// profile built from cruise far enough out (no triangle; top of descent ~119 nm) flies there,
+    /// in still air and into a headwind. The literals are hand-worked from the default profile
+    /// (1,800 fpm, 250/290 KIAS, ISA): 363.4 kt at 40 nm in still air (~14,600 ft there); 341.2 kt
+    /// into 30 kt, which also shortens every descent step (~15,900 ft there).
+    #[test]
+    fn descent_ground_speed_at_reads_the_descent_schedule_from_cruise() {
+        let p = AircraftProfile::default();
+        let reference = VerticalProfile::build(
+            35_000.0,
+            300.0,
+            0.0,
+            35_000.0,
+            440.0,
+            &p,
+            RouteWind::still(),
+        );
+        let still = RouteWind::still();
+        let at_40 = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &still);
+        assert!(
+            (at_40 - reference.ground_speed_at(40.0)).abs() < 1e-6,
+            "{at_40}"
+        );
+        assert!((at_40 - 363.4).abs() < 0.5, "{at_40}");
+        let at_150 = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &still);
+        assert_eq!(at_150, 440.0, "above the top of descent it cruises");
+        assert!((at_150 - reference.ground_speed_at(150.0)).abs() < 1e-6);
+
+        let head = RouteWind::uniform(30.0);
+        let windy_reference =
+            VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, 440.0, &p, head.clone());
+        let windy = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &head);
+        assert!(
+            (windy - windy_reference.ground_speed_at(40.0)).abs() < 1e-6,
+            "{windy}"
+        );
+        assert!((windy - 341.2).abs() < 0.5, "{windy}");
     }
 
     // ---- #836: wind and temperature read per segment, per altitude ----------------------------

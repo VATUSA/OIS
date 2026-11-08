@@ -652,10 +652,24 @@ impl Trajectory<'_> {
         self.eta_to_go(0.0)
     }
 
-    /// Predicted groundspeed (kt) `nm` along-route short of the field, or where the flight is now
-    /// when it is closer than that.
+    /// Predicted groundspeed (kt) `nm` along-route short of the field. A flight already closer than
+    /// that has no such point ahead of it, so it reads its own descent schedule `nm` out, with the
+    /// wind where it is now (#813).
     pub fn gs_short_of_field(&self, nm: f64) -> f64 {
-        self.timing().vp.ground_speed_at(nm.min(self.route_nm))
+        let t = self.timing();
+        if nm <= self.route_nm {
+            return t.vp.ground_speed_at(nm);
+        }
+        let fp = self.fp;
+        let (ty, wake) = fp.aircraft_type_wake();
+        trajectory::descent_ground_speed_at(
+            nm,
+            field_elevation_ft(self.inp.airports, &fp.arrival),
+            t.cruise_ft,
+            t.cruise_tas,
+            self.inp.profiles.resolve(&ty, &wake),
+            &self.inp.winds.along(&self.path, self.route_nm),
+        )
     }
 
     /// Where the flight is after `flying_sec` from its start: now for an airborne flight, wheels-up
@@ -1956,6 +1970,119 @@ mod tests {
         assert_eq!(t.ground_allowance().unwrap().runway, None);
     }
 
+    /// #813: a prefile is timed from its departure's reference point, which is not where it is
+    /// parked, so a gate there does not match it. With no assignment it reaches the airport tier;
+    /// with 04L assigned, the airport+runway tier, never gate+type+runway. A connected pilot parked
+    /// at the same spot does match the gate (positive control).
+    #[test]
+    fn a_prefile_matches_no_gate_at_its_departure_reference_point() {
+        let gate = |id: &str, lat: f64, lon: f64| AirportGateBody {
+            id: id.into(),
+            icao: "KJFK".into(),
+            name: id.into(),
+            lat,
+            lon,
+            source: "manual".into(),
+            kind: None,
+            heading: None,
+            size_code: None,
+            operation_type: None,
+            aircraft_classes: None,
+            airline_codes: None,
+            updated_at: now(),
+            editable: false,
+        };
+        let gates = HashMap::from([(
+            "KJFK".to_string(),
+            vec![gate("G1", JFK[0], JFK[1]), gate("G2", 40.65, -73.79)],
+        )]);
+        let sample = |gate: &str, aircraft: &str, taxi_sec: i32| taxi_estimate::TaxiSample {
+            gate_id: Some(gate.into()),
+            aircraft: Some(aircraft.into()),
+            runway: Some("04L".into()),
+            pushback_sec: Some(50),
+            startup_sec: Some(40),
+            taxi_sec,
+        };
+        let mut at_jfk: Vec<_> = (0..5).map(|_| sample("G1", "B738", 600)).collect();
+        at_jfk.extend((0..5).map(|_| sample("G2", "A320", 120)));
+        let samples = HashMap::from([("KJFK".to_string(), at_jfk)]);
+        let (nav, ap) = (NavData::default(), airports());
+        let ground = |assigned| GroundInputs {
+            gates: &gates,
+            taxi_samples: &samples,
+            assigned,
+            ..GroundInputs::unused()
+        };
+        let assign = |cs: &str| {
+            AssignedRunways::from([(
+                ("KJFK".to_string(), cs.to_string()),
+                ("04L".to_string(), "auto".to_string()),
+            )])
+        };
+        let pre = prefile(plan("KJFK", "KMIA", ""));
+
+        let none = AssignedRunways::new();
+        let inp = with_ground(&nav, &ap, ground(&none));
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        let a = t.ground_allowance().unwrap();
+        assert_eq!(a.gate_id, None);
+        assert_eq!(a.taxi.tier, taxi_estimate::EstimateTier::Airport);
+        assert_eq!((a.taxi.value_sec, a.taxi.sample_count), (360.0, 10));
+
+        let pre1 = assign("PRE1");
+        let inp = with_ground(&nav, &ap, ground(&pre1));
+        let t = trajectory(&inp, Flight::Prefile(&pre), None, now()).unwrap();
+        let a = t.ground_allowance().unwrap();
+        assert_eq!(
+            (a.gate_id.as_deref(), a.runway.as_deref()),
+            (None, Some("04L"))
+        );
+        assert_eq!(a.taxi.tier, taxi_estimate::EstimateTier::AirportRunway);
+        assert_eq!((a.taxi.value_sec, a.taxi.sample_count), (360.0, 10));
+        assert_eq!(t.allowance_sec(), 50.0 + 40.0 + 360.0);
+
+        let parked = pilot(JFK, 13, 0, plan("KJFK", "KMIA", ""));
+        let aal1 = assign("AAL1");
+        let inp = with_ground(&nav, &ap, ground(&aal1));
+        let t = trajectory(&inp, Flight::Pilot(&parked), None, now()).unwrap();
+        let a = t.ground_allowance().unwrap();
+        assert_eq!(a.gate_id.as_deref(), Some("G1"), "positive control");
+        assert_eq!(a.taxi.tier, taxi_estimate::EstimateTier::GateTypeRunway);
+        assert_eq!((a.taxi.value_sec, a.taxi.sample_count), (600.0, 5));
+        assert_eq!(t.allowance_sec(), 50.0 + 40.0 + 600.0);
+    }
+
+    /// #813: either side of `MIT_CROSSING_NM` (40). A flight 41 nm out reads its own trajectory
+    /// 40 nm short of the field; one 39 nm out has no such point left and reads its descent
+    /// schedule 40 nm out: 363.4 kt for the default profile (hand-worked, as in trajectory.rs).
+    #[test]
+    fn the_mit_speed_switches_to_the_descent_schedule_inside_forty_miles() {
+        let (nav, ap) = (NavData::default(), airports());
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let at = |lat: f64| Pilot {
+            heading: 180,
+            ..pilot([lat, -80.29], 3_000, 180, plan("KJFK", "KMIA", ""))
+        };
+        let (out, inside) = (at(26.4729), at(26.4396));
+        let out = trajectory(&inp, Flight::Pilot(&out), None, now()).unwrap();
+        let inside = trajectory(&inp, Flight::Pilot(&inside), None, now()).unwrap();
+        assert!((out.route_nm() - 41.0).abs() < 0.05, "{}", out.route_nm());
+        assert!(
+            (inside.route_nm() - 39.0).abs() < 0.05,
+            "{}",
+            inside.route_nm()
+        );
+
+        assert_eq!(
+            out.gs_short_of_field(40.0),
+            out.gs_at(out.route_nm() - 40.0)
+        );
+        let near = inside.gs_short_of_field(40.0);
+        assert!((near - 363.4).abs() < 0.5, "{near}");
+        assert!(near > inside.gs_at(0.0), "not the speed where it is now");
+    }
+
     /// AC2 filed cruise speed: the filed number, `0` when blank or junk, then the profile cap; an
     /// unfiled speed takes the altitude default, not airport flow's old 420 kt.
     #[test]
@@ -2088,8 +2215,9 @@ mod tests {
 
     /// The calls into the model that produce a time, a speed or a position along a route. Outside
     /// `feed/predict.rs` and `feed/trajectory.rs`, only [`trajectory`] and its [`Trajectory`] make them.
-    const TIMING_CALLS: [&str; 8] = [
+    const TIMING_CALLS: [&str; 9] = [
         "VerticalProfile::build",
+        "descent_ground_speed_at(",
         "profile_from_here(",
         "eta_along_route(",
         "project_along_route(",
@@ -2232,6 +2360,10 @@ mod tests {
             let src = format!("fn f() {{ let x = {call}1); }}\n");
             assert_eq!(timing_calls(&src), vec![call], "{call}");
         }
+        // The descent-schedule speed the MIT conversion reads inside 40 nm is a timing call too.
+        let descent = "fn f() { trajectory::descent_ground_speed_at(40.0, 0.0, a, b, p, w); }
+";
+        assert_eq!(timing_calls(descent), vec!["descent_ground_speed_at("]);
         // A comment, a test module and a test-only helper are not shipped code...
         let tests = "// predict::arrival_eta(a)\n#[cfg(test)]\nmod tests {\n    fn t() {\n        vp.time_between(1.0, 0.0);\n    }\n}\n#[cfg(test)]\nfn helper() { vp.distance_after(1.0, 2.0); }\n";
         assert!(timing_calls(tests).is_empty());
