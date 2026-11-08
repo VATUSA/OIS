@@ -86,8 +86,9 @@ tauri-plugin-process = "2.4"
 # Native OS notifications (#348). Delivery only — what to notify about is decided in the
 # frontend, where the user's own permissions and settings already apply. The plugin is kept for the
 # OS permission prompt; notifications themselves are raised through each platform's own API
-# (`desktop/src-tauri/src/notify.rs`), because the plugin reports no clicks on desktop. Both crates
-# are the ones the plugin already pulls in through notify-rust, so no new code enters the tree.
+# (`desktop/src-tauri/src/notify.rs`), which carries the in-app route through the macOS and Windows
+# click callbacks; the plugin reported no clicks on desktop before 2.6. Both crates are the ones the
+# plugin already pulls in through notify-rust, so no new code enters the tree.
 tauri-plugin-notification = "2.8"
 mac-notification-sys = "0.6"
 tauri-winrt-notification = "0.8"
