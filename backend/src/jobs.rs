@@ -36,6 +36,7 @@ use crate::repos::sector_consolidations as sector_consolidations_repo;
 use crate::repos::sector_limits as sector_limits_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
+use crate::state::AppState;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -61,6 +62,10 @@ const SERVER_ADMIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often the held-STA pass meters every enabled FCA (#817). VATSIM publishes every 15 s, so a
+/// flight entering the freeze horizon is held within one feed update; until then reads re-meter it.
+const FCA_HOLD_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -1625,6 +1630,26 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
                     }
                     Err(_) => Err("lifecycle pass failed".to_string()),
                 }
+            }
+        },
+    ));
+}
+
+/// Store and drop each enabled FCA's freeze-horizon STAs, and delete the holds of FCAs nothing
+/// meters (#817). The only background writer of `flow.fca_held_sta`; every read only reads it. Runs
+/// on every replica: the first STA stored wins (`on conflict do nothing`).
+pub fn spawn_fca_hold_sync(reg: Arc<JobRegistry>, state: AppState) {
+    tokio::spawn(run_interval(
+        reg,
+        "fca_hold_sync",
+        "Hold FCA crossing times inside the freeze horizon",
+        FCA_HOLD_SYNC_INTERVAL,
+        move || {
+            let state = state.clone();
+            async move {
+                crate::handlers::flow::sync_fca_holds_once(&state, chrono::Utc::now())
+                    .await
+                    .map(|()| "synced".to_string())
             }
         },
     ));

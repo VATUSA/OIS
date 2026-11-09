@@ -5,12 +5,13 @@
 alter table flow.fca
     add column if not exists freeze_min int not null default 30 check (freeze_min between 0 and 120);
 
--- The STA each airborne flight was given on entering an FCA's freeze horizon. The metered reads
--- write a row the first time they see a flight inside the horizon (`on conflict do nothing`, so
--- every replica keeps the first STA stored), read it on every later pass, and delete it once the
--- flight leaves the horizon, is released or leaves the feed. Rows an hour past their STA are ignored
--- and pruned on the next write for the FCA; editing or deleting the FCA clears its rows, and no
--- read stores rows for a deleted FCA.
+-- The STA each airborne flight was given on entering an FCA's freeze horizon. The held-STA pass
+-- (`jobs::spawn_fca_hold_sync`) writes a row the first time it sees a flight inside the horizon
+-- (`on conflict do nothing`, so every replica keeps the first STA stored) and deletes it once the
+-- flight leaves the horizon by more than the margin, is released or leaves the feed; reads only read
+-- it. Rows an hour past their STA are ignored and pruned on the FCA's next sync. An edit to a
+-- metering field, a manual reorder and a delete clear the FCA's rows in the same statement, and the
+-- pass deletes the rows of every FCA it does not meter (disabled, deleted, unpublished event FCA).
 create table if not exists flow.fca_held_sta (
     fca_id   text not null references flow.fca(id) on delete cascade,
     callsign text not null,

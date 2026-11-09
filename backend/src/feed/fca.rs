@@ -331,7 +331,7 @@ pub struct MeterInput {
     /// sits inside another crossing's gap is flagged instead (#817).
     pub frozen_ms: Option<i64>,
     /// The STA stored when this airborne flight entered the freeze horizon (#817). Read only while
-    /// the flight is still inside the horizon.
+    /// the flight is still inside the horizon, widened by [`FREEZE_HYSTERESIS_MS`].
     pub held_ms: Option<i64>,
     /// The ground allowance (pushback + start-up + taxi) inside `eta_ms`, millis; 0 when airborne.
     /// Metering ignores it. The release math needs it: a release is a wheels-up time, so it backs
@@ -368,6 +368,11 @@ pub struct MeterOutput {
 /// The freeze horizon an FCA gets when none is set, minutes before the crossing. TBFM freezes an
 /// arrival's STA about 30-40 min from the airport (MIT LL ATC-364 §2); this is the low end.
 pub const DEFAULT_FREEZE_MIN: i32 = 30;
+
+/// How far past the freeze horizon a flight with a stored STA may drift before it is released from
+/// the hold, millis (#817). A margin, not a permanent freeze: a re-routed flight leaves the hold
+/// instead of showing late until it crosses.
+pub const FREEZE_HYSTERESIS_MS: i64 = 2 * 60_000;
 
 /// The time gap one aircraft needs at this FCA, in ms: MIT at its own crossing speed, or the flat
 /// rate interval; 0 means no spacing.
@@ -504,12 +509,16 @@ fn meter_auto(
     (sched, seq_of)
 }
 
-/// An airborne, unreleased flight whose ETA is within the FCA's freeze horizon.
+/// An airborne, unreleased flight whose ETA is within the FCA's freeze horizon. A flight that
+/// already holds a stored STA stays frozen until its ETA runs [`FREEZE_HYSTERESIS_MS`] past the
+/// horizon, so ETA noise at the edge does not drop and re-store its STA every poll.
 fn in_freeze_horizon(c: &MeterInput, cfg: &MeterConfig) -> bool {
-    c.airborne
-        && c.frozen_ms.is_none()
-        && cfg.freeze_ms > 0
-        && c.eta_ms - cfg.now_ms <= cfg.freeze_ms
+    let limit = if c.held_ms.is_some() {
+        cfg.freeze_ms + FREEZE_HYSTERESIS_MS
+    } else {
+        cfg.freeze_ms
+    };
+    c.airborne && c.frozen_ms.is_none() && cfg.freeze_ms > 0 && c.eta_ms - cfg.now_ms <= limit
 }
 
 /// Earliest time ≥ `eta` clear of every committed `(time, separation)` crossing, where a pair needs
@@ -1021,6 +1030,41 @@ mod tests {
         assert!(!out[1].sta_frozen, "34 min out is outside");
         let edge = meter(&[mk(T0 + 30 * MIN + 1, true, 400.0)], &freeze_cfg(T0), None);
         assert!(!edge[0].sta_frozen, "1 ms past the horizon is outside");
+    }
+
+    #[test]
+    fn the_hysteresis_margin_sits_between_the_fixtures() {
+        // The edge fixtures below sit at 31 and 33 min with a 30 min horizon: a margin of 2 min
+        // keeps the first and drops the second; 1 min or 3 min would flip one of them.
+        let margin = std::hint::black_box(FREEZE_HYSTERESIS_MS);
+        assert!(MIN < margin && margin < 3 * MIN, "margin {margin} ms");
+    }
+
+    #[test]
+    fn a_held_flight_stays_frozen_up_to_the_margin_past_the_horizon() {
+        let held = |eta: i64| MeterInput {
+            held_ms: Some(T0 + 29 * MIN),
+            ..mk(eta, true, 400.0)
+        };
+        let out = meter(
+            &[held(T0 + 31 * MIN), held(T0 + 33 * MIN)],
+            &freeze_cfg(T0),
+            None,
+        );
+        assert!(out[0].sta_frozen, "31 min out, held: inside the margin");
+        assert_eq!(out[0].sched_ms, T0 + 31 * MIN, "anchored at max(held, ETA)");
+        assert_eq!(out[0].late_sec, 120, "ETA 2 min past the held STA");
+        assert!(!out[1].sta_frozen, "33 min out, held: past the margin");
+        let at = meter(&[held(T0 + 32 * MIN)], &freeze_cfg(T0), None);
+        assert!(at[0].sta_frozen, "exactly at horizon + margin is inside");
+        let past = meter(&[held(T0 + 32 * MIN + 1)], &freeze_cfg(T0), None);
+        assert!(!past[0].sta_frozen, "1 ms past horizon + margin is outside");
+    }
+
+    #[test]
+    fn a_flight_with_no_stored_sta_gets_no_margin() {
+        let out = meter(&[mk(T0 + 31 * MIN, true, 400.0)], &freeze_cfg(T0), None);
+        assert!(!out[0].sta_frozen, "31 min out without a stored STA");
     }
 
     #[test]

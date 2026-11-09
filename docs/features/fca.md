@@ -204,7 +204,7 @@ now) and an optional manual order.
   speed; a pair takes the larger of its two.
 - otherwise, if `rate > 0`: `3600 / rate` seconds.
 - otherwise 0, which means no spacing at all. Writes clamp rate to 0-240 (default 30) and MIT to
-  0-200 (default 15) (`repos/flow.rs:156-157`), so 0 is a legal value that turns metering off.
+  0-200 (default 15) (`repos/flow.rs` `bind_fca`), so 0 is a legal value that turns metering off.
 
 The formula is `fca::separation_ms`; the handler's `separation_ms` and `rdy_slot` call it. Two
 crossings are spaced by the **larger** of the pair's separations (#817), so under MIT the slower
@@ -213,7 +213,10 @@ aircraft's gap holds whichever of the two is placed first.
 **Fixed times** (#817). `fca::meter(cands, &MeterConfig { mode, rate, mit, freeze_ms, now_ms },
 order)`. A flight's time is fixed by a release (`frozen_ms`, the CTA) or, when it is airborne with no
 release and its ETA is within `freeze_ms` of `now_ms`, by its held STA (`held_ms`, from
-`flow.fca_held_sta`). Its anchor is `max(fixed, eta)`, and it reports
+`flow.fca_held_sta`). A flight that already has a held STA stays frozen until its ETA runs
+`FREEZE_HYSTERESIS_MS` (2 min) past the horizon, so ETA noise at the edge does not drop and re-store
+it every tick. The margin is bounded rather than permanent: a re-routed flight leaves the hold
+instead of showing late until it crosses. Its anchor is `max(fixed, eta)`, and it reports
 `late_sec = max(eta - fixed, 0) / 1000`. `freeze_min` 0 turns holding off.
 
 **Auto mode** (`meter_auto`). Flights sort by tier, then by anchor: releases; held flights still on
@@ -234,30 +237,40 @@ itself.
 `delay_sec = max(sched - eta, 0) / 1000`. A release that ends inside another crossing's gap is
 returned with `slot_conflict` set; it is the only crossing allowed there.
 
-**Held STAs.** `metered_flights` is the only writer, reached from the traffic route and the flight
-advisory (`build_flight_advisory`), both public. `flow_repo::sync_held_stas` stores the STA of each
-newly frozen flight (first STA wins, `on conflict do nothing`), deletes the rows of held flights the
-read no longer holds (out of the horizon, released, or gone from the feed) and rows more than an
-hour past their STA. A new row is stored only while the FCA is not deleted and `flow.fca.updated_at`
-still matches the read's FCA, so a read that metered before a committed edit or delete stores
-nothing, and a signed-in read of a deleted FCA (historical replay) stores none. A sync that commits
-while the edit's or delete's own statement runs can leave rows its clear missed; each is only an
-earliest crossing until the flight leaves the horizon or the feed, and after an edit that moves the
-line it can show the flight late or delayed at the new line until then. A failed write is logged and the read still
-answers. IDST, `mark_release` and `clear_release` read the rows without writing. `update_fca` and
-`delete_fca` (a soft delete) delete the FCA's rows. `set_manual_order` does not: in manual mode a
-held STA is still the earliest a flight is placed.
+**Held STAs.** The held-STA pass (`jobs::spawn_fca_hold_sync`, every 15 s, running
+`handlers::flow::sync_fca_holds_once`) is the only writer besides the clears below. Each tick it
+meters every enabled live FCA with its stored holds; `flow_repo::sync_held_stas` stores the STA of
+each newly frozen flight (first STA wins, `on conflict do nothing`, so replicas agree), deletes the
+rows of held flights the tick no longer holds (past the horizon and margin, released, or gone from
+the feed) and rows more than an hour past their STA. A new row is stored only while the FCA is not
+deleted and `flow.fca.updated_at` still matches the FCA the tick metered, so a tick that metered
+before a committed edit, reorder or delete stores nothing. Then `prune_unmetered_held_stas` deletes
+the rows of every FCA the pass does not meter (disabled, deleted, or an unpublished or archived
+event FCA). A sync that commits while an edit's, reorder's or delete's own statement runs can leave
+rows its clear missed; each is only an earliest crossing until the flight leaves the horizon or the
+feed, and after an edit that moves the line it can show the flight late or delayed at the new line
+until then. A failed FCA is logged and reported to the job registry; the other FCAs still sync.
+
+The traffic route, the flight advisory, IDST, `mark_release` and `clear_release` read the rows and
+never write them; a flight that entered the horizon since the last tick is re-metered by a read
+until the pass stores it. `update_fca` deletes the FCA's rows in the same statement only when a
+metering field changes (points, dests, origins, fixes, scope, min/max FL, direction, mode, rate,
+MIT or `freeze_min`); a rename, recolor, ARTCC or enable change keeps them. `set_manual_order`
+deletes them when the order or the manual flag changes, because manual mode anchors each flight at
+its held STA and the old order's holds would add delay to a reorder. `delete_fca` (a soft delete)
+deletes them. A release or a swap needs no clear: a released flight is never in the horizon, so the
+next tick drops its row, and every other hold is spaced around the release by the slot check.
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
-- **RDY**, `rdy_slot` (`handlers/flow.rs:2144`): in manual mode the ladder's slot plus
-  `RELEASE_MARGIN_MS` = 15 s (`:508`). In auto mode, `earliest_slot` against every other pinned
-  flight at its **metered** time (`committed_crossings`, `:2099`, #356), with the margin added to
+- **RDY**, `rdy_slot` (`handlers/flow.rs`): in manual mode the ladder's slot plus
+  `RELEASE_MARGIN_MS` = 15 s. In auto mode, `earliest_slot` against every other pinned
+  flight at its **metered** time (`committed_crossings`, #356), with the margin added to
   the separation.
 - **SET**: the typed time plus the airborne ETE, `eta - now - ground_allowance`
-  (`handlers/flow.rs:2630`, #815). It runs no slot search; that is **owned by #816**.
+  (`mark_release`, #815). It runs no slot search; that is **owned by #816**.
 - The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
-  (`handlers/flow.rs:2133`, `:2635`, #815), so RDY stores a wheels-up and SET stores the typed time.
+  (`release_ms`, #815), so RDY stores a wheels-up and SET stores the typed time.
 
 **Tests.** `feed/fca.rs` `mod tests` covers #817's cases 1 to 5, the freeze horizon on both sides of
 its default, the tier order, and a randomized check that no two crossings are closer than the gap
@@ -286,7 +299,7 @@ MIT 0 through `meter`.
 | Route | Handler | Gate | Writes | Topic |
 | --- | --- | --- | --- | --- |
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
-| `PUT /api/v1/flow/fcas/{id}` | `update_fca` | `flow.fca.update` + event-planner rule (`:277`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows (#817) | `flow.fca` |
+| `PUT /api/v1/flow/fcas/{id}` | `update_fca` | `flow.fca.update` + event-planner rule (`require_event_fca_planner`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows when a metering field changes (#817) | `flow.fca` |
 | `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` |
 | `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2859`) |
 | `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |

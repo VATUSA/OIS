@@ -220,9 +220,10 @@ pub async fn create_event_fca(
         .map_err(|_| ApiError::Internal)
 }
 
-/// Update an FCA and drop its held STAs in the same statement: they were spaced under the old
-/// geometry and settings, so the next read re-meters and re-holds (#817). A request without
-/// `freeze_min` (an older client) keeps the stored horizon.
+/// Update an FCA. When a metering input changes (geometry, filters, mode, rate, MIT or the freeze
+/// horizon) the same statement drops its held STAs, which were spaced under the old settings; the
+/// hold pass re-holds on its next tick (#817). A rename, recolor, ARTCC or enable change keeps them.
+/// A request without `freeze_min` (an older client) keeps the stored horizon.
 pub async fn update_fca(
     pool: &PgPool,
     id: &str,
@@ -230,7 +231,16 @@ pub async fn update_fca(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let q = sqlx::query(
-        "with d as (delete from flow.fca_held_sta where fca_id = $19)
+        "with d as (
+             delete from flow.fca_held_sta where fca_id = $19 and exists (
+                 select 1 from flow.fca f where f.id = $19
+                   and (f.points, f.dests, f.origins, f.fixes, f.scope, f.min_fl, f.max_fl,
+                        f.dir, f.mode, f.rate, f.mit, f.freeze_min)
+                       is distinct from
+                       ($4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                        coalesce($18, f.freeze_min))
+             )
+         )
          update flow.fca set
              name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
              fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
@@ -449,7 +459,10 @@ pub async fn delete_route(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Set (or clear) an FCA's manual crossing order.
+/// Set (or clear) an FCA's manual crossing order. When the order or the manual flag changes, the
+/// same statement drops the FCA's held STAs: manual mode anchors each flight at its held STA, so
+/// keeping the old order's holds would add delay to a reorder (#817). A save that changes neither
+/// keeps them.
 pub async fn set_manual_order(
     pool: &PgPool,
     id: &str,
@@ -458,7 +471,13 @@ pub async fn set_manual_order(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4, \
+        "with d as (
+             delete from flow.fca_held_sta where fca_id = $1 and exists (
+                 select 1 from flow.fca f where f.id = $1
+                   and (f.manual_order, f.manual_seq) is distinct from ($2, $3)
+             )
+         )
+         update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4, \
              updated_by_actor = $5 where id = $1",
     )
     .bind(id)
@@ -580,19 +599,38 @@ pub async fn list_held_stas(
     Ok(held)
 }
 
-/// What one metered read changes in an FCA's held STAs.
+/// Delete the held STAs of every FCA the hold pass does not meter: disabled, soft-deleted, or an
+/// event FCA that is not published (#817). One statement per pass tick.
+pub async fn prune_unmetered_held_stas(pool: &PgPool) -> Result<u64, ApiError> {
+    // `NOT_HIDDEN_EVENT` is a code constant over the alias `f`, not caller input.
+    let result = sqlx::query(&format!(
+        "delete from flow.fca_held_sta h where not exists (
+             select 1 from flow.fca f
+             where f.id = h.fca_id and f.enabled and f.deleted_at is null and {NOT_HIDDEN_EVENT}
+         )"
+    ))
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "held STA prune failed");
+        ApiError::Internal
+    })?;
+    Ok(result.rows_affected())
+}
+
+/// What one hold-pass tick changes in an FCA's held STAs.
 pub struct HeldStaSync<'a> {
     /// Flights that just entered the freeze horizon, with the STA to hold.
     pub store: &'a [(String, i64)],
-    /// Held flights this read no longer holds: left the horizon, released, or gone from the feed.
+    /// Held flights this tick no longer holds: left the horizon, released, or gone from the feed.
     pub drop: &'a [String],
 }
 
-/// Apply one metered read's changes to an FCA's held STAs, in one transaction (#817). Stale rows
+/// Apply one hold-pass tick's changes to an FCA's held STAs, in one transaction (#817). Stale rows
 /// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
-/// has the `fca_updated_at` the read metered under, so a read that metered before a committed edit
-/// or delete stores nothing. A sync that commits while an edit's or a delete's own statement runs
-/// can leave rows that statement's clear did not see. They act only as an earliest crossing until
+/// has the `fca_updated_at` the pass metered under, so a tick that metered before a committed edit,
+/// reorder or delete stores nothing. A sync that commits while an edit's, a reorder's or a delete's
+/// own statement runs can leave rows that statement's clear did not see. They act only as an earliest crossing until
 /// the flight leaves the horizon or the feed: the slot check spaces them, but after an edit that
 /// moves the line one can show the flight late or delayed at the new line until then. The first STA
 /// stored wins
@@ -608,7 +646,7 @@ pub async fn sync_held_stas(
         return Ok(());
     }
     let (callsigns, stas): (Vec<String>, Vec<i64>) = sync.store.iter().cloned().unzip();
-    // The caller answers its read either way, so this log is the only record of the cause.
+    // The pass reports only that this FCA failed, so this log is the record of the cause.
     let fail = |e: sqlx::Error| {
         tracing::error!(fca_id, error = %e, "held STA sync failed");
         ApiError::Internal

@@ -2183,12 +2183,8 @@ async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiE
         .collect())
 }
 
-/// Build the metered crossing list for one FCA, running the CPU-heavy route resolution + sequencing
-/// on a **blocking thread**. `build_candidates` resolves every matching aircraft's route against the
-/// FCA — pure CPU with no `.await` — so running it inline on the async workers lets a burst of polling
-/// clients starve the whole runtime (health check + websocket keepalive included) and the process
-/// appears hung. `spawn_blocking` keeps it off the async threads. All shared state is `Arc`, so the
-/// closure owns cheap clones.
+/// Build the metered crossing list for one FCA from its stored holds. Reads only: the holds are
+/// written by [`sync_fca_holds_once`], never by a request (#817).
 async fn metered_flights(
     state: &AppState,
     fca: FcaBody,
@@ -2203,6 +2199,26 @@ async fn metered_flights(
         Some(pool) => held_stas_for(pool, &fca.id, now).await?,
         None => HeldMap::new(),
     };
+    meter_fca(state, fca, releases, held, now, debug).await
+}
+
+/// Meter one FCA against the live feed with `held` as its stored STAs, running the CPU-heavy route
+/// resolution + sequencing on a **blocking thread**. `build_candidates` resolves every matching
+/// aircraft's route against the FCA — pure CPU with no `.await` — so running it inline on the async
+/// workers lets a burst of polling clients starve the whole runtime (health check + websocket
+/// keepalive included) and the process appears hung. `spawn_blocking` keeps it off the async
+/// threads. All shared state is `Arc`, so the closure owns cheap clones.
+async fn meter_fca(
+    state: &AppState,
+    fca: FcaBody,
+    releases: ReleaseMap,
+    held: HeldMap,
+    now: DateTime<Utc>,
+    debug: bool,
+) -> Result<Vec<FcaFlight>, ApiError> {
+    if fca.points.0.len() < 2 {
+        return Ok(Vec::new());
+    }
     let (snapshot, airports) = feed_view(state).await;
     let Some(snap) = snapshot else {
         return Ok(Vec::new());
@@ -2215,8 +2231,7 @@ async fn metered_flights(
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let flight_exclusions = state.flight_exclusions.load_full();
-    let (fca_id, fca_updated_at) = (fca.id.clone(), fca.updated_at);
-    let (flights, (store, drop)) = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let (flights, mut metas) = build_candidates(
             &fca,
             &snap.data,
@@ -2235,26 +2250,63 @@ async fn metered_flights(
             debug,
         );
         attach_held(&flights, &mut metas, &held);
-        let flights = finalize(&fca, flights, &metas, now.timestamp_millis());
-        let changes = held_changes(&flights, &held);
-        (flights, changes)
+        finalize(&fca, flights, &metas, now.timestamp_millis())
     })
     .await
-    .map_err(|_| ApiError::Internal)?;
-    // The holds depend only on the feed and the stored FCA, never on the caller or the query, so
-    // every reader of this FCA, the public ones included, stores the same rows. A failed write is
-    // logged and the read still answers; the next read retries the same changes.
-    if let Some(pool) = state.db.as_ref() {
-        let sync = flow_repo::HeldStaSync {
-            store: &store,
-            drop: &drop,
-        };
-        // `sync_held_stas` logs the database error; this records that the read answered anyway.
-        if let Err(e) = flow_repo::sync_held_stas(pool, &fca_id, fca_updated_at, &sync, now).await {
-            tracing::debug!(fca_id = %fca_id, error = %e, "held STAs not stored; read answered");
+    .map_err(|_| ApiError::Internal)
+}
+
+/// One tick of the held-STA pass (`jobs::spawn_fca_hold_sync`, #817): meter every enabled live FCA
+/// against the feed with its stored holds, store the STAs of flights that entered the freeze
+/// horizon and drop the ones it no longer holds, then delete the holds of every FCA it does not
+/// meter. It is the only writer of `flow.fca_held_sta` besides the edit, reorder and delete
+/// clears. It lives here, not in a repo or `feed/`, because it reuses this module's candidate
+/// building and metering, which every FCA read also runs. Every FCA is attempted; the `Err`
+/// names the ones that failed.
+pub(crate) async fn sync_fca_holds_once(
+    state: &AppState,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let Some(pool) = state.db.as_ref() else {
+        return Ok(());
+    };
+    let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
+        .await
+        .map_err(|_| "list FCAs failed".to_string())?
+        .into_iter()
+        .filter(|f| f.enabled)
+        .collect();
+    let fca_ids: Vec<String> = fcas.iter().map(|f| f.id.clone()).collect();
+    let mut held_by_fca = flow_repo::list_held_stas(pool, &fca_ids, now)
+        .await
+        .map_err(|_| "list held STAs failed".to_string())?;
+    let mut failed: Vec<String> = Vec::new();
+    for fca in fcas {
+        let (fca_id, updated_at) = (fca.id.clone(), fca.updated_at);
+        let held = held_by_fca.remove(&fca_id).unwrap_or_default();
+        let synced = async {
+            let releases = load_releases(pool, &fca_id).await?;
+            let flights = meter_fca(state, fca, releases, held.clone(), now, false).await?;
+            let (store, drop) = held_changes(&flights, &held);
+            let sync = flow_repo::HeldStaSync {
+                store: &store,
+                drop: &drop,
+            };
+            flow_repo::sync_held_stas(pool, &fca_id, updated_at, &sync, now).await
+        }
+        .await;
+        if synced.is_err() {
+            failed.push(fca_id);
         }
     }
-    Ok(flights)
+    if flow_repo::prune_unmetered_held_stas(pool).await.is_err() {
+        failed.push("prune".into());
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("held STAs not synced for: {}", failed.join(", ")))
+    }
 }
 
 /// Query for the FCA traffic endpoint.

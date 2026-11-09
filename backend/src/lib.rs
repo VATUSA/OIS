@@ -157,6 +157,8 @@ pub async fn run() -> color_eyre::Result<()> {
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
         jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
+        // Freeze-horizon STAs for every enabled FCA (#817).
+        jobs::spawn_fca_hold_sync(state.jobs.clone(), state.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA: register the division webhook, and pull the whole division daily (#605).

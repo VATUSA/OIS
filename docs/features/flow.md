@@ -75,9 +75,10 @@ carry `updated_at` (via the shared `platform.touch_updated_at()` trigger) and re
 ### `flow.fca_held_sta` — held crossing times *(migration 0132)*
 
 One row per airborne flight inside an FCA's freeze horizon: `fca_id`, `callsign`, `sta_ms`. The
-metered read stores the first STA a flight gets on entering the horizon and later reads place it
-there no earlier than its ETA. Editing or deleting the FCA clears its rows. See
-`docs/features/fca.md` for the write rules.
+held-STA pass (`jobs::spawn_fca_hold_sync`, every 15 s) stores the first STA a flight gets on
+entering the horizon, and every read places it there no earlier than its ETA. An edit to a metering
+field, a manual reorder and a delete clear the FCA's rows; the pass deletes the rows of FCAs it does
+not meter. See `docs/features/fca.md` for the write rules.
 
 ### `flow.fca_release` — frozen CFR releases per FCA *(migration 0023)*
 
