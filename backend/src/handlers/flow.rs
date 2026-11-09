@@ -741,14 +741,13 @@ pub async fn aircraft_route(
         let fp = p.flight_plan.as_ref().ok_or(ApiError::NotFound)?;
         let (named, unresolved) =
             fca::full_route_named(nav, airports, &fp.departure, &fp.arrival, &fp.route);
-        let path = fca::route_path(
+        // The path the flight is timed along, great-circle fallback included, as the FCA map
+        // draws it.
+        let path = predict::flight_path(
             nav,
             airports,
-            &fp.departure,
-            &fp.arrival,
-            &fp.route,
-            p.latitude,
-            p.longitude,
+            fp,
+            [p.latitude, p.longitude],
             p.heading,
             p.groundspeed,
         );
@@ -1517,7 +1516,7 @@ fn fca_flight(
     lat: f64,
     lon: f64,
     cross: &fca::FcaCrossing,
-    path: Vec<[f64; 2]>,
+    traj: &predict::Trajectory,
     eta: Option<DateTime<Utc>>,
     gs: i64,
     alt: i64,
@@ -1534,8 +1533,9 @@ fn fca_flight(
         lon,
         cross_lat: cross.lat,
         cross_lon: cross.lon,
-        path,
-        distance_nm: cross.along_nm.round() as i64,
+        path: traj.path().to_vec(),
+        // The distance the ETA is timed over, padding included, as the per-fix table shows it.
+        distance_nm: traj.modeled_nm(cross.along_nm).round() as i64,
         eta,
         cross_time: None,
         delay_min: 0,
@@ -1662,7 +1662,7 @@ fn build_candidates(
             p.latitude,
             p.longitude,
             &cross,
-            traj.path().to_vec(),
+            &traj,
             Some(eta),
             p.groundspeed,
             p.altitude,

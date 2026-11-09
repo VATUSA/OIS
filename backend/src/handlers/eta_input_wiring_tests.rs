@@ -574,3 +574,73 @@ async fn the_board_the_badge_count_and_the_advisory_agree_on_an_unresolved_route
         "the advisory lists the FCA: {advisory}"
     );
 }
+
+/// #813: a parked flight whose filed route does not resolve is timed on the great circle to its
+/// destination, padded by 1.12 because it is not yet airborne. Its FCA row shows the distance that
+/// ETA is timed over, and its route popup draws the same great circle the FCA map does, not a dot.
+#[sqlx::test]
+async fn a_parked_flight_on_an_unresolved_route_shows_its_timed_distance_and_path(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let parked = Pilot {
+        callsign: "LOST2".into(),
+        latitude: 40.2,
+        longitude: -72.5,
+        altitude: 0,
+        groundspeed: 0,
+        heading: 250,
+        flight_plan: Some(FlightPlan {
+            departure: "KZZZ".into(),
+            arrival: "KDCA".into(),
+            route: "DCT".into(),
+            aircraft_short: "B738".into(),
+            altitude: "30000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    state.feed.write().await.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+        pilots: vec![parked],
+        ..Default::default()
+    })));
+    let id = corridor_fca(&pool).await;
+    let (status, board) = send_json(
+        &state,
+        Method::GET,
+        &format!("/api/v1/flow/fcas/{id}/traffic"),
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{board}");
+    let row = board
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["callsign"] == "LOST2")
+        .unwrap_or_else(|| panic!("the board meters it: {board}"));
+    assert_eq!(row["status"], "ground", "{row}");
+    let raw = crate::feed::flow::gc_dist(
+        40.2,
+        -72.5,
+        row["cross_lat"].as_f64().unwrap(),
+        row["cross_lon"].as_f64().unwrap(),
+    );
+    assert!(
+        raw > 20.0,
+        "positive control: padding moves it by whole miles: {raw}"
+    );
+    assert_eq!(
+        row["distance_nm"],
+        (raw * predict::GROUND_ROUTE_FACTOR).round() as i64,
+        "the padded distance the ETA is timed over, not the raw {raw}"
+    );
+
+    let (status, route) =
+        send_json(&state, Method::GET, "/api/v1/flow/aircraft/LOST2/route", "").await;
+    assert_eq!(status, 200, "{route}");
+    assert_eq!(
+        route["points"],
+        json!([[40.2, -72.5], [38.85, -77.04]]),
+        "the great circle to the destination: {route}"
+    );
+}

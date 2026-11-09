@@ -5341,7 +5341,8 @@ export interface components {
             dep: string;
             /**
              * Format: int64
-             * @description Distance along the (remaining) route to the crossing, nm.
+             * @description Distance along the (remaining) route to the crossing, nm, as the ETA is timed: a ground
+             *     flight whose route does not resolve carries the 1.12 padding (#813).
              */
             distance_nm: number;
             /**
