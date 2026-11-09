@@ -25,7 +25,11 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   In airport flow, an issued CFR's `FlowFlight.sta` and `delay_min` now go through the same slot
   check as every other arrival and are never before its ETA, so a CFR the flight can no longer make
   shows its ETA and a CFR whose slot is taken shows the delay. (#817)
-
+- **Documented: a description on every response, and `null` last in nullable references** (#888).
+  The OpenAPI document at `/docs/api/v1/openapi.json` is now built with utoipa 6. Each response that
+  had an empty `description` carries its HTTP reason phrase (`OK`, `Unauthorized`, `Not Found`), as
+  OpenAPI 3.1 requires, and a nullable reference lists the reference before `{"type": "null"}` in its
+  `oneOf`. No request, response body or status code changes, so a caller needs to do nothing.
 - **Changed:** `GET /api/v1/flow/data-status` (and the `POST /api/v1/flow/data-refresh` answer, which
   is the same `DataStatus`) gains `winds_source` (`rap` or `none`) and `winds_valid_at` (the time the
   RAP field is valid for; null in still air), and drops `winds_stations`: winds now come from NOAA
