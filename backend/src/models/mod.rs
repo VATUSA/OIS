@@ -2660,10 +2660,10 @@ pub struct FcaFlight {
     pub late_sec: i64,
     /// A released crossing that sits inside another crossing's required gap (#817).
     pub slot_conflict: bool,
-    /// An airborne, unreleased flight inside the FCA's freeze horizon. Its STA is held from the
-    /// first read that saw it there; `cross_time` keeps that STA while the ETA moves, unless the
-    /// flight runs late or a crossing placed ahead of it (a release, or the manual order) needs the
-    /// gap (#817).
+    /// An airborne, unreleased flight inside the FCA's freeze horizon. A background pass, every
+    /// 15 s, stores its STA from the first pass that saw it there; from then `cross_time` keeps
+    /// that STA while the ETA moves, unless the flight runs late or a crossing placed ahead of it
+    /// (a release, or the manual order) needs the gap (#817).
     pub sta_frozen: bool,
     pub groundspeed: i64,
     pub altitude: i64,
