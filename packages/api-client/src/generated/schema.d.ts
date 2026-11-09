@@ -5394,10 +5394,10 @@ export interface components {
             /** @description A released crossing that sits inside another crossing's required gap (#817). */
             slot_conflict: boolean;
             /**
-             * @description An airborne, unreleased flight inside the FCA's freeze horizon. Its STA is held from the
-             *     first read that saw it there; `cross_time` keeps that STA while the ETA moves, unless the
-             *     flight runs late or a crossing placed ahead of it (a release, or the manual order) needs the
-             *     gap (#817).
+             * @description An airborne, unreleased flight inside the FCA's freeze horizon. A background pass, every
+             *     15 s, stores its STA from the first pass that saw it there; from then `cross_time` keeps
+             *     that STA while the ETA moves, unless the flight runs late or a crossing placed ahead of it
+             *     (a release, or the manual order) needs the gap (#817).
              */
             sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
