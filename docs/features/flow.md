@@ -410,7 +410,7 @@ the same functions against a reconstructed snapshot and the winds at that instan
 Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
 groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), floored at 120 kt as FCA
 metering floors its crossing speed. A flight already inside 40 nm reads its own descent schedule
-40 nm out (its type's profile, filed cruise altitude and speed, the wind where it is now), not
+40 nm out (its type's profile, filed cruise altitude and speed, the wind along its remaining route), not
 its speed where it is now. Airport-flow MIT is set per
 arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is no
 fix to read a speed at. When a flight would land ahead of a slot already assigned on its gate, the

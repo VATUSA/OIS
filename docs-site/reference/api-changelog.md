@@ -14,6 +14,18 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: one trajectory per flight behind every time** (#813). `GET /api/v1/tmu/flow/{icao}`,
+  `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/departures/{dep}`, `GET /api/v1/flow/fcas/{id}/traffic`,
+  `GET /api/v1/flow/counts`, `GET /api/v1/flow/idst`, `GET /api/v1/flow/traffic/projected`,
+  `GET /api/v1/flow/aircraft/{callsign}/route` and the `/api/v1/stats/hist/flow`, `departures` and
+  `runway` replays now time a flight the same way. A flight is `airborne` from 50 kt groundspeed at any altitude (airport flow
+  used above 60 kt and 300 ft). A ground flight whose route does not resolve is timed on the great
+  circle to its destination, padded by 1.12, so it now appears on the FCA routes and projected
+  traffic, which skipped it. On the live routes a ground flight's taxi time comes from its stored
+  departure runway. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
+  step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
+  trailing flight's predicted speed 40 nm out (its descent speed there once it is inside 40 nm), not
+  360 kt. Response shapes are unchanged; a caller needs do nothing.
 - **Documented: a description on every response, and `null` last in nullable references** (#888).
   The OpenAPI document at `/docs/api/v1/openapi.json` is now built with utoipa 6. Each response that
   had an empty `description` carries its HTTP reason phrase (`OK`, `Unauthorized`, `Not Found`), as

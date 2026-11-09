@@ -649,7 +649,7 @@ mod tests {
         // onto the *arrival* end for this reversed KIAD->KJFK route (the same fixture the other
         // tests use, direction swapped), collapsing the route to one point and losing a real future
         // crossing entirely. With the caller now passing the real departure airport's coordinates
-        // (`handlers::flow::prefile_position`), it must still resolve correctly here too.
+        // (as `predict::trajectory` does for a prefile), it must still resolve correctly here too.
         let nav = NavData::default();
         let ap = airports();
         let fca = [[41.0, -75.7], [38.0, -75.7]];

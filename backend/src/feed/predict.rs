@@ -238,8 +238,9 @@ pub struct ArrivalRoute {
 
 /// Resolve the route [`arrival_eta`] times an aircraft along: the filed route via
 /// [`fca::route_path`] (the trimmed remaining route for airborne aircraft, the full dep→arr route
-/// for ground/proposed), else a straight-line great circle `pos → arr_ll`. The same resolution
-/// [`trajectory`] makes, through [`resolve_path`] and [`route_scale`].
+/// for ground/proposed), else a straight-line great circle `pos → arr_ll`, through [`resolve_path`]
+/// and [`route_scale`] as [`trajectory`] resolves it, except that a landed pilot still gets the
+/// great circle here.
 pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> ArrivalRoute {
     let airborne = is_airborne(ac.gs);
     let (path, resolved) = resolve_path(
@@ -653,8 +654,8 @@ impl Trajectory<'_> {
     }
 
     /// Predicted groundspeed (kt) `nm` along-route short of the field. A flight already closer than
-    /// that has no such point ahead of it, so it reads its own descent schedule `nm` out, with the
-    /// wind where it is now (#813).
+    /// that has no such point ahead of it, so it reads its own descent schedule `nm` out, in the wind
+    /// along its remaining route, held at its position beyond it (#813).
     pub fn gs_short_of_field(&self, nm: f64) -> f64 {
         let t = self.timing();
         if nm <= self.route_nm {
@@ -1734,7 +1735,7 @@ mod tests {
     }
 
     /// A local flight (departure = arrival) and a prefile both start at a field without having
-    /// arrived there, so they keep a path, as `next` timed them, and not the 300 nm nominal leg a
+    /// arrived there, so they keep a path, and not the 300 nm nominal leg a
     /// flight with no route at all gets.
     #[test]
     fn a_local_flight_and_a_prefile_have_not_arrived() {
@@ -2124,7 +2125,46 @@ mod tests {
             .gs_short_of_field(40.0);
         assert_eq!(low_near, 400.0);
 
-        // And the wind where it is now: a 40 kt wind over the field moves the speed off still air.
+        // Its own type's profile: a B738 descending at 260/220 KIAS reads that schedule 40 nm out,
+        // and the same profile times its ETA.
+        let b738 = AircraftProfile {
+            desc_ias_hi: 260.0,
+            desc_ias_lo: 220.0,
+            ..AircraftProfile::default()
+        };
+        let typed = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([("B738".to_string(), b738.clone())]),
+        );
+        static STILL: LazyLock<Winds> = LazyLock::new(Winds::default);
+        let inp_typed = Inputs {
+            nav: &nav,
+            airports: &ap,
+            winds: &STILL,
+            profiles: &typed,
+            ground: GroundInputs::unused(),
+        };
+        let p = at(26.4396);
+        let typed_traj = trajectory(&inp_typed, Flight::Pilot(&p), None, now()).unwrap();
+        let typed_near = typed_traj.gs_short_of_field(40.0);
+        let expected = trajectory::descent_ground_speed_at(
+            40.0,
+            0.0,
+            35_000.0,
+            440.0,
+            &b738,
+            &RouteWind::still(),
+        );
+        assert_eq!(typed_near, expected);
+        assert!(typed_near < near - 1.0, "{typed_near} vs {near}");
+        assert!(
+            typed_traj.eta_at_field() > inside.eta_at_field(),
+            "the slower B738 schedule lands later"
+        );
+
+        // And the wind along its remaining route: a uniform 40 kt on the tail of this southbound
+        // flight (`v` 40 in the grid) raises it.
         let windy = Winds::test_grid(
             (24.0, -82.0),
             (5, 4),
@@ -2144,7 +2184,10 @@ mod tests {
         let windy_near = trajectory(&inp, Flight::Pilot(&p), None, now())
             .unwrap()
             .gs_short_of_field(40.0);
-        assert!((windy_near - near).abs() > 1.0, "{windy_near} vs {near}");
+        assert!(
+            windy_near > near + 1.0,
+            "a tailwind: {windy_near} vs {near}"
+        );
     }
 
     /// AC2 filed cruise speed: the filed number, `0` when blank or junk, then the profile cap; an

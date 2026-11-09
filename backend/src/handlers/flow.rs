@@ -4089,8 +4089,9 @@ mod release_spacing_tests {
 }
 
 /// Regression (#355): the FCA metering wiring — not just the primitives. `MeterInput.cross_speed`
-/// must be the descent-aware groundspeed `predict::eta_along_route` predicts **at the crossing
-/// fix**, because `fca::meter` turns it into a frozen time gap (`MIT ÷ cross_speed`) that the
+/// must be the descent-aware groundspeed the flight's `predict::trajectory` predicts **at the
+/// crossing fix** (the same `predict::eta_along_route` gives, which this test compares against),
+/// because `fca::meter` turns it into a frozen time gap (`MIT ÷ cross_speed`) that the
 /// aircraft then flies at its real crossing speed. `predict`'s own tests prove `gs_kt` is
 /// position-dependent and `fca`'s prove `meter` divides by whatever it is handed; only this one
 /// proves `build_candidates` hands it the right number. Both flight states that reach it are
@@ -4461,7 +4462,7 @@ mod mit_cross_speed_wiring_tests {
                 high < sea,
                 "{site}: a 5431 ft field shortens the descent, so the metering crossing must come \
                  earlier than a sea-level one — got {high} vs {sea}. Equal means the elevation \
-                 argument never reached predict::eta_along_route"
+                 argument never reached the trajectory's profile"
             );
         }
     }
@@ -6302,7 +6303,9 @@ mod eta_parity_tests {
     //! #813 AC3: one flight, one trajectory. FCA metering (and IDST, which reads the same
     //! candidates), airport flow and sector demand each read their time off the flight's
     //! `predict::trajectory`, so at any point they agree with it and with each other: airborne, and
-    //! on the ground with an assigned runway and learned taxi samples.
+    //! on the ground with an assigned runway and learned taxi samples. Sector demand projects a ground
+    //! flight only from a released wheels-up, so its ground case is checked against the trajectory
+    //! from that release.
 
     use std::collections::{HashMap, HashSet};
 

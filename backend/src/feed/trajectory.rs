@@ -1550,6 +1550,28 @@ mod tests {
             "{windy}"
         );
         assert!((windy - 341.2).abs() < 0.5, "{windy}");
+
+        // The wind is read at the descent's own altitude 40 nm out (~14,600 ft): 80 kt on the nose
+        // from FL300 up and calm below 20,000 ft leaves it at the still-air speed, while above the
+        // top of descent the cruise leg flies into the full 80 kt (440 - 80).
+        let aloft = RouteWind::new(
+            [0.0, 300.0]
+                .into_iter()
+                .map(|d| WindKnot {
+                    d_nm: d,
+                    levels: vec![
+                        (0.0, 0.0, None),
+                        (20_000.0, 0.0, None),
+                        (30_000.0, 80.0, None),
+                        (45_000.0, 80.0, None),
+                    ],
+                })
+                .collect(),
+        );
+        let low_calm = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &aloft);
+        assert!((low_calm - at_40).abs() < 1e-9, "{low_calm} vs {at_40}");
+        let high_wind = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &aloft);
+        assert_eq!(high_wind, 360.0, "positive control: the wind aloft is live");
     }
 
     // ---- #836: wind and temperature read per segment, per altitude ----------------------------

@@ -137,20 +137,6 @@ pub async fn get(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn list_for_airport(
-    pool: &PgPool,
-    icao: &str,
-) -> Result<Vec<DepartureRunwayAssignment>, ApiError> {
-    sqlx::query_as::<_, DepartureRunwayAssignment>(
-        "select icao, callsign, runway, source, updated_at \
-         from flow.departure_runway_assignment where icao = $1 order by callsign",
-    )
-    .bind(icao)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ApiError::Internal)
-}
-
 /// Every stored assignment, keyed `(icao, callsign)` with `(runway, source)`: the map the live timing
 /// surfaces hand the predictor through `TimingTables::live`, so a ground flight's taxi allowance reads the same runway on the FCA
 /// ladder, IDST, airport flow and the per-fix table (#813). The table holds at most
@@ -286,9 +272,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let all = list_for_airport(&pool, "KJFK").await.unwrap();
+        let all = assignment_map(&pool).await.unwrap();
         assert_eq!(all.len(), 1, "one physical departure, one runway: {all:?}");
-        assert_eq!(all[0].callsign, "SWA3");
+        assert!(all.contains_key(&("KJFK".to_string(), "SWA3".to_string())));
     }
 
     /// Nothing cascades into this table, so the prune is the only thing that removes a row.

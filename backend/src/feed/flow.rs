@@ -2624,11 +2624,12 @@ mod tests {
         );
     }
 
-    /// #813: 10 MIT behind a flight inside 40 nm doing 150 kt is timed at its descent speed 40 nm
-    /// out (363.4 kt, `compute_converts_mit_at_each_flights_speed_forty_miles_out`): 10 / 363.4 h,
-    /// about 99 s, not the 240 s (4.0 min) its current 150 kt would give.
+    /// #813: a flight inside 40 nm doing 150 kt converts the 10 MIT to the flight ahead of it at
+    /// its descent speed 40 nm out, 363.4 kt (as in
+    /// `compute_converts_mit_at_each_flights_speed_forty_miles_out`): 10 / 363.4 h, about 99 s, not
+    /// the 240 s its current 150 kt would give.
     #[test]
-    fn ten_mit_behind_a_flight_inside_forty_miles_is_timed_at_its_descent_speed() {
+    fn the_gap_ahead_of_a_flight_inside_forty_miles_is_timed_at_its_descent_speed() {
         let (data, ap) = far_and_near(150);
         let (nav, winds, profiles) = (
             NavData::default(),
