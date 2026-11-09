@@ -2081,6 +2081,70 @@ mod tests {
         let near = inside.gs_short_of_field(40.0);
         assert!((near - 363.4).abs() < 0.5, "{near}");
         assert!(near > inside.gs_at(0.0), "not the speed where it is now");
+
+        // The descent ends at the arrival field's own elevation: the same flight into a field at
+        // 5,000 ft is lower 40 nm out, so it reads the schedule there.
+        let mut high = airports();
+        high.get_mut("KMIA").unwrap().elevation_ft = 5_000.0;
+        let inp = with_ground(&nav, &high, GroundInputs::unused());
+        let p = at(26.4396);
+        let high_near = trajectory(&inp, Flight::Pilot(&p), None, now())
+            .unwrap()
+            .gs_short_of_field(40.0);
+        let expected = trajectory::descent_ground_speed_at(
+            40.0,
+            5_000.0,
+            35_000.0,
+            440.0,
+            &AircraftProfile::default(),
+            &RouteWind::still(),
+        );
+        assert_eq!(high_near, expected);
+        assert!((high_near - near).abs() > 1.0, "{high_near} vs {near}");
+
+        // It reads the flight's own filed cruise: one filed at 8,000 ft and 400 kt is already
+        // cruising 40 nm out (its descent from 8,000 ft is shorter than that), faster than the
+        // 363.4 kt a descent from FL350 gives there.
+        let low = Pilot {
+            heading: 180,
+            ..pilot(
+                [26.4396, -80.29],
+                3_000,
+                180,
+                FlightPlan {
+                    altitude: "8000".into(),
+                    cruise_tas: "400".into(),
+                    ..plan("KJFK", "KMIA", "")
+                },
+            )
+        };
+        let inp = with_ground(&nav, &ap, GroundInputs::unused());
+        let low_near = trajectory(&inp, Flight::Pilot(&low), None, now())
+            .unwrap()
+            .gs_short_of_field(40.0);
+        assert_eq!(low_near, 400.0);
+
+        // And the wind where it is now: a 40 kt wind over the field moves the speed off still air.
+        let windy = Winds::test_grid(
+            (24.0, -82.0),
+            (5, 4),
+            &[0.0, 10_000.0, 20_000.0, 40_000.0],
+            now(),
+            |_, _, _| (0, 40, super::super::winds::GRID_MISSING),
+        );
+        let profiles = ProfileTable::default();
+        let inp = Inputs {
+            nav: &nav,
+            airports: &ap,
+            winds: &windy,
+            profiles: &profiles,
+            ground: GroundInputs::unused(),
+        };
+        let p = at(26.4396);
+        let windy_near = trajectory(&inp, Flight::Pilot(&p), None, now())
+            .unwrap()
+            .gs_short_of_field(40.0);
+        assert!((windy_near - near).abs() > 1.0, "{windy_near} vs {near}");
     }
 
     /// AC2 filed cruise speed: the filed number, `0` when blank or junk, then the profile cap; an
