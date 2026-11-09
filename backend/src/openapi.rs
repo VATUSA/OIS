@@ -615,7 +615,7 @@ impl Modify for CredentialSchemes {
         (name = "service-accounts", description = "Machine client credentials"),
         (name = "api-keys", description = "User-owned API keys (personal access tokens)")
     ),
-    modifiers(&CredentialSchemes, &RateLimited)
+    modifiers(&CredentialSchemes, &RateLimited, &ResponseDescriptions)
 )]
 pub struct ApiDoc;
 
@@ -655,6 +655,50 @@ impl utoipa::Modify for RateLimited {
                     .responses
                     .responses
                     .insert("429".to_string(), response.clone().into());
+            }
+        }
+    }
+}
+
+/// OpenAPI 3.1 requires a `description` on every response object, and utoipa 6 leaves an empty one
+/// out of the JSON. A response declared without one gets its status's reason phrase ("OK",
+/// "Unauthorized"); one that has a description keeps it. A status with no reason phrase stays empty,
+/// and `response_description_tests` fails on it.
+struct ResponseDescriptions;
+
+impl utoipa::Modify for ResponseDescriptions {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::RefOr;
+
+        for item in openapi.paths.paths.values_mut() {
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.options,
+                &mut item.head,
+                &mut item.patch,
+                &mut item.trace,
+                &mut item.query,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for (status, response) in operation.responses.responses.iter_mut() {
+                    let RefOr::T(response) = response else {
+                        continue;
+                    };
+                    if !response.description.is_empty() {
+                        continue;
+                    }
+                    if let Some(reason) = http::StatusCode::from_bytes(status.as_bytes())
+                        .ok()
+                        .and_then(|code| code.canonical_reason())
+                    {
+                        response.description = reason.to_string();
+                    }
+                }
             }
         }
     }
@@ -716,5 +760,82 @@ mod dump_path_tests {
             openapi_dump_path(Some("/work/wt-a/target/ois-openapi.json".into())),
             Path::new("/work/wt-a/target/ois-openapi.json")
         );
+    }
+}
+
+#[cfg(test)]
+mod response_description_tests {
+    use super::{ApiDoc, ResponseDescriptions};
+    use utoipa::openapi::{
+        OpenApiBuilder, PathItem, ResponseBuilder, ResponsesBuilder, path::HttpMethod,
+        path::OperationBuilder, path::PathsBuilder,
+    };
+    use utoipa::{Modify, OpenApi};
+
+    /// Asserts on the JSON that ships, since utoipa 6 drops an empty `description` only when it
+    /// serializes.
+    #[test]
+    fn every_published_response_carries_a_description() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for (method, op) in item.as_object().unwrap() {
+                let Some(responses) = op.get("responses").and_then(|r| r.as_object()) else {
+                    continue;
+                };
+                for (status, response) in responses {
+                    checked += 1;
+                    match response.get("description").and_then(|d| d.as_str()) {
+                        Some(d) if !d.is_empty() => {}
+                        _ => missing.push(format!("{method} {path} {status}")),
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 1000,
+            "only {checked} responses found; the walk is broken"
+        );
+        assert!(
+            missing.is_empty(),
+            "responses with no description: {missing:?}"
+        );
+
+        let catalog = &doc["paths"]["/api/v1/access/catalog"]["get"]["responses"];
+        assert_eq!(catalog["200"]["description"], "OK");
+        assert_eq!(catalog["401"]["description"], "Unauthorized");
+        let limited = catalog["429"]["description"].as_str().unwrap();
+        assert!(
+            limited.starts_with("Rate limit exceeded"),
+            "a declared description must survive: {limited}"
+        );
+    }
+
+    #[test]
+    fn a_status_without_a_reason_phrase_is_left_empty() {
+        let responses = ResponsesBuilder::new()
+            .response("200", ResponseBuilder::new().build())
+            .response("299", ResponseBuilder::new().build())
+            .response(
+                "404",
+                ResponseBuilder::new().description("No such FCA").build(),
+            )
+            .build();
+        let mut doc = OpenApiBuilder::new()
+            .paths(PathsBuilder::new().path(
+                "/x",
+                PathItem::new(
+                    HttpMethod::Get,
+                    OperationBuilder::new().responses(responses).build(),
+                ),
+            ))
+            .build();
+        ResponseDescriptions.modify(&mut doc);
+        let json = serde_json::to_value(&doc).unwrap();
+        let out = &json["paths"]["/x"]["get"]["responses"];
+        assert_eq!(out["200"]["description"], "OK");
+        assert_eq!(out["404"]["description"], "No such FCA");
+        assert!(out["299"].get("description").is_none(), "{out}");
     }
 }

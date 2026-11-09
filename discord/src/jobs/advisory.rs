@@ -61,8 +61,7 @@ fn fenced_chunks(document: &str, limit: usize) -> Vec<String> {
             current.len() + 1 + line.len()
         };
         if !current.is_empty() && added > budget {
-            out.push(current);
-            current = String::new();
+            out.push(std::mem::take(&mut current));
         }
         if !current.is_empty() {
             current.push('\n');
