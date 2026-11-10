@@ -170,3 +170,127 @@ mod route_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod loop_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ois_client::OisClient;
+    use serenity::all::Http;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    use super::job_loop;
+
+    const LEASE: &str = "POST /api/v1/integration/jobs/lease";
+    const POLL: Duration = Duration::from_millis(100);
+    /// D72's 15 s request timeout, plus the poll, plus one second of slack: a hung call must have
+    /// failed and the loop leased again inside this. A literal, so a changed constant fails here too.
+    const NEXT_LEASE_WITHIN: Duration = Duration::from_millis(16_100);
+
+    /// Reads one request head and returns its request line.
+    async fn request_line(stream: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let head = String::from_utf8_lossy(&head);
+        head.lines().next().unwrap_or_default().to_string()
+    }
+
+    async fn reply_json(stream: &mut TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    /// A fake backend. It reports every request line on the channel. The first lease is answered
+    /// with `first_lease` or, when that is `None`, held open with no reply; every ack is held open;
+    /// every later lease is answered with an empty batch.
+    async fn fake_backend(
+        first_lease: Option<&'static str>,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            let mut leases = 0;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let line = request_line(&mut stream).await;
+                let is_lease = line.starts_with(LEASE);
+                // A send fails only once the test has stopped listening.
+                let _ = tx.send(line);
+                if is_lease {
+                    leases += 1;
+                    match (leases, first_lease) {
+                        (1, None) => held.push(stream),
+                        (1, Some(body)) => reply_json(&mut stream, body).await,
+                        _ => reply_json(&mut stream, "[]").await,
+                    }
+                } else {
+                    held.push(stream);
+                }
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// AC 4(a) (#930): the first lease's connection never answers. The loop must give up on it and
+    /// lease again. The clock is real, for the reason in `ois-client`'s timeout tests.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_a_lease_hangs() {
+        let (base, mut requests) = fake_backend(None).await;
+        let api = OisClient::new(base, "t").unwrap();
+        let worker = tokio::spawn(job_loop(api, Arc::new(Http::new("")), POLL));
+
+        let first = tokio::time::timeout(Duration::from_secs(5), requests.recv()).await;
+        assert!(
+            first.ok().flatten().is_some_and(|l| l.starts_with(LEASE)),
+            "the loop never leased"
+        );
+        let second = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        let second = second.expect("no second lease: the loop is stuck on the hung one");
+        assert!(second.is_some_and(|l| l.starts_with(LEASE)));
+    }
+
+    /// AC 4(b) (#930): the lease hands out one job of an unknown type, which `perform_job` fails
+    /// without touching Discord, so the loop nacks it. That ack's connection never answers. The loop
+    /// must give up on the ack and lease again.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_an_ack_hangs() {
+        let one_job = r#"[{"id":"j1","job_type":"no_such_type","payload":{},"subject_type":null,"subject_id":null,"attempt_count":1}]"#;
+        let (base, mut requests) = fake_backend(Some(one_job)).await;
+        let api = OisClient::new(base, "t").unwrap();
+        let worker = tokio::spawn(job_loop(api, Arc::new(Http::new("")), POLL));
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_secs(5), requests.recv()).await {
+                Ok(Some(line)) => seen.push(line),
+                _ => break,
+            }
+        }
+        let next = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        assert_eq!(seen.len(), 2, "expected a lease then an ack, got {seen:?}");
+        assert!(seen[0].starts_with(LEASE), "{seen:?}");
+        assert!(
+            seen[1].starts_with("POST /api/v1/integration/jobs/j1/ack"),
+            "the job was not acked, so the hung ack was never reached: {seen:?}"
+        );
+        let next = next.expect("no lease after the hung ack: the loop is stuck on it");
+        assert!(next.is_some_and(|l| l.starts_with(LEASE)));
+    }
+}
