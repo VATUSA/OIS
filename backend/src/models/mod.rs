@@ -2763,9 +2763,9 @@ pub struct IdstFlight {
     /// Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
     /// would meet `cross_time`. The EDCT a release stores can be earlier or later than the
     /// proposal: RDY spaces the flight only against airborne and already-released crossings (in
-    /// manual mode it takes its ladder slot), plus a 15 s margin, and SET uses the time the
-    /// controller enters. Null only when an unreleased flight has no metered crossing time or no
-    /// ETA.
+    /// manual mode it takes its ladder slot), plus a 15 s margin, and SET takes the first slot at
+    /// or after the controller's ready time plus the airborne flight time, with the same margin.
+    /// Null only when an unreleased flight has no metered crossing time or no ETA.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
     /// The display name of the service account or API key that issued this release, or null when a
