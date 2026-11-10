@@ -239,10 +239,15 @@ fi
 #
 # .githooks/ (pre-commit, commit-msg, pre-push) runs only once core.hooksPath points at
 # it, and nothing else notices when it does not: commits then skip the attribution and
-# migration checks and pushes skip clippy and the suites.
+# migration checks and pushes skip clippy and the suites. An absolute path to the primary
+# checkout's .githooks passes too: every checkout then runs the primary's copy of the hooks,
+# which still judge the checkout being committed or pushed.
 HOOKS_PATH="$(git config core.hooksPath 2>/dev/null)"
+PRIMARY_HOOKS="$(cd "$GIT_COMMON_PATH/../.githooks" 2>/dev/null && pwd -P)"
 if [[ "$HOOKS_PATH" == ".githooks" ]]; then
     check_pass "git hooks installed (core.hooksPath=.githooks)"
+elif [[ "$HOOKS_PATH" == /* && -n "$PRIMARY_HOOKS" && "$(cd "$HOOKS_PATH" 2>/dev/null && pwd -P)" == "$PRIMARY_HOOKS" ]]; then
+    check_pass "git hooks installed (core.hooksPath=${HOOKS_PATH}, the primary checkout's .githooks)"
 else
     check_fail "git hooks not installed (core.hooksPath is '${HOOKS_PATH}', not .githooks): run just setup once per clone"
 fi

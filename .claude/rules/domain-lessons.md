@@ -108,6 +108,18 @@ Proof: commit 31cac565; `a_manually_excluded_callsign_is_dropped_from_live_traff
 `…_from_projected_traffic` (`handlers/flow.rs`),
 `a_facility_grant_cannot_exclude_through_another_facilitys_fca` (`handlers/flight_exclusions.rs`).
 
+## A flight plan is not an aircraft
+
+FCA metering took candidates from connected pilots and from prefiles with no cross-check. A prefile
+that lingered after its pilot connected listed and metered the aircraft twice, and a prefile with no
+pilot took a sequence slot: on a 10/hr FCA, one out of KEWR held a departure parked at KJFK for
+285 s (#834). An FCA candidate is a connected pilot with a flight plan; `build_candidates` and
+`fca_counts` read no prefiles. Proof: commit 3664d664;
+`a_pilot_and_its_own_prefile_yield_one_ground_flight`, `a_prefile_alone_is_not_a_candidate` and
+`a_ground_pilot_is_no_longer_delayed_behind_an_earlier_prefile` (`handlers/flow.rs`),
+`flow_counts_counts_a_connected_pilot_once_and_no_prefile`
+(`handlers/flow_prefile_candidate_tests.rs`).
+
 ## The coarse permission is not the facility's permission
 
 Release and CFR writes (#626) and the four FCA writes (#636) checked only `RequirePermission`, so any
