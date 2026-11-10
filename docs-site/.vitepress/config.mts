@@ -2,6 +2,8 @@ import {readFileSync} from "node:fs";
 
 import {defineConfig} from "vitepress";
 
+import {navVersionText, parseStage} from "../../web/src/lib/stage";
+
 // Full version shown in the nav, e.g. "1.0.1-a1b2c3d". CI passes the finished string as OIS_VERSION;
 // locally we read the repo-root VERSION file (the single programmer-controlled base).
 function version(): string {
@@ -11,6 +13,12 @@ function version(): string {
   } catch {
     return "dev";
   }
+}
+
+// Release stage from the repo-root STAGE file (#841). No fallback: a missing, blank or unknown value
+// fails the docs build.
+function releaseStage() {
+  return parseStage(readFileSync(new URL("../../STAGE", import.meta.url), "utf8"));
 }
 
 // https://vitepress.dev/reference/site-config
@@ -30,7 +38,7 @@ export default defineConfig({
       { text: "Guide", link: "/introduction/what-is-ois" },
       { text: "Traffic Management", link: "/tmu/fcas" },
       { text: "Pilots", link: "/advisories/board" },
-      { text: `v${version()}`, link: "https://github.com/VATUSA/OIS" },
+      { text: navVersionText(version(), releaseStage()), link: "https://github.com/VATUSA/OIS" },
     ],
     sidebar: [
       {

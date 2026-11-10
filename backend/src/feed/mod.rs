@@ -20,6 +20,7 @@ mod nav_dns;
 pub mod nav_source;
 pub mod neighbors;
 pub mod predict;
+pub mod rap;
 pub mod runway;
 pub mod runway_db;
 pub mod sector_consolidations;

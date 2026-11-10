@@ -1,5 +1,5 @@
 import {rotateOnLaunch} from "@/lib/desktop-auth";
-import {forgetOnClose, restoreWindows} from "@/lib/popout";
+import {forgetOnClose, restoreWindows, stageMainWindowTitle} from "@/lib/popout";
 
 /**
  * Launch-time desktop work, in the one order that is safe (#346, #350).
@@ -11,8 +11,10 @@ import {forgetOnClose, restoreWindows} from "@/lib/popout";
  *
  * Restoring is not awaited: a window failing to reopen must not hold up first paint. Both steps
  * gate themselves to the desktop app's main window; `forgetOnClose` runs in route windows only.
+ * Titling the main window with the release stage (#841) depends on neither, so it starts first.
  */
 export async function launchDesktop(): Promise<void> {
+  void stageMainWindowTitle();
   void forgetOnClose();
   await rotateOnLaunch();
   void restoreWindows();

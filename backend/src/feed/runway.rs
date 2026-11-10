@@ -596,4 +596,81 @@ mod tests {
         assert_eq!(demand[0].levels[0], "red");
         assert_eq!(demand[0].levels[1], "green");
     }
+
+    // ---- #836: runway ETE reads the per-segment wind (AC5) ------------------------------------
+
+    // AC5: the runway ETE caller.
+    #[test]
+    fn collect_arrivals_times_an_arrival_in_the_route_wind() {
+        use crate::feed::airports::Airport;
+        use crate::feed::vatsim::{FlightPlan, Pilot};
+        let ap: AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KDCA".to_string(), Airport::at(38.8521, -77.0377)),
+        ]);
+        let plan = FlightPlan {
+            departure: "KJFK".into(),
+            arrival: "KDCA".into(),
+            route: "RBV WHITE SIE".into(),
+            altitude: "35000".into(),
+            cruise_tas: "440".into(),
+            ..Default::default()
+        };
+        let data = VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.2,
+                longitude: -74.0,
+                altitude: 24_000,
+                groundspeed: 400,
+                heading: 220,
+                flight_plan: Some(plan),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let nav = NavData::load();
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let eta = |w: &Winds| {
+            collect_arrivals(
+                "KDCA",
+                &data,
+                &ap,
+                &nav,
+                w,
+                &trajectory::ProfileTable::default(),
+                now,
+                600,
+            )
+            .into_iter()
+            .find(|a| a.cs == "AAL1")
+            .expect("AAL1 is inbound")
+            .eta_ms
+        };
+        // `Winds::test_shear()`: 80 kt on the nose above 30,000 ft east of 75.5°W, calm elsewhere.
+        let shear = Winds::test_shear();
+        let direct = crate::feed::predict::arrival_eta(
+            &nav,
+            &ap,
+            &shear,
+            &trajectory::AircraftProfile::default(),
+            &crate::feed::predict::ArrivalInput {
+                dep: "KJFK",
+                arr: "KDCA",
+                route: "RBV WHITE SIE",
+                pos: [40.2, -74.0],
+                alt_ft: 24_000.0,
+                gs: 400,
+                hdg: 220,
+                arr_ll: [38.8521, -77.0377],
+                cruise_ft: 35_000.0,
+                cruise_tas: 440.0,
+            },
+            0.0,
+            now,
+        );
+        assert_eq!(eta(&shear), direct.eta.timestamp_millis());
+        let delay_ms = eta(&shear) - eta(&Winds::default());
+        assert!(delay_ms > 30_000, "{delay_ms} ms");
+    }
 }

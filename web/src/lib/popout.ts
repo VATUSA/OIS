@@ -1,6 +1,8 @@
+import {BUILD_STAGE} from "@/lib/build-stage";
 import {safeUnlisten} from "@/lib/desktop-events";
 import {can, isMainWindow} from "@/lib/platform";
 import {clampToMonitors, toLogical, type Monitor, type Rect} from "@/lib/popout-geometry";
+import {stagedTitle} from "@/lib/stage";
 import {forgetWindow, rememberWindow, rememberedWindows} from "@/lib/window-registry";
 
 /**
@@ -202,7 +204,9 @@ async function openWindow(kind: WindowKind, spec: PopoutSpec): Promise<boolean> 
     const separator = spec.route.includes("?") ? "&" : "?";
     const win = new WebviewWindow(label, {
       url: kind.embed ? `${spec.route}${separator}embed=1` : spec.route,
-      title: spec.title,
+      // The release stage goes in here, at creation, and never into `spec`: the remembered title stays
+      // raw, so a restored window is staged once, by the build that restores it (#841).
+      title: stagedTitle(spec.title, BUILD_STAGE),
       width: size.width,
       height: size.height,
       ...(restored ? {x: restored.x, y: restored.y} : {}),
@@ -316,6 +320,21 @@ export async function forgetOnClose(): Promise<void> {
     });
   } catch {
     // Not remembering a close means the window comes back next launch; closable either way.
+  }
+}
+
+/**
+ * Puts the release stage in the main window's title, "OIS (Alpha)" (#841). `tauri.conf.json` can
+ * only hold the static "OIS", and every other window is titled by `openWindow` when it is created.
+ * Stable leaves the title as configured.
+ */
+export async function stageMainWindowTitle(): Promise<void> {
+  if (BUILD_STAGE === "stable" || !(await isMainWindow())) return;
+  try {
+    const {getCurrentWindow} = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setTitle(stagedTitle("OIS", BUILD_STAGE));
+  } catch (error) {
+    console.warn("OIS: could not put the release stage in the main window title", error);
   }
 }
 

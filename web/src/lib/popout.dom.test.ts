@@ -1,10 +1,32 @@
 // @vitest-environment jsdom
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 
-import {forgetOnClose, openPopout, openRouteWindow, popoutLabel, popoutSpecs, restoreWindows, routeWindowLabel} from "./popout";
+import {
+  forgetOnClose,
+  openPopout,
+  openRouteWindow,
+  popoutLabel,
+  popoutSpecs,
+  restoreWindows,
+  routeWindowLabel,
+  stageMainWindowTitle,
+} from "./popout";
 import {rememberedWindows} from "./window-registry";
 
 const WebviewWindow = vi.fn();
+
+/**
+ * The build's release stage (#841). The real one comes from the repo-root STAGE file through the Vite
+ * define, so a test relying on it would change meaning when STAGE does. "stable" by default, which
+ * is also the proof that every older test here still sees today's raw titles.
+ */
+const build = vi.hoisted(() => ({stage: "stable" as "alpha" | "beta" | "rc" | "stable"}));
+vi.mock("@/lib/build-stage", () => ({
+  get BUILD_STAGE() {
+    return build.stage;
+  },
+}));
+const setTitle = vi.fn();
 const getByLabel = vi.fn();
 const availableMonitors = vi.fn();
 
@@ -61,6 +83,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   availableMonitors: () => availableMonitors(),
   getCurrentWindow: () => ({
     label: currentLabel.value,
+    setTitle: (title: string) => setTitle(title),
     onCloseRequested: (cb: () => void) => {
       ownClose.handler = cb;
       return Promise.resolve(() => undefined);
@@ -90,6 +113,8 @@ function installStorage() {
 const SPEC = {id: "fca-abc", title: "ATL · metering", route: "/popout/fca/abc"};
 
 beforeEach(() => {
+  build.stage = "stable";
+  setTitle.mockReset().mockResolvedValue(undefined);
   WebviewWindow.mockReset();
   getByLabel.mockReset().mockResolvedValue(null);
   availableMonitors.mockReset().mockResolvedValue([
@@ -112,6 +137,7 @@ beforeEach(() => {
 afterEach(() => {
   delete window.__TAURI_INTERNALS__;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("popoutLabel", () => {
@@ -482,5 +508,113 @@ describe("remembering which route windows are open (VATUSA/OIS#350 review)", () 
       await forgetOnClose();
     }
     expect(ownClose.handler).toBeUndefined();
+  });
+});
+
+describe("staged window titles (#841)", () => {
+  const TMU = {id: "/ops/tmu", title: "OIS · TMU board", route: "/ops/tmu"};
+
+  it('opens the route window "OIS · TMU board" with WebviewWindow title "OIS (Alpha) · TMU board"', async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+
+    await openRouteWindow(TMU);
+
+    expect(WebviewWindow).toHaveBeenCalledWith(
+      routeWindowLabel("/ops/tmu"),
+      expect.objectContaining({title: "OIS (Alpha) · TMU board"}),
+    );
+  });
+
+  it('opens the "ATL · metering" panel popout with WebviewWindow title "ATL · metering (Alpha)"', async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+
+    await openPopout(SPEC);
+
+    expect(WebviewWindow).toHaveBeenCalledWith(popoutLabel("fca-abc"), expect.objectContaining({title: "ATL · metering (Alpha)"}));
+  });
+
+  it('remembers the route window under its raw title "OIS · TMU board"', async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+
+    await openRouteWindow(TMU);
+
+    expect(rememberedWindows()).toEqual([TMU]);
+  });
+
+  it('restores a remembered "OIS · IDST" window titled "OIS (Beta) · IDST" by the build that restores it, staged once', async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+    await openRouteWindow({id: "/ops/idst", title: "OIS · IDST", route: "/ops/idst"});
+    WebviewWindow.mockReset();
+    build.stage = "beta";
+
+    await expect(restoreWindows()).resolves.toBe(1);
+
+    expect(WebviewWindow).toHaveBeenCalledWith(routeWindowLabel("/ops/idst"), expect.objectContaining({title: "OIS (Beta) · IDST"}));
+  });
+
+  it("opens route and panel windows with their raw titles when the stage is stable", async () => {
+    pretendDesktop();
+    build.stage = "stable";
+
+    await openRouteWindow(TMU);
+    await openPopout(SPEC);
+
+    expect(WebviewWindow).toHaveBeenNthCalledWith(1, routeWindowLabel("/ops/tmu"), expect.objectContaining({title: "OIS · TMU board"}));
+    expect(WebviewWindow).toHaveBeenNthCalledWith(2, popoutLabel("fca-abc"), expect.objectContaining({title: "ATL · metering"}));
+  });
+});
+
+describe("main window title (#841)", () => {
+  it('sets the main window title to "OIS (Alpha)" on desktop', async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+    currentLabel.value = "main";
+
+    await stageMainWindowTitle();
+
+    expect(setTitle).toHaveBeenCalledExactlyOnceWith("OIS (Alpha)");
+  });
+
+  it("never reaches the Tauri window API on the web build", async () => {
+    build.stage = "alpha";
+
+    await stageMainWindowTitle();
+
+    expect(setTitle).not.toHaveBeenCalled();
+  });
+
+  it("does not retitle a route window, whose title was staged when it was created", async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+    currentLabel.value = "window--ops-tmu";
+
+    await stageMainWindowTitle();
+
+    expect(setTitle).not.toHaveBeenCalled();
+  });
+
+  it('does not call setTitle when the stage is stable, leaving "OIS" from tauri.conf.json', async () => {
+    pretendDesktop();
+    build.stage = "stable";
+    currentLabel.value = "main";
+
+    await stageMainWindowTitle();
+
+    expect(setTitle).not.toHaveBeenCalled();
+  });
+
+  it("logs, rather than throws, when the window refuses the title", async () => {
+    pretendDesktop();
+    build.stage = "alpha";
+    setTitle.mockRejectedValue(new Error("not allowed"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await expect(stageMainWindowTitle()).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith("OIS: could not put the release stage in the main window title", expect.any(Error));
   });
 });

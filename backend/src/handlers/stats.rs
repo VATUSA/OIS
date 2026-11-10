@@ -415,10 +415,10 @@ pub async fn save_capture(
     if to <= from {
         return Err(ApiError::BadRequest);
     }
-    if let Some(event_id) = payload.event_id {
-        if events_repo::get(p, event_id).await?.is_none() {
-            return Err(ApiError::NotFound);
-        }
+    if let Some(event_id) = payload.event_id
+        && events_repo::get(p, event_id).await?.is_none()
+    {
+        return Err(ApiError::NotFound);
     }
     if !stats_repo::has_positions_in(p, from, to).await? {
         // Nothing left to keep — the window has already aged past what compaction retains.

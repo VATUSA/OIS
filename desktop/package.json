@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -8,6 +8,6 @@
     "tauri": "tauri"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "^2.12.4"
   }
 }

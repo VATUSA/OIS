@@ -264,10 +264,8 @@ impl Ctx<'_> {
         let cruise_ft = trajectory::parse_alt_ft(&fp.altitude);
         let cruise_tas =
             trajectory::capped_cruise_tas(feed_flow::parse_tas(&fp.cruise_tas), cruise_ft, profile);
-        // An airborne flight's wind is taken at its altitude, as `project_traffic` does; one still on
-        // the ground spends almost all of its time at cruise, so it is taken there.
-        let wind_alt = if airborne { cur_alt_ft } else { cruise_ft };
-        let headwind = self.winds.route_headwind(path, wind_alt);
+        // The profile reads the wind at each point's own altitude along the route (#836).
+        let wind = self.winds.along(path, route_len);
         let vp = predict::profile_from_here(
             airborne,
             route_len,
@@ -278,7 +276,7 @@ impl Ctx<'_> {
             self.airports,
             &fp.arrival,
             profile,
-            headwind,
+            wind,
         );
 
         let first_ms = self.now_ms.max(start_ms);
@@ -975,5 +973,163 @@ mod tests {
             "minutes resolved: {skipping} skipping, {every} walking every one"
         );
         eprintln!("fixes kept {kept}; minutes resolved {skipping} skipping, {every} walking");
+    }
+
+    // ---- #836: sector occupancy reads the per-segment wind (AC5) ------------------------------
+    //
+    // `Winds::test_shear()`: 80 kt from 225° (on the nose of the SW-bound KJFK→KDCA course) at and
+    // above 30,000 ft east of 75.5°W, calm elsewhere.
+
+    use crate::feed::trajectory::{AircraftProfile, RouteWind};
+
+    fn project_in(data: &VatsimData, wheels_up: &[(&str, i64)], winds: &Winds) -> Vec<OwnedTrack> {
+        let wheels_up: HashMap<String, i64> =
+            wheels_up.iter().map(|(c, t)| (c.to_string(), *t)).collect();
+        project_tracks(
+            data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            winds,
+            &wheels_up,
+            &HashSet::new(),
+            now(),
+            None,
+        )
+    }
+
+    /// The fix `minutes` after now.
+    fn fix_at(tracks: &[OwnedTrack], minutes: i64) -> Fix {
+        let t = now() + minutes * MINUTE_MS;
+        tracks[0]
+            .fixes
+            .iter()
+            .find(|f| f.t_ms == t)
+            .cloned()
+            .unwrap_or_else(|| panic!("no fix at +{minutes} min"))
+    }
+
+    fn apart_nm(a: &Fix, b: &Fix) -> f64 {
+        crate::feed::flow::gc_dist(a.lat, a.lon, b.lat, b.lon)
+    }
+
+    // AC5: an airborne flight's minute-by-minute fixes move with the wind along its route.
+    #[test]
+    fn an_airborne_track_advances_through_the_route_wind() {
+        let data = pilots(vec![pilot("AAL1", 400)]);
+        let shear = Winds::test_shear();
+        let windy = fix_at(&project_in(&data, &[], &shear), 15);
+        let still = fix_at(&project_in(&data, &[], &Winds::default()), 15);
+        assert!(
+            apart_nm(&windy, &still) > 4.0,
+            "{} nm",
+            apart_nm(&windy, &still)
+        );
+        // The same position the shared profile gives over the same route and wind.
+        let path = fca::route_path(
+            &NavData::load(),
+            &airports(),
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            40.2,
+            -74.0,
+            220,
+            400,
+        )
+        .unwrap();
+        let len = predict::path_len_nm(&path);
+        let vp = predict::profile_from_here(
+            true,
+            len,
+            24_000.0,
+            400.0,
+            35_000.0,
+            440.0,
+            &airports(),
+            "KDCA",
+            &AircraftProfile::default(),
+            shear.along(&path, len),
+        );
+        let (pos, _) = fca::point_and_heading_at(&path, len - vp.distance_after(len, 900.0));
+        let want = Fix {
+            lat: pos[0],
+            lon: pos[1],
+            ..windy
+        };
+        assert!(apart_nm(&windy, &want) < 0.01);
+    }
+
+    // AC5: a proposed departure (locked wheels-up) is walked through the same wind.
+    #[test]
+    fn a_proposed_departures_track_advances_through_the_route_wind() {
+        let data = VatsimData {
+            prefiles: vec![prefile("UAL3")],
+            ..Default::default()
+        };
+        let up = [("UAL3", now())];
+        let shear = Winds::test_shear();
+        let (windy, still) = (
+            project_in(&data, &up, &shear),
+            project_in(&data, &up, &Winds::default()),
+        );
+        let most = (10..30)
+            .map(|m| apart_nm(&fix_at(&windy, m), &fix_at(&still, m)))
+            .fold(0.0, f64::max);
+        assert!(most > 2.0, "the tracks part by at most {most} nm");
+        // Early in the climb it is below the sheared levels and calm, so it flies as still air.
+        let early = apart_nm(&fix_at(&windy, 5), &fix_at(&still, 5));
+        assert!(early < 0.1, "{early} nm at +5 min");
+    }
+
+    // AC3: the old code took one headwind at the airborne flight's current altitude for the whole
+    // route.
+    #[test]
+    fn an_airborne_track_is_not_timed_on_one_wind_at_its_altitude() {
+        let data = pilots(vec![pilot("AAL1", 400)]);
+        let shear = Winds::test_shear();
+        // The shear field's headwind at the pilot's position and FL240, as one value.
+        let one = shear.point_headwind(40.2, -74.0, 220.0, 24_000.0).unwrap();
+        assert!(
+            one > 30.0,
+            "the old model's value is a real headwind: {one}"
+        );
+        let path = fca::route_path(
+            &NavData::load(),
+            &airports(),
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            40.2,
+            -74.0,
+            220,
+            400,
+        )
+        .unwrap();
+        let len = predict::path_len_nm(&path);
+        let old = predict::profile_from_here(
+            true,
+            len,
+            24_000.0,
+            400.0,
+            35_000.0,
+            440.0,
+            &airports(),
+            "KDCA",
+            &AircraftProfile::default(),
+            RouteWind::uniform(one),
+        );
+        let tracks = project_in(&data, &[], &shear);
+        let most = (5..30)
+            .map(|m| {
+                let (old_pos, _) = fca::point_and_heading_at(
+                    &path,
+                    len - old.distance_after(len, m as f64 * 60.0),
+                );
+                let windy = fix_at(&tracks, m);
+                crate::feed::flow::gc_dist(windy.lat, windy.lon, old_pos[0], old_pos[1])
+            })
+            .fold(0.0, f64::max);
+        assert!(most > 2.0, "the tracks part by at most {most} nm");
     }
 }

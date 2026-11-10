@@ -32,8 +32,10 @@ relaxed so the whole network is recorded (see [Capture windows](#capture-windows
 - `stats.controller_session` — ATC/ATIS sessions (no positions — they don't move).
 - `stats.snapshot` — per-tick network totals (read-time hourly roll-up; no continuous aggregate).
 - `stats.capture` — a saved/open time window (below).
-- `stats.winds` (0042) — one serialized winds-aloft snapshot per hourly refresh, `jsonb` (Postgres
-  TOASTs it) — so historical ETAs are computed against the winds that actually applied.
+- `stats.winds` (0042) — one serialized wind field per hourly refresh, `jsonb` (Postgres TOASTs
+  it), so historical ETAs are computed against the winds that actually applied. A RAP field is keyed
+  on its valid time, so replicas loading the same cycle write one row. Snapshots from before RAP
+  (FB stations only) still load and replay with their station winds (#836).
 - `stats.flight_plan` (0044) — flight-plan **revision history**, for temporally-faithful replay.
 
 ## Data compression
@@ -60,9 +62,12 @@ layers, each trading fidelity for size only where it doesn't hurt:
    (a narrow, one-`STATS_COMPACTION_INTERVAL`-wide slice, not the whole historical band — see the
    doc comment on `COMPACTION_TIERS`) — the incremental steps compound to the cumulative densities
    above.
-5. **Prune horizon (winds & TM history only).** Winds snapshots and published TM history
-   (TMIs/GDPs/ground stops) older than **`STATS_PRUNE_AFTER_DAYS = 14`** days are deleted outright —
-   unrelated to `stats.position`, which is only ever thinned, never dropped.
+5. **Prune horizons (winds & TM history only).** Published TM history (TMIs/GDPs/ground stops)
+   older than **`STATS_PRUNE_AFTER_DAYS = 14`** days and winds snapshots older than
+   **`WINDS_RETAIN_DAYS = 90`** days are deleted outright, unrelated to `stats.position`, which is
+   only ever thinned, never dropped. Winds are kept longer so the aircraft-profile builder
+   ([flow.md](flow.md#measuring-aircraft-profiles-828)) can turn older groundspeeds into TAS; a RAP
+   snapshot is about 222 KB stored, so 90 days of hourly snapshots is about 480 MB.
 6. **Capture guard.** Any row whose `ts` falls inside an **open or saved** `stats.capture` window is
    **exempt from downsampling** — captured events keep full ~15s fidelity indefinitely
    (`CAPTURE_GUARD` in `repos/stats.rs`). A window can be **saved after the fact**, too (see

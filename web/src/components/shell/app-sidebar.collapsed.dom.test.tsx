@@ -53,6 +53,14 @@ vi.mock("@/lib/auth", () => ({
   useSignInPending: () => false,
 }));
 
+// The build's release stage (#841); the real one comes from the repo-root STAGE file.
+const build = vi.hoisted(() => ({stage: "alpha" as "alpha" | "beta" | "rc" | "stable"}));
+vi.mock("@/lib/build-stage", () => ({
+  get BUILD_STAGE() {
+    return build.stage;
+  },
+}));
+
 import {AppSidebar, MobileNavButton} from "./app-sidebar";
 
 declare global {
@@ -75,6 +83,7 @@ afterEach(() => {
   root = undefined;
   document.body.innerHTML = "";
   auth.logout.mockClear();
+  build.stage = "alpha";
 });
 
 /** A `Me` holding exactly `permissions` (dotted names), never `server_admin`. */
@@ -341,5 +350,71 @@ describe("AppSidebar outside collapsed mode (#823)", () => {
     expect(document.querySelectorAll("button[aria-haspopup]")).toHaveLength(0);
     expect(document.querySelector('a[href="/admin/planning/events"]')).not.toBeNull();
     expect(document.querySelector('a[href="/profile"]')).not.toBeNull();
+  });
+});
+
+// The release-stage chip in the sidebar header (#841). Its own label, tones and hover text are
+// pinned in release-stage-chip.dom.test.tsx; these pin where the shell puts it.
+describe("AppSidebar release stage chip (#841)", () => {
+  const chip = (scope: ParentNode = document) => scope.querySelector<HTMLElement>("[data-release-stage]");
+  const stageRow = () => document.querySelector<HTMLElement>("aside [data-stage-row]");
+
+  it("shows the OIS wordmark and the ALPHA chip in the expanded header, in the row directly below the chrome row", async () => {
+    await renderAt("/advisories", user(), "expanded");
+    const row = stageRow()!;
+    expect(row).not.toBeNull();
+    expect(row.textContent).toBe("OISAlpha");
+    expect(chip(row)!.textContent).toBe("Alpha");
+    expect(chip(row)!.firstElementChild!.className).toContain("uppercase");
+    expect(row.previousElementSibling!.querySelector('button[aria-label="Back"]')).not.toBeNull();
+  });
+
+  it("keeps the chrome row as the header's first child, with the stage row as its next sibling", async () => {
+    await renderAt("/advisories", user(), "expanded");
+    const header = stageRow()!.parentElement!;
+    expect(header.firstElementChild!.querySelector('button[aria-label="Collapse sidebar"]')).not.toBeNull();
+    expect(header.children[1]).toBe(stageRow());
+  });
+
+  it("shows the compact chip centered in the collapsed rail, with its hover title and no wordmark", async () => {
+    await renderAt("/advisories", user(), "collapsed");
+    const row = stageRow()!;
+    expect(row.className).toContain("justify-center");
+    expect(row.textContent).toBe("Alpha");
+    expect(chip(row)!.getAttribute("title")).toBe("Alpha: expect rough edges and frequent changes");
+    expect(chip(row)!.firstElementChild!.className).toContain("text-[10px]");
+    expect(row.previousElementSibling!.querySelector('button[aria-label="Expand sidebar"]')).not.toBeNull();
+  });
+
+  it('shows "OIS" and the chip in the phone drawer title, and the dialog\'s aria-label is still "OIS"', async () => {
+    await renderAt("/advisories", user(), "drawer");
+    act(() => document.querySelector<HTMLButtonElement>('button[aria-label="Menu"]')!.click());
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.getAttribute("aria-label")).toBe("OIS");
+    const title = dialog.querySelector("h2")!;
+    expect(title.textContent).toBe("OISAlpha");
+    expect(chip(title)).not.toBeNull();
+  });
+
+  // The header does not vary by route (AppShell renders this one sidebar on every signed-in page),
+  // so one page outside Advisories is enough to show it is not tied to the route above.
+  it("shows the chip in the header on /admin/access for a member with permissions", async () => {
+    await renderAt("/admin/access", user("flow.fca.read", "access.users.read"), "expanded");
+    expect(chip(stageRow()!)!.textContent).toBe("Alpha");
+  });
+
+  it("keeps the wordmark and drops the chip in the expanded header when the stage is stable", async () => {
+    build.stage = "stable";
+    await renderAt("/advisories", user(), "expanded");
+    expect(stageRow()!.textContent).toBe("OIS");
+    expect(chip()).toBeNull();
+  });
+
+  it("hides the empty stage row in the collapsed rail when the stage is stable", async () => {
+    build.stage = "stable";
+    await renderAt("/advisories", user(), "collapsed");
+    expect(stageRow()!.childElementCount).toBe(0);
+    expect(stageRow()!.className).toContain("empty:hidden");
+    expect(chip()).toBeNull();
   });
 });

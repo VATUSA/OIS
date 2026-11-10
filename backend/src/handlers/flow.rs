@@ -898,8 +898,9 @@ fn build_data_status(state: &AppState) -> DataStatus {
         airways: nav.airway_count(),
         procedures: nav.procedure_count(),
         nav_refreshed: to_dt(state.nav_refreshed.load(Ordering::Relaxed)),
-        winds_stations: winds.station_count(),
         winds_refreshed: to_dt(state.winds_refreshed.load(Ordering::Relaxed)),
+        winds_source: winds.source(),
+        winds_valid_at: winds.valid_at(),
     }
 }
 
@@ -1238,8 +1239,10 @@ impl Drop for DataRefreshClaim<'_> {
 }
 
 /// Force an immediate nav + winds refresh, then return the updated status. Failures are
-/// logged and leave the current data in place — the response still carries the resulting status, so
-/// the caller compares it (cycle age, wind-station count) to tell a real refresh from a fallback.
+/// logged and leave the current data in place, except that winds drop to still air once the last
+/// field loaded is more than 3 h old. The response still carries the resulting status, so the
+/// caller compares it (cycle age, `winds_refreshed`, `winds_source`) to tell a real refresh from a
+/// fallback.
 ///
 /// One refresh at a time: a rebuild is a full upstream download and parse, and the control is global
 /// to every flow controller, so a concurrent press gets a 409 instead of starting a second rebuild.
@@ -1266,11 +1269,9 @@ pub async fn data_refresh(
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .unwrap_or_default();
-    match jobs::refresh_winds_once(&state.feed, &state.winds, &state.winds_refreshed, &client).await
-    {
-        None => tracing::warn!("manual winds refresh: airport database not loaded yet"),
-        Some(n) => tracing::info!(stations = n, "manual winds refresh"),
-    }
+    let run = jobs::refresh_winds_once(&state.winds, &state.winds_refreshed, &client).await;
+    // A RAP failure is already logged by `install_winds`.
+    tracing::info!(ok = run.ok, detail = %run.detail, "manual winds refresh");
     Ok(Json(build_data_status(&state)))
 }
 
@@ -1481,7 +1482,7 @@ pub(crate) fn project_traffic(
                 cruise_ft,
                 profile,
             );
-            let headwind = winds.route_headwind(&path, p.altitude as f64);
+            let wind = winds.along(&path, route_len_nm);
             // Everything that reaches here is airborne — the early return above bails out on
             // `!airborne` — so the pilot is projected from the altitude they report and anchored
             // to the groundspeed they report. Passed through rather than hardcoded so that guard
@@ -1496,7 +1497,7 @@ pub(crate) fn project_traffic(
                 airports,
                 &fp.arrival,
                 profile,
-                headwind,
+                wind,
             );
             let target_d = vp.distance_after(route_len_nm, offset_sec);
             let ahead_nm = (route_len_nm - target_d).max(0.0);
@@ -1520,6 +1521,16 @@ pub(crate) fn project_traffic(
             })
         })
         .collect()
+}
+
+/// A Set's ready time, epoch ms: [`parse_hhmm_z`], refused when its minute ended before `now`'s
+/// began (#816). An HHMM cannot name a second, so the current minute is accepted and read as `now`;
+/// the release built on it is never earlier than the moment it was issued.
+fn ready_ms(s: &str, now: DateTime<Utc>) -> Option<i64> {
+    let ready = parse_hhmm_z(s, now)?;
+    let now_ms = now.timestamp_millis();
+    let minute_start = now_ms - now_ms.rem_euclid(60_000);
+    (ready >= minute_start).then_some(ready.max(now_ms))
 }
 
 /// Parse an "HHMM"/"HHMMz" Zulu clock into an epoch-ms near `now` (±12h).
@@ -1574,7 +1585,7 @@ fn ground_route_scale(airborne: bool, path_len: usize) -> f64 {
 /// [`feed_flow::ground_estimate`]'s own `pilot_pos` convention; it must not be re-derived from
 /// `gs`/`hdg` being nonzero, or a pilot idling at the gate is treated as position-less. `path` is
 /// the caller's already-resolved `fca::route_path` polyline for the same aircraft (reused for the
-/// headwind sample rather than re-resolving the route a second time). Returns an empty list when
+/// wind sample rather than re-resolving the route a second time). Returns an empty list when
 /// the route can't be resolved, exactly like `points`/`waypoints` already tolerate.
 #[allow(clippy::too_many_arguments)]
 fn fix_predictions(
@@ -1615,9 +1626,9 @@ fn fix_predictions(
     let cruise_alt = trajectory::parse_alt_ft(&fp.altitude);
     let filed_tas: f64 = fp.cruise_tas.parse().unwrap_or(0.0);
     let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise_alt, profile);
-    let headwind = state.winds.load_full().route_headwind(path, cruise_alt);
     let route_scale = ground_route_scale(airborne, path.len());
     let route_len = predict::path_len_nm(path) * route_scale;
+    let wind = state.winds.load_full().along(path, route_len);
 
     let dep = fp.departure.to_ascii_uppercase();
     let ground_allowance = if airborne {
@@ -1646,7 +1657,7 @@ fn fix_predictions(
         airports,
         &fp.arrival,
         profile,
-        headwind,
+        wind,
     );
 
     let arr_ll = airports.get(&fp.arrival.to_ascii_uppercase()).map(
@@ -1882,8 +1893,8 @@ fn build_candidates(
         let cruise = trajectory::parse_alt_ft(&fp.altitude);
         let filed_tas = fp.cruise_tas.parse().unwrap_or(0.0);
         let cruise_tas = trajectory::capped_cruise_tas(filed_tas, cruise, profile);
-        let headwind = winds.route_headwind(&path, cruise);
         let route_len = predict::path_len_nm(&path);
+        let wind = winds.along(&path, route_len);
         let dep = fp.departure.to_ascii_uppercase();
         // Airborne pilots never apply the allowance (`eta_along_route`'s `!airborne` gate) — skip
         // the lookup for them and pass 0.0.
@@ -1913,7 +1924,7 @@ fn build_candidates(
             airports,
             &fp.arrival,
             profile,
-            headwind,
+            wind,
             allowance,
             now,
         );
@@ -1953,7 +1964,7 @@ fn build_candidates(
                 cruise_tas,
                 cross_speed,
                 cruise,
-                headwind,
+                pred.profile.mean_headwind(route_len, 0.0),
                 nav,
                 airports,
                 &fp.departure,
@@ -2057,6 +2068,58 @@ fn rdy_slot(
     }
     let committed = committed_crossings(metas, metered, ti);
     fca::earliest_slot(metas[ti].eta_ms, &committed, sep_ms + RELEASE_MARGIN_MS)
+}
+
+/// The crossing to pin when a controller Sets a ready time (#816): the first slot at or after
+/// `desired_ms` (ready + airborne ETE) that keeps the separation plus [`RELEASE_MARGIN_MS`], the
+/// gap RDY holds.
+///
+/// **Auto:** clear of every other pinned crossing (airborne or released), each a given, as in
+/// TBFM's Schedule a Departure with "delay scheduled flights for this aircraft only" off. They are
+/// metered **without** the flight being set, so a re-Set never spaces against its own old release.
+///
+/// **Manual:** the controller's order is the sequence, as for RDY. The flight follows the one
+/// ordered ahead of it in the ladder (`metered`). An airborne flight ordered behind it is chained
+/// behind its new time by the next metering pass, so spacing against it would only delay both; a
+/// released one keeps its time whatever the order, so the Set still clears every other release.
+fn set_slot(
+    fca: &FcaBody,
+    metas: &[fca::MeterInput],
+    metered: &[fca::MeterOutput],
+    manual: bool,
+    ti: usize,
+    desired_ms: i64,
+) -> i64 {
+    let gap_ms = separation_ms(fca, metas[ti].cross_speed) + RELEASE_MARGIN_MS;
+    if manual {
+        let ahead = metered.iter().find(|m| m.seq == metered[ti].seq - 1);
+        let from = ahead.map_or(desired_ms, |a| desired_ms.max(a.sched_ms + gap_ms));
+        let released: Vec<i64> = (metas.iter().enumerate())
+            .filter(|(i, _)| *i != ti)
+            .filter_map(|(_, m)| m.frozen_ms)
+            .collect();
+        return fca::earliest_slot(from, &released, gap_ms);
+    }
+    let others: Vec<fca::MeterInput> = metas
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != ti)
+        .map(|(_, m)| fca::MeterInput {
+            eta_ms: m.eta_ms,
+            airborne: m.airborne,
+            cross_speed: m.cross_speed,
+            frozen_ms: m.frozen_ms,
+            ground_allowance_ms: m.ground_allowance_ms,
+        })
+        .collect();
+    let metered = fca::meter(&others, &fca.mode, fca.rate, fca.mit, None);
+    let given: Vec<i64> = others
+        .iter()
+        .zip(&metered)
+        .filter(|(m, _)| m.airborne || m.frozen_ms.is_some())
+        .map(|(_, out)| out.sched_ms)
+        .collect();
+    fca::earliest_slot(desired_ms, &given, gap_ms)
 }
 
 /// Meter the candidates (auto, or the FCA's manual order) and finalize sequence/delay.
@@ -2444,7 +2507,8 @@ pub async fn list_idst(
     request_body = ReleaseRequest,
     responses(
         (status = 200, body = Vec<FcaFlight>, description = "Released; `ETag` is the new version"),
-        (status = 400), (status = 401),
+        (status = 400, description = "`ready` is not `HHMM`/`HHMMz` or names a minute that has ended, or `If-Match`/`If-None-Match` is malformed"),
+        (status = 401),
         (status = 403, description = "The FCA's ARTCC is outside the caller's scope"),
         (status = 404, description = "No such FCA, an unpublished event FCA (#746), or the flight isn't crossing it"),
         (status = 409, description = "`held_by_person` / `held_by_other_machine`: a machine may not replace it"),
@@ -2512,11 +2576,12 @@ pub async fn mark_release(
     let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
 
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
-        // SET: pin the crossing so wheels-up lands on the requested time: the typed time is a
-        // runway time, so the crossing is that plus the airborne ETE alone (#815).
+        // SET: the typed time is a ready (runway) time. The crossing it asks for is that plus the
+        // airborne ETE alone (#815); the slot is the first legal one from there (#816).
         Some(ready) => {
-            let ready_ms = parse_hhmm_z(ready, now).ok_or(ApiError::BadRequest)?;
-            ready_ms + (eta_ms - now_ms - allowance_ms)
+            let ready_ms = ready_ms(ready, now).ok_or(ApiError::BadRequest)?;
+            let desired_ms = ready_ms + (eta_ms - now_ms - allowance_ms);
+            set_slot(&fca, &metas, &metered, order.is_some(), ti, desired_ms)
         }
         // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
         None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
@@ -3218,6 +3283,101 @@ mod project_traffic_tests {
             "a descent toward a 5431 ft field must not project below the field, got {high_field} ft"
         );
     }
+
+    // ---- #836: map projection reads the per-segment wind (AC5) --------------------------------
+    //
+    // `Winds::test_shear()`: 80 kt from 225° (on the nose of the SW-bound KJFK→KDCA course) at and
+    // above 30,000 ft east of 75.5°W, calm elsewhere.
+
+    fn projected(winds: &Winds, offset_sec: i64) -> (f64, f64) {
+        let data = VatsimData {
+            pilots: vec![airborne_pilot()],
+            ..Default::default()
+        };
+        let out = project_traffic(
+            &data,
+            &NavData::load(),
+            &airports(),
+            &ProfileTable::default(),
+            winds,
+            &HashMap::new(),
+            offset_sec,
+        );
+        (out[0].lat, out[0].lon)
+    }
+
+    /// The point `elapsed_sec` along the pilot's resolved route under `wind` (None: the shear
+    /// field laid along that route), from the shared profile.
+    fn along_profile(
+        wind: Option<crate::feed::trajectory::RouteWind>,
+        elapsed_sec: f64,
+    ) -> (f64, f64) {
+        use crate::feed::{fca, predict, trajectory::AircraftProfile};
+        let path = fca::route_path(
+            &NavData::load(),
+            &airports(),
+            "KJFK",
+            "KDCA",
+            "RBV WHITE SIE",
+            40.2,
+            -74.0,
+            220,
+            400,
+        )
+        .unwrap();
+        let len = predict::path_len_nm(&path);
+        let wind = wind.unwrap_or_else(|| Winds::test_shear().along(&path, len));
+        let vp = predict::profile_from_here(
+            true,
+            len,
+            24_000.0,
+            400.0,
+            35_000.0,
+            440.0,
+            &airports(),
+            "KDCA",
+            &AircraftProfile::default(),
+            wind,
+        );
+        let (pos, _) = fca::point_and_heading_at(&path, len - vp.distance_after(len, elapsed_sec));
+        (pos[0], pos[1])
+    }
+
+    fn nm(a: (f64, f64), b: (f64, f64)) -> f64 {
+        crate::feed::flow::gc_dist(a.0, a.1, b.0, b.1)
+    }
+
+    // AC5: the map's projected position.
+    #[test]
+    fn a_projected_position_advances_through_the_route_wind() {
+        let shear = projected(&Winds::test_shear(), 15 * 60);
+        let still = projected(&Winds::default(), 15 * 60);
+        assert!(nm(shear, still) > 4.0, "{} nm", nm(shear, still));
+        let want = along_profile(None, 900.0);
+        assert!(nm(shear, want) < 0.01, "{} nm", nm(shear, want));
+    }
+
+    // AC3: the old code took one headwind at the pilot's reported altitude for the whole route.
+    #[test]
+    fn a_projected_position_is_not_timed_on_one_wind_at_its_altitude() {
+        let one = Winds::test_shear()
+            .point_headwind(40.2, -74.0, 220.0, 24_000.0)
+            .unwrap();
+        assert!(
+            one > 30.0,
+            "the old model's value is a real headwind: {one}"
+        );
+        let most = (5..30)
+            .map(|m| {
+                let old = along_profile(
+                    Some(crate::feed::trajectory::RouteWind::uniform(one)),
+                    m as f64 * 60.0,
+                );
+                nm(projected(&Winds::test_shear(), m * 60), old)
+            })
+            .fold(0.0, f64::max);
+        assert!(most > 2.0, "the projections part by at most {most} nm");
+    }
 }
 
 #[cfg(test)]
@@ -3720,6 +3880,183 @@ mod prefile_fix_predictions_tests {
             last.altitude_ft
         );
     }
+
+    // ---- #836: the per-fix table reads the per-segment wind (AC5) -----------------------------
+    //
+    // `fix_predictions` reads `state.winds`. `Winds::test_shear()`: 80 kt from 225° (on the nose
+    // of the SW-bound KJFK→KDCA course) at and above 30,000 ft east of 75.5°W, calm elsewhere.
+
+    use super::fix_predictions;
+
+    fn with_winds(winds: Winds) -> crate::state::AppState {
+        let st = state();
+        st.winds.store(std::sync::Arc::new(winds));
+        st
+    }
+
+    /// The live coastal pilot's fix table: (40.2, -74.0), FL240, gs 400, hdg 220.
+    fn live_table(st: &crate::state::AppState) -> Vec<crate::models::FixPrediction> {
+        let (nav, ap) = (NavData::load(), airports());
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        let path = crate::feed::fca::route_path(
+            &nav, &ap, "KJFK", "KDCA", &fp.route, 40.2, -74.0, 220, 400,
+        )
+        .unwrap();
+        fix_predictions(
+            st,
+            &nav,
+            &ap,
+            &fp,
+            &path,
+            Some((40.2, -74.0, 220, 400)),
+            40.2,
+            -74.0,
+            220,
+            400,
+            24_000.0,
+            now(),
+        )
+    }
+
+    /// `real_arrival` with a wind field: what metering and airport-flow demand show.
+    fn arrival_in(
+        fp: &FlightPlan,
+        winds: &Winds,
+        pos: [f64; 2],
+        alt_ft: f64,
+        gs: i64,
+        hdg: i64,
+    ) -> DateTime<Utc> {
+        let ap = airports();
+        let arr_ll = ap[&fp.arrival];
+        let profile = AircraftProfile::default();
+        let cruise_ft = crate::feed::trajectory::parse_alt_ft(&fp.altitude);
+        let allowance = feed_flow::resolve_ground_allowance_sec(
+            &HashMap::new(),
+            &RunwayDb::load(),
+            &HashMap::new(),
+            &fp.departure,
+            None,
+            None,
+            None,
+        );
+        predict::arrival_eta(
+            &NavData::load(),
+            &ap,
+            winds,
+            &profile,
+            &predict::ArrivalInput {
+                dep: &fp.departure,
+                arr: &fp.arrival,
+                route: &fp.route,
+                pos,
+                alt_ft,
+                gs,
+                hdg,
+                arr_ll: [arr_ll.lat, arr_ll.lon],
+                cruise_ft,
+                cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
+            },
+            allowance,
+            now(),
+        )
+        .eta
+    }
+
+    // AC5: a live (airborne) pilot's fix table.
+    #[tokio::test]
+    async fn a_live_pilots_fix_table_is_timed_in_the_route_wind() {
+        let shear = live_table(&with_winds(Winds::test_shear()));
+        let still = live_table(&with_winds(Winds::default()));
+        let (last, last_still) = (shear.last().unwrap(), still.last().unwrap());
+        assert_eq!(last.name, "KDCA");
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        let want = arrival_in(&fp, &Winds::test_shear(), [40.2, -74.0], 24_000.0, 400, 220);
+        assert!(
+            (last.eta - want).num_seconds().abs() <= 1,
+            "{} vs {want}",
+            last.eta
+        );
+        assert!((last.eta - last_still.eta).num_seconds() > 30);
+    }
+
+    // AC5: a prefile's fix table (the `prefile_fix_predictions` path into the same site).
+    #[tokio::test]
+    async fn a_prefiles_fix_table_is_timed_in_the_route_wind() {
+        let fp = plan("KJFK", "KDCA", "RBV WHITE SIE");
+        let table = |w: Winds| {
+            prefile_fix_predictions(&with_winds(w), &NavData::load(), &airports(), &fp, now())
+        };
+        let (shear, still) = (table(Winds::test_shear()), table(Winds::default()));
+        let last = shear.last().unwrap();
+        let want = arrival_in(&fp, &Winds::test_shear(), [40.64, -73.78], 0.0, 0, 0);
+        assert!(
+            (last.eta - want).num_seconds().abs() <= 1,
+            "{} vs {want}",
+            last.eta
+        );
+        assert!((last.eta - still.last().unwrap().eta).num_seconds() > 20);
+    }
+
+    // The ground padding is applied before the wind is laid on the profile.
+    #[tokio::test]
+    async fn a_direct_prefiles_fix_table_lays_the_wind_on_the_padded_route() {
+        let fp = plan("KDCA", "KJFK", "");
+        // Northeast-bound, so the shear field's 225° wind is a tailwind east of 75.5°W at altitude.
+        let table = |w: Winds| {
+            prefile_fix_predictions(&with_winds(w), &NavData::load(), &airports(), &fp, now())
+        };
+        let (shear, still) = (table(Winds::test_shear()), table(Winds::default()));
+        let last = shear.last().expect("the direct route yields its endpoints");
+        let want = arrival_in(&fp, &Winds::test_shear(), [38.85, -77.04], 0.0, 0, 0);
+        assert!(
+            (last.eta - want).num_seconds().abs() <= 1,
+            "{} vs {want}",
+            last.eta
+        );
+        assert!(
+            (still.last().unwrap().eta - last.eta).num_seconds() > 5,
+            "the tailwind arrives earlier"
+        );
+    }
+
+    // The KT column reads the wind at each fix's own altitude.
+    #[tokio::test]
+    async fn the_fix_tables_groundspeed_reads_the_wind_at_each_fix() {
+        let shear = live_table(&with_winds(Winds::test_shear()));
+        let still = live_table(&with_winds(Winds::default()));
+        let at = |t: &[crate::models::FixPrediction], name: &str| {
+            t.iter().find(|f| f.name == name).cloned().unwrap()
+        };
+        // Each fix is slower by the field's headwind at that fix's position, altitude and course:
+        // 0 at or below 18,000 ft rising to 80 kt at 30,000 ft for a 225° course.
+        let mut most = 0.0_f64;
+        for fix in &shear {
+            let plain = at(&still, &fix.name);
+            let hw = Winds::test_shear()
+                .point_headwind(
+                    fix.lat,
+                    fix.lon,
+                    fix.heading_deg as f64,
+                    fix.altitude_ft as f64,
+                )
+                .unwrap_or(0.0);
+            let slower = (plain.groundspeed_kt - fix.groundspeed_kt) as f64;
+            assert!(
+                (slower - hw).abs() <= 5.0,
+                "{}: {slower} kt slower at {} ft, field {hw:.1}",
+                fix.name,
+                fix.altitude_ft
+            );
+            most = most.max(slower);
+        }
+        assert!(
+            most > 20.0,
+            "some fix flies in the sheared wind: {most} kt at most"
+        );
+        let (end, end_still) = (shear.last().unwrap(), still.last().unwrap());
+        assert!((end.groundspeed_kt - end_still.groundspeed_kt).abs() <= 1);
+    }
 }
 
 #[cfg(test)]
@@ -4065,6 +4402,258 @@ mod release_spacing_tests {
         // Airborne: no allowance, so the whole ETA is airborne time.
         assert_eq!(release_ms(at(14, 0), at(13, 30), at(13, 0), 0), at(13, 30));
     }
+
+    // ---- #816: SET searches for a slot from ready + airborne ETE ------------------------------
+
+    /// 2026-10-10 at `h:m:s` UTC.
+    fn utc(h: u32, m: u32, s: u32) -> chrono::DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(2026, 10, 10, h, m, s).unwrap()
+    }
+    fn ms(h: u32, m: u32, s: u32) -> i64 {
+        utc(h, m, s).timestamp_millis()
+    }
+
+    /// `set_slot` as `mark_release` calls it: the ladder metered first, in the controller's order
+    /// when there is one.
+    fn set(
+        fca: &FcaBody,
+        metas: &[MeterInput],
+        order: Option<&[usize]>,
+        ti: usize,
+        desired: i64,
+    ) -> i64 {
+        let metered = fca::meter(metas, &fca.mode, fca.rate, fca.mit, order);
+        super::set_slot(fca, metas, &metered, order.is_some(), ti, desired)
+    }
+
+    /// #816 AC1: ready 1400Z, airborne ETE 30 min, so the crossing asked for is 14:30. An airborne
+    /// flight crosses at 14:30, so the Set lands 120 s (rate 30) + 15 s margin behind it: 14:32:15.
+    #[test]
+    fn set_spaces_a_desired_crossing_behind_an_airborne_one() {
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        let slot = set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(
+            slot,
+            ms(14, 32, 15),
+            "one separation plus the margin behind the airborne crossing"
+        );
+        assert_eq!(RELEASE_MARGIN_MS, 15_000);
+    }
+
+    /// #816 AC1: clear of every pinned crossing, the Set keeps its desired crossing. An unreleased
+    /// ground flight at the same time is no commitment and does not push it.
+    #[test]
+    fn set_keeps_the_desired_crossing_when_the_slot_is_clear() {
+        let metas = vec![
+            cand(ms(14, 0, 0), true, None),   // airborne, 30 min clear
+            cand(ms(14, 30, 0), false, None), // unreleased ground at the same time
+            cand(ms(14, 5, 0), false, None),  // the one being set
+        ];
+        let slot = set(&rate_fca(vec![]), &metas, None, 2, ms(14, 30, 0));
+        assert_eq!(slot, ms(14, 30, 0));
+    }
+
+    /// #816: a released (frozen) crossing is a commitment the Set spaces behind, as an airborne
+    /// one is.
+    #[test]
+    fn set_spaces_behind_a_released_crossing() {
+        let metas = vec![
+            cand(ms(14, 10, 0), false, Some(ms(14, 30, 0))),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        let slot = set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(slot, ms(14, 32, 15));
+    }
+
+    /// #816 AC2: two Sets for the same ready time. The second sees the first as released.
+    #[test]
+    fn a_second_set_for_the_same_time_spaces_behind_the_first() {
+        let fca = rate_fca(vec![]);
+        let mut metas = vec![
+            cand(ms(14, 5, 0), false, None),
+            cand(ms(14, 6, 0), false, None),
+        ];
+        let a = set(&fca, &metas, None, 0, ms(14, 30, 0));
+        metas[0].frozen_ms = Some(a);
+        let b = set(&fca, &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(a, ms(14, 30, 0));
+        assert_eq!(b, ms(14, 32, 15));
+        assert!(b - a >= SEP_MS);
+    }
+
+    /// #816, manual mode: order Leader -> Dep -> Trailer, Leader airborne at 0 s. Dep follows
+    /// Leader by 120 s + 15 s, so a Set asking for 100 s lands at 135 s, and one asking for 300 s
+    /// keeps it. The airborne Trailer, ordered behind, is no constraint: its 110 s ETA is inside
+    /// 135 s of the 135 s slot, and the next metering pass chains it behind Dep's new time.
+    #[test]
+    fn a_manual_set_follows_the_flight_ordered_ahead_not_those_behind() {
+        let metas = vec![
+            cand(0, true, None),        // Leader, airborne
+            cand(100_000, false, None), // Dep, ground: the one being set
+            cand(110_000, true, None),  // Trailer, airborne, ordered behind Dep
+        ];
+        let order = [0usize, 1, 2];
+        let fca = rate_fca(vec!["LEAD".into(), "DEP".into(), "TRAIL".into()]);
+        assert_eq!(set(&fca, &metas, Some(&order), 1, 100_000), 135_000);
+        assert_eq!(set(&fca, &metas, Some(&order), 1, 300_000), 300_000);
+    }
+
+    /// #816, manual mode: the flight ahead is the one the controller ordered ahead, at its ladder
+    /// time. Order B -> Dep -> A: B (airborne, ETA 10 s) leads, so Dep follows it at
+    /// 10 s + 135 s = 145 s, though A (airborne, ETA 0 s) crosses first. Spaced in ETA order it
+    /// would follow B's pushed 120 s crossing to 255 s.
+    #[test]
+    fn a_manual_set_follows_the_controllers_order_not_the_eta_order() {
+        let metas = vec![
+            cand(0, true, None),      // A, airborne, ordered last
+            cand(5_000, false, None), // Dep, ground: the one being set
+            cand(10_000, true, None), // B, airborne, ordered first
+        ];
+        let fca = rate_fca(vec!["B".into(), "DEP".into(), "A".into()]);
+        assert_eq!(set(&fca, &metas, Some(&[2, 1, 0]), 1, 100_000), 145_000);
+    }
+
+    /// #816 AC2, manual mode: a release ordered behind is still a commitment. Order Dep -> R, R
+    /// released for 14:30: a Set for Dep asking for 14:30 lands 135 s behind it, and Dep's own
+    /// earlier release (a re-Set) is not one.
+    #[test]
+    fn a_manual_set_still_clears_a_release_ordered_behind_it() {
+        let metas = vec![
+            cand(ms(14, 5, 0), false, Some(ms(14, 0, 0))), // Dep, released before, set again
+            cand(ms(14, 10, 0), false, Some(ms(14, 30, 0))), // R, released, ordered behind
+        ];
+        let fca = rate_fca(vec!["DEP".into(), "R".into()]);
+        assert_eq!(
+            set(&fca, &metas, Some(&[0, 1]), 0, ms(14, 30, 0)),
+            ms(14, 32, 15)
+        );
+        assert_eq!(
+            set(&fca, &metas, Some(&[0, 1]), 0, ms(14, 1, 0)),
+            ms(14, 1, 0)
+        );
+    }
+
+    /// #816, auto mode: an airborne flight is a given at its **metered** time. B (ETA 14:31) owes
+    /// A (14:30) 120 s and is metered to 14:32, so a Set asking for 14:33:30 is inside 14:32 + 135 s
+    /// and lands at 14:34:15. Against B's raw ETA it would keep 14:33:30.
+    #[test]
+    fn a_set_spaces_against_an_airborne_flights_metered_time_not_its_eta() {
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            cand(ms(14, 31, 0), true, None),
+            cand(ms(14, 5, 0), false, None),
+        ];
+        assert_eq!(
+            set(&rate_fca(vec![]), &metas, None, 2, ms(14, 33, 30)),
+            ms(14, 34, 15)
+        );
+    }
+
+    /// #816, auto MIT: the other flights are metered on their own crossing speeds. 20 MIT: B at
+    /// 600 kt owes A 120 s, so crosses 14:32; the setter at 300 kt needs 240 s + 15 s behind it, so
+    /// 14:36:15 is clear. Metered at 300 kt, B would cross 14:34 and push the Set to 14:38:15.
+    #[test]
+    fn a_set_under_mit_meters_the_others_on_their_own_speeds() {
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.rate = 0;
+        fca.mit = 20;
+        let mut b = cand(ms(14, 31, 0), true, None);
+        b.cross_speed = 600.0;
+        let metas = vec![
+            cand(ms(14, 30, 0), true, None),
+            b,
+            cand(ms(14, 5, 0), false, None),
+        ];
+        assert_eq!(set(&fca, &metas, None, 2, ms(14, 36, 15)), ms(14, 36, 15));
+    }
+
+    /// #816, auto mode: a re-Set does not space against the flight's own earlier release.
+    #[test]
+    fn a_re_set_ignores_the_flights_own_release() {
+        let metas = vec![
+            cand(ms(14, 0, 0), true, None),
+            cand(ms(14, 5, 0), false, Some(ms(14, 30, 0))), // released for 14:30, set again
+        ];
+        assert_eq!(
+            set(&rate_fca(vec![]), &metas, None, 1, ms(14, 30, 0)),
+            ms(14, 30, 0)
+        );
+    }
+
+    /// #816 AC3: the previous minute has ended, so it is refused.
+    #[test]
+    fn ready_ms_refuses_a_ready_time_whose_minute_has_ended() {
+        let now = utc(14, 0, 30);
+        assert_eq!(super::ready_ms("1359", now), None);
+        assert_eq!(super::ready_ms("1359z", now), None);
+        // Two hours back is past too, though `parse_hhmm_z` resolves it.
+        assert_eq!(super::ready_ms("1200", now), None);
+        // An odd minute: the minute is 60 s wide, so 1400 has ended by 14:01:30.
+        assert_eq!(super::ready_ms("1400", utc(14, 1, 30)), None);
+    }
+
+    /// #816 AC3: the current minute is accepted and read as now, so a release is never in the past.
+    #[test]
+    fn ready_ms_reads_the_current_minute_as_now() {
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 30)), Some(ms(14, 0, 30)));
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 0)), Some(ms(14, 0, 0)));
+        assert_eq!(super::ready_ms("1400", utc(14, 0, 59)), Some(ms(14, 0, 59)));
+    }
+
+    /// #816: a future minute is the typed time.
+    #[test]
+    fn ready_ms_accepts_a_future_minute_as_typed() {
+        assert_eq!(super::ready_ms("1401", utc(14, 0, 30)), Some(ms(14, 1, 0)));
+        assert_eq!(
+            super::ready_ms("2359Z", utc(14, 0, 30)),
+            Some(ms(23, 59, 0))
+        );
+    }
+
+    /// The ±12 h wrap survives the past-time check: at 23:50Z "0010" is tomorrow; at 00:10Z "2350"
+    /// is yesterday, and refused.
+    #[test]
+    fn ready_ms_keeps_the_twelve_hour_wrap_across_midnight() {
+        use chrono::TimeZone;
+        let tomorrow = Utc.with_ymd_and_hms(2026, 10, 11, 0, 10, 0).unwrap();
+        assert_eq!(
+            super::ready_ms("0010", utc(23, 50, 0)),
+            Some(tomorrow.timestamp_millis())
+        );
+        assert_eq!(super::ready_ms("2350", tomorrow), None);
+    }
+
+    /// Malformed input is refused, not guessed at.
+    #[test]
+    fn ready_ms_refuses_a_malformed_ready_time() {
+        for bad in ["", "14", "140", "14000", "2460", "1460", "ab12", "14:00"] {
+            assert_eq!(
+                super::ready_ms(bad, utc(14, 0, 30)),
+                None,
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// #816, MIT mode: the gap is sized on the setting flight's own crossing speed, as RDY's is.
+    /// 20 MIT at 300 kt is 240 s, so 14:30 + 240 s + 15 s = 14:34:15. Sized on the airborne
+    /// flight's 600 kt it would be 120 s (14:32:15).
+    #[test]
+    fn a_set_under_mit_is_spaced_on_its_own_crossing_speed() {
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.rate = 0;
+        fca.mit = 20;
+        let mut airborne = cand(ms(14, 30, 0), true, None);
+        airborne.cross_speed = 600.0;
+        let metas = vec![airborne, cand(ms(14, 5, 0), false, None)]; // the setter crosses at 300 kt
+        assert_eq!(set(&fca, &metas, None, 1, ms(14, 30, 0)), ms(14, 34, 15));
+    }
 }
 
 /// Regression (#355): the FCA metering wiring — not just the primitives. `MeterInput.cross_speed`
@@ -4081,13 +4670,15 @@ mod mit_cross_speed_wiring_tests {
 
     use chrono::Utc;
 
-    use super::{ExclusionSet, ReleaseMap, build_candidates};
+    use super::{ExclusionSet, ReleaseMap, build_candidates, fca_crossing_for};
     use crate::feed::airports::{Airport, AirportDb};
     use crate::feed::{
         airspace::Boundaries,
+        fca,
         nav::NavData,
+        predict,
         runway_db::RunwayDb,
-        trajectory::ProfileTable,
+        trajectory::{self, ProfileTable, RouteWind},
         vatsim::{FlightPlan, Pilot, VatsimData},
         winds::Winds,
     };
@@ -4439,6 +5030,237 @@ mod mit_cross_speed_wiring_tests {
                 "{site}: a 5431 ft field shortens the descent, so the metering crossing must come \
                  earlier than a sea-level one — got {high} vs {sea}. Equal means the elevation \
                  argument never reached predict::eta_along_route"
+            );
+        }
+    }
+
+    // ---- #836: FCA metering reads the per-segment wind for both flight states (AC5) ----------
+    //
+    // The candidate loop lays `winds.along(&path, route_len)` on each pilot's own profile.
+    // Fixture: arrival_at_cruise() (AAL1 airborne at FL350, AAL2 parked at KJFK, both direct
+    // KJFK→KDCA).
+
+    /// 80 kt from 225° (on the nose of the SW-bound route) at and above 30,000 ft, calm at and
+    /// below 18,000 ft, over 37–42°N 79–72°W.
+    fn cruise_headwind() -> Winds {
+        Winds::test_grid(
+            (37.0, -79.0),
+            (6, 8),
+            &[5_000.0, 18_000.0, 30_000.0, 39_000.0],
+            Utc::now(),
+            |alt, _, _| {
+                if alt >= 30_000.0 {
+                    (-57, -57, -45)
+                } else {
+                    (0, 0, -45)
+                }
+            },
+        )
+    }
+
+    /// `(callsign → (eta, cross_speed, debug headwind))` for both candidates.
+    fn candidates(
+        fca: &FcaBody,
+        winds: &Winds,
+        now: chrono::DateTime<Utc>,
+    ) -> HashMap<String, (chrono::DateTime<Utc>, f64, Option<i64>)> {
+        let (flights, metas) = build_candidates(
+            fca,
+            &arrival_at_cruise(),
+            &airports(),
+            &NavData::load(),
+            &Boundaries::default(),
+            winds,
+            &ProfileTable::default(),
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &ExclusionSet::new(),
+            &Default::default(),
+            now,
+            true,
+        );
+        assert_eq!(flights.len(), 2, "both pilots must be candidates");
+        flights
+            .iter()
+            .zip(&metas)
+            .map(|(f, m)| {
+                let hw = f.debug.as_ref().and_then(|d| d.headwind);
+                (f.callsign.clone(), (f.eta.unwrap(), m.cross_speed, hw))
+            })
+            .collect()
+    }
+
+    // AC5: the crossing ETA for both flight states.
+    #[test]
+    fn both_candidates_time_their_crossing_in_the_route_wind() {
+        let now = Utc::now();
+        let gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
+        let windy = candidates(&gate, &cruise_headwind(), now);
+        let still = candidates(&gate, &Winds::default(), now);
+        for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
+            // The airborne pilot's anchoring (#313) takes back part of the headwind, so its move is
+            // smaller.
+            let moved = (windy[cs].0 - still[cs].0).num_seconds().abs();
+            assert!(moved > 10, "{site}: the wind moves the crossing {moved} s");
+        }
+    }
+
+    // AC5: MIT ÷ cross_speed sizes the gap; cross_speed is the groundspeed at the fix, in the wind
+    // there.
+    #[test]
+    fn both_candidates_size_the_gap_on_the_wind_at_the_fix() {
+        let now = Utc::now();
+        // ~130 nm from KDCA: the airborne pilot crosses at cruise, the ground pilot (~65 nm out of
+        // KJFK) while still climbing through the sheared levels.
+        let gate = mit_fca_at_lon(-75.0, 39.0, 41.0);
+        let windy = candidates(&gate, &cruise_headwind(), now);
+        let still = candidates(&gate, &Winds::default(), now);
+        let ground = still["AAL2"].1 - windy["AAL2"].1;
+        assert!(
+            ground > 20.0 && ground < 80.0,
+            "the ground pilot crosses {ground} kt slower"
+        );
+        // The airborne pilot is anchored to its observed 440 kt (#313), clamped at +15 %, so part
+        // of the headwind is taken back: (440 − 80) × 1.15 = 414 kt.
+        assert!(
+            (windy["AAL1"].1 - 414.0).abs() < 2.0,
+            "the airborne pilot crosses at {}",
+            windy["AAL1"].1
+        );
+        assert!((still["AAL1"].1 - 440.0).abs() < 2.0);
+    }
+
+    // The FCA debug view's headwind: the profile's distance-weighted mean over the remaining route.
+    #[test]
+    fn the_debug_headwind_is_the_mean_the_profile_flew() {
+        let now = Utc::now();
+        let gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
+        let windy = candidates(&gate, &cruise_headwind(), now);
+        let still = candidates(&gate, &Winds::default(), now);
+        for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
+            let hw = windy[cs]
+                .2
+                .unwrap_or_else(|| panic!("{site}: no debug headwind"));
+            // The climb and descent pass through calmer air than the 80 kt at cruise.
+            assert!(hw > 0 && hw < 80, "{site}: mean {hw} kt");
+            assert_eq!(still[cs].2, None, "{site}: still air has no headwind");
+        }
+    }
+
+    /// What `predict::eta_along_route` predicts for `cs`'s crossing of `fca` in the wind `wind`
+    /// builds from the route path and its length: the inputs the candidate loop hands it, with the
+    /// loop's own ground allowance, which no wind reaches. `(eta, groundspeed at the fix)`.
+    fn crossing_in(
+        fca: &FcaBody,
+        cs: &str,
+        wind: impl Fn(&[[f64; 2]], f64) -> RouteWind,
+        allowance_sec: f64,
+        now: chrono::DateTime<Utc>,
+    ) -> (chrono::DateTime<Utc>, f64) {
+        let data = arrival_at_cruise();
+        let p = data.pilots.iter().find(|p| p.callsign == cs).unwrap();
+        let fp = p.flight_plan.as_ref().unwrap();
+        let (nav, ap) = (NavData::load(), airports());
+        let path = fca::route_path(
+            &nav,
+            &ap,
+            &fp.departure,
+            &fp.arrival,
+            &fp.route,
+            p.latitude,
+            p.longitude,
+            p.heading,
+            p.groundspeed,
+        )
+        .unwrap();
+        let cross = fca_crossing_for(
+            fca,
+            &Boundaries::default(),
+            &ExclusionSet::new(),
+            cs,
+            fp,
+            Some(p.altitude),
+            &path,
+        )
+        .unwrap();
+        let profiles = ProfileTable::default();
+        let (ty, wake) = fp.aircraft_type_wake();
+        let profile = profiles.resolve(&ty, &wake);
+        let cruise = trajectory::parse_alt_ft(&fp.altitude);
+        let cruise_tas = trajectory::capped_cruise_tas(FILED_TAS, cruise, profile);
+        let route_len = predict::path_len_nm(&path);
+        let pred = predict::eta_along_route(
+            p.groundspeed >= 50,
+            route_len,
+            cross.along_nm,
+            p.altitude as f64,
+            p.groundspeed as f64,
+            cruise,
+            cruise_tas,
+            &ap,
+            &fp.arrival,
+            profile,
+            wind(&path, route_len),
+            allowance_sec,
+            now,
+        );
+        (pred.eta, pred.gs_kt)
+    }
+
+    // AC5 at the call site: each crossing ETA and `cross_speed` is exactly `eta_along_route` over
+    // `winds.along`, and the wind the loop flew before #836 (one route mean at filed cruise,
+    // `Winds::route_mean`) crosses the descent gate at another time.
+    #[test]
+    fn the_candidate_loop_times_each_crossing_on_the_wind_along_its_route() {
+        let now = Utc::now();
+        let winds = cruise_headwind();
+        let descent_gate = mit_fca_at_lon(-76.75, 38.5, 39.5);
+        for gate in [&descent_gate, &mit_fca_at_lon(-75.0, 39.0, 41.0)] {
+            let (flights, metas) = build_candidates(
+                gate,
+                &arrival_at_cruise(),
+                &airports(),
+                &NavData::load(),
+                &Boundaries::default(),
+                &winds,
+                &ProfileTable::default(),
+                &ReleaseMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &ExclusionSet::new(),
+                &Default::default(),
+                now,
+                false,
+            );
+            for (site, cs) in [("airborne pilot", "AAL1"), ("ground pilot", "AAL2")] {
+                let i = flights.iter().position(|f| f.callsign == cs).unwrap();
+                let allowance = metas[i].ground_allowance_ms as f64 / 1000.0;
+                let (eta, gs) = crossing_in(gate, cs, |p, len| winds.along(p, len), allowance, now);
+                assert_eq!(flights[i].eta, Some(eta), "{site}: crossing ETA");
+                assert_eq!(metas[i].cross_speed, gs, "{site}: crossing speed");
+                assert!(
+                    gs > 120.0,
+                    "{site}: {gs} kt, so the 120 kt floor is not in play"
+                );
+            }
+        }
+        let cruise = trajectory::parse_alt_ft(&jfk_dca_plan().altitude);
+        for cs in ["AAL1", "AAL2"] {
+            let along = crossing_in(&descent_gate, cs, |p, len| winds.along(p, len), 0.0, now);
+            let mean = crossing_in(
+                &descent_gate,
+                cs,
+                |p, _| winds.route_mean(p, cruise),
+                0.0,
+                now,
+            );
+            let apart = (along.0 - mean.0).num_seconds().abs();
+            assert!(
+                apart > 10,
+                "{cs}: the route mean crosses {apart} s from the route wind"
             );
         }
     }

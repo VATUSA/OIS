@@ -6,6 +6,8 @@ import {execSync} from "node:child_process";
 import {readFileSync} from "node:fs";
 import path from "node:path";
 
+import {parseStage} from "./src/lib/stage";
+
 // Programmer-controlled base version, single source of truth for the whole repo.
 function baseVersion(): string {
   try {
@@ -35,6 +37,12 @@ function appVersion(): string {
   return sha ? `${base}-${sha}` : base;
 }
 
+// Release stage from the repo-root STAGE file (#841). No fallback: a missing, blank or unknown value
+// fails the build.
+function releaseStage() {
+  return parseStage(readFileSync(path.resolve(import.meta.dirname, "..", "STAGE"), "utf8"));
+}
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -42,6 +50,7 @@ export default defineConfig({
   },
   define: {
     __APP_VERSION__: JSON.stringify(appVersion()),
+    __APP_STAGE__: JSON.stringify(releaseStage()),
   },
   // Bind to 127.0.0.1 so the web origin matches the API host (127.0.0.1:3000) —
   // otherwise the session cookie (SameSite=Lax) is treated as cross-site and dropped.

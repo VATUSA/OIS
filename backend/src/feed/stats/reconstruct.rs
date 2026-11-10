@@ -6,9 +6,10 @@
 //!
 //! A flight is "present at T" when its session overlaps T (`first_seen <= T <= last_seen`) and it
 //! has at least one stored position at or before T — the nearest such position gives its location,
-//! exactly like the map replay. Controllers/ATIS use the same overlap test. Winds/nav are the
-//! *current* runtime data (not persisted per-tick), so reconstructed ETAs aren't bit-exact to what
-//! was shown live — acceptable for a debrief view.
+//! exactly like the map replay. Controllers/ATIS use the same overlap test. Nav is the *current*
+//! runtime data (not persisted per-tick), so reconstructed ETAs aren't bit-exact to what was shown
+//! live — acceptable for a debrief view. Winds are the `stats.winds` snapshot at or before T, which
+//! the historical handlers load (`handlers::stats::winds_for`).
 
 use std::collections::HashMap;
 

@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.92"
 
 # Versions are pinned once here and referenced by members with `<dep>.workspace = true`.
 # Mirrors the versions proven in osmium so the ported permission core builds unchanged.
@@ -43,8 +43,8 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 # --- docs / openapi ---
-utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa = { version = "6.0.0", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # --- metrics / observability ---
 # `default-features = false` drops the exporter's own hyper http-listener + push-gateway; we only
@@ -64,8 +64,8 @@ dotenvy = "0.15.7"
 # `tray-icon` (#351) and `protocol-asset` (#353) are both off by default, and both fail in ways a
 # test never sees: without the first the tray commands aren't compiled in at all, and without the
 # second the build refuses outright because tauri.conf.json enables the asset protocol.
-tauri = { version = "2.11", features = ["tray-icon", "image-png", "protocol-asset"] }
-tauri-build = { version = "2.6", features = [] }
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-build = { version = "2.7", features = [] }
 # Desktop auth (#346): the session token lives in the real OS keychain (macOS Keychain, Windows
 # Credential Manager, Linux Secret Service), and sign-in opens the SYSTEM browser so the app never
 # sees the user's VATSIM credentials.
@@ -77,26 +77,26 @@ open = "5.4"
 # tauri.conf.json and refuses anything that doesn't match, so package verification is its job
 # rather than a weaker hand-rolled check of ours. `process` is only for relaunch().
 # Launch at login (#351), toggled from the app's settings rather than assumed on.
-tauri-plugin-autostart = "2.5"
+tauri-plugin-autostart = "2.7"
 # OS-level shortcuts that fire while another app is focused (#352). Unlike the tray this needs no
 # extra `tauri` feature — the plugin carries its own platform support.
-tauri-plugin-global-shortcut = "2.3"
-tauri-plugin-updater = "2.11"
-tauri-plugin-process = "2.3"
+tauri-plugin-global-shortcut = "2.4"
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4"
 # Native OS notifications (#348). Delivery only — what to notify about is decided in the
 # frontend, where the user's own permissions and settings already apply. The plugin is kept for the
 # OS permission prompt; notifications themselves are raised through each platform's own API
-# (`desktop/src-tauri/src/notify.rs`), because the plugin reports no clicks on desktop. Both crates
-# are the ones the plugin already pulls in through notify-rust, so no new code enters the tree.
-tauri-plugin-notification = "2.4"
+# (`desktop/src-tauri/src/notify.rs`), which carries the in-app route through the macOS and Windows
+# click callbacks; the plugin reported no clicks on desktop before 2.6. Both crates are the ones the
+# plugin already pulls in through notify-rust, so no new code enters the tree.
+tauri-plugin-notification = "2.8"
 mac-notification-sys = "0.6"
-tauri-winrt-notification = "0.7"
+tauri-winrt-notification = "0.8"
 
 # Desktop diagnostics (#629): a rotating, redacted log file in the OS log directory, and the
 # user-initiated "Send diagnostics" upload. The plugin is the only new crate; `log` and `regex` are
 # already in the tree, and the upload reuses the workspace reqwest with its multipart feature.
-# Pinned: 2.10 requires tauri 2.12, and taking it would drag a whole Tauri upgrade in with it.
-tauri-plugin-log = "=2.9.1"
+tauri-plugin-log = "2.10"
 log = "0.4"
 regex = "1"
 

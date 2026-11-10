@@ -18,7 +18,8 @@ import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
-import {useClearRelease, useMarkRelease, useSwapReleases} from "@/lib/fca";
+import {setResult, setResultIsCurrent, useClearRelease, useMarkRelease, useSwapReleases, type SetResult} from "@/lib/fca";
+import {parseHhmm} from "@/lib/time";
 import {swapPartners, useIdst, useIdstScope, scopeIsEmpty, type IdstFlight, type IdstScope} from "@/lib/idst";
 import {FacilityCombobox, type FacilityPick} from "@/components/facility-combobox";
 
@@ -257,7 +258,7 @@ function SwapControl({ selected, released }: { selected: IdstFlight; released: I
   );
 }
 
-function SelectedPanel({
+export function SelectedPanel({
   selected,
   released,
   canEdit,
@@ -268,6 +269,7 @@ function SelectedPanel({
 }) {
   const qc = useQueryClient();
   const [ready, setReady] = useState("");
+  const [lastSet, setLastSet] = useState<SetResult | null>(null);
   const mark = useMarkRelease(selected?.fca_id ?? "");
   const clear = useClearRelease(selected?.fca_id ?? "");
   const invalidate = () => qc.invalidateQueries({ queryKey: ["idst"] });
@@ -299,9 +301,15 @@ function SelectedPanel({
               <dd className="font-mono">{hhmmZ(selected.cross_time)}</dd>
             </div>
             <div className="flex justify-between py-1.5">
-              <dt className="text-ink-2">{selected.released ? "EDCT (wheels-up)" : "Proposed EDCT"}</dt>
+              <dt className="text-ink-2">{selected.released ? "Release time (wheels-up)" : "Proposed release"}</dt>
               <dd className={`font-mono ${selected.released ? "text-success" : ""}`}>{hhmmZ(selected.edct)}</dd>
             </div>
+            {setResultIsCurrent(lastSet, selected) ? (
+              <div className="flex justify-between py-1.5" data-set-result>
+                <dt className="text-ink-2">Delay after ready {hhmmZ(lastSet.ready)}</dt>
+                <dd className="font-mono">{lastSet.delayMin > 0 ? `+${lastSet.delayMin}m` : "none"}</dd>
+              </div>
+            ) : null}
             {selected.released_by_machine ? (
               <div className="flex justify-between py-1.5">
                 <dt className="text-ink-2">Released by</dt>
@@ -324,9 +332,12 @@ function SelectedPanel({
               </div>
             ) : (
               <div className="flex flex-col gap-2">
+                <label htmlFor="idst-ready" className="text-xs text-ink-2">
+                  Ready time
+                </label>
                 <div className="flex gap-1.5">
                   <Input
-                    aria-label="Ready time"
+                    id="idst-ready"
                     value={ready}
                     onChange={(e) => setReady(e.target.value)}
                     placeholder="HHMMz"
@@ -336,7 +347,20 @@ function SelectedPanel({
                   <Button
                     variant="outline"
                     disabled={ready.trim().length < 4 || mark.isPending}
-                    onClick={() => mark.mutate({ callsign: selected.callsign, ready: ready.trim() }, { onSuccess: () => { setReady(""); invalidate(); } })}
+                    onClick={() => {
+                      const typed = ready.trim();
+                      const readyIso = parseHhmm(typed);
+                      mark.mutate(
+                        { callsign: selected.callsign, ready: typed },
+                        {
+                          onSuccess: (flights) => {
+                            setReady("");
+                            setLastSet(readyIso ? setResult(flights, selected.callsign, readyIso) : null);
+                            invalidate();
+                          },
+                        },
+                      );
+                    }}
                   >
                     Set
                   </Button>

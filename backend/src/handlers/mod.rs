@@ -65,3 +65,5 @@ mod flow_prefile_candidate_tests;
 mod machine_actor_tests;
 #[cfg(test)]
 mod service_account_grant_tests;
+#[cfg(test)]
+mod winds_tests;

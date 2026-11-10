@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 
-import {type DataStatus, fcaIsLive, refreshToast} from "./fca";
+import {type DataStatus, type FcaFlight, fcaIsLive, refreshToast, setResult, setResultIsCurrent, windsLabel} from "./fca";
 
 function status(over: Partial<DataStatus>): DataStatus {
   return {
@@ -12,7 +12,7 @@ function status(over: Partial<DataStatus>): DataStatus {
     nav_source: "runtime fetch (faa)",
     navaids: 3,
     procedures: 4,
-    winds_stations: 176,
+    winds_source: "rap",
     ...over,
   };
 }
@@ -21,7 +21,7 @@ describe("refreshToast", () => {
   it("reads as success only when the loaded cycle is current", () => {
     const toast = refreshToast(status({}));
     expect(toast.variant).toBe("success");
-    expect(toast.title).toBe("Nav 2026-09-03 · 176 wind stations");
+    expect(toast.title).toBe("Nav 2026-09-03 · RAP winds");
     expect(toast.description).toBeUndefined();
   });
 
@@ -31,7 +31,7 @@ describe("refreshToast", () => {
     const toast = refreshToast(status({ nav_cycle: "2026-07-09", nav_cycles_behind: 2 }));
     expect(toast.variant).toBe("warning");
     expect(toast.title).toBe("NASR cycle 2026-07-09 is 2 cycles behind");
-    expect(toast.description).toBe("Nav 2026-07-09 · 176 wind stations · current 2026-09-03");
+    expect(toast.description).toBe("Nav 2026-07-09 · RAP winds · current 2026-09-03");
   });
 
   it("says one cycle behind in the singular", () => {
@@ -51,6 +51,17 @@ describe("refreshToast", () => {
   });
 });
 
+// The summary names the wind source the ETAs use, so still air is visible (#836).
+describe("windsLabel", () => {
+  it("names RAP", () => {
+    expect(windsLabel(status({ winds_source: "rap" }))).toBe("RAP winds");
+  });
+
+  it("says when there is no wind field", () => {
+    expect(windsLabel(status({ winds_source: "none" }))).toBe("no winds");
+  });
+});
+
 // The live-operation routes (release, swap, reorder) 404 on an event FCA that isn't published, to
 // every caller (VATUSA/OIS#746), so only a published event FCA or an ordinary one is live.
 describe("fcaIsLive", () => {
@@ -62,5 +73,70 @@ describe("fcaIsLive", () => {
     [7461, null, false],
   ])("event %s / %s → %s", (eventId, eventStatus, live) => {
     expect(fcaIsLive({event_id: eventId, event_status: eventStatus})).toBe(live);
+  });
+});
+
+// VATUSA/OIS#816: after a Set, the panel reports how far past the typed ready time the release
+// landed, read from the FcaFlight list the mutation returned. Expectations are literals.
+function flight(callsign: string, over: Partial<FcaFlight>): FcaFlight {
+  return {
+    callsign,
+    released: true,
+    edct: "2026-10-10T14:00:00Z",
+    cross_time: "2026-10-10T14:30:00Z",
+    ...over,
+  } as FcaFlight;
+}
+const READY = "2026-10-10T14:00:00.000Z";
+
+describe("setResult", () => {
+  it("reports the delay as release minus ready in whole minutes", () => {
+    const r = setResult([flight("AAL1", { edct: "2026-10-10T14:02:15Z" })], "AAL1", READY);
+    expect(r).toEqual({ callsign: "AAL1", ready: READY, edct: "2026-10-10T14:02:15Z", delayMin: 2 });
+  });
+
+  it("never reports a negative delay when the client clock resolves the ready time late", () => {
+    expect(setResult([flight("AAL1", { edct: "2026-10-10T13:59:30Z" })], "AAL1", READY)?.delayMin).toBe(0);
+  });
+
+  it("floors to the minute the panel prints, so 14:02:59 is +2 after a 1400Z ready", () => {
+    expect(setResult([flight("AAL1", { edct: "2026-10-10T14:02:59Z" })], "AAL1", READY)?.delayMin).toBe(2);
+  });
+
+  it("reports zero delay when the release is the ready time", () => {
+    expect(setResult([flight("AAL1", {})], "AAL1", READY)?.delayMin).toBe(0);
+  });
+
+  it("reads the named callsign, not the first row", () => {
+    const rows = [flight("UAL2", { edct: "2026-10-10T14:20:00Z" }), flight("AAL1", { edct: "2026-10-10T14:07:00Z" })];
+    expect(setResult(rows, "AAL1", READY)?.delayMin).toBe(7);
+  });
+
+  it("is null when the callsign is absent, unreleased or has no release time", () => {
+    expect(setResult([flight("UAL2", {})], "AAL1", READY)).toBeNull();
+    expect(setResult([flight("AAL1", { released: false })], "AAL1", READY)).toBeNull();
+    expect(setResult([flight("AAL1", { edct: null })], "AAL1", READY)).toBeNull();
+  });
+});
+
+describe("setResultIsCurrent", () => {
+  const result = { callsign: "AAL1", ready: READY, edct: "2026-10-10T14:07:00Z", delayMin: 7 };
+  const row = (over: Partial<{ callsign: string; released: boolean; edct: string | null }>) => ({
+    callsign: "AAL1",
+    released: true,
+    edct: "2026-10-10T14:07:00.000Z",
+    ...over,
+  });
+
+  it("holds while the flight keeps the release the Set gave it, whatever the timestamp's format", () => {
+    expect(setResultIsCurrent(result, row({}))).toBe(true);
+  });
+
+  it("ends when the release is cancelled, moved, or the panel shows another flight", () => {
+    expect(setResultIsCurrent(result, row({ released: false }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ edct: "2026-10-10T14:09:00Z" }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ edct: null }))).toBe(false);
+    expect(setResultIsCurrent(result, row({ callsign: "UAL2" }))).toBe(false);
+    expect(setResultIsCurrent(null, row({}))).toBe(false);
   });
 });

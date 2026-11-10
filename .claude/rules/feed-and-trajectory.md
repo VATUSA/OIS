@@ -62,8 +62,9 @@ calls to resolve a route and time it.
   `resolve_label` names the tier for the debug view.
 - Filed cruise TAS is capped by the profile (`capped_cruise_tas`); above `MAX_PLAUSIBLE_TAS` (700 kt)
   or below 60 kt it is replaced by an altitude default. Filed altitude junk parses to 35,000 ft.
-- Wind: `Winds::route_headwind` along the path at cruise altitude; `None` means still air, never an
-  error. `effective_gs` clamps groundspeed to 0.4–1.6 × TAS.
+- Wind: `winds.along(&path, route_len)` samples the RAP field per segment, read at each point's own
+  altitude; a route outside the field is still air, never an error. `effective_gs` clamps groundspeed
+  to 0.4–1.6 × TAS.
 - Anchoring scales every predicted groundspeed by observed/predicted only for an aircraft established
   at cruise (≥ 250 kt, within 300 ft of cruise), clamped to ±15 % (#313).
 - **The arrival field elevation is resolved in one place**, `predict::profile_from_here`. No caller
