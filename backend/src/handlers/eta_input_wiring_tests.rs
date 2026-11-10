@@ -3,7 +3,9 @@
 //! tests go through the real router before and after the assignment is stored, and the surface's
 //! time moves by the change in the ground allowance the assignment makes (within 3 s, the time
 //! between the two requests); the demand test asserts the count that change moves. The last test
-//! checks that the badge count and the advisory read the board's path.
+//! checks that the badge count and the advisory read the board's path. The `TimingTables::load`
+//! tests at the end do the same for the other tables it hands the predictor: the aircraft
+//! profiles, the gate catalog and the replay's historical winds.
 //!
 //! The feed: GND1 parked at KJFK, filed KJFK->KDCA via `RBV WHITE SIE`, crossing an FCA on the
 //! corridor between WHITE and SIE. KJFK has five taxi samples off 04L (900 s) and five off 31L
@@ -642,5 +644,329 @@ async fn a_parked_flight_on_an_unresolved_route_shows_its_timed_distance_and_pat
         route["points"],
         json!([[40.2, -72.5], [38.85, -77.04]]),
         "the great circle to the destination: {route}"
+    );
+}
+
+// ---- the other tables `TimingTables::load` hands the predictor --------------------------------
+
+/// The tables [`gnd1_times`] takes in place of the state's: the aircraft profiles, the gate
+/// catalog, the assigned runways and the winds.
+struct Given<'a> {
+    profiles: &'a crate::feed::trajectory::ProfileTable,
+    gates: &'a HashMap<String, Vec<crate::models::AirportGateBody>>,
+    assigned: &'a predict::AssignedRunways,
+    winds: &'a crate::feed::winds::Winds,
+}
+
+/// GND1's arrival ETA and wheels-up from the predictor over the state's navigation, airports,
+/// runways and taxi samples and the tables `given`, at `now`.
+async fn gnd1_times(
+    state: &AppState,
+    given: Given<'_>,
+    now: DateTime<Utc>,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    let Given {
+        profiles,
+        gates,
+        assigned,
+        winds,
+    } = given;
+    let (nav, airports) = (
+        state.nav.load_full(),
+        state.feed.read().await.airports.clone(),
+    );
+    let samples = state.taxi_estimate_samples.load_full();
+    let inp = predict::Inputs {
+        nav: &nav,
+        airports: &airports,
+        winds,
+        profiles,
+        ground: predict::GroundInputs {
+            gates,
+            runways: &state.runways,
+            taxi_samples: &samples,
+            assigned,
+        },
+    };
+    let p = gnd1();
+    let traj = predict::trajectory(&inp, predict::Flight::Pilot(&p), None, now).unwrap();
+    (traj.eta_at_field(), traj.wheels_up())
+}
+
+/// A B738 profile that climbs, cruises and descends slower than the default, so GND1 lands later.
+fn slow_b738() -> crate::feed::trajectory::ProfileTable {
+    use crate::feed::trajectory::{AircraftProfile, ProfileTable};
+    let b738 = AircraftProfile {
+        climb_ias_hi: 250.0,
+        climb_fpm_hi: 900.0,
+        cruise_tas: Some(330.0),
+        desc_ias_hi: 240.0,
+        ..AircraftProfile::default()
+    };
+    ProfileTable::new(
+        AircraftProfile::default(),
+        HashMap::new(),
+        HashMap::from([("B738".to_string(), b738)]),
+    )
+}
+
+/// #813: a stored aircraft profile reaches the surfaces that time through `TimingTables::load`:
+/// airport flow lands GND1 where the predictor puts it on its type's profile, and the FCA board
+/// moves it later with it.
+#[sqlx::test]
+async fn airport_flow_and_the_fca_board_time_a_flight_on_its_type_profile(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let (default, typed) = (Default::default(), slow_b738());
+    let (gates, assigned, winds) = (HashMap::new(), HashMap::new(), Default::default());
+    let given = |profiles| Given {
+        profiles,
+        gates: &gates,
+        assigned: &assigned,
+        winds: &winds,
+    };
+    let now = Utc::now();
+    let (eta_default, _) = gnd1_times(&state, given(&default), now).await;
+    let (eta_typed, _) = gnd1_times(&state, given(&typed), now).await;
+    let shift = (eta_typed - eta_default).num_seconds();
+    assert!(
+        shift >= 60,
+        "positive control: the profile moves the ETA by {shift} s"
+    );
+
+    let id = corridor_fca(&pool).await;
+    let cookie = holder(&pool, "tmu.program.read").await;
+    let (flow, board) = (
+        "/api/v1/tmu/flow/KDCA",
+        format!("/api/v1/flow/fcas/{id}/traffic"),
+    );
+    let (status, flow_before) = send_json(&state, Method::GET, flow, &cookie).await;
+    assert_eq!(status, 200, "{flow_before}");
+    let (_, board_before) = send_json(&state, Method::GET, &board, "").await;
+    state.aircraft_profiles.store(Arc::new(slow_b738()));
+    let (_, flow_after) = send_json(&state, Method::GET, flow, &cookie).await;
+    let (_, board_after) = send_json(&state, Method::GET, &board, "").await;
+
+    assert_shift(
+        time(&gnd1_in(&flow_before["flights"])["eta"]),
+        time(&gnd1_in(&flow_after["flights"])["eta"]),
+        shift,
+        "airport-flow ETA on the B738 profile",
+    );
+    let crossing = |b: &Value| time(&gnd1_in(b)["eta"]);
+    let moved = (crossing(&board_after) - crossing(&board_before)).num_seconds();
+    assert!(
+        moved >= 60,
+        "the FCA crossing moves later with the profile: {moved} s"
+    );
+}
+
+/// #813: the gate catalog reaches the ground allowance through `TimingTables::load`: GND1 parked
+/// on stand G1 with 04L assigned, where five learned samples share its stand, type and runway,
+/// takes that tier's allowance on airport flow, and the FCA board names the stand.
+#[sqlx::test]
+async fn airport_flow_and_the_fca_board_time_a_departure_from_its_stand(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let stand = crate::models::AirportGateBody {
+        id: "G1".into(),
+        icao: "KJFK".into(),
+        name: "G1".into(),
+        lat: 40.64,
+        lon: -73.78,
+        source: "manual".into(),
+        kind: None,
+        heading: None,
+        size_code: None,
+        operation_type: None,
+        aircraft_classes: None,
+        airline_codes: None,
+        updated_at: Utc::now(),
+        editable: false,
+    };
+    let mut samples = state.taxi_estimate_samples.load_full().as_ref().clone();
+    samples
+        .get_mut("KJFK")
+        .unwrap()
+        .extend((0..5).map(|_| TaxiSample {
+            gate_id: Some("G1".into()),
+            aircraft: Some("B738".into()),
+            runway: Some("04L".into()),
+            pushback_sec: Some(300),
+            startup_sec: Some(200),
+            taxi_sec: 1_200,
+        }));
+    state.taxi_estimate_samples.store(Arc::new(samples));
+    let gates = HashMap::from([("KJFK".to_string(), vec![stand])]);
+    let (profiles, no_gates, winds) = (Default::default(), HashMap::new(), Default::default());
+    let assigned = predict::AssignedRunways::from([(
+        ("KJFK".to_string(), "GND1".to_string()),
+        ("04L".to_string(), "auto".to_string()),
+    )]);
+    let given = |gates| Given {
+        profiles: &profiles,
+        gates,
+        assigned: &assigned,
+        winds: &winds,
+    };
+    let now = Utc::now();
+    let (_, up_runway) = gnd1_times(&state, given(&no_gates), now).await;
+    let (_, up_stand) = gnd1_times(&state, given(&gates), now).await;
+    let shift = (up_stand - up_runway).num_seconds();
+    assert!(
+        shift >= 60,
+        "positive control: the stand moves wheels-up by {shift} s"
+    );
+
+    let id = corridor_fca(&pool).await;
+    assign_04l(&pool).await;
+    let cookie = holder(&pool, "tmu.program.read").await;
+    let (flow, board) = (
+        "/api/v1/tmu/flow/KDCA",
+        format!("/api/v1/flow/fcas/{id}/traffic?debug=true"),
+    );
+    let (status, flow_before) = send_json(&state, Method::GET, flow, &cookie).await;
+    assert_eq!(status, 200, "{flow_before}");
+    let (_, board_before) = send_json(&state, Method::GET, &board, "").await;
+    state.gates.store(Arc::new(gates));
+    let (_, flow_after) = send_json(&state, Method::GET, flow, &cookie).await;
+    let (_, board_after) = send_json(&state, Method::GET, &board, "").await;
+
+    assert_shift(
+        time(&gnd1_in(&flow_before["flights"])["etd"]),
+        time(&gnd1_in(&flow_after["flights"])["etd"]),
+        shift,
+        "airport-flow wheels-up from stand G1",
+    );
+    assert_eq!(
+        gnd1_in(&board_before)["debug"]["taxi_estimate"]["gate"],
+        Value::Null
+    );
+    assert_eq!(
+        gnd1_in(&board_after)["debug"]["taxi_estimate"]["gate"],
+        "G1"
+    );
+    assert_shift(
+        time(&gnd1_in(&board_before)["eta"]),
+        time(&gnd1_in(&board_after)["eta"]),
+        shift,
+        "FCA crossing from stand G1",
+    );
+}
+
+/// #813: the live winds reach the surfaces that time through `TimingTables::live` and the route
+/// popup's per-fix table: airport flow and the last fix land GND1 where the predictor puts it in
+/// those winds, not in still air.
+#[sqlx::test]
+async fn airport_flow_and_the_fix_table_time_a_flight_in_the_live_winds(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let (shear, still) = (crate::feed::winds::Winds::test_shear(), Default::default());
+    let (profiles, gates, assigned) = (Default::default(), HashMap::new(), HashMap::new());
+    let given = |winds| Given {
+        profiles: &profiles,
+        gates: &gates,
+        assigned: &assigned,
+        winds,
+    };
+    let now = Utc::now();
+    let (eta_still, _) = gnd1_times(&state, given(&still), now).await;
+    let (eta_shear, _) = gnd1_times(&state, given(&shear), now).await;
+    assert!(
+        (eta_shear - eta_still).num_seconds().abs() >= 30,
+        "positive control: the winds move the ETA: {eta_shear} vs {eta_still}"
+    );
+    state
+        .winds
+        .store(Arc::new(crate::feed::winds::Winds::test_shear()));
+
+    let cookie = holder(&pool, "tmu.program.read").await;
+    let (status, flow) = send_json(&state, Method::GET, "/api/v1/tmu/flow/KDCA", &cookie).await;
+    assert_eq!(status, 200, "{flow}");
+    let (status, route) =
+        send_json(&state, Method::GET, "/api/v1/flow/aircraft/GND1/route", "").await;
+    assert_eq!(status, 200, "{route}");
+    let last = &route["fixes"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["name"], "KDCA", "{route}");
+    for (surface, eta) in [
+        ("airport flow", time(&gnd1_in(&flow["flights"])["eta"])),
+        ("per-fix table", time(&last["eta"])),
+    ] {
+        assert!(
+            (eta - eta_shear).num_seconds().abs() <= 3,
+            "{surface} ETA {eta}: the live winds give {eta_shear}, still air {eta_still}"
+        );
+    }
+}
+
+/// #813: the flow and departures replays time the past in the winds stored for that instant,
+/// which `TimingTables::load` takes from its caller, not in the live winds.
+#[sqlx::test]
+async fn the_historical_replays_time_a_flight_in_the_winds_of_its_instant(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let at = DateTime::parse_from_rfc3339("2026-10-16T01:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let (shear, still) = (crate::feed::winds::Winds::test_shear(), Default::default());
+    let (profiles, gates, assigned) = (Default::default(), HashMap::new(), HashMap::new());
+    let given = |winds| Given {
+        profiles: &profiles,
+        gates: &gates,
+        assigned: &assigned,
+        winds,
+    };
+    let (eta_still, _) = gnd1_times(&state, given(&still), at).await;
+    let (eta_shear, _) = gnd1_times(&state, given(&shear), at).await;
+    assert!(
+        (eta_shear - eta_still).num_seconds().abs() >= 30,
+        "positive control: the stored winds move the ETA: {eta_shear} vs {eta_still}"
+    );
+    crate::repos::stats::upsert_winds(&pool, at - chrono::Duration::minutes(10), &shear)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, last_seen, \
+             status, departure, arrival, aircraft_short, route, cruise_alt, cruise_tas) \
+         values (1, 1000001, 'GND1', $1, $1, $2, 'active', 'KJFK', 'KDCA', 'B738', \
+             'RBV WHITE SIE', 35000, 440)",
+    )
+    .bind(at - chrono::Duration::hours(1))
+    .bind(at + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+         values (1, $1, 40.64, -73.78, 13, 0, 310)",
+    )
+    .bind(at - chrono::Duration::minutes(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let cookie = holder(&pool, "stats.data.read").await;
+    let uri = format!("/api/v1/stats/hist/flow/KDCA?at={}", at.timestamp());
+    let (status, body) = send_json(&state, Method::GET, &uri, &cookie).await;
+    assert_eq!(status, 200, "{body}");
+    let eta = time(&gnd1_in(&body["flights"])["eta"]);
+    assert!(
+        (eta - eta_shear).num_seconds().abs() <= 1,
+        "flow replay ETA {eta}: the stored winds give {eta_shear}, still air {eta_still}"
+    );
+
+    // The departures replay times KJFK's departures to a metered field the same way.
+    sqlx::query("insert into tmu.programs (icao, aar) values ('KDCA', 60)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let uri = format!("/api/v1/stats/hist/departures/KJFK?at={}", at.timestamp());
+    let (status, body) = send_json(&state, Method::GET, &uri, &cookie).await;
+    assert_eq!(status, 200, "{body}");
+    let row = gnd1_in(&body["departures"]);
+    assert_eq!(
+        row["has_program"], true,
+        "positive control: KDCA is metered"
+    );
+    let eta = time(&row["eta"]);
+    assert!(
+        (eta - eta_shear).num_seconds().abs() <= 1,
+        "departures replay ETA {eta}: the stored winds give {eta_shear}, still air {eta_still}"
     );
 }
