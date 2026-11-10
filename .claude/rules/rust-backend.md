@@ -28,6 +28,9 @@ modules are compiled only by it. Two traps that have passed a narrower check and
 - **`too_many_arguments`.** An eighth parameter fails the lint (#508). Group related parameters into a
   struct rather than reaching for `#[allow]`; it also stops call sites swapping same-typed arguments.
 
+**Edit Rust source with the Edit tool**, never a non-raw Python string fed through a heredoc: Python
+consumes the `\` of a Rust string's line continuation and leaves a run of spaces in the literal (#870).
+
 ## Running the Rust tests
 - Targeted: `cargo nextest run -p ois-backend -E 'test(<name>)'`. nextest runs each test in its own
   process, which the `#[sqlx::test]` harness needs; many threads in one `cargo test` process collide on

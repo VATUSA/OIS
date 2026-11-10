@@ -272,6 +272,12 @@ always rebuild while dependencies are reused. `RUSTC_WRAPPER=sccache` caches the
 builds into: cargo judges path crates fresh by mtime, so a worktree ran another's test binary and
 passed on code it did not have. `bin/verify-worktree.sh` fails on one.
 
+**A Windows checkout (`core.autocrlf=true`) cannot reach the markers.** `bin/verify-worktree.sh`
+fails the lockfile compare (CRLF only) and an absolute `core.hooksPath`; `just test` fails
+text-comparison and source-scan tests that pass in CI; `bin/lib/review-attestation.sh` reads the CRLF
+`.claude/review-lenses.tsv` and reports every rule file missing. None is a branch defect. The gate,
+the markers and the push run from a WSL clone (#872).
+
 **And one thing it does NOT check.** A green health check means the worktree is provisioned on the
 points above, nothing more:
 
