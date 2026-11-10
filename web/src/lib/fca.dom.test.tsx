@@ -13,7 +13,7 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
 const api = vi.hoisted(() => ({ POST: vi.fn(), PUT: vi.fn(), DELETE: vi.fn() }));
 vi.mock("@/lib/api", () => ({ ois: api, API_BASE: "", DOCS_URL: "" }));
 
-import {type FcaFlight, useClearRelease, useMarkRelease, useReorderFca, useSwapReleases} from "./fca";
+import {type FcaFlight, READY_REFUSED, useClearRelease, useMarkRelease, useReorderFca, useSwapReleases} from "./fca";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -121,5 +121,25 @@ describe("live FCA operations on a 404 (VATUSA/OIS#746)", () => {
     const { qc, hooks } = mount();
     await run(() => hooks.reorder.mutateAsync(["DAL2", "AAL1"]));
     expect(qc.getQueryData(["fca-traffic", ID])).toEqual(TRAFFIC);
+  });
+});
+
+/** VATUSA/OIS#816 AC3: a refused Set tells the controller why, in place of the generic failure. */
+describe("useMarkRelease on a 400 (VATUSA/OIS#816)", () => {
+  it("a Set answered 400 says the ready time was refused, not the generic failure", async () => {
+    api.POST.mockResolvedValue(answer(400));
+    const { hooks, host } = mount();
+    await run(() => hooks.mark.mutateAsync({ callsign: "AAL1", ready: "1359" }));
+    expect(host.textContent).toContain("Ready time refused");
+    expect(host.textContent).toContain(READY_REFUSED);
+    expect(host.textContent).not.toContain("Couldn’t issue the release");
+  });
+
+  it("an RDY (no ready time) answered 400 keeps the generic failure", async () => {
+    api.POST.mockResolvedValue(answer(400));
+    const { hooks, host } = mount();
+    await run(() => hooks.mark.mutateAsync({ callsign: "AAL1" }));
+    expect(host.textContent).toContain("Couldn’t issue the release");
+    expect(host.textContent).not.toContain("Ready time refused");
   });
 });

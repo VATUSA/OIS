@@ -113,22 +113,41 @@ pub async fn delete(pool: &PgPool, kind: &str, key: &str) -> Result<bool, ApiErr
 /// `AircraftProfile::default()` when no `default` row exists (e.g. an empty DB).
 pub async fn load_all(pool: &PgPool) -> Result<ProfileTable, ApiError> {
     let rows = list(pool).await?;
-    let mut default = AircraftProfile::default();
-    let mut by_wake: HashMap<String, AircraftProfile> = HashMap::new();
-    let mut by_type: HashMap<String, AircraftProfile> = HashMap::new();
-    for r in &rows {
-        let p = to_profile(r);
-        match r.kind.as_str() {
-            "default" => default = p,
-            "wake" => {
-                by_wake.insert(r.key.to_ascii_uppercase(), p);
-            }
-            _ => {
-                by_type.insert(r.key.to_ascii_uppercase(), p);
+    let t = StoredTiers::from_rows(&rows);
+    Ok(ProfileTable::new(t.default, t.by_wake, t.by_type))
+}
+
+/// Stored rows split into the three tiers [`ProfileTable`] resolves through, keys uppercased. The
+/// one place a row's `kind` picks its tier, shared by [`load_all`] and the aircraft-profile
+/// backtest's stored set (#828).
+#[derive(Debug, Clone)]
+pub struct StoredTiers {
+    pub default: AircraftProfile,
+    pub by_wake: HashMap<String, AircraftProfile>,
+    pub by_type: HashMap<String, AircraftProfile>,
+}
+
+impl StoredTiers {
+    pub fn from_rows(rows: &[AircraftProfileBody]) -> Self {
+        let mut t = Self {
+            default: AircraftProfile::default(),
+            by_wake: HashMap::new(),
+            by_type: HashMap::new(),
+        };
+        for r in rows {
+            let p = to_profile(r);
+            match r.kind.as_str() {
+                "default" => t.default = p,
+                "wake" => {
+                    t.by_wake.insert(r.key.to_ascii_uppercase(), p);
+                }
+                _ => {
+                    t.by_type.insert(r.key.to_ascii_uppercase(), p);
+                }
             }
         }
+        t
     }
-    Ok(ProfileTable::new(default, by_wake, by_type))
 }
 
 /// Map a stored row to the pure trajectory profile.
@@ -146,5 +165,42 @@ fn to_profile(r: &AircraftProfileBody) -> AircraftProfile {
         desc_ias_hi: r.desc_ias_hi,
         desc_ias_lo: r.desc_ias_lo,
         desc_fpm: r.desc_fpm,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::load_all;
+
+    /// Each stored tier reaches the table the trajectory model resolves through: a type row (stored
+    /// lowercase, matched uppercase), a wake row and the default, each told apart by its descent
+    /// rate.
+    #[sqlx::test]
+    async fn load_all_puts_each_stored_row_in_its_own_tier(pool: PgPool) {
+        for (kind, key, fpm) in [("default", "", 1_111.0), ("wake", "H", 2_222.0)] {
+            sqlx::query(
+                "update flow.aircraft_profile set desc_fpm = $3 where kind = $1 and key = $2",
+            )
+            .bind(kind)
+            .bind(key)
+            .bind(fpm)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "insert into flow.aircraft_profile (kind, key, desc_fpm) values ('type', 'zz9z', 3333)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let table = load_all(&pool).await.unwrap();
+
+        assert_eq!(table.resolve("ZZ9Z", "H").desc_fpm, 3_333.0, "type tier");
+        assert_eq!(table.resolve("QQQQ", "H").desc_fpm, 2_222.0, "wake tier");
+        assert_eq!(table.resolve("QQQQ", "").desc_fpm, 1_111.0, "default tier");
     }
 }

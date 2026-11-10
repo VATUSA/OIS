@@ -179,3 +179,12 @@ describe("FcaDetail live-operation controls (VATUSA/OIS#746)", () => {
     expect(controls(mount(CONTROLLER, fca(null, null), false))).toEqual(NONE);
   });
 });
+
+/** VATUSA/OIS#816 AC4: the strip's Set input is named for what it takes. */
+describe("FcaDetail Set input (VATUSA/OIS#816)", () => {
+  it("names the strip's HHMMz input \"Ready time\"", () => {
+    const host = mount(CONTROLLER, fca(null, null), true);
+    const input = host.querySelector<HTMLInputElement>('input[placeholder="HHMMz"]');
+    expect(input?.getAttribute("aria-label")).toBe("Ready time");
+  });
+});
