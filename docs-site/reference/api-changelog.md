@@ -19,9 +19,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   `GET /api/v1/flow/counts`, `GET /api/v1/flow/idst`, `GET /api/v1/flow/traffic/projected`,
   `GET /api/v1/flow/aircraft/{callsign}/route` and the `/api/v1/stats/hist/flow`, `departures` and
   `runway` replays now time a flight the same way. A flight is `airborne` from 50 kt groundspeed at any altitude (airport flow
-  used above 60 kt and 300 ft). A ground flight whose route does not resolve is timed on the great
-  circle to its destination, padded by 1.12, so it now appears on the FCA routes and projected
-  traffic, which skipped it; its `FcaFlight.distance_nm` is that padded distance, and
+  used above 60 kt and 300 ft). A flight whose route does not resolve is timed, projected and drawn
+  on the great circle to its destination; a ground one is padded by 1.12, its `FcaFlight.distance_nm`
+  is that padded distance, and
   `AircraftRoute.points` draws the great circle instead of a single point. On the live routes a ground flight's taxi time comes from its stored
   departure runway. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
   step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
