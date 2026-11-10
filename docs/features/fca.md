@@ -280,8 +280,10 @@ next tick drops its row, and every other hold is spaced around the release by th
 its default, the tier order, and a randomized check that no two crossings are closer than the gap
 except a flagged release. Case 6 (the airport-flow CFR scheduler) is in `feed/flow.rs`.
 `mod release_spacing_tests` (`handlers/flow.rs`) covers `rdy_slot`, and
-`handlers/fca_freeze_tests.rs` drives the held STAs through the traffic route, the release routes,
-IDST, the FCA edit and the delete.
+`handlers/fca_freeze_tests.rs` drives the held STAs through the hold pass (`sync_fca_holds_once`,
+its prune and the hysteresis margin), and checks that the traffic route, the flight advisory, the
+release routes and IDST only read them, and that the FCA edit, the manual order and the delete clear
+them when they should.
 
 **Untested branches.** Duplicate or out-of-range indices in the manual order. Equal-ETA ties. Rate or
 MIT 0 through `meter`.
