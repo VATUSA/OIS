@@ -239,7 +239,7 @@ pub fn estimate(
 }
 
 /// The three phases summed into the single ground allowance the prediction service adds to a
-/// not-yet-airborne flight's time (#164 sub-issue E — `feed::predict::eta_along_route`).
+/// not-yet-airborne flight's time (#164 sub-issue E, read by `feed::predict::trajectory`).
 pub fn ground_allowance_sec(est: &TaxiEstimate) -> f64 {
     est.pushback.value_sec + est.startup.value_sec + est.taxi.value_sec
 }

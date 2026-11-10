@@ -2626,7 +2626,8 @@ pub struct FcaFlight {
     /// drawing the aircraft's full path across the FCA.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub path: Vec<[f64; 2]>,
-    /// Distance along the (remaining) route to the crossing, nm.
+    /// Distance along the (remaining) route to the crossing, nm, as the ETA is timed: a ground
+    /// flight whose route does not resolve carries the 1.12 padding (#813).
     pub distance_nm: i64,
     /// Unmetered ETA to the crossing.
     pub eta: Option<DateTime<Utc>>,

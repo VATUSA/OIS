@@ -75,7 +75,7 @@ pub struct AppState {
     /// Learned per-gate/type/runway pushback+taxi observation samples, keyed by departure ICAO
     /// (#164 sub-issue E). Starts empty and is reloaded from the DB every 10 min by
     /// `jobs::spawn_taxi_estimate_samples_refresh`, so it sits behind an `ArcSwap` for lock-free
-    /// reads from the DB-less feed subsystem (`feed::flow::resolve_ground_allowance_sec`). Distinct
+    /// reads from the DB-less feed subsystem (`feed::flow::resolve_ground_allowance`). Distinct
     /// from `FeedInner::taxi_samples`, `feed::taxi.rs`'s own unrelated live 3h rolling aggregate for
     /// the Taxi Monitor page.
     pub taxi_estimate_samples: Arc<ArcSwap<HashMap<String, Vec<taxi_estimate::TaxiSample>>>>,

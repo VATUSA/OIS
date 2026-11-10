@@ -14,6 +14,19 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed: one trajectory per flight behind every time** (#813). `GET /api/v1/tmu/flow/{icao}`,
+  `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/departures/{dep}`, `GET /api/v1/flow/fcas/{id}/traffic`,
+  `GET /api/v1/flow/counts`, `GET /api/v1/flow/idst`, `GET /api/v1/flow/traffic/projected`,
+  `GET /api/v1/flow/aircraft/{callsign}/route` and the `/api/v1/stats/hist/flow`, `departures` and
+  `runway` replays now time a flight the same way. A flight is `airborne` from 50 kt groundspeed at any altitude (airport flow
+  used above 60 kt and 300 ft). A flight whose route does not resolve is timed, projected and drawn
+  on the great circle to its destination; a ground one is padded by 1.12, its `FcaFlight.distance_nm`
+  is that padded distance, and
+  `AircraftRoute.points` draws the great circle instead of a single point. On the live routes a ground flight's taxi time comes from its stored
+  departure runway. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
+  step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
+  trailing flight's predicted speed 40 nm out (its descent speed there once it is inside 40 nm), not
+  360 kt. Response shapes are unchanged; a caller needs do nothing.
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,

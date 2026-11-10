@@ -16,18 +16,29 @@
 /// as unfiled and replaced with the altitude-based default. Comfortably above any real airliner.
 pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
 
-/// Parse a filed cruise-altitude string (`"350"`, `"FL350"`, `"35000"`) to feet. Values
-/// ≤ 600 are treated as flight levels (×100); junk falls back to 35,000 ft.
-pub fn parse_alt_ft(s: &str) -> f64 {
-    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return 35000.0;
-    }
-    let mut n: f64 = digits.parse().unwrap_or(35000.0);
+/// The filed cruise altitude in feet, or `None` when it is unfiled or unreadable (#813).
+///
+/// Reads the **first** run of digits, so a step climb filed `"FL350/370"` is FL350 rather than the
+/// 350,370 ft that concatenating every digit gives. A value ≤ 600 is a flight level (×100); anything
+/// that comes out under 1,000 ft (`"VFR"`, `"0"`, `"8"`) is unknown. The FCA altitude band and the
+/// timing model both read the filing through this one parser.
+pub fn filed_altitude_ft(s: &str) -> Option<f64> {
+    let digits: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let mut n: f64 = digits.parse().ok()?;
     if n <= 600.0 {
         n *= 100.0;
     }
-    if n < 1000.0 { 35000.0 } else { n }
+    (n >= 1000.0).then_some(n)
+}
+
+/// The cruise altitude the model times a flight at: [`filed_altitude_ft`], or 35,000 ft when the
+/// filing is unknown.
+pub fn parse_alt_ft(s: &str) -> f64 {
+    filed_altitude_ft(s).unwrap_or(35000.0)
 }
 
 /// Filed TAS (kt) with a sane fallback estimated from cruise altitude. A filed value outside the
@@ -702,6 +713,42 @@ impl VerticalProfile {
     }
 }
 
+/// The groundspeed (kt) an aircraft flies `d_nm` from the field on its descent from
+/// `cruise_req_ft`, whatever it is doing now: the descent curve [`VerticalProfile::build`]
+/// integrates, read at `d_nm`, or the cruise speed when `d_nm` lies above the top of descent. The
+/// arguments are [`VerticalProfile::build`]'s; there is no groundspeed anchoring.
+pub fn descent_ground_speed_at(
+    d_nm: f64,
+    arr_elev_ft: f64,
+    cruise_req_ft: f64,
+    cruise_tas_kt: f64,
+    profile: &AircraftProfile,
+    wind: &RouteWind,
+) -> f64 {
+    let arr_elev = arr_elev_ft.max(0.0);
+    let cruise_alt = cruise_req_ft.min(profile.service_ceiling_ft).max(arr_elev);
+    let speeds = Speeds {
+        profile,
+        wind,
+        cruise_tas: cruise_tas_kt.max(GS_FLOOR_KT),
+    };
+    let desc = integrate_descent(arr_elev, cruise_alt, &speeds);
+    let (alt, tas) = match desc.iter().position(|s| s.0 >= d_nm) {
+        Some(0) => (desc[0].1, desc[0].2),
+        Some(i) => {
+            let ((d0, a0, t0), (d1, a1, t1)) = (desc[i - 1], desc[i]);
+            let f = if d1 > d0 {
+                (d_nm - d0) / (d1 - d0)
+            } else {
+                0.0
+            };
+            (a0 + f * (a1 - a0), t0 + f * (t1 - t0))
+        }
+        None => (cruise_alt, speeds.cruise_at(d_nm, cruise_alt)),
+    };
+    step_gs(tas, wind.headwind(d_nm, alt))
+}
+
 /// The speed schedule a profile integrates with: the aircraft's phases, the wind along the route,
 /// and the capped cruise TAS.
 struct Speeds<'a> {
@@ -870,6 +917,28 @@ mod tests {
         assert_eq!(parse_alt_ft(""), 35000.0);
         assert_eq!(parse_alt_ft("VFR"), 35000.0);
         assert_eq!(parse_alt_ft("80"), 8000.0);
+    }
+
+    /// A step climb reads its first level, not every digit run concatenated (#813, from #838).
+    #[test]
+    fn a_step_climb_filing_reads_its_first_level() {
+        assert_eq!(filed_altitude_ft("FL350/370"), Some(35000.0));
+        assert_eq!(parse_alt_ft("FL350/370"), 35000.0);
+        assert_eq!(filed_altitude_ft("35000/37000"), Some(35000.0));
+        assert_eq!(filed_altitude_ft("A045"), Some(4500.0));
+    }
+
+    /// Unknown is unknown for the band and 35,000 ft for the timing; a filing under 1,000 ft is
+    /// unknown on both, at the boundary as well as below it.
+    #[test]
+    fn an_unreadable_filing_is_unknown_to_the_band_and_35000_ft_to_the_model() {
+        for s in ["", "VFR", "0", "8", "700"] {
+            assert_eq!(filed_altitude_ft(s), None, "{s:?}");
+            assert_eq!(parse_alt_ft(s), 35000.0, "{s:?}");
+        }
+        assert_eq!(filed_altitude_ft("10"), Some(1000.0));
+        assert_eq!(filed_altitude_ft("600"), Some(60000.0));
+        assert_eq!(filed_altitude_ft("1000"), Some(1000.0));
     }
 
     #[test]
@@ -1442,6 +1511,67 @@ mod tests {
             vp.gs_at(80.0),
             vp.gs_at(150.0)
         );
+    }
+
+    /// #813: the groundspeed the descent schedule gives `d` nm from the field is the speed a
+    /// profile built from cruise far enough out (no triangle; top of descent ~119 nm) flies there,
+    /// in still air and into a headwind. The literals are hand-worked from the default profile
+    /// (1,800 fpm, 250/290 KIAS, ISA): 363.4 kt at 40 nm in still air (~14,600 ft there); 341.2 kt
+    /// into 30 kt, which also shortens every descent step (~15,900 ft there).
+    #[test]
+    fn descent_ground_speed_at_reads_the_descent_schedule_from_cruise() {
+        let p = AircraftProfile::default();
+        let reference = VerticalProfile::build(
+            35_000.0,
+            300.0,
+            0.0,
+            35_000.0,
+            440.0,
+            &p,
+            RouteWind::still(),
+        );
+        let still = RouteWind::still();
+        let at_40 = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &still);
+        assert!(
+            (at_40 - reference.ground_speed_at(40.0)).abs() < 1e-6,
+            "{at_40}"
+        );
+        assert!((at_40 - 363.4).abs() < 0.5, "{at_40}");
+        let at_150 = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &still);
+        assert_eq!(at_150, 440.0, "above the top of descent it cruises");
+        assert!((at_150 - reference.ground_speed_at(150.0)).abs() < 1e-6);
+
+        let head = RouteWind::uniform(30.0);
+        let windy_reference =
+            VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, 440.0, &p, head.clone());
+        let windy = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &head);
+        assert!(
+            (windy - windy_reference.ground_speed_at(40.0)).abs() < 1e-6,
+            "{windy}"
+        );
+        assert!((windy - 341.2).abs() < 0.5, "{windy}");
+
+        // The wind is read at the descent's own altitude 40 nm out (~14,600 ft): 80 kt on the nose
+        // from FL300 up and calm below 20,000 ft leaves it at the still-air speed, while above the
+        // top of descent the cruise leg flies into the full 80 kt (440 - 80).
+        let aloft = RouteWind::new(
+            [0.0, 300.0]
+                .into_iter()
+                .map(|d| WindKnot {
+                    d_nm: d,
+                    levels: vec![
+                        (0.0, 0.0, None),
+                        (20_000.0, 0.0, None),
+                        (30_000.0, 80.0, None),
+                        (45_000.0, 80.0, None),
+                    ],
+                })
+                .collect(),
+        );
+        let low_calm = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &aloft);
+        assert!((low_calm - at_40).abs() < 1e-9, "{low_calm} vs {at_40}");
+        let high_wind = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &aloft);
+        assert_eq!(high_wind, 360.0, "positive control: the wind aloft is live");
     }
 
     // ---- #836: wind and temperature read per segment, per altitude ----------------------------

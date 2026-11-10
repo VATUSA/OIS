@@ -111,9 +111,8 @@ pub struct Candidate {
 /// Every not-yet-departed flight in `data`, with the ladder's inputs resolved.
 ///
 /// Selection mirrors [`super::flow::pending_departures`] exactly — a flight is still a departure until
-/// `groundspeed > 60 && altitude > 300`, and a prefile is skipped when a connected pilot already holds
-/// its callsign. Two different answers to "is this still a departure" would be a bug waiting to happen,
-/// so the condition is copied deliberately and this comment is the pointer between them.
+/// [`super::predict::is_airborne`], and a prefile is skipped when a connected pilot already holds its
+/// callsign. Both read the one airborne test every timed surface uses (#813).
 ///
 /// The gate is resolved here rather than by the caller because it needs two things at once: the
 /// position, which only a connected pilot has, and the catalog, to turn `nearest_gate`'s id into the
@@ -129,7 +128,7 @@ pub fn candidates(
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         // Same airborne test as `pending_departures`.
-        if p.groundspeed > 60 && p.altitude > 300 {
+        if super::predict::is_airborne(p.groundspeed) {
             continue;
         }
         let icao = fp.departure.to_ascii_uppercase();
@@ -196,6 +195,36 @@ mod tests {
             updated_by: None,
             editable: false,
         }
+    }
+
+    /// A departure stays a candidate below 50 kt and leaves at 50 kt, whatever its altitude: the one
+    /// airborne test (`predict::is_airborne`).
+    #[test]
+    fn a_departure_rolling_at_fifty_five_knots_is_not_a_candidate() {
+        let pilot = |cs: &str, gs: i64, alt: i64| crate::feed::vatsim::Pilot {
+            callsign: cs.into(),
+            groundspeed: gs,
+            altitude: alt,
+            flight_plan: Some(crate::feed::vatsim::FlightPlan {
+                departure: "KJFK".into(),
+                arrival: "KDCA".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let data = crate::feed::vatsim::VatsimData {
+            pilots: vec![
+                pilot("TAXI", 45, 0),
+                pilot("ROLL", 55, 0),
+                pilot("LOW", 70, 200),
+            ],
+            ..Default::default()
+        };
+        let got: Vec<String> = candidates(&data, &HashMap::new())
+            .into_iter()
+            .map(|c| c.callsign)
+            .collect();
+        assert_eq!(got, vec!["TAXI".to_string()]);
     }
 
     /// Rung 2a. Above the gate rule on purpose: a SID is a filed intention about where the aircraft is

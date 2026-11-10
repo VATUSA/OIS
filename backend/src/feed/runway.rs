@@ -200,7 +200,7 @@ pub fn apply_preset(ends: &mut [RunwayEnd], preset: &str) {
 }
 
 /// Collect airborne arrivals to `icao` within the window, with accurate along-route ETAs from the
-/// shared predictor (`predict::arrival_eta` — the same one `flow::compute` and FCA metering use)
+/// shared predictor (`predict::trajectory` — the same one `flow::compute` and FCA metering use)
 /// and their detected STAR.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_arrivals(
@@ -222,47 +222,35 @@ pub fn collect_arrivals(
     else {
         return Vec::new();
     };
+    // Airborne arrivals only, so the ground allowance is never read.
+    let inp = predict::Inputs {
+        nav,
+        airports,
+        winds,
+        profiles,
+        ground: predict::GroundInputs::unused(),
+    };
     let mut out = Vec::new();
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         if fp.arrival.to_ascii_uppercase() != icao {
             continue;
         }
-        if p.groundspeed < 50 {
+        if !predict::is_airborne(p.groundspeed) {
             continue; // airborne only
         }
         if gc_dist(p.latitude, p.longitude, alat, alon) < 3.0 {
             continue; // on the field / rolling out
         }
-        let (ty, wake) = fp.aircraft_type_wake();
-        let profile = profiles.resolve(&ty, &wake);
-        let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let cruise_tas =
-            trajectory::capped_cruise_tas(fp.cruise_tas.parse().unwrap_or(0.0), cruise, profile);
         // Time the remaining along-route distance to the field through the shared predictor, so
         // the ladder slot lines up with the aircraft's drawn route on the map.
-        let pred = predict::arrival_eta(
-            nav,
-            airports,
-            winds,
-            profile,
-            &predict::ArrivalInput {
-                dep: &fp.departure,
-                arr: &fp.arrival,
-                route: &fp.route,
-                pos: [p.latitude, p.longitude],
-                alt_ft: p.altitude as f64,
-                gs: p.groundspeed,
-                hdg: p.heading,
-                arr_ll: [alat, alon],
-                cruise_ft: cruise,
-                cruise_tas,
-            },
-            // Airborne-only caller (`groundspeed < 50` filtered above) — `arrival_eta` only
-            // applies the ground allowance on its ground branch, so any value here is inert.
-            0.0,
-            now,
-        );
+        let Some(traj) = predict::trajectory(&inp, predict::Flight::Pilot(p), None, now) else {
+            continue;
+        };
+        let pred = predict::ArrivalPrediction {
+            eta: traj.eta_at_field(),
+            route_nm: traj.route_nm(),
+        };
         if (pred.eta - now).num_minutes() > window_min {
             continue;
         }
