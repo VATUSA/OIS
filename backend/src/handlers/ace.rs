@@ -389,9 +389,9 @@ pub(crate) async fn create_one(
 pub async fn delete_request(
     State(state): State<AppState>,
     _permission: RequirePermission<AceRequestsDecide>,
-    Path((_event_id, req)): Path<(i64, String)>,
+    Path((event_id, req)): Path<(i64, String)>,
 ) -> Result<StatusCode, ApiError> {
-    if ace_repo::delete_request(pool(&state)?, &req).await? {
+    if ace_repo::delete_request(pool(&state)?, event_id, &req).await? {
         // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
         state.publish(crate::realtime::topic::ACE);
         Ok(StatusCode::NO_CONTENT)
@@ -416,10 +416,10 @@ pub async fn claim_request(
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let p = pool(&state)?;
 
-    let request = ace_repo::get_request(p, &req)
+    if ace_repo::get_request_in_event(p, event_id, &req)
         .await?
-        .ok_or(ApiError::NotFound)?;
-    if request.event_id != event_id {
+        .is_none()
+    {
         return Err(ApiError::NotFound);
     }
     let event = events_repo::get(p, event_id)
@@ -465,13 +465,13 @@ pub async fn release_claim(
     State(state): State<AppState>,
     _permission: RequirePermission<AceRequestsClaim>,
     Extension(current_user): Extension<Option<CurrentUser>>,
-    Path((_event_id, req)): Path<(i64, String)>,
+    Path((event_id, req)): Path<(i64, String)>,
 ) -> Result<Json<AceRequestBody>, ApiError> {
     let user = current_user.as_ref().ok_or(ApiError::Unauthorized)?;
     let p = pool(&state)?;
 
     let mut tx = p.begin().await.map_err(|_| ApiError::Internal)?;
-    let (slots, count) = ace_repo::release_claim(&mut tx, &req, &user.id).await?;
+    let (slots, count) = ace_repo::release_claim(&mut tx, event_id, &req, &user.id).await?;
     enqueue_notify(&mut tx, p, &req, slots, count).await?;
     tx.commit().await.map_err(|_| ApiError::Internal)?;
     // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
@@ -493,7 +493,7 @@ pub async fn decide_request(
     State(state): State<AppState>,
     _permission: RequirePermission<AceRequestsDecide>,
     Actor(principal): Actor,
-    Path((_event_id, req)): Path<(i64, String)>,
+    Path((event_id, req)): Path<(i64, String)>,
     Json(payload): Json<DecideAceRequestRequest>,
 ) -> Result<Json<AceRequestBody>, ApiError> {
     let by = principal.attribution(&state).await?;
@@ -501,7 +501,7 @@ pub async fn decide_request(
     if !matches!(payload.outcome.as_str(), "completed" | "cancelled") {
         return Err(ApiError::BadRequest);
     }
-    ace_repo::decide_request(p, &req, &by, &payload.outcome).await?;
+    ace_repo::decide_request(p, event_id, &req, &by, &payload.outcome).await?;
     // Every viewer's board, not a timer: on the write path, once the change is committed (#645).
     state.publish(crate::realtime::topic::ACE);
     ace_repo::get_request(p, &req)

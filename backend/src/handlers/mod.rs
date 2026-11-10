@@ -44,6 +44,8 @@ pub mod users;
 pub mod webhooks;
 
 #[cfg(test)]
+mod ace_event_scope_tests;
+#[cfg(test)]
 mod topic_publish_tests;
 
 #[cfg(test)]
