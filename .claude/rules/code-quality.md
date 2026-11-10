@@ -405,6 +405,10 @@ and both excused skipping work: "the auto-publish job has no principal" (it carr
 Before writing "X can't…", "X has no…" or "Y already does Z", find the line that makes it true and
 cite it. For "Y fires Z", grep every place Z is enqueued.
 
+**A precedence claim about a tool (env over file, which value wins) is checked with the tool's own
+resolver, not its docs.** On #871 a plan said `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` replaces the config's
+list; `cargo -Zunstable-options config get --show-origin` and `cargo build -v` showed cargo appends it.
+
 If the reasoning is load-bearing and you have not run the check, say "evidence points at" in the
 artifact too, or leave it out and state only what you did.
 
