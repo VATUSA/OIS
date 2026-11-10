@@ -332,9 +332,13 @@ different machine, so it gets `409 held_by_other_machine` on those releases; a p
   It resolves to the **nearest occurrence within ±12 hours of now**:
   - `"1415"` at 13:02Z → 14:15Z today;
   - `"0010"` at 23:50Z → 00:10Z **tomorrow**;
-  - `"2350"` at 00:10Z → 23:50Z **yesterday** (in the past, so it pins an already-due wheels-up).
+  - `"2350"` at 00:10Z → 23:50Z **yesterday**, which is in the past and answers `400`. A time in
+    the current minute is accepted and read as now.
 
-  Omit `ready` (or send empty) for RDY: the metered slot.
+  The ready time is a runway time: the release takes the first slot at or after ready plus the
+  airborne ETE that keeps its spacing (in manual mode, behind the flight ordered ahead of it), so
+  its `edct` can be later than
+  `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: the metered slot.
 - **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
   `"2026-10-03T14:15:00Z"`. No rollover rule is needed.
 - **Responses**: every time is RFC 3339 UTC (`cross_time`, `edct`, `wheels_up`). Storage in epoch
@@ -421,10 +425,52 @@ only, so they read it through `predict::flight_path`, the path the trajectory is
 great-circle fallback included.
 
 `only_the_entry_point_times_a_flight` (`feed/predict.rs`) fails when non-test code outside
-`feed/predict.rs` and `feed/trajectory.rs` calls the model directly. To re-derive the caller list:
+`feed/predict.rs`, `feed/trajectory.rs` and the offline profile backtest
+(`profile_builder/backtest.rs`, below) calls the model directly. To re-derive the caller list:
 
 ```bash
 git grep -n 'predict::trajectory(' -- backend/src ':!*_tests.rs'
 ```
 
 and keep the hits outside `#[cfg(test)]` modules.
+
+## Measuring aircraft profiles *(#828)*
+
+The `flow.aircraft_profile` rows are hand-written. `aircraft-profile-builder` measures what each
+type actually flies on VATSIM from the stats history, and scores a profile set against flights it
+held out. It runs offline from a checkout (the backend image ships only `ois-backend`), reads the
+database named by `DATABASE_URL` and writes nothing to it:
+
+```text
+# Measure: the profile file and its coverage report.
+RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- build \
+    --from 2026-09-20 --to 2026-10-11 --out /tmp/aircraft_profiles.json --report coverage.md
+
+# Score: the stored catalog (set A) against it with the measured types applied (set B).
+RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- backtest \
+    --from 2026-09-20 --to 2026-10-11 --profiles /tmp/aircraft_profiles.json --report backtest.md
+```
+
+- **Split.** A flight whose `session_id mod 5 == 0` is held out of `build` and scored by
+  `backtest`, so no flight both shapes and scores a profile.
+- **Samples** (`profile_builder::samples`). Each pair of consecutive positions is a climb or descent
+  (at least 300 fpm, at most 90 s apart) or cruise (under 100 fpm, within 300 ft of the flight's
+  top, up to 20 min apart). Groundspeed becomes TAS with the `stats.winds` snapshot in force, read along the
+  pair's track the way the model reads RAP (`Winds::along`); a snapshot over 2 h old is not used.
+  Mach uses the field's temperature, IAS the ISA density, matching `trajectory.rs`. Climb and
+  descent speeds are IAS below FL260 and Mach from FL340; a pair between gives a rate but no speed,
+  since the IAS/Mach crossover moves with the type. Positions are
+  thinned past 7 days (`COMPACTION_TIERS`), so climbs and descents come only from the last 14 days;
+  cruise samples use any age `stats.winds` still holds (90 days, `WINDS_RETAIN_DAYS`).
+- **Output.** One value per flight per field (its median), then per type the median and quartiles
+  across flights. A field counts as measured at 20 flights (`MIN_FLIGHTS_PER_FIELD`); a type is
+  profiled when climb, cruise and descent each have a measured field (`climb_fpm_lo` or
+  `climb_fpm_hi`, `cruise_tas`, `desc_fpm`). Types below that are listed in
+  the coverage report with their wake class and engine family. The same data gives the same bytes.
+  The file is a measurement to review, not committed data.
+- **Backtest** (`profile_builder::backtest`). Each held-out flight is replayed from its first fix
+  1,000 ft above its take-off roll, on the plan revision in force then, through
+  `predict::arrival_eta` and, for the top of descent, `predict::arrival_route` +
+  `predict::eta_along_route`, the model's own functions; the live surfaces reach the same model
+  through `predict::trajectory`. Errors are predicted minus
+  observed, at the top of descent and at touchdown.

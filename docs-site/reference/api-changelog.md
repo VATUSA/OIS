@@ -27,6 +27,12 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
   trailing flight's predicted speed 40 nm out (its descent speed there once it is inside 40 nm), not
   360 kt. Response shapes are unchanged; a caller needs do nothing.
+- **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
+  pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
+  or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,
+  behind the flight ordered ahead of it), and `edct` is that slot less the flight time. `edct` was always `ready`; it is now never earlier and
+  may be later. A `ready` before the current minute answers `400 bad_request`; it used to store an
+  already-due release. A caller sending a past time must send a current one. (#816)
 - **Documented: a description on every response, and `null` last in nullable references** (#888).
   The OpenAPI document at `/docs/api/v1/openapi.json` is now built with utoipa 6. Each response that
   had an empty `description` carries its HTTP reason phrase (`OK`, `Unauthorized`, `Not Found`), as

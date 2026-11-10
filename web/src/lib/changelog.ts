@@ -38,6 +38,36 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-11-09-rap-winds",
+    date: "2026-11-09",
+    title: "RAP winds for every ETA, and Set finds a free slot",
+    sections: [
+      {
+        heading: "Flow and FCAs",
+        highlights: [
+          "ETAs now use NOAA's Rapid Refresh (RAP) wind and temperature model, read at each point along the route at the altitude the aircraft will be at there. Before, one average headwind from about 159 FB reporting stations was applied to the whole flight. This moves every ETA where there is wind: the arrival ladder, airport flow, GDP and CFR times, runway ETE, sector counts and FCA metering.",
+          "The FCA data summary says \"RAP winds\" when a wind field is loaded and \"no winds\" when OIS is running in still air.",
+          "On IDST and the FCA page, the time you type into \"Ready time\" before pressing Set is now the time the aircraft is ready at the runway. OIS gives the flight the first free crossing slot it can make from that time, so the release can be later than the ready time but never earlier, and two Sets for the same minute no longer take the same slot.",
+          "A ready time earlier than the current minute is refused with a message.",
+          "After a Set, the IDST panel shows the release time (wheels-up), the CTA at the FCA, and the delay after the ready time.",
+          "Historical replay between 14 and 90 days back now uses the winds recorded at the time instead of still air.",
+        ],
+      },
+      {
+        heading: "App",
+        highlights: [
+          "OIS now shows that it is in alpha: a chip beside the OIS name in the sidebar, on the landing page and next to the footer version, and \"(Alpha)\" in desktop window titles.",
+        ],
+      },
+      {
+        heading: "Security",
+        highlights: [
+          "Updates the server and desktop libraries with published security advisories, including the desktop app's update and zip handling.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-10-21-sidebar-flyouts",
     date: "2026-10-21",
     title: "Sidebar group menus, and one row per flight on IDST",
