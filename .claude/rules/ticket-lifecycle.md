@@ -306,7 +306,10 @@ points above, nothing more:
   a branch cut before a rule landed keeps following the old rule indefinitely and nothing warns
   you. When a rule change governs what gets posted, pushed or transitioned, merging it to `next`
   does not deliver it: bring `origin/next` into the open worktrees (rebase if unpushed, merge if
-  pushed), or accept they will not comply.
+  pushed), or accept they will not comply. The same holds for `bin/`: a branch whose
+  `bin/review-marker.sh` predates the marker manifest has every stamp deleted by the primary's
+  marker audit, so merge `origin/next` before stamping. Run the stamp alone on its line; chained
+  after other commands, the audit reverts it too (#872).
 - **Write config to the PRIMARY checkout, not the worktree copy.** A change to `CLAUDE.md`,
   `.claude/rules/`, `.claude/agents/` or a skill written to the worktree copy dies with the
   worktree. The harness will not let a worktree session edit the primary checkout, so note the
