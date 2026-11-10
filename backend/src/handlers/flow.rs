@@ -249,7 +249,7 @@ fn altitude_matches(
 /// same gate the shared-route writes use. An empty `artcc` normalises to none, so an FCA with no ARTCC is
 /// writable only nationally, like a global route. Before this, the FCA's `artcc` was only a sidebar
 /// filter: any holder could create, edit, reorder or delete another facility's FCA.
-async fn require_fca_write_scope(
+pub(crate) async fn require_fca_write_scope(
     state: &AppState,
     principal: &Principal,
     permission: &str,

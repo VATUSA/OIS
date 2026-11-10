@@ -23,6 +23,7 @@ use crate::{
     },
     errors::ApiError,
     feed,
+    handlers::flow::require_fca_write_scope,
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateAdvisoryRequest, CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest,
@@ -1584,6 +1585,10 @@ async fn capture_body(
 
 // --- Event-specific FCAs (planned in the event manager; stored in flow.fca with an event_id) ---
 
+/// The event FCA writes are scoped on this permission at the FCA's `artcc` (#854), as the plain FCA
+/// routes are on `flow.fca.*` (#636): a planner scoped to one facility can't write another's FCA.
+const FCA_PLAN_PERMISSION: &str = "events.plan.update";
+
 /// Fetch an FCA and confirm it belongs to `event_id` — 404 otherwise, so one event can't touch
 /// another's (or a shared) FCA through these routes.
 async fn owned_event_fca(
@@ -1624,7 +1629,7 @@ pub async fn list_event_fcas(
     security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn create_event_fca(
     State(state): State<AppState>,
@@ -1639,6 +1644,7 @@ pub async fn create_event_fca(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&payload.artcc]).await?;
     flow_repo::create_event_fca(pool, id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1653,7 +1659,7 @@ pub async fn create_event_fca(
         ("fca_id" = String, Path, description = "FCA id")
     ),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_event_fca(
     State(state): State<AppState>,
@@ -1665,7 +1671,16 @@ pub async fn update_event_fca(
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     crate::handlers::flow::validate_fca(&payload)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let existing = owned_event_fca(pool, id, &fca_id).await?;
+    // As it is AND where it's headed, so an FCA can't be taken from or moved into a facility the
+    // caller doesn't plan for.
+    require_fca_write_scope(
+        &state,
+        &principal,
+        FCA_PLAN_PERMISSION,
+        &[&existing.artcc, &payload.artcc],
+    )
+    .await?;
     flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1679,15 +1694,17 @@ pub async fn update_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     flow_repo::delete_fca(pool, &fca_id).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1701,15 +1718,17 @@ pub async fn delete_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn publish_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     if fca.event_status.as_deref() != Some("planned") {
         return Err(ApiError::Conflict); // only a planned FCA can be published
     }
@@ -1727,15 +1746,17 @@ pub async fn publish_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn archive_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     if !matches!(fca.event_status.as_deref(), Some("planned" | "published")) {
         return Err(ApiError::Conflict); // already archived
     }
@@ -1754,16 +1775,19 @@ pub async fn archive_event_fca(
         ("fca_id" = String, Path, description = "FCA id")
     ),
     request_body = SetFcaAutoRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn set_event_fca_auto(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
     Json(payload): Json<SetFcaAutoRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    // The lifecycle job publishes an armed FCA with no principal, so this is the only scope check.
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     flow_repo::set_event_fca_auto(pool, id, &fca_id, payload.auto_publish).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
