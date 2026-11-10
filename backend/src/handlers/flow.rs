@@ -4674,6 +4674,47 @@ mod release_spacing_tests {
         assert_eq!(slot, ms(14, 30, 0));
     }
 
+    /// #817 on #816's Set: under MIT a pair is spaced by the larger of the two gaps. A slower
+    /// airborne crossing (200 kt, 20 MIT: 360 s) ahead of the flight being set (300 kt: 240 s)
+    /// holds 360 s + the 15 s margin, not the set flight's own 240 s.
+    #[test]
+    fn set_spaces_behind_a_slower_crossing_by_its_larger_gap() {
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.mit = 20;
+        let slow = MeterInput {
+            cross_speed: 200.0,
+            ..cand(ms(14, 30, 0), true, None)
+        };
+        let metas = vec![slow, cand(ms(14, 5, 0), false, None)];
+        let slot = set(&fca, &metas, None, 1, ms(14, 30, 0));
+        assert_eq!(
+            slot,
+            ms(14, 36, 15),
+            "360 s + 15 s, not 240 s + 15 s (14:34:15)"
+        );
+    }
+
+    /// The same rule on a manually ordered FCA: the Set still clears a slower release by that
+    /// release's larger gap.
+    #[test]
+    fn a_manual_set_clears_a_slower_release_by_its_larger_gap() {
+        let mut fca = rate_fca(vec!["SET".into(), "REL".into()]);
+        fca.mode = "mit".into();
+        fca.mit = 20;
+        let release = MeterInput {
+            cross_speed: 200.0,
+            ..cand(ms(14, 30, 0), false, Some(ms(14, 30, 0)))
+        };
+        let metas = vec![cand(ms(14, 5, 0), false, None), release];
+        let slot = set(&fca, &metas, Some(&[0, 1]), 0, ms(14, 30, 0));
+        assert_eq!(
+            slot,
+            ms(14, 36, 15),
+            "360 s + 15 s, not 240 s + 15 s (14:34:15)"
+        );
+    }
+
     /// #816: a released (frozen) crossing is a commitment the Set spaces behind, as an airborne
     /// one is.
     #[test]
