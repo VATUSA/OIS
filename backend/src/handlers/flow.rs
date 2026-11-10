@@ -4811,9 +4811,10 @@ mod release_spacing_tests {
         );
     }
 
-    /// #816, auto MIT: the other flights are metered on their own crossing speeds. 20 MIT: B at
-    /// 600 kt owes A 120 s, so crosses 14:32; the setter at 300 kt needs 240 s + 15 s behind it, so
-    /// 14:36:15 is clear. Metered at 300 kt, B would cross 14:34 and push the Set to 14:38:15.
+    /// #816, auto MIT: the other flights are metered on their own crossing speeds, and each pair
+    /// takes the larger of its two gaps (#817). 20 MIT: A at 300 kt needs 240 s and B at 600 kt
+    /// 120 s, so B crosses 240 s behind A at 14:34. The setter at 300 kt needs 240 s + 15 s behind
+    /// B: 14:38:15. Spaced by each flight's own gap, B would cross 14:32 and the Set 14:36:15.
     #[test]
     fn a_set_under_mit_meters_the_others_on_their_own_speeds() {
         let mut fca = rate_fca(vec![]);
@@ -4827,7 +4828,7 @@ mod release_spacing_tests {
             b,
             cand(ms(14, 5, 0), false, None),
         ];
-        assert_eq!(set(&fca, &metas, None, 2, ms(14, 36, 15)), ms(14, 36, 15));
+        assert_eq!(set(&fca, &metas, None, 2, ms(14, 36, 15)), ms(14, 38, 15));
     }
 
     /// #816, auto mode: a re-Set does not space against the flight's own earlier release.

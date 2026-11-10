@@ -672,8 +672,10 @@ async fn idst_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
     );
 }
 
+/// Two Sets for the same ready time: since #816 a Set searches for a slot, so the second lands one
+/// rate-30 gap (120 s) plus RDY/SET's 15 s margin behind the first, and neither is left in a gap.
 #[sqlx::test]
-async fn two_departures_set_for_the_same_time_are_both_flagged(pool: PgPool) {
+async fn a_second_set_for_the_same_time_is_spaced_behind_the_first(pool: PgPool) {
     let state = state_with(pool.clone(), vec![parked("GND1"), parked("GND2")]).await;
     let id = corridor_fca(&pool, 30).await;
     let cookie = national(&pool, "flow.fca.update").await;
@@ -682,6 +684,7 @@ async fn two_departures_set_for_the_same_time_are_both_flagged(pool: PgPool) {
         .to_string();
 
     let first = release(&state, &cookie, &id, "GND1", json!({ "ready": ready })).await;
+    let g1 = ms(&row(&first, "GND1")["cross_time"]);
     assert_eq!(
         row(&first, "GND1")["slot_conflict"],
         false,
@@ -689,11 +692,17 @@ async fn two_departures_set_for_the_same_time_are_both_flagged(pool: PgPool) {
     );
     let rows = release(&state, &cookie, &id, "GND2", json!({ "ready": ready })).await;
     assert_eq!(
-        row(&rows, "GND1")["cross_time"],
-        row(&rows, "GND2")["cross_time"]
+        ms(&row(&rows, "GND1")["cross_time"]),
+        g1,
+        "the first keeps its slot"
     );
-    assert_eq!(row(&rows, "GND1")["slot_conflict"], true);
-    assert_eq!(row(&rows, "GND2")["slot_conflict"], true);
+    assert_eq!(
+        ms(&row(&rows, "GND2")["cross_time"]),
+        g1 + 135_000,
+        "one 120 s gap plus the 15 s margin behind the first"
+    );
+    assert_eq!(row(&rows, "GND1")["slot_conflict"], false);
+    assert_eq!(row(&rows, "GND2")["slot_conflict"], false);
 }
 
 #[sqlx::test]
