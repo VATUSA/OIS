@@ -43,15 +43,21 @@ desktop dependency tree into a `rust:1-bookworm` builder that has no GTK.
   `tauri://localhost`. But the web app learns its base at **runtime**: `deploy/40-ois-config.sh`
   writes `window.__OIS_API_URL__` into `config.js` at container start. A Tauri bundle has no
   container start — `web/public/config.js` is a comment-only placeholder — so the SPA falls through
-  to `VITE_OIS_API_URL`, and then to the `http://127.0.0.1:3000` default. A plain `just desktop-build`
-  therefore ships an app that only ever talks to the build machine's own localhost. Dev is unaffected
-  (`devUrl` is the web dev server, which already points at the local backend). **Releases** take the
+  to `VITE_OIS_API_URL`, and then to the `http://127.0.0.1:3000` default. **Releases** take the
   base from the repo variable `OIS_DESKTOP_API_URL`: the release job runs
   `desktop/scripts/pin-release-api.py`, which exports it as `VITE_OIS_API_URL` for the web build and
-  adds the origin to the CSP (below), and fails the release if the variable is unset, not `https://`,
-  carries a path, or points at loopback (#347). A local bundle you intend to hand to someone else
-  needs the same: `VITE_OIS_API_URL=https://… just desktop-build`, plus the CSP entry. Auth differs
-  too: the desktop app uses a keychain-stored token rather than the session cookie (#346).
+  the Rust shell and adds the origin to the CSP (below), and fails the release if the variable is
+  unset, not `https://`, carries a path, or points at loopback (#347). Auth differs too: the desktop
+  app uses a keychain-stored token rather than the session cookie (#346).
+- **The Rust shell has its own copy of the API origin.** `send_diagnostics` and `begin_login` send
+  the token and open the sign-in page from Rust, outside the CSP, so they never take a destination
+  from the webview: `src/api_origin.rs` compiles in `VITE_OIS_API_URL` (`option_env!`) and refuses
+  anything else (#924). A release build allows only that origin, and only `https`; a debug build
+  also allows `http://127.0.0.1:3000`. So a plain `just desktop-build` with no `VITE_OIS_API_URL`
+  set produces an app that refuses to sign in or send diagnostics. A local bundle you intend to hand
+  to someone else needs `VITE_OIS_API_URL=https://… just desktop-build` in the shell (cargo does not
+  read `web/.env.local`), plus the CSP entry. Dev (`just desktop`, a debug build) signs in against
+  `http://127.0.0.1:3000` unless `VITE_OIS_API_URL` is exported in the shell.
 - **The backend must allow the webview's origin.** It isn't an http host: `tauri://localhost` on
   macOS/Linux, `http://tauri.localhost` on Windows. Both are in `.env.example`'s
   `CORS_ALLOWED_ORIGINS`; a deployment that drops them gets a desktop app whose every API call is
@@ -123,7 +129,7 @@ publish an update the installed app would reject.
 
 | Variable | Required | For |
 | --- | --- | --- |
-| `OIS_DESKTOP_API_URL` | **Yes** | The production API origin the shipped app talks to, e.g. `https://api.example.org` (no path, no trailing slash). Added to the CSP `connect-src` as `https://` and `wss://`. The release fails without it. |
+| `OIS_DESKTOP_API_URL` | **Yes** | The production API origin the shipped app talks to, e.g. `https://api.example.org` (no path, no trailing slash). Added to the CSP `connect-src` as `https://` and `wss://`, and compiled into the Rust shell as the only origin it sends the token to (#924). The release fails without it. |
 
 Without the Apple/Windows certificates the build still succeeds, but the OS warns on first launch.
 The updater signature above is what gates an update **applying** — a different thing from OS signing.
@@ -222,7 +228,8 @@ wider: the webview can read a replaced alert sound and no other file on the mach
 
 `tauri.conf.json` sets a CSP for bundled builds (#346). It matters because the webview can call the
 app's commands, and `get_token` hands back the 30-day keychain token: without a policy, one injected
-script could read it and post it anywhere.
+script could read it and post it anywhere. The policy governs only the webview's own requests; the
+commands that send the token from Rust check their destination themselves (`src/api_origin.rs`, #924).
 
 | Directive | Allows | Why |
 | --- | --- | --- |
@@ -232,7 +239,7 @@ script could read it and post it anywhere.
 | `img-src blob:` | event banners | Banners are third-party URLs and organisers use any host, so no allowlist can cover them (#429). They are fetched through the API by `EventBanner` and handed over as an object URL — nothing is added to `img-src` for them. |
 | `worker-src 'self' blob:` | blob workers | maplibre spawns its tile workers from blobs. |
 | `connect-src ipc: http://ipc.localhost` | Tauri IPC | How `invoke` reaches the commands. |
-| `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`.** Release builds get it from `OIS_DESKTOP_API_URL` via `desktop/scripts/pin-release-api.py` (#347). |
+| `connect-src http://127.0.0.1:3000 ws://127.0.0.1:3000` | the API, REST + realtime (`/api/v1/ws`) | The default API base. **A build pointed at another API must add that origin, `http(s)` and `ws(s)`, and set `VITE_OIS_API_URL` for the Rust shell too.** Release builds get it from `OIS_DESKTOP_API_URL` via `desktop/scripts/pin-release-api.py` (#347). |
 
 `devCsp` is `null`: `just desktop` loads the Vite dev server, whose HMR and module preamble a strict
 policy would block. The policy is enforced only on the bundled app.

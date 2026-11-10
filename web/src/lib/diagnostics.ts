@@ -9,7 +9,6 @@
 
 import {lastUpdateCheck} from "./desktop-update";
 import {logTail} from "./logger";
-import {API_BASE} from "./api";
 import {capabilities, invokeDesktop, windowLabel} from "./platform";
 import {realtimeHistory} from "./realtime";
 import {webgl2Available} from "./webgl";
@@ -35,9 +34,6 @@ export async function diagnosticsContext(route: string) {
  */
 export async function sendDiagnostics(note: string): Promise<string> {
   const context = await diagnosticsContext(window.location.pathname);
-  return invokeDesktop<string>("send_diagnostics", {
-    apiBase: API_BASE || window.location.origin,
-    note,
-    context,
-  });
+  // No API base: the shell sends to its own build's origin, never one the webview names (#924).
+  return invokeDesktop<string>("send_diagnostics", {note, context});
 }
