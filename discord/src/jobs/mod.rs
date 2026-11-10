@@ -190,17 +190,36 @@ mod loop_tests {
     /// failed and the loop leased again inside this. A literal, so a changed constant fails here too.
     const NEXT_LEASE_WITHIN: Duration = Duration::from_millis(16_100);
 
-    /// Reads one request head and returns its request line.
-    async fn request_line(stream: &mut TcpStream) -> String {
-        let mut head = Vec::new();
+    /// Reads one whole request, its `content-length` body included, and returns its request line.
+    /// The body is drained so that answering a POST never closes on unread bytes, which would reset
+    /// the connection under the client.
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return String::new(),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let body_len = head
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        while buf.len() < head_end + body_len {
             match stream.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
-                Ok(n) => head.extend_from_slice(&chunk[..n]),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
-        let head = String::from_utf8_lossy(&head);
         head.lines().next().unwrap_or_default().to_string()
     }
 
@@ -212,9 +231,10 @@ mod loop_tests {
         stream.write_all(response.as_bytes()).await.unwrap();
     }
 
-    /// A fake backend. It reports every request line on the channel. The first lease is answered
-    /// with `first_lease` or, when that is `None`, held open with no reply; every ack is held open;
-    /// every later lease is answered with an empty batch.
+    /// A fake backend, which also stands in for Discord's REST API when an `Http` is pointed at it.
+    /// It reports every request line on the channel. The first lease is answered with `first_lease`
+    /// or, when that is `None`, held open with no reply; every ack is held open; every later lease,
+    /// and any other request, is answered with an empty JSON array.
     async fn fake_backend(
         first_lease: Option<&'static str>,
     ) -> (String, mpsc::UnboundedReceiver<String>) {
@@ -225,8 +245,9 @@ mod loop_tests {
             let mut held = Vec::new();
             let mut leases = 0;
             while let Ok((mut stream, _)) = listener.accept().await {
-                let line = request_line(&mut stream).await;
+                let line = read_request(&mut stream).await;
                 let is_lease = line.starts_with(LEASE);
+                let is_ack = line.contains("/ack");
                 // A send fails only once the test has stopped listening.
                 let _ = tx.send(line);
                 if is_lease {
@@ -236,8 +257,10 @@ mod loop_tests {
                         (1, Some(body)) => reply_json(&mut stream, body).await,
                         _ => reply_json(&mut stream, "[]").await,
                     }
-                } else {
+                } else if is_ack {
                     held.push(stream);
+                } else {
+                    reply_json(&mut stream, "[]").await;
                 }
             }
         });
@@ -264,7 +287,7 @@ mod loop_tests {
         assert!(second.is_some_and(|l| l.starts_with(LEASE)));
     }
 
-    /// AC 4(b) (#930): the lease hands out one job of an unknown type, which `perform_job` fails
+    /// AC 4(b) (#930), the nack arm: the lease hands out one job of an unknown type, which `perform_job` fails
     /// without touching Discord, so the loop nacks it. That ack's connection never answers. The loop
     /// must give up on the ack and lease again.
     #[tokio::test]
@@ -291,6 +314,53 @@ mod loop_tests {
             "the job was not acked, so the hung ack was never reached: {seen:?}"
         );
         let next = next.expect("no lease after the hung ack: the loop is stuck on it");
+        assert!(next.is_some_and(|l| l.starts_with(LEASE)));
+    }
+
+    /// AC 4(b) (#930), the success arm: a `guild_snapshot` job, with Discord's REST API pointed at
+    /// the fake (`HttpBuilder::proxy`). The fake lists no guilds and accepts the snapshot push, so the
+    /// job succeeds and the loop acks it as a success. That ack's connection never answers. The loop
+    /// must give up on the ack and lease again.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_a_success_ack_hangs() {
+        let one_job = r#"[{"id":"j1","job_type":"guild_snapshot","payload":{},"subject_type":null,"subject_id":null,"attempt_count":1}]"#;
+        let (base, mut requests) = fake_backend(Some(one_job)).await;
+        let api = OisClient::new(base.clone(), "t").unwrap();
+        let discord = serenity::http::HttpBuilder::new("")
+            .proxy(base)
+            .ratelimiter_disabled(true)
+            .build();
+        let worker = tokio::spawn(job_loop(api, Arc::new(discord), POLL));
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            match tokio::time::timeout(Duration::from_secs(5), requests.recv()).await {
+                Ok(Some(line)) => seen.push(line),
+                _ => break,
+            }
+        }
+        let next = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        assert_eq!(
+            seen.len(),
+            4,
+            "expected lease, guilds, snapshot, ack: {seen:?}"
+        );
+        assert!(seen[0].starts_with(LEASE), "{seen:?}");
+        assert!(
+            seen[1].starts_with("GET /api/v10/users/@me/guilds"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[2].starts_with("POST /api/v1/integration/discord/guilds/snapshot"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[3].starts_with("POST /api/v1/integration/jobs/j1/ack"),
+            "the job was not acked, so the hung ack was never reached: {seen:?}"
+        );
+        let next = next.expect("no lease after the hung success ack: the loop is stuck on it");
         assert!(next.is_some_and(|l| l.starts_with(LEASE)));
     }
 }
