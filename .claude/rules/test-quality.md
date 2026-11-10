@@ -197,7 +197,9 @@ formula. On a flaky test it is mandatory: the test was green before you touched 
 **Then revert the actual bug and run the suite.** In OIS the regression is usually a call site
 drifting, not the unit misbehaving: five returns (#428, #433 twice, #419) had a well-tested unit and
 an untested caller. If the suite stays green with the real bug back in, the tests do not defend the
-fix (`test-writing.md` → "Test the wiring, not just the unit").
+fix (`test-writing.md` → "Test the wiring, not just the unit"). The revert row puts back `next`'s
+exact expression at that site; a neutral value (still air, zero, `None`) is an extra row, never the
+only one, since a bounded assertion can pass the neutral mutant and the real revert alike (#836).
 
 **Restore the mutation in a way that survives the run being killed.** A restore placed after the
 test command, on its own line, does not run when the command is killed, and the mutation stays on
@@ -210,7 +212,12 @@ Around it:
 - **Never mutate while a suite builds in the same tree.** cargo and vitest read sources at build
   time, so a background run picks up your mutant (#699). Mutate first, or in a second worktree.
 - **One verification run per worktree.** To abandon a backgrounded script, stop the task itself,
-  not its test binary: killing the child lets the shell run its next mutation (#585).
+  not its test binary: killing the child lets the shell run its next mutation (#585). Kill only the
+  process IDs your own runner started (record them, or walk the tree from your task's PID); every
+  session's `mutate.sh` matches a command-line pattern (#872).
+- **Mutate a line-ending guard on Linux.** Git Bash's grep, awk and bash drop a CR themselves, so a
+  mutant that removes a CR strip stays green there; run it in the WSL clone. Drive `bin/mutate.sh`
+  from a script file, not argv from a Windows process, which MSYS rewrites (#872).
 - **Commit a WIP checkpoint before mutating by hand**, through the hooks, never `--no-verify`: the
   pre-existing-failure exception does not cover it; if a hook blocks it, copy the files to your
   scratchpad instead.
@@ -289,16 +296,18 @@ whose live and historical paths read different sources.
 - **Prove it by reinstating the old signal.** OR the old input back into the predicate. The test
   that pins the shipped direction must go red, not only the test for the direction nobody hits.
 
-**A shell probe that disagrees with the code is usually the probe.** Two specific traps make a
-verification command lie silently, and both read as a finding rather than a mistake:
+**A shell probe that disagrees with the code is usually the probe.** These traps make a
+verification command lie silently, and each reads as a finding rather than a mistake:
 
 - `echo "... $(grep -c 'unwrap($e)' file)"`: the outer double quotes expand `$e` to nothing
   *before* grep sees it, so the pattern becomes `unwrap()` and matches the wrong thing. Use single
   quotes on the outer string, or a heredoc.
 - `FILES=$(...); grep pattern $FILES`: zsh does not word-split, so a newline-separated file list
   arrives as one enormous filename. Write the list to a file and use `xargs`.
+- `bash -c "python -c '...\`x\`...'"`: the double-quoted string runs each backtick span as a
+  command before Python sees it. Put the snippet in a file or a quoted heredoc.
 
-A probe returning nothing is evidence about the probe. These are the two shapes that produce a
+A probe returning nothing is evidence about the probe. These are the shapes that produce a
 *confident wrong number* instead of nothing, which is harder to catch. When a probe contradicts a
 test result, believe the test.
 

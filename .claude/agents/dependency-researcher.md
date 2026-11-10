@@ -22,8 +22,8 @@ else that edits a manifest or lockfile. Never commit or push.
     Unicode-3.0, Zlib, CC0-1.0 and CDLA-Permissive-2.0. Anything else needs a narrow
     `[[licenses.exceptions]]` entry with a reason, as the MPL-2.0 crates under the Tauri shell
     have. A copyleft license (GPL, AGPL, LGPL) on a backend crate is a blocker.
-  - **Advisories**: yanked crates are denied, and the `ignore` list holds only unmaintained notices
-    on transitive Tauri dependencies. A new ignore needs the same justification.
+  - **Advisories**: yanked crates are denied. Each `ignore` entry carries its own exposure reason
+    and revisit trigger; read them in `deny.toml`. A new ignore needs both.
   - **Sources**: unknown registries and git sources are denied. A git dependency is a blocker.
   - **Bans**: multiple versions and wildcards warn.
 - **Locally**, `just test` (`bin/run-tests.sh`) runs `cargo deny check` and
