@@ -107,8 +107,10 @@ Every release has a `version`. It's returned in the `ETag` header of a successfu
 write** (a swap excepted); without one the write is refused with `428 precondition_required`.
 
 **Issue a release** only if the flight doesn't hold one — `If-None-Match: *`. `ready` is the
-pilot's ready time, `HHMM` in **UTC** (it resolves to the nearest occurrence within ±12 hours); omit
-it for "ready now", which takes the metered slot:
+pilot's ready time, `HHMM` in **UTC** (it resolves to the nearest occurrence within ±12 hours). The
+release takes the first slot the flight can make from that time, so its `edct` is never earlier than
+`ready` and may be later. A ready time before the current minute answers `400`. Omit `ready` for
+"ready now", which takes the metered slot:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $OIS_TOKEN" -H "If-None-Match: *" -H "Content-Type: application/json" -d '{"ready":"1415"}' https://<your-ois-host>/api/v1/flow/fcas/{id}/release/{callsign}
