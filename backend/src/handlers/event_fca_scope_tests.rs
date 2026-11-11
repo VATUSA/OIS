@@ -1,5 +1,6 @@
-//! #854: the six event FCA write routes (`/api/v1/events/{id}/fcas…`) check the caller's
-//! `events.plan.update` scope against the FCA's ARTCC, through the real router.
+//! #854: the six event FCA write routes (`/api/v1/events/{id}/fcas…`), and `PUT`/`DELETE
+//! /api/v1/flow/fcas/{id}` on an event FCA, check the caller's `events.plan.update` scope against the
+//! FCA's ARTCC, through the real router.
 //!
 //! Each route's refusal is its own `*_is_refused_outside_*` test, so deleting one route's scope
 //! call reds that route's test and no other route's.
@@ -788,4 +789,106 @@ async fn an_api_key_of_a_ztl_planner_is_refused_a_zdc_event_fca(pool: PgPool) {
         StatusCode::OK
     );
     assert!(row(&pool, "ev-planned").await.4);
+}
+
+/// A signed-in user holding `events.plan.update` at `plan` and `flow.fca.update` and
+/// `flow.fca.delete` at each of `flow`.
+async fn planner_with_fca_grants(
+    pool: &PgPool,
+    plan: Option<&str>,
+    flow: &[Option<&str>],
+) -> String {
+    let user = seed_user(pool).await;
+    grant(pool, &user, PERM, plan).await;
+    for artcc in flow {
+        grant(pool, &user, "flow.fca.update", *artcc).await;
+        grant(pool, &user, "flow.fca.delete", *artcc).await;
+    }
+    session_cookie(pool, &user).await
+}
+
+/// The plain FCA routes hold an event FCA to the same rule (#854): a ZTL planner who also holds
+/// `flow.fca.*` at ZDC can't edit or delete a ZDC event FCA through `/api/v1/flow/fcas/{id}`, and
+/// can still write an ordinary ZDC FCA there.
+#[sqlx::test]
+async fn the_plain_routes_refuse_an_event_fca_outside_the_planners_artcc(pool: PgPool) {
+    let state = state(&pool);
+    seed(&pool).await;
+    sqlx::query(
+        "insert into flow.fca (id, name, artcc, enabled) values ('plain-zdc', 'Plain', 'ZDC', true)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ztl = planner_with_fca_grants(&pool, Some("ZTL"), &[Some("ZDC")]).await;
+
+    for id in ["ev-planned", "ev-published"] {
+        let uri = format!("/api/v1/flow/fcas/{id}");
+        let before = row(&pool, id).await;
+        let put = send(&state, Method::PUT, &uri, &ztl, Some(fca("Hijack", "ZDC"))).await;
+        assert_eq!(put, StatusCode::FORBIDDEN, "PUT {id}");
+        let delete = send(&state, Method::DELETE, &uri, &ztl, None).await;
+        assert_eq!(delete, StatusCode::FORBIDDEN, "DELETE {id}");
+        assert_eq!(row(&pool, id).await, before, "{id} is unchanged");
+    }
+
+    // Positive control: the same caller still writes an ordinary ZDC FCA.
+    let plain = "/api/v1/flow/fcas/plain-zdc";
+    let status = send(
+        &state,
+        Method::PUT,
+        plain,
+        &ztl,
+        Some(fca("Plain edit", "ZDC")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row(&pool, "plain-zdc").await.0, "Plain edit");
+
+    // And a ZDC planner and a national planner with the same flow grants write the event FCA.
+    let zdc = planner_with_fca_grants(&pool, Some("ZDC"), &[Some("ZDC")]).await;
+    let uri = "/api/v1/flow/fcas/ev-planned";
+    let status = send(&state, Method::PUT, uri, &zdc, Some(fca("ZDC edit", "ZDC"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row(&pool, "ev-planned").await.0, "ZDC edit");
+    let national = planner_with_fca_grants(&pool, None, &[None]).await;
+    let uri = "/api/v1/flow/fcas/ev-planned-2";
+    let status = send(&state, Method::DELETE, uri, &national, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        row(&pool, "ev-planned-2").await.2,
+        "the national planner's delete landed"
+    );
+    let status = send(
+        &state,
+        Method::DELETE,
+        "/api/v1/flow/fcas/ev-planned",
+        &zdc,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        row(&pool, "ev-planned").await.2,
+        "the ZDC planner's delete landed"
+    );
+}
+
+/// The plain `PUT` checks the payload's ARTCC against `events.plan.update` too: a ZDC planner who
+/// holds `flow.fca.update` at ZTL as well can't move a ZDC event FCA to ZTL.
+#[sqlx::test]
+async fn the_plain_put_refuses_moving_an_event_fca_out_of_the_planners_artcc(pool: PgPool) {
+    let state = state(&pool);
+    seed(&pool).await;
+    let zdc = planner_with_fca_grants(&pool, Some("ZDC"), &[Some("ZDC"), Some("ZTL")]).await;
+    let uri = "/api/v1/flow/fcas/ev-planned";
+    let before = row(&pool, "ev-planned").await;
+
+    let status = send(&state, Method::PUT, uri, &zdc, Some(fca("Moved", "ZTL"))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(row(&pool, "ev-planned").await, before);
+
+    let status = send(&state, Method::PUT, uri, &zdc, Some(fca("Kept", "ZDC"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row(&pool, "ev-planned").await.0, "Kept");
 }
