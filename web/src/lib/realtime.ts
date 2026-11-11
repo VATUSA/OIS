@@ -159,8 +159,8 @@ export function isRealtimeLive(): boolean {
 
 /**
  * A feed-derived query's `refetchInterval`: off while feed ticks are arriving, `ms` otherwise. The
- * ticks replace the timer rather than adding to it. One backend replica is assumed: with several, a
- * client would miss ticks from the others until the hub is shared (#649).
+ * ticks replace the timer rather than adding to it. Each replica ticks only its own sockets
+ * (`Events::publish_local`, #648), so a client hears the replica it is connected to.
  */
 export function pollUnlessLive(ms: number, isLive: boolean): number | false {
   return isLive ? false : ms;

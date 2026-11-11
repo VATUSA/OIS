@@ -14,6 +14,11 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Documentation:** `IdstFlight.edct` in `GET /api/v1/flow/idst` now documents what the route already
+  returns: before release it carries the proposed EDCT (the wheels-up that would meet `cross_time`), and
+  it is null only when an unreleased flight has no metered crossing time or no ETA. The EDCT a release
+  stores can be earlier or later than that proposal. No caller change.
+  (#827)
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,

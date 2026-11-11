@@ -5,7 +5,7 @@ import {cn} from "../lib/utils";
 import {SegmentedControl, type SegmentOption} from "./segmented-control";
 
 /**
- * The page header (DESIGN.md "Wayfinding"): a large 700 title with a neutral count chip, a subtitle,
+ * The page header (DESIGN.md "The shell"): a large 700 title with a neutral count chip, a subtitle,
  * and on the right an optional view switch and page actions. The shell renders it from route meta.
  */
 export function PageHeader<V extends string = string>({

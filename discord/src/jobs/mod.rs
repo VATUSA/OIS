@@ -62,11 +62,9 @@ pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
 
 /// What a job type dispatches to.
 ///
-/// Split out of [`perform_job`] so the table can be asserted. `perform_job` needs a live `Http` and an
-/// `OisClient`, so it is unreachable from a test — which meant the one-line arm deciding whether a
-/// cancellation posts at all had no coverage: dropping `"tmi_cancel"` from it left every test green
-/// while cancels parked as `failed` (#436 review). Same reason `build_message` is split out in
-/// `jobs::tmi`.
+/// Split out of [`perform_job`] so the table can be asserted: `perform_job` needs a live `Http` and an
+/// `OisClient`, so it is unreachable from a test, and each arm (whether a cancellation posts at all,
+/// for one) needs its own coverage (#436). Same reason `build_message` is split out in `jobs::tmi`.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
     AceRequestPost,

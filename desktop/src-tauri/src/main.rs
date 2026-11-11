@@ -6,12 +6,10 @@
 //! the desktop app is literally the same app.
 //!
 //! What it adds beyond the window is authentication (see [`auth`]): the desktop app can't carry the
-//! website's session cookie, so it holds a session token in the OS keychain and sends it as a
-//! bearer. The remaining desktop features arrive in later issues, each adding its own commands and
-//! capability entries:
-//!
-//! - native notifications whose click opens the page they're about — #348 (see [`notify`])
-//! - tray, hotkeys and the rest — #349-#354
+//! website's session cookie, so it holds a session token (the OS credential store, or a 0600 file
+//! on macOS) and sends it as a bearer. The other desktop-only features are native notifications
+//! (see [`notify`]), pop-out and route windows (see [`popout`]), the tray, global shortcuts,
+//! launch at login, auto-update and diagnostics (see [`diagnostics`]).
 
 // Release builds on Windows are GUI apps, so suppress the console window that would otherwise
 // appear behind them. Logs go to the log file either way (see `logging`); debug builds also print them
