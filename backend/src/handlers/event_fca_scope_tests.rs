@@ -892,3 +892,30 @@ async fn the_plain_put_refuses_moving_an_event_fca_out_of_the_planners_artcc(poo
     assert_eq!(status, StatusCode::OK);
     assert_eq!(row(&pool, "ev-planned").await.0, "Kept");
 }
+
+/// The plain `PUT` checks the stored ARTCC even when the payload's is in the planner's scope: a ZTL
+/// planner holding `flow.fca.update` at ZDC and ZTL can't take a ZDC event FCA over by relabeling it.
+#[sqlx::test]
+async fn the_plain_put_refuses_taking_an_event_fca_into_the_planners_artcc(pool: PgPool) {
+    let state = state(&pool);
+    seed(&pool).await;
+    let ztl = planner_with_fca_grants(&pool, Some("ZTL"), &[Some("ZDC"), Some("ZTL")]).await;
+    let uri = "/api/v1/flow/fcas/ev-planned";
+    let before = row(&pool, "ev-planned").await;
+
+    let status = send(&state, Method::PUT, uri, &ztl, Some(fca("Taken", "ZTL"))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(row(&pool, "ev-planned").await, before);
+
+    // Positive control: the same caller edits the ZTL event FCA through the plain route.
+    let status = send(
+        &state,
+        Method::PUT,
+        "/api/v1/flow/fcas/ev-ztl",
+        &ztl,
+        Some(fca("ZTL edit", "ZTL")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row(&pool, "ev-ztl").await.0, "ZTL edit");
+}
