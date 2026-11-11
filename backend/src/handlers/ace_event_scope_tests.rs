@@ -499,9 +499,7 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
 }
 
 // AC5, AC2, AC3: POST /api/v1/events/{id}/ace/{req}/claim resolves the request with the event id
-// bound in the lookup. The handler's post-fetch `request.event_id != event_id` check makes this pass
-// today; once the plan removes that check, dropping the predicate from `get_request_in_event` is what
-// must turn it red.
+// bound in the lookup (`get_request_in_event`); dropping that predicate turns this test red.
 #[sqlx::test]
 async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
