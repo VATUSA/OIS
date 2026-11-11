@@ -853,6 +853,16 @@ async fn the_plain_routes_refuse_an_event_fca_outside_the_planners_artcc(pool: P
     assert_eq!(row(&pool, "ev-planned").await.0, "ZDC edit");
     let national = planner_with_fca_grants(&pool, None, &[None]).await;
     let uri = "/api/v1/flow/fcas/ev-planned-2";
+    let status = send(
+        &state,
+        Method::PUT,
+        uri,
+        &national,
+        Some(fca("National edit", "ZDC")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row(&pool, "ev-planned-2").await.0, "National edit");
     let status = send(&state, Method::DELETE, uri, &national, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(
