@@ -163,10 +163,10 @@ describe("sector demand topics (VATUSA/OIS#725)", () => {
   // refetch waits for the next tick, so a burst costs the server one projection per ARTCC, not one per
   // nudge per client. The topic's other keys still refetch at once.
   it.each([
-    ["flow.release", [["idst"], ["fca-traffic"], ["departures"]]],
-    ["flow.cfr", [["departures"], ["flow"]]],
-    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"]]],
-    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]]],
+    ["flow.release", [["idst"], ["fca-traffic"], ["departures"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
+    ["flow.cfr", [["departures"], ["flow"], ["fca-traffic"], ["idst"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
+    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["departures"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
   ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {
     const { dispose, send } = await connected();
     send(topic);

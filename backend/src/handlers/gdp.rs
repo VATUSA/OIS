@@ -135,17 +135,33 @@ fn validate_steps(
 }
 
 /// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD +
-/// departure ARTCC, no metering). Airborne/ground/proposed only — arrived flights dropped.
+/// departure ARTCC, no metering). Airborne/ground only — arrived flights dropped, and prefiles are not listed (#814).
 async fn live_inbounds(
     state: &AppState,
     icao: &str,
     now: DateTime<Utc>,
 ) -> Result<Vec<gdp::Inbound>, ApiError> {
-    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let Some(snap) = state.feed.read().await.snapshot.clone() else {
         return Ok(Vec::new());
     };
-    let tables = crate::handlers::feed::TimingTables::live(state, pool).await?;
+    // Every lock but this airport's own GDP slots: a flight held by an FCA release or a CFR is ranked
+    // from when it can arrive, while one timed from its own published slot would have its CTA as its
+    // ETA, so a revise or compress could never move it earlier and would store a delay of zero (#814).
+    let tables = match state.db.as_ref() {
+        Some(pool) => {
+            let callsigns: Vec<String> = snap
+                .data
+                .pilots
+                .iter()
+                .map(|p| p.callsign.clone())
+                .collect();
+            let locked =
+                crate::repos::flow::locked_wheels_up_outside_gdps_at(pool, &callsigns, icao)
+                    .await?;
+            crate::handlers::feed::TimingTables::with_locks(state, locked).await
+        }
+        None => crate::handlers::feed::TimingTables::load(state, state.winds.load_full()).await,
+    };
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
@@ -219,7 +235,7 @@ async fn fresh_assignments(
 /// params and persist the controlled slots (replacing any existing ones). Used on publish
 /// and when revising a published program.
 /// The frozen slot rows, the resolved program window, and the delay statistics for `gdp` — computed
-/// from the live feed and one read of the stored departure-runway assignments, with no transaction.
+/// from the live feed, with no transaction.
 ///
 /// Split out of [`freeze_slots`] for #508. Publishing must write the slots and the generated advisory in
 /// one transaction, and this is the expensive part: `fresh_assignments` runs the feed and RBS. Holding a
@@ -879,14 +895,13 @@ mod tests {
         .unwrap()
     }
 
-    /// #815: a ground flight's ETD is its estimated wheels-up, so the `max_enroute_min` tier counts
-    /// its airborne minutes, not its ground allowance on top. A tier between the airborne time and the
-    /// gate-to-arrival time (airborne + 11 min) controls the flight; one below the airborne time
-    /// exempts it.
+    /// #815: a ground flight's ETD is its proposed wheels-up, so the `max_enroute_min` tier counts
+    /// its airborne minutes, not the 10 minutes from now to that wheels-up on top (#814). A tier
+    /// between the airborne time and the now-to-arrival time (airborne + 10 min) controls the flight;
+    /// one below the airborne time exempts it.
     #[sqlx::test]
-    async fn the_enroute_tier_counts_airborne_minutes_not_the_ground_allowance(pool: PgPool) {
+    async fn the_enroute_tier_counts_airborne_minutes_not_the_time_to_wheels_up(pool: PgPool) {
         use crate::feed::airports::Airport;
-        use crate::feed::taxi_estimate::TaxiSample;
         use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
         use std::sync::Arc;
 
@@ -913,20 +928,6 @@ mod tests {
                 ..Default::default()
             })));
         }
-        // Five samples at KBOS's airport tier: 50 + 40 + 570 = 660 s.
-        let sample = || TaxiSample {
-            gate_id: None,
-            aircraft: None,
-            runway: None,
-            pushback_sec: Some(50),
-            startup_sec: Some(40),
-            taxi_sec: 570,
-        };
-        state.taxi_estimate_samples.store(Arc::new(HashMap::from([(
-            "KBOS".to_string(),
-            (0..5).map(|_| sample()).collect::<Vec<_>>(),
-        )])));
-
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
         let inbounds = live_inbounds(&state, "KJFK", now).await.unwrap();
@@ -936,8 +937,8 @@ mod tests {
             .expect("GRD1 inbound");
         assert_eq!(
             grd.etd_ms,
-            Some(now_ms + 660_000),
-            "wheels-up is now + 660 s"
+            Some(now_ms + 600_000),
+            "no filed time: wheels-up is now + 10 min"
         );
         let airborne_min = (grd.eta_ms - grd.etd_ms.unwrap()) / 60_000;
 
@@ -959,76 +960,6 @@ mod tests {
         assert!(inside.controlled, "{:?}", inside.exempt_reason);
         let beyond = ration(airborne_min - 1);
         assert_eq!(beyond.exempt_reason.as_deref(), Some(gdp::EXEMPT_TIER));
-    }
-
-    /// #813: GDP inbounds time a ground departure from its stored departure runway, the map
-    /// `list_idst` reads. KBOS has five 04R samples (900 s of taxi) and five 33L (300 s); with 04R
-    /// assigned the wheels-up is now + 50 + 40 + 900 s.
-    #[sqlx::test]
-    async fn gdp_inbounds_time_a_departure_from_its_assigned_runway(pool: PgPool) {
-        use crate::feed::airports::Airport;
-        use crate::feed::taxi_estimate::TaxiSample;
-        use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
-        use crate::repos::departure_runway::{self as departure_runway_repo, RunwaySource};
-        use std::sync::Arc;
-
-        let state = test_state(pool.clone(), HashMap::new());
-        {
-            let mut feed = state.feed.write().await;
-            feed.airports = Arc::new(HashMap::from([
-                ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
-                ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
-            ]));
-            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-                pilots: vec![Pilot {
-                    callsign: "GRD1".into(),
-                    latitude: 42.3656,
-                    longitude: -71.0096,
-                    flight_plan: Some(FlightPlan {
-                        departure: "KBOS".into(),
-                        arrival: "KJFK".into(),
-                        route: "DCT".into(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })));
-        }
-        let sample = |runway: &str, taxi_sec| TaxiSample {
-            gate_id: None,
-            aircraft: None,
-            runway: Some(runway.into()),
-            pushback_sec: Some(50),
-            startup_sec: Some(40),
-            taxi_sec,
-        };
-        let mut at_bos: Vec<_> = (0..5).map(|_| sample("04R", 900)).collect();
-        at_bos.extend((0..5).map(|_| sample("33L", 300)));
-        state
-            .taxi_estimate_samples
-            .store(Arc::new(HashMap::from([("KBOS".to_string(), at_bos)])));
-
-        let etd = |inbounds: Vec<gdp::Inbound>| {
-            inbounds
-                .into_iter()
-                .find(|f| f.cs == "GRD1")
-                .unwrap()
-                .etd_ms
-                .unwrap()
-        };
-        let now = Utc::now();
-        let unassigned = etd(live_inbounds(&state, "KJFK", now).await.unwrap());
-        assert_ne!(
-            unassigned,
-            now.timestamp_millis() + 990_000,
-            "positive control: no runway, a different tier"
-        );
-        departure_runway_repo::assign(&pool, "KBOS", "GRD1", "04R", RunwaySource::Auto, None)
-            .await
-            .unwrap();
-        let assigned = etd(live_inbounds(&state, "KJFK", now).await.unwrap());
-        assert_eq!(assigned, now.timestamp_millis() + 990_000);
     }
 
     /// AC1 — publishing a GDP produces its advisory, in the same transaction as the publish.
@@ -1381,6 +1312,109 @@ mod tests {
             live[0].2.contains("PROGRAM RATE: 20"),
             "the reissued document carries the revised rate; got:\n{}",
             live[0].2
+        );
+    }
+
+    // AC4 on the GDP surface: `live_inbounds` takes `now`, so the fixture is absolute. GRD2 holds a
+    // published GDP slot, and RBS still ranks it from its un-held ETA: the slot is not its input.
+    // GRD3 holds an FCA release, a lock elsewhere, and is ranked from it (decision 31). A prefile
+    // gets no proposed wheels-up and is not an inbound.
+    #[sqlx::test]
+    async fn a_gdp_inbounds_etd_is_its_filed_departure_plus_ten(pool: PgPool) {
+        use crate::feed::airports::Airport;
+        use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+        use chrono::TimeZone;
+        use std::sync::Arc;
+
+        let plan = |deptime: &str| FlightPlan {
+            departure: "KBOS".into(),
+            arrival: "KJFK".into(),
+            route: "DCT".into(),
+            deptime: deptime.into(),
+            ..Default::default()
+        };
+        let parked = |cs: &str, deptime: &str| Pilot {
+            callsign: cs.into(),
+            latitude: 42.3656,
+            longitude: -71.0096,
+            flight_plan: Some(plan(deptime)),
+            ..Default::default()
+        };
+        let state = test_state(pool.clone(), HashMap::new());
+        {
+            let mut feed = state.feed.write().await;
+            feed.airports = Arc::new(HashMap::from([
+                ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
+                ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ]));
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: vec![
+                    parked("GRD1", "2300"),
+                    parked("GRD2", ""),
+                    parked("GRD3", ""),
+                ],
+                prefiles: vec![Prefile {
+                    callsign: "PRE1".into(),
+                    flight_plan: Some(plan("2220")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })));
+        }
+        let at = |h, m, s| {
+            Utc.with_ymd_and_hms(2023, 11, 14, h, m, s)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let now = Utc.with_ymd_and_hms(2023, 11, 14, 22, 13, 20).unwrap();
+        let gdp: String = sqlx::query_scalar(
+            "insert into tmu.gdp (airport, aar, start_time, end_time, status) \
+             values ('KJFK', 30, '2200', '2359', 'published') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let slot = now + chrono::Duration::hours(2);
+        sqlx::query(
+            "insert into tmu.gdp_slot (gdp_id, callsign, original_eta, cta, edct) \
+             values ($1, 'GRD2', $2, $2, $2)",
+        )
+        .bind(&gdp)
+        .bind(slot)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let fca: String =
+            sqlx::query_scalar("insert into flow.fca (enabled) values (true) returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let release = now + chrono::Duration::minutes(50);
+        sqlx::query(
+            "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, 'GRD3', $2, $2)",
+        )
+        .bind(&fca)
+        .bind(release.timestamp_millis())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let inbounds = live_inbounds(&state, "KJFK", now).await.unwrap();
+        let by = |cs: &str| inbounds.iter().find(|f| f.cs == cs).unwrap();
+        assert_eq!(by("GRD1").etd_ms, Some(at(23, 10, 0)));
+        assert_eq!(by("GRD2").etd_ms, Some(at(22, 23, 20)));
+        assert_eq!(
+            by("GRD3").etd_ms,
+            Some(release.timestamp_millis()),
+            "ranked from its FCA release"
+        );
+        assert!(
+            inbounds.iter().all(|f| f.cs != "PRE1"),
+            "a prefile is not in the GDP draft (#814)"
+        );
+        assert_eq!(
+            by("GRD1").eta_ms - by("GRD1").etd_ms.unwrap(),
+            by("GRD2").eta_ms - by("GRD2").etd_ms.unwrap(),
+            "one airborne ETE from two wheels-ups"
         );
     }
 }

@@ -14,6 +14,31 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Removed: taxi insights** (#814). `GET /api/v1/stats/taxi/observations` and
+  `GET /api/v1/stats/taxi/estimates` are gone and answer 404, with their schemas
+  (`TaxiObservationEntry`, `TaxiObservationPage`, `TaxiEstimateEntry`, `TaxiEstimatePage`) and the
+  debug block's `FcaFlightDebug.taxi_estimate`. A caller of either route has to stop calling it.
+- **Changed: no taxi time in any time OIS predicts** (#814). A ground flight that holds no ready time,
+  FCA release, CFR or GDP EDCT is wheels-up at its filed departure time plus 10 minutes: now plus 10
+  when that time has passed or is blank, malformed or `0000`. It was now plus a ground allowance
+  learned from taxi observations, 780 s where too few were stored. `FlowFlight.etd` and `eta`, `FcaFlight.eta` and `cross_time`, demand, GDP
+  inbounds and the advisory `edct` on `GET /api/v1/flow/idst` move with it; `POST /api/v1/tmu/cfr`
+  without a `ready_time` locks that wheels-up when no CFR is proposed. RDY and SET never release a
+  flight before a CFR, GDP slot or other FCA release it holds. RDY
+  (`POST /api/v1/flow/fcas/{id}/release/{callsign}` without `ready`) means ready at the runway now: its
+  slot search starts at now plus the airborne flight time, not at the flight's ETA. A ground flight
+  that holds an issued CFR, an FCA release or a published GDP slot is timed from the latest of them,
+  so its `eta` is that time plus its airborne flight time and its delay reads only what was added
+  after the lock. A new boolean,
+  `wheels_up_proposed`, on `FlowFlight`, `FcaFlight` and `DepartureFlight` is true when a ground
+  flight's times rest on that proposed wheels-up. A caller needs do nothing; one that tells proposed
+  times from scheduled ones reads the new field.
+- **Changed: prefiles leave airport flow, demand and departures** (#814). `GET /api/v1/tmu/flow/{icao}`,
+  `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/flow/{icao}/aadc`, the GDP draft and
+  `GET /api/v1/tmu/departures/{dep}` list and count connected pilots only, and the `proposed` status
+  is gone from them. `Flow.proposed` is removed. `GET /api/v1/flow/aircraft/{callsign}/route` gives a
+  prefile no `fixes` unless it holds a CFR, GDP slot or FCA release. A caller that read
+  `Flow.proposed` or the `proposed` rows has to stop; the rest need do nothing.
 - **Changed: one trajectory per flight behind every time** (#813). `GET /api/v1/tmu/flow/{icao}`,
   `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/departures/{dep}`, `GET /api/v1/flow/fcas/{id}/traffic`,
   `GET /api/v1/flow/counts`, `GET /api/v1/flow/idst`, `GET /api/v1/flow/traffic/projected`,
@@ -22,8 +47,7 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   used above 60 kt and 300 ft). A flight whose route does not resolve is timed, projected and drawn
   on the great circle to its destination; a ground one is padded by 1.12, its `FcaFlight.distance_nm`
   is that padded distance, and
-  `AircraftRoute.points` draws the great circle instead of a single point. On the live routes a ground flight's taxi time comes from its stored
-  departure runway. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
+  `AircraftRoute.points` draws the great circle instead of a single point. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
   step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
   trailing flight's predicted speed 40 nm out (its descent speed there once it is inside 40 nm), not
   360 kt. Response shapes are unchanged; a caller needs do nothing.

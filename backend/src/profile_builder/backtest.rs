@@ -6,8 +6,7 @@
 //! descent ([`predict::eta_along_route`], the function FCA metering crosses fixes with). The errors
 //! are predicted minus observed, so a positive number means the model was late.
 //!
-//! Only airborne instants are replayed, so the ground branch (the taxi allowance, see #814) never
-//! enters the score.
+//! Only airborne instants are replayed, so a ground flight's wheels-up never enters the score.
 
 use std::collections::BTreeSet;
 
@@ -143,7 +142,6 @@ pub fn eta_at_along(
         ac.arr,
         profile,
         wind,
-        0.0,
         now,
     )
     .eta
@@ -166,7 +164,7 @@ pub fn predict_case(
 ) -> Prediction {
     let now = obs.snapshot.ts;
     let ac = arrival_input(plan, &obs.snapshot, profile);
-    let arrival = predict::arrival_eta(nav, airports, winds, profile, &ac, 0.0, now).eta;
+    let arrival = predict::arrival_eta(nav, airports, winds, profile, &ac, now).eta;
     // How far along the route the TOD fix lies: the route still to fly from here, less the route
     // still to fly from the TOD fix, both resolved the way arrival_eta resolves them.
     let here_nm = predict::arrival_route(nav, airports, &ac).route_nm;
@@ -450,7 +448,7 @@ mod tests {
             let p = plan(route);
             let snap = pos(0, 40.2, -74.0, 18_000, 380);
             let ac = arrival_input(&p, &snap, &profile);
-            let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, 0.0, t0());
+            let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, t0());
             let ours = eta_at_along(&nav, &ap, &winds, &profile, &ac, live.route_nm, t0());
             assert_eq!(ours, live.eta, "route {route:?}");
             // Positive control: a point short of the field is earlier.
@@ -474,7 +472,7 @@ mod tests {
         };
         let pred = predict_case(&nav, &ap, &winds, &profile, &p, &obs);
         let ac = arrival_input(&p, &obs.snapshot, &profile);
-        let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, 0.0, t0());
+        let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, t0());
         assert_eq!(pred.arrival, live.eta);
         assert!(pred.tod > t0() && pred.tod < pred.arrival);
     }
@@ -641,11 +639,10 @@ mod tests {
         for route in ["RBV WHITE SIE", ""] {
             let p = plan(route);
             let ac = arrival_input(&p, &pos(0, 40.2, -74.0, 31_000, 450), &profile);
-            let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, 0.0, t0());
+            let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, t0());
             let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
             assert_eq!(ours, live.eta, "route {route:?}");
-            let still =
-                predict::arrival_eta(&nav, &ap, &Winds::default(), &profile, &ac, 0.0, t0());
+            let still = predict::arrival_eta(&nav, &ap, &Winds::default(), &profile, &ac, t0());
             assert!(
                 (live.eta - still.eta).num_seconds().abs() > 30,
                 "route {route:?}"
@@ -664,7 +661,7 @@ mod tests {
         let profile = AircraftProfile::default();
         let p = plan("");
         let ac = arrival_input(&p, &pos(0, 40.64, -73.78, 20, 0), &profile);
-        let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, 0.0, t0());
+        let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, t0());
         let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
         assert_eq!(ours, live.eta);
     }

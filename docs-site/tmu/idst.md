@@ -32,12 +32,12 @@ Select a flight to open the right panel. It shows the **CTA** (metered crossing 
 
 Issuing a release needs **`flow.fca.update`** — read-only viewers see the board but not the buttons. There are two ways to release:
 
-- **RDY — release earliest** — drops the flight into the **earliest open metered slot** and freezes the wheels-up time that results. Use this when the pilot is ready to go now.
-- **Ready time + Set** — type the time the aircraft will be ready at the runway (`HHMMz`) and press **Set**. OIS gives it the first open crossing slot it can make from that time and freezes the release time that results. On an automatically sequenced FCA that slot is clear of every airborne and released flight; on a manually sequenced one it follows the flight you ordered ahead of it and clears every released flight, and airborne flights ordered behind it are re-spaced behind it. The release is never before the ready time; if the slot it needed was taken, it is later, and the panel shows the release time, the crossing slot and the delay. A ready time earlier than the current minute is refused.
+- **RDY — release earliest** — the pilot is ready at the runway now: drops the flight into the **earliest open metered slot** it can make from now and freezes the wheels-up time that results.
+- **Ready time + Set** — type the time the aircraft will be ready at the runway (`HHMMz`) and press **Set**. OIS gives it the first open crossing slot it can make from that time and freezes the release time that results. On an automatically sequenced FCA that slot is clear of every airborne and released flight; on a manually sequenced one it follows the flight you ordered ahead of it and clears every released flight, and airborne flights ordered behind it are re-spaced behind it. The release is never before the ready time; if the slot it needed was taken, it is later, and the panel shows the release time, the crossing slot and the delay. A ready time earlier than the current minute is refused. Neither RDY nor Set releases a flight before a CFR, GDP EDCT or other FCA release it already holds.
 - **Cancel release** — on a released flight, returns it to Unscheduled.
 
 ::: tip Proposed vs. issued
-The EDCT on an unreleased flight is advisory and moves with the flow. The moment you **RDY** or **Set**, it freezes — see [Release times](/tmu/releases) for what "frozen" means.
+The EDCT on an unreleased flight is advisory and moves with the flow. It is timed from the flight's CFR, GDP EDCT or other FCA release when it holds one, else from its proposed departure, its filed departure time plus 10 minutes (now plus 10 when that time has passed or was never filed), so RDY on a pilot who is ready sooner gives an earlier release. The moment you **RDY** or **Set**, it freezes — see [Release times](/tmu/releases) for what "frozen" means.
 :::
 
 ## It stays in sync

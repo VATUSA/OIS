@@ -31,8 +31,9 @@ pub async fn list_gates(pool: &PgPool, icao: &str) -> Result<Vec<AirportGateBody
 }
 
 /// Every gate, grouped by ICAO — for `AppState::gates` (`jobs::spawn_airport_gates_refresh` and
-/// the force-reload on write in `handlers::airport_surface`), so the DB-less feed subsystem
-/// (`feed::taxi_observations`) can match a spawn point to a gate without querying inline.
+/// the force-reload on write in `handlers::airport_surface`), so the departure-runway derive
+/// (`jobs::departure_runway_derive_once`) can match a parked aircraft to a gate without querying
+/// inline.
 pub async fn load_all_gates(
     pool: &PgPool,
 ) -> Result<HashMap<String, Vec<AirportGateBody>>, ApiError> {

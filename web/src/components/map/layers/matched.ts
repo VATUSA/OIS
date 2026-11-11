@@ -29,6 +29,8 @@ export interface MatchedFlight {
   cross_time?: string | null;
   eta?: string | null;
   delay_sec: number;
+  /** Both times rest on the flight's proposed wheels-up (#814). */
+  wheels_up_proposed?: boolean;
 }
 
 /**

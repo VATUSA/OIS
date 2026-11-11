@@ -7,7 +7,8 @@ describe the code after #813. Tables, permissions, and the route list are in [fl
 This doc does not repeat them.
 
 Out of scope here, with links: ETA computation itself (`feed/predict.rs`, `feed/trajectory.rs`;
-design doc planned by #814 at `docs/architecture/prediction.md`), the release-time formula (#815), the scheduler re-check and freeze horizon (#817), manual-order late joiners
+its design is [`docs/architecture/prediction.md`](../architecture/prediction.md), #814), the
+release-time formula (#815), the scheduler re-check and freeze horizon (#817), manual-order late joiners
 (#819), naming (#820), profiles (#818, #828), winds (#836), and IDST duplicate rows (#834).
 
 Paths below are relative to `backend/src/` unless they start with `web/` or `backend/migrations/`.
@@ -133,14 +134,15 @@ short-circuit. `dir`.
 **Live pilots** (`build_candidates`, `handlers/flow.rs`):
 
 1. No flight plan: skipped.
-2. `predict::trajectory(inp, Flight::Pilot(p), None, now)` (#813) resolves the route from the live
-   position, heading and groundspeed, and decides airborne (`gs >= 50`), the direct-route padding
-   and the departure runway from `inp.ground.assigned`, the map `list_idst` reads. No route and no
-   known destination: skipped.
+2. `predict::trajectory(inp, Flight::Pilot(p), released, now)` (#813) resolves the route from the
+   live position, heading and groundspeed, and decides airborne (`gs >= 50`) and the direct-route
+   padding. `released` is the flight's locked wheels-up (`inp.locked`: its CFR, its releases in
+   live FCAs, its GDP slot), else this FCA's release; a ground flight with neither is timed from
+   its proposed wheels-up, its filed departure time plus 10 min (#814). No route and no known
+   destination: skipped.
 3. `fca_crossing_for` with the current altitude, on `traj.path()`. Skipped before either push,
    because the two lists are consumed as parallel slices.
-4. The trajectory builds its profile, wind and ground allowance only now, for a flight that
-   crosses.
+4. The trajectory builds its profile and wind only now, for a flight that crosses.
 5. `traj.eta_at(cross.along_nm)`, the same clock airport flow, sector demand and the per-fix table
    read.
 6. `cross_speed = traj.gs_at(cross.along_nm).max(MIN_CROSS_SPEED_KT)` (120 kt), the groundspeed
@@ -227,18 +229,22 @@ numbers are the order itself (`:399-401`).
 
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
-- **RDY**, `rdy_slot` (`handlers/flow.rs:2144`): in manual mode the ladder's slot plus
-  `RELEASE_MARGIN_MS` = 15 s (`:508`). In auto mode, `earliest_slot` against every other pinned
-  flight at its **metered** time (`committed_crossings`, `:2099`, #356), with the margin added to
-  the separation.
+- **RDY**, `rdy_slot` (`handlers/flow.rs`): ready at the runway now (#814). The ready crossing is
+  now, or a later lock the flight holds outside this FCA (a CFR, a GDP slot, another FCA's
+  release; `locked_wheels_up_elsewhere`), plus the airborne ETE. In auto mode the slot is
+  `earliest_slot` from there against every other pinned flight at its **metered** time
+  (`committed_crossings`, #356), with `RELEASE_MARGIN_MS` (15 s) added to the separation. In manual
+  mode it is SET's manual slot from the same crossing: behind the flight ordered ahead by the gap,
+  clear of every other release.
 - **SET**, `set_slot` (`handlers/flow.rs`, #816): the typed time is a ready (runway) time. The
-  desired crossing is that time plus the airborne ETE, `eta - now - ground_allowance` (#815), and
+  desired crossing is that time, or a later lock held outside this FCA, plus the airborne ETE,
+  `eta - wheels_up` (#815), and
   the slot is `earliest_slot` from there against every other pinned flight, metered without the
   flight being set, with the margin added to the separation. In manual mode the flight instead
   follows the one ordered ahead of it on the ladder by the same gap, and still clears every other
   release; airborne flights ordered behind it re-chain behind its new time. A ready time before the current
   minute is refused with 400 (`ready_ms`).
-- The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - now - ground_allowance)`
+- The stored EDCT is `release_ms`: the CTA less the airborne ETE, `cta - (eta - wheels_up)`
   (`release_ms` and `mark_release` in `handlers/flow.rs`, #815), so both store a wheels-up; SET's is never earlier than the typed time.
 
 **Tests.** `feed/fca.rs:882-1141`: MIT at the follower's speed, rate metering, airborne priority,
@@ -324,12 +330,11 @@ release authority, scope and provenance; `mod release_swap_tests` (`handlers/flo
   is not true for FCAs. A callsign that flies the same FCA on a later day, as airline callsigns do,
   is pinned to the old CTA (`handlers/flow.rs:1928-1933`). It shows as released with yesterday's
   EDCT, and that EDCT also reaches `locked_wheels_up`. Filed as #844.
-- **Releases on planned or archived event FCAs still lock a departure.** `locked_wheels_up`
-  (`repos/flow.rs:543-560`) joins on `f.enabled and f.deleted_at is null` and ignores
-  `event_status`. Planners may release on hidden FCAs (#746 owner decision), and archiving keeps
-  the rows, so those times feed sector demand (`handlers/sector_demand.rs:209`) and the departures
-  list (`handlers/feed.rs:562`). Every other surface hides those FCAs (`repos/flow.rs:20-22`).
-  Filed as #845.
+- **Releases on planned or archived event FCAs locked a departure.** `locked_wheels_up` ignored
+  `event_status`, so a planner's release on a hidden FCA (#746 owner decision), or one kept when an
+  event FCA was archived, fed sector demand and the departures list. Filed as #845. #814 made every
+  timing surface read the same lock map, public routes among them, so it applies `NOT_HIDDEN_EVENT`
+  there now, as `list_fcas` does (`repos/flow.rs`, `a_hidden_event_fcas_release_locks_nothing`).
 - **Editing or deleting an event FCA publishes no realtime topic.** `update_event_fca` and
   `delete_event_fca` (`handlers/events.rs:1658`, `:1684`) skip `state.publish`, unlike the plain
   routes. A published event FCA edited this way changes live metering, and other screens see it only
@@ -368,8 +373,8 @@ planner, because both read `list_fcas`. This matches #586 and #746 as built.
 
 **Tests.** `mod fca_traffic_visibility_tests` (`handlers/flow.rs:5939`). IDST has router tests
 for provenance (`handlers/machine_actor_tests.rs:1060`, `:1103`, `:1611`) and for its advisory
-EDCT: `idst_proposes_the_same_edct_a_release_stores` and
-`idst_gives_a_rolling_pilot_its_own_runway_tier_allowance`. The `fca_counts`
+EDCT: `idst_proposes_the_proposed_wheels_up_and_rdy_releases_now_through_the_router` and
+`idst_gives_each_row_its_own_proposed_wheels_up`. The `fca_counts`
 handler is covered through the router by `handlers/flow_prefile_candidate_tests.rs` (#834). No test
 covers `hist_fcas`.
 

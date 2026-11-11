@@ -13,7 +13,7 @@ and broken down by what kind of traffic is driving it — before it lands, not j
 ## Scope
 
 **Built:** 15/30/60-minute bucketing over a fixed 4-hour forward window; breakdown by status
-(airborne/ground/proposed), aircraft category (wake class), carrier, and arrival fix; the airport's
+(airborne/ground), aircraft category (wake class), carrier, and arrival fix; the airport's
 wind-favored AAR/ADR as a reference. A dedicated page and a configurable dashboard widget.
 
 **Not built (out of proportion to the issue that shipped this):** a "Center" breakdown dimension —

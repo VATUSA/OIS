@@ -9,8 +9,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
     runway_db::RunwayDb, sector_consolidations::SectorConsolidations, sector_limits::SectorLimits,
-    sectors::SectorTable, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
-    winds::Winds,
+    sectors::SectorTable, tracon::TraconState, trajectory::ProfileTable, winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -64,7 +63,7 @@ pub struct AppState {
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
-    /// DB-less feed subsystem (`feed::taxi_observations`).
+    /// DB-less departure-runway derive (`jobs::departure_runway_derive_once`).
     pub gates: Arc<ArcSwap<HashMap<String, Vec<AirportGateBody>>>>,
     /// Manually excluded ("bogus") flight callsigns, keyed by ARTCC (#342). Starts empty and is
     /// reloaded from the DB by `jobs::spawn_flight_exclusions_refresh` (and force-reloaded on every
@@ -72,13 +71,6 @@ pub struct AppState {
     /// from the DB-less flow surfaces that must drop a bogus callsign from the map, the FCA
     /// crossing lists, metering, counts and AADC demand.
     pub flight_exclusions: Arc<ArcSwap<HashMap<String, HashSet<String>>>>,
-    /// Learned per-gate/type/runway pushback+taxi observation samples, keyed by departure ICAO
-    /// (#164 sub-issue E). Starts empty and is reloaded from the DB every 10 min by
-    /// `jobs::spawn_taxi_estimate_samples_refresh`, so it sits behind an `ArcSwap` for lock-free
-    /// reads from the DB-less feed subsystem (`feed::flow::resolve_ground_allowance`). Distinct
-    /// from `FeedInner::taxi_samples`, `feed::taxi.rs`'s own unrelated live 3h rolling aggregate for
-    /// the Taxi Monitor page.
-    pub taxi_estimate_samples: Arc<ArcSwap<HashMap<String, Vec<taxi_estimate::TaxiSample>>>>,
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
@@ -130,7 +122,6 @@ impl AppState {
             Arc::new(ArcSwap::from_pointee(SectorConsolidations::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
-        let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let data_refresh_in_flight = Arc::new(AtomicBool::new(false));
@@ -176,7 +167,6 @@ impl AppState {
                 sector_demand: Arc::default(),
                 gates,
                 flight_exclusions,
-                taxi_estimate_samples,
                 nav_refreshed,
                 winds_refreshed,
                 data_refresh_in_flight,
@@ -206,7 +196,6 @@ impl AppState {
             sector_demand: Arc::default(),
             gates,
             flight_exclusions,
-            taxi_estimate_samples,
             nav_refreshed,
             winds_refreshed,
             data_refresh_in_flight,
@@ -237,7 +226,6 @@ impl AppState {
             sector_demand: Arc::default(),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),

@@ -248,8 +248,6 @@ always matches the running API.
 | `/api/v1/stats/replay` | GET | `stats.data.read` |
 | `/api/v1/stats/replay/positions` | GET | `stats.data.read` |
 | `/api/v1/stats/storage-forecast` | GET | `system.jobs.read` |
-| `/api/v1/stats/taxi/estimates` | GET | `stats.data.read` |
-| `/api/v1/stats/taxi/observations` | GET | `stats.data.read` |
 | `/api/v1/tmu/advisories` | GET | `tmu.adv.read` |
 | `/api/v1/tmu/advisories` | POST | `tmu.adv.create` |
 | `/api/v1/tmu/advisories/{id}` | DELETE | `tmu.adv.update` |

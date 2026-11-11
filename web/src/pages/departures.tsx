@@ -8,6 +8,7 @@ import {type Departure, useDepartures, useIssueCfr, useReleaseCfr} from "@/lib/d
 import {useHistoricalAt} from "@/lib/historical-context";
 import {hasPermission} from "@/lib/permissions";
 import {hhmmZulu, parseHhmm} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 
 function delayClass(min: number): string {
   if (min >= 15) return "text-level-over";
@@ -131,7 +132,13 @@ function departureColumns(canIssue: boolean): DataColumn<Departure>[] {
       icon: Clock,
       mono: true,
       sortDescFirst: false,
-      cell: (c) => <span className="text-ink-2">{hhmmZulu(c.row.original.eta)}</span>,
+      cell: (c) => (
+        <ProposedTime
+          className="text-ink-2"
+          iso={c.row.original.eta}
+          proposed={c.row.original.wheels_up_proposed}
+        />
+      ),
     },
     {
       accessorKey: "delay_min",
@@ -166,7 +173,7 @@ function departureColumns(canIssue: boolean): DataColumn<Departure>[] {
     },
     {
       id: "state",
-      accessorFn: (d) => (!d.has_program ? "no program" : d.cfr_issued ? "issued" : "proposed"),
+      accessorFn: (d) => (!d.has_program ? "no program" : d.cfr_issued ? "issued" : "metered"),
       header: "State",
       cell: (c) => {
         const d = c.row.original;
@@ -175,7 +182,7 @@ function departureColumns(canIssue: boolean): DataColumn<Departure>[] {
         ) : d.cfr_issued ? (
           <StatusPill tone="good">issued</StatusPill>
         ) : (
-          <StatusPill tone="brand">proposed</StatusPill>
+          <StatusPill tone="brand">metered</StatusPill>
         );
       },
     },

@@ -59,6 +59,13 @@ describe("mapTooltip", () => {
     expect(h).toContain("+4:12");
   });
 
+  it("names a crossing that rests on the flight's proposed wheels-up, and only that one (#814)", () => {
+    const h = html(tooltip(pick("matched", { ...matched, wheels_up_proposed: true })));
+    expect(h).toContain("STA 1432z");
+    expect(h).toContain(">proposed</span>");
+    expect(html(tooltip(pick("matched", matched)))).not.toContain("proposed");
+  });
+
   it("shows on time below the delay threshold", () => {
     expect(html(tooltip(pick("matched", { ...matched, delay_sec: 10 })))).toContain("on time");
   });

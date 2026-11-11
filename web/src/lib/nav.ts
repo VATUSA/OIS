@@ -129,7 +129,6 @@ export const AREAS: readonly NavArea[] = [
           { label: "Dashboard", to: "/admin/historical/dashboard", icon: LayoutDashboard, permission: "stats.data.read" },
           { label: "Replay", to: "/admin/historical/replay", icon: Film, permission: "stats.data.read" },
           { label: "Delays", to: "/admin/historical/delays", icon: Timer, permission: "stats.data.read" },
-          { label: "Taxi", to: "/admin/historical/taxi", icon: PlaneTakeoff, permission: "stats.data.read" },
         ],
       },
       {

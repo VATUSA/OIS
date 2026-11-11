@@ -222,13 +222,12 @@ pub fn collect_arrivals(
     else {
         return Vec::new();
     };
-    // Airborne arrivals only, so the ground allowance is never read.
     let inp = predict::Inputs {
         nav,
         airports,
         winds,
         profiles,
-        ground: predict::GroundInputs::unused(),
+        locked: &predict::NO_LOCKS,
     };
     let mut out = Vec::new();
     for p in &data.pilots {
@@ -654,7 +653,6 @@ mod tests {
                 cruise_ft: 35_000.0,
                 cruise_tas: 440.0,
             },
-            0.0,
             now,
         );
         assert_eq!(eta(&shear), direct.eta.timestamp_millis());

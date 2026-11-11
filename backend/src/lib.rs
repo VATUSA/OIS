@@ -1,6 +1,4 @@
 pub mod advisory;
-#[cfg(test)]
-mod alloc_probe;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -118,7 +116,7 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.sector_consolidations.clone(),
         );
-        // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
+        // Airport surface gates, for the departure-runway derive's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Manually excluded ("bogus") flights, for the DB-less flow surfaces (#342). Also runs the
         // auto-clear once a callsign leaves the feed.
@@ -134,25 +132,11 @@ pub async fn run() -> color_eyre::Result<()> {
         // spawn_airport_gates_refresh above, so a seed's own cache reload is not immediately
         // overwritten by a poll that started before the rows landed.
         jobs::spawn_xplane_gate_seed(state.jobs.clone(), pool.clone(), state.gates.clone());
-        // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164
-        // sub-issue E, kept DB-less).
-        jobs::spawn_taxi_estimate_samples_refresh(
-            state.jobs.clone(),
-            pool.clone(),
-            state.taxi_estimate_samples.clone(),
-        );
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         // Per-flight delay legs (taxi-out + arrival transit) for the average-delay page.
         feed::delays::spawn_collector(pool.clone(), state.feed.clone(), state.runways.clone());
-        // Per-gate/type/runway pushback+taxi-out observations (#164 sub-issue C).
-        feed::taxi_observations::spawn_collector(
-            pool.clone(),
-            state.feed.clone(),
-            state.runways.clone(),
-            state.gates.clone(),
-        );
         jobs::spawn_stats_compaction(state.jobs.clone(), pool.clone());
         jobs::spawn_capture_scheduler(state.jobs.clone(), pool.clone());
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
