@@ -238,10 +238,10 @@ async fn update_refuses_a_zdc_planner_relabelling_a_zdc_fca_to_ztl(pool: PgPool)
     assert_eq!(status, StatusCode::OK);
 }
 
-/// Update checks the stored ARTCC even when the payload's is in scope: an FCA can't be taken over
-/// from another facility.
+/// Update checks the stored ARTCC even when the payload's is in scope (a ZDC planner can't take a
+/// ZTL FCA over), and the payload's when the stored one is (a ZTL planner can't hand it to ZDC).
 #[sqlx::test]
-async fn update_refuses_a_ztl_planner_relabelling_a_ztl_fca_to_zdc(pool: PgPool) {
+async fn update_refuses_moving_a_ztl_fca_to_zdc_from_either_facility(pool: PgPool) {
     let state = state(&pool);
     seed(&pool).await;
     let uri = "/api/v1/events/7360/fcas/ev-ztl";
