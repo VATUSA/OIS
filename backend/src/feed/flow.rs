@@ -1577,7 +1577,7 @@ mod tests {
     }
 
     /// #815: `ready_time_slot` returns a wheels-up, so the enroute time it slots with is the
-    /// airborne ETE alone (`sta − cfr`). AIR is airborne, so its slot does not depend on any ETD.
+    /// airborne ETE alone (its ETA less its ETD). AIR is airborne, so its slot does not depend on any ETD.
     /// GRD1 is ready one airborne ETE less 1 min before AIR's slot, so it would arrive 1 min behind
     /// AIR, inside the 2 min runway interval (AAR 30), and its wheels-up is pushed 1 min later. With
     /// the 10 min to its proposed wheels-up counted in the enroute time, the ready time would read as

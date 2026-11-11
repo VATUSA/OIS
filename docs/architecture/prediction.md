@@ -148,8 +148,9 @@ trajectory's ETA there less its wheels-up (`release_ms` in `handlers/flow.rs`, `
 - **SET** and a CFR's `ready_time` are runway times: the release is never earlier than the ready
   time.
 - **A lock held elsewhere** (an issued CFR, a published GDP slot, another FCA's release) floors
-  RDY and SET: the search starts at the later of the ready time and that lock
-  (`repos::flow::locked_wheels_up_elsewhere`). The flight's own release on the FCA does not.
+  RDY and SET for a ground flight: the search starts at the later of the ready time and that lock
+  (`repos::flow::locked_wheels_up_elsewhere`). The flight's own release on the FCA does not, and an
+  airborne flight, which has left, is not floored.
 - **A CFR issued without a ready time** locks the program's metered CFR, else the flight's locked
   or proposed wheels-up (`FlowFlight.etd`).
 - **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:482`) milliseconds on

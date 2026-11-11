@@ -1070,7 +1070,7 @@ pub struct DepartureFlight {
     /// EDCT), so `eta` and `cfr` rest on its proposed wheels-up (`FlowFlight.etd`) (#814).
     pub wheels_up_proposed: bool,
     /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
-    /// is issued for this callsign.
+    /// is issued for this callsign, and on a historical replay, which holds none of today's CFRs.
     #[serde(default)]
     pub cfr_version: Option<i64>,
     pub seq: Option<i64>,

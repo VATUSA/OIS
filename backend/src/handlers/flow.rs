@@ -2245,7 +2245,8 @@ pub async fn mark_release(
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let releases = load_releases(pool, &id).await?;
-    // A CFR, GDP slot or another FCA's release the flight is held to: no release here goes before it.
+    // A CFR, GDP slot or another FCA's release the flight is held to: for a ground flight, no release
+    // here goes before it.
     let held_ms = flow_repo::locked_wheels_up_elsewhere(pool, &callsign, &id).await?;
 
     // Release the feed lock before the metering CPU (build_candidates resolves every

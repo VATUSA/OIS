@@ -1398,14 +1398,19 @@ mod departures_release_tests {
         let snap = state.feed.read().await.snapshot.clone().unwrap();
         let row = |r: &crate::models::DeparturesResponse| {
             let d = r.departures.iter().find(|d| d.callsign == "CFR").unwrap();
-            (d.cfr, d.cfr_issued, d.wheels_up_proposed)
+            (
+                d.cfr,
+                d.cfr_issued,
+                d.wheels_up_proposed,
+                d.cfr_version.is_some(),
+            )
         };
         let none = Arc::new(super::TimingTables::load(&state, state.winds.load_full()).await);
         let replay =
             super::departures_response(&state, &pool, "KJFK", snap.clone(), none, Utc::now())
                 .await
                 .unwrap();
-        assert_eq!(row(&replay), (None, false, true), "replay");
+        assert_eq!(row(&replay), (None, false, true, false), "replay");
         let live = super::TimingTables::live(&state, &pool, Some(&snap.data))
             .await
             .unwrap();
@@ -1413,6 +1418,6 @@ mod departures_release_tests {
             super::departures_response(&state, &pool, "KJFK", snap, Arc::new(live), Utc::now())
                 .await
                 .unwrap();
-        assert_eq!(row(&live), (Some(lock), true, false), "live");
+        assert_eq!(row(&live), (Some(lock), true, false, true), "live");
     }
 }

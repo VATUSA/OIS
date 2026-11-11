@@ -24,7 +24,7 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   learned from taxi observations, 780 s where too few were stored. `FlowFlight.etd` and `eta`, `FcaFlight.eta` and `cross_time`, demand, GDP
   inbounds and the advisory `edct` on `GET /api/v1/flow/idst` move with it; `POST /api/v1/tmu/cfr`
   without a `ready_time` locks that wheels-up when no CFR is metered. RDY and SET never release a
-  flight before a CFR, GDP slot or other FCA release it holds. RDY
+  ground flight before a CFR, GDP slot or other FCA release it holds. RDY
   (`POST /api/v1/flow/fcas/{id}/release/{callsign}` without `ready`) means ready at the runway now: its
   slot search starts at now plus the airborne flight time, not at the flight's ETA. A ground flight
   that holds an issued CFR, an FCA release or a published GDP slot is timed from the latest of them,

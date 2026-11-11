@@ -230,14 +230,15 @@ numbers are the order itself (`:399-401`).
 **Releases enter the sequence** as `frozen_ms` (area 2). `mark_release` computes the CTA:
 
 - **RDY**, `rdy_slot` (`handlers/flow.rs`): ready at the runway now (#814). The ready crossing is
-  now, or a later lock the flight holds outside this FCA (a CFR, a GDP slot, another FCA's
-  release; `locked_wheels_up_elsewhere`), plus the airborne ETE. In auto mode the slot is
+  now, or, for a ground flight, a later lock it holds outside this FCA (a CFR, a GDP slot, another
+  FCA's release; `locked_wheels_up_elsewhere`), plus the airborne ETE. In auto mode the slot is
   `earliest_slot` from there against every other pinned flight at its **metered** time
   (`committed_crossings`, #356), with `RELEASE_MARGIN_MS` (15 s) added to the separation. In manual
   mode it is SET's manual slot from the same crossing: behind the flight ordered ahead by the gap,
   clear of every other release.
 - **SET**, `set_slot` (`handlers/flow.rs`, #816): the typed time is a ready (runway) time. The
-  desired crossing is that time, or a later lock held outside this FCA, plus the airborne ETE,
+  desired crossing is that time, or a later lock a ground flight holds outside this FCA, plus the
+  airborne ETE,
   `eta - wheels_up` (#815), and
   the slot is `earliest_slot` from there against every other pinned flight, metered without the
   flight being set, with the margin added to the separation. In manual mode the flight instead

@@ -4794,7 +4794,7 @@ export interface components {
             /**
              * Format: int64
              * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
-             *     is issued for this callsign.
+             *     is issued for this callsign, and on a historical replay, which holds none of today's CFRs.
              */
             cfr_version?: number | null;
             /** Format: int64 */

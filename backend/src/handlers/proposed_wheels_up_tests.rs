@@ -540,6 +540,10 @@ async fn clearing_a_release_times_the_flight_from_what_it_still_holds(pool: PgPo
     let free = row(&cleared, "FREE");
     assert_eq!(free["released"], false, "{free}");
     assert_eq!(free["wheels_up_proposed"], true, "{free}");
+    assert!(
+        free["release_version"].is_null(),
+        "the cleared release's version is gone with it: {free}"
+    );
 
     let (status, cleared) = call(
         &state,
@@ -1072,5 +1076,60 @@ async fn a_cfr_for_a_prefile_only_callsign_takes_the_unlisted_fallback(pool: PgP
         at(&body["wheels_up"]),
         ready,
         "the ready time, unmetered: {body}"
+    );
+}
+
+/// #814 decision 40: the lock-held-elsewhere floor on RDY applies to a ground flight only. AIR, in
+/// the air but still holding a CFR 45 min out, is released at the crossing it can make; GRD, parked
+/// and held to the same CFR, is released no sooner than that CFR (the positive control).
+#[sqlx::test]
+async fn rdy_does_not_floor_an_airborne_flight_at_a_lock_it_still_holds(pool: PgPool) {
+    let data = VatsimData {
+        pilots: vec![airborne("AIR"), parked("GRD", "")],
+        ..Default::default()
+    };
+    let state = state_with(&pool, data).await;
+    let id = corridor_fca(&pool).await;
+    let lock = whole_minute(45);
+    issue_cfr(&pool, "AIR", lock).await;
+    issue_cfr(&pool, "GRD", lock).await;
+    let traffic = format!("/api/v1/flow/fcas/{id}/traffic");
+    let (_, before) = send_json(&state, Method::GET, &traffic, "").await;
+    let air_eta = at(&row(&before, "AIR")["eta"]);
+    assert!(
+        air_eta < lock,
+        "positive control: AIR crosses before its CFR: {before}"
+    );
+    let cookie = holder(&pool, &["flow.fca.update"]).await;
+    let headers = [("cookie", cookie.as_str())];
+    let release = |cs: &str| format!("/api/v1/flow/fcas/{id}/release/{cs}");
+    let (status, board) = call(
+        &state,
+        Method::POST,
+        &release("AIR"),
+        &headers,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{board}");
+    let cross = at(&row(&board, "AIR")["cross_time"]);
+    let late = (cross - air_eta).num_seconds();
+    assert!(
+        (0..=180).contains(&late),
+        "released at the crossing it can make, {late} s after its ETA, not after its CFR: {board}"
+    );
+    let (status, board) = call(
+        &state,
+        Method::POST,
+        &release("GRD"),
+        &headers,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{board}");
+    let early = (lock - at(&row(&board, "GRD")["edct"])).num_seconds();
+    assert!(
+        early <= 0,
+        "a ground flight is floored at its CFR: {early} s early: {board}"
     );
 }

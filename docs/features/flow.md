@@ -340,8 +340,8 @@ different machine, so it gets `409 held_by_other_machine` on those releases; a p
   airborne ETE that keeps its spacing (in manual mode, behind the flight ordered ahead of it), so
   its `edct` can be later than
   `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: ready at the runway now,
-  so the first slot at or after now plus the airborne ETE (#814). Either way the search starts no
-  earlier than a CFR, GDP slot or other FCA release the flight holds.
+  so the first slot at or after now plus the airborne ETE (#814). Either way the search for a ground
+  flight starts no earlier than a CFR, GDP slot or other FCA release it holds.
 - **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
   `"2026-10-03T14:15:00Z"`. No rollover rule is needed.
 - **Responses**: every time is RFC 3339 UTC (`cross_time`, `edct`, `wheels_up`). Storage in epoch
