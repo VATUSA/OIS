@@ -5,7 +5,7 @@
 //!
 //! Coverage (VATUSA/OIS#920): one test per route, each walking no credential (401), no permission
 //! (401), a ZDC-scoped holder and a national holder (404 through another event's URL with the row
-//! unchanged, then success through its own event).
+//! unchanged and no ACE topic published, then success through its own event, published once).
 //!
 //! Every request row carries `artcc_id = 'ZNY'` and every scoped caller holds its permission at ZDC
 //! only: the routes take no ARTCC scope check today, so a ZDC holder's success on the right event is
@@ -16,13 +16,27 @@ use std::collections::HashMap;
 use axum::http::{Method, StatusCode};
 use serde_json::json;
 use sqlx::PgPool;
+use tokio::sync::broadcast::Receiver;
 
+use crate::realtime::{WsEvent, topic};
 use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+
+/// How many events of `wanted` arrived since the last drain.
+fn drain(rx: &mut Receiver<WsEvent>, wanted: &str) -> usize {
+    let mut n = 0;
+    while let Ok(event) = rx.try_recv() {
+        if event.topic == wanted {
+            n += 1;
+        }
+    }
+    n
+}
 
 // AC1, AC2, AC3: DELETE /api/v1/events/{id}/ace/{req} binds the event id in the delete.
 #[sqlx::test]
 async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
+    let mut rx = state.events.subscribe();
     let requester = seed_user(&pool).await;
     sqlx::query(
         "insert into events.event (id, title, start_time, end_time) values \
@@ -94,6 +108,11 @@ async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let a1: Option<(i64, String)> =
         sqlx::query_as("select event_id, status from ace.requests where id = 'ace-920-a1'")
             .fetch_optional(&pool)
@@ -116,6 +135,11 @@ async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool
         )
         .await,
         StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
     );
     let left: Vec<String> = sqlx::query_scalar(
         "select id from ace.requests where id in ('ace-920-a1', 'ace-920-a2', 'ace-920-b1') order by id",
@@ -144,6 +168,11 @@ async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let a3_count: i64 =
         sqlx::query_scalar("select count(*) from ace.requests where id = 'ace-920-a3'")
             .fetch_one(&pool)
@@ -161,6 +190,11 @@ async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool
         .await,
         StatusCode::NO_CONTENT
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
+    );
     let a3_count: i64 =
         sqlx::query_scalar("select count(*) from ace.requests where id = 'ace-920-a3'")
             .fetch_one(&pool)
@@ -175,6 +209,7 @@ async fn delete_answers_404_for_another_events_request_and_keeps_it(pool: PgPool
 #[sqlx::test]
 async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
+    let mut rx = state.events.subscribe();
     let requester = seed_user(&pool).await;
     sqlx::query(
         "insert into events.event (id, title, start_time, end_time) values \
@@ -250,6 +285,11 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
         .await,
         StatusCode::UNAUTHORIZED
     );
+    let claims: i64 = sqlx::query_scalar("select count(*) from ace.claims")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(claims, 4, "a refused caller released nothing");
 
     // The ZDC-scoped claimer, through the wrong event.
     assert_eq!(
@@ -262,6 +302,11 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
         )
         .await,
         StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
     );
     let scoped_on_a1: i64 = sqlx::query_scalar(
         "select count(*) from ace.claims where request_id = 'ace-920-a1' and claimed_by = $1",
@@ -293,6 +338,11 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
         .await,
         StatusCode::OK
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
+    );
     let claims: Vec<String> = sqlx::query_scalar(
         "select notes from ace.claims where request_id in ('ace-920-a1', 'ace-920-b1') order by notes",
     )
@@ -317,6 +367,11 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let national_on_a3: i64 = sqlx::query_scalar(
         "select count(*) from ace.claims where request_id = 'ace-920-a3' and claimed_by = $1",
     )
@@ -339,6 +394,11 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
         .await,
         StatusCode::OK
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
+    );
     let national_on_a3: i64 = sqlx::query_scalar(
         "select count(*) from ace.claims where request_id = 'ace-920-a3' and claimed_by = $1",
     )
@@ -354,6 +414,7 @@ async fn release_answers_404_for_another_events_request_and_keeps_the_claim(pool
 #[sqlx::test]
 async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
+    let mut rx = state.events.subscribe();
     let requester = seed_user(&pool).await;
     sqlx::query(
         "insert into events.event (id, title, start_time, end_time) values \
@@ -400,6 +461,12 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
         .await,
         StatusCode::UNAUTHORIZED
     );
+    let a1_status: String =
+        sqlx::query_scalar("select status from ace.requests where id = 'ace-920-a1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(a1_status, "open", "a refused caller decided nothing");
 
     // A ZDC-scoped holder, through the wrong event.
     let scoped = seed_user(&pool).await;
@@ -415,6 +482,11 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
         )
         .await,
         StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
     );
     let a1: (String, Option<String>, bool, bool) = sqlx::query_as(
         "select status, decided_by, decided_by_actor is null, decided_at is null \
@@ -440,6 +512,11 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
         )
         .await,
         StatusCode::OK
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
     );
     let a1: (String, Option<String>) =
         sqlx::query_as("select status, decided_by from ace.requests where id = 'ace-920-a1'")
@@ -469,6 +546,11 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let a3: (String, Option<String>) =
         sqlx::query_as("select status, decided_by from ace.requests where id = 'ace-920-a3'")
             .fetch_one(&pool)
@@ -490,6 +572,11 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
         .await,
         StatusCode::OK
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
+    );
     let a3: (String, Option<String>) =
         sqlx::query_as("select status, decided_by from ace.requests where id = 'ace-920-a3'")
             .fetch_one(&pool)
@@ -503,6 +590,7 @@ async fn decide_answers_404_for_another_events_request_and_leaves_it_open(pool: 
 #[sqlx::test]
 async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());
+    let mut rx = state.events.subscribe();
     let requester = seed_user(&pool).await;
     sqlx::query(
         "insert into events.event (id, title, start_time, end_time) values \
@@ -570,6 +658,11 @@ async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: 
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let claims: i64 = sqlx::query_scalar("select count(*) from ace.claims")
         .fetch_one(&pool)
         .await
@@ -587,6 +680,11 @@ async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: 
         )
         .await,
         StatusCode::OK
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
     );
     let claims: Vec<(String, String)> =
         sqlx::query_as("select request_id, claimed_by from ace.claims order by request_id")
@@ -610,6 +708,11 @@ async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: 
         .await,
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        0,
+        "a refused cross-event write publishes nothing"
+    );
     let national_claims: i64 =
         sqlx::query_scalar("select count(*) from ace.claims where claimed_by = $1")
             .bind(&national)
@@ -630,6 +733,11 @@ async fn claim_answers_404_for_another_events_request_and_writes_no_claim(pool: 
         )
         .await,
         StatusCode::OK
+    );
+    assert_eq!(
+        drain(&mut rx, topic::ACE),
+        1,
+        "the write through its own event publishes once"
     );
     let national_claims: Vec<String> =
         sqlx::query_scalar("select request_id from ace.claims where claimed_by = $1")
