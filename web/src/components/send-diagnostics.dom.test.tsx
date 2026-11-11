@@ -82,7 +82,6 @@ describe("SendDiagnosticsButton", () => {
     expect(args.context).toHaveProperty("realtime");
     expect((args.context.log_tail as string[]).join("\n")).toMatch(/realtime dropped/);
   });
-
 });
 
 describe("ErrorBoundary", () => {

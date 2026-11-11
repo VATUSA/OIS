@@ -3,7 +3,9 @@
 //! Rust owns it rather than taking it from the webview: a script injected into the webview could
 //! otherwise name any host, and these requests leave from Rust, outside the CSP's `connect-src`. The
 //! origin is compiled in from `VITE_OIS_API_URL`, the variable `desktop/scripts/pin-release-api.py`
-//! exports for the release build, so the webview's API base and this one come from one value.
+//! exports for the release build, so in a release the webview's API base and this one come from one
+//! value. Cargo reads only the shell environment, never `web/.env.local`, so a dev build can disagree
+//! with the webview (`desktop/README.md`).
 
 use reqwest::Url;
 
@@ -393,7 +395,8 @@ mod tests {
         fn flush(&self) {}
     }
 
-    /// The process's logger. nextest runs each test in its own process, so records never mix.
+    /// The process's logger. `cargo test` runs every test in one process, so each test reads only the
+    /// records naming an origin no other test uses.
     fn captured() -> &'static Capture {
         static LOGGER: OnceLock<&'static Capture> = OnceLock::new();
         LOGGER.get_or_init(|| {
@@ -404,29 +407,33 @@ mod tests {
         })
     }
 
-    fn warnings() -> Vec<String> {
+    /// Every record naming `origin`, at any level.
+    fn records_naming(origin: &str) -> Vec<(log::Level, String)> {
         let records = captured().0.lock().unwrap();
         records
             .iter()
-            .filter(|(level, _)| *level == log::Level::Warn)
-            .map(|(_, m)| m.clone())
+            .filter(|(_, m)| m.contains(origin))
+            .cloned()
             .collect()
     }
 
     #[test]
     fn a_refused_origin_is_logged_at_warn_naming_the_origin() {
+        const REFUSED: &str = "http://refused-and-logged.test";
         captured();
-        assert!(release(Some("http://evil.test")).api_origin().is_err());
-        let warnings = warnings();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("http://evil.test"), "{warnings:?}");
+        assert!(release(Some(REFUSED)).api_origin().is_err());
+        let records = records_naming(REFUSED);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].0, log::Level::Warn, "{records:?}");
     }
 
     #[test]
-    fn an_allowed_origin_logs_no_warning() {
+    fn an_allowed_origin_is_not_logged() {
+        const ALLOWED: &str = "https://allowed-and-silent.test";
         captured();
-        assert!(release(Some(PIN)).api_origin().is_ok());
-        assert!(warnings().is_empty(), "{:?}", warnings());
+        assert!(release(Some(ALLOWED)).api_origin().is_ok());
+        let records = records_naming(ALLOWED);
+        assert!(records.is_empty(), "{records:?}");
     }
 
     // ---- AC2: the build-time pin is the one the release script writes ----
