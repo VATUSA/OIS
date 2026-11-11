@@ -1786,7 +1786,7 @@ pub async fn set_event_fca_auto(
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = owned_event_fca(pool, id, &fca_id).await?;
-    // The lifecycle job publishes an armed FCA with no principal, so this is the only scope check.
+    // The lifecycle job publishes an armed FCA with no scope check, so arming is checked here.
     require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     flow_repo::set_event_fca_auto(pool, id, &fca_id, payload.auto_publish).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
