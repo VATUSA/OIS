@@ -108,4 +108,14 @@ describe("DeparturesView proposed ETA (#814)", () => {
     const free = [...host.querySelectorAll("tr")].find((r) => r.textContent?.includes("FREE"));
     expect(free?.textContent).toContain("1240zP proposed");
   });
+
+  it("calls an unissued CFR metered and an issued one issued (decision 33)", () => {
+    const host = mount([
+      departure("FREE", { cfr: "2026-10-06T12:05:00Z" }),
+      departure("LCK1", { cfr: "2026-10-06T12:10:00Z", cfr_issued: true }),
+    ]);
+    const row = (cs: string) => [...host.querySelectorAll("tr")].find((r) => r.textContent?.includes(cs));
+    expect(row("FREE")?.textContent).toContain("metered");
+    expect(row("LCK1")?.textContent).toContain("issued");
+  });
 });

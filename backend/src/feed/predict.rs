@@ -2229,6 +2229,8 @@ mod tests {
         assert_eq!(proposed_wheels_up("1211", now), day(15, 0, 20));
         // Exactly 12 hours either side reads as the stated day, not the other one.
         assert_eq!(filed_departure("1210", now), Some(day(15, 12, 10)));
+        let past_edge = Utc.with_ymd_and_hms(2023, 11, 15, 12, 10, 0).unwrap();
+        assert_eq!(filed_departure("0010", past_edge), Some(day(15, 0, 10)));
         let noon = Utc.with_ymd_and_hms(2023, 11, 15, 12, 0, 0).unwrap();
         assert_eq!(filed_departure("0000", noon), None, "0000 means unset");
         assert_eq!(filed_departure("2359", noon), Some(day(15, 23, 59)));

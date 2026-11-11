@@ -1472,9 +1472,9 @@ fn to_waypoints(named: Vec<(String, f64, f64)>) -> Vec<RouteWaypoint> {
 /// Per-fix predictions for the debug-mode route breakdown (#225): the flight's one
 /// [`predict::trajectory`], read at every named fix ahead instead of one crossing point, so each row
 /// is the time FCA metering, airport flow and the runway ladder would give at that point. A prefile
-/// is timed from its departure (`predict::Flight::Prefile`, never a `(0, 0)` placeholder). A flight
-/// not yet airborne leaves at its locked wheels-up, else its proposed one (#814). Empty when the
-/// route does not resolve.
+/// is timed from its departure (`predict::Flight::Prefile`, never a `(0, 0)` placeholder). A pilot
+/// not yet airborne leaves at its locked wheels-up, else its proposed one; a prefile only at a lock,
+/// so one with none has an empty table (#814). Empty too when the route does not resolve.
 fn fix_predictions(
     inp: &predict::Inputs,
     flight: predict::Flight,
@@ -2281,7 +2281,9 @@ pub async fn mark_release(
     let order = manual_order(&fca, &flights);
     let metered = fca::meter(&metas, &fca.mode, fca.rate, fca.mit, order.as_deref());
 
-    // The earliest wheels-up a ready time can give: never before a lock held elsewhere (#814).
+    // The earliest wheels-up a ready time can give: never before a lock a ground flight holds
+    // elsewhere (#814). An airborne flight has left, whatever it still holds.
+    let held_ms = held_ms.filter(|_| !metas[ti].airborne);
     let earliest = |ready_ms: i64| held_ms.map_or(ready_ms, |h| ready_ms.max(h));
     let cta = match payload.ready.as_deref().filter(|s| !s.trim().is_empty()) {
         // SET: the typed time is a ready (runway) time. The crossing it asks for is that plus the
@@ -2380,6 +2382,7 @@ pub async fn clear_release(
     // Every read before the delete commits, so a failed read cannot answer 500 for a cleared release.
     // The flight is timed from the locks it keeps: everything but this FCA's release (#814).
     let mut releases = load_releases(pool, &id).await?;
+    let mut holders = flow_repo::release_holders(pool, &id).await?;
     // Clone the snapshot handle so the feed lock is not held across the metering CPU below.
     let snapshot = feed_view(&state).await.0;
     let mut tables = TimingTables::live(&state, pool, snapshot.as_ref().map(|s| &s.data)).await?;
@@ -2393,6 +2396,7 @@ pub async fn clear_release(
     }
     state.publish(crate::realtime::topic::RELEASE);
     releases.remove(&callsign);
+    holders.remove(&callsign);
     let locked = Arc::make_mut(&mut tables.locked);
     match kept.and_then(DateTime::from_timestamp_millis) {
         Some(t) => locked.insert(callsign.clone(), t),
@@ -2419,7 +2423,7 @@ pub async fn clear_release(
     // The other flights' versions, as `mark_release` and the traffic list return them: a writer
     // reading this list must not see a released flight with `release_version: null` (#585 QA).
     let mut flights = finalize(&fca, flights, &metas);
-    annotate_releases(&mut flights, &flow_repo::release_holders(pool, &id).await?);
+    annotate_releases(&mut flights, &holders);
     Ok(Json(flights))
 }
 

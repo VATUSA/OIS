@@ -78,6 +78,16 @@ function marked(host: HTMLElement, callsign: string) {
 }
 
 describe("AircraftView proposed ETA (#814)", () => {
+  it("calls an unissued CFR metered and an issued one locked (decision 33)", () => {
+    const host = mount([
+      row("MET", { cfr: "2026-10-06T12:05:00Z" }),
+      row("ISS", { cfr: "2026-10-06T12:05:00Z", cfr_issued: true }),
+    ]);
+    expect(host.querySelector('[title^="Metered wheels-up"]')?.textContent).toBe("1205z");
+    expect(host.querySelector('[title^="Call-for-release issued"]')?.textContent).toBe("1205z");
+    expect(host.textContent).toContain("faint times are metered slots");
+  });
+
   it("marks the ETA of a ground flight with no lock, and nothing else", () => {
     const host = mount([
       row("GRD", { wheels_up_proposed: true }),
@@ -123,8 +133,16 @@ describe("SummaryView status cards (#814)", () => {
         </QueryClientProvider>,
       ),
     );
-    const text = host.textContent ?? "";
-    for (const label of ["Inbound total", "Airborne", "Ground", "Arrived"]) expect(text).toContain(label);
-    expect(text).not.toContain("Proposed");
+    const card = (label: string) =>
+      [...host.querySelectorAll<HTMLElement>("div.rounded-md")].find((c) => c.textContent?.startsWith(label));
+    for (const [label, count] of [
+      ["Inbound total", "3"],
+      ["Airborne", "1"],
+      ["Ground", "2"],
+      ["Arrived", "1"],
+    ]) {
+      expect(card(label)?.textContent, label).toBe(`${label}${count}`);
+    }
+    expect(host.textContent).not.toContain("Proposed");
   });
 });

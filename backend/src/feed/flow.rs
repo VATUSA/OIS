@@ -71,9 +71,11 @@ pub struct FlowFlight {
     pub delay_min: i64,
     /// Sequence number in the metered arrival order; null if unmetered.
     pub seq: Option<i64>,
-    /// Proposed wheels-up (EDCT / Call-For-Release) for ground flights.
+    /// The CFR (Call-For-Release) wheels-up of a metered ground flight: the issued CFR when
+    /// `cfr_issued`, else the metered one, its STA less the airborne ETE. Not the proposed wheels-up
+    /// (`etd` when `wheels_up_proposed`).
     pub cfr: Option<DateTime<Utc>>,
-    /// True when the CFR has been issued (locked) rather than merely proposed.
+    /// True when the CFR has been issued (locked) rather than only metered.
     pub cfr_issued: bool,
     /// True when this ground inbound holds no locked wheels-up (an issued CFR, an FCA release or a
     /// GDP slot), so `etd`, `eta` and `cfr` rest on its proposed wheels-up (#814).
@@ -636,10 +638,11 @@ pub fn ready_time_slot(
         now,
     );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
-    // enroute time = STA - proposed wheels-up (both already computed for this flight)
-    let sta = target.sta?.timestamp_millis();
-    let cfr = target.cfr?.timestamp_millis();
-    let flight_ms = sta - cfr;
+    // A metered ground flight only (it has an STA). The enroute time is its ETA less the wheels-up it
+    // is timed from: the airborne ETE whether it holds a metered or an issued CFR. `sta - cfr` is not,
+    // once an issued CFR has passed or a later lock binds it (#814).
+    target.sta?;
+    let flight_ms = (target.eta? - target.etd?).num_milliseconds();
     let runway = 3_600_000.0 / program.aar.max(1) as f64;
     let gate = target.gate.clone();
 
@@ -1647,6 +1650,67 @@ mod tests {
         assert_eq!(slot, Some(ready + Duration::minutes(1)));
     }
 
+    /// #814: a re-issue with a ready time for a flight that already holds an issued CFR slots on the
+    /// airborne ETE, not `sta - cfr`. GRD1's CFR passed 20 min ago, so it is timed from now and its
+    /// STA sits 20 min past its CFR + ETE; read as the enroute time, those 20 min would put the
+    /// conflict check 20 min late and miss AIR. Same geometry as the test above.
+    #[test]
+    fn a_re_issued_cfr_slots_on_the_airborne_ete_not_its_old_cfr() {
+        let now = t0();
+        let plan = fp("KBOS", "KJFK", "DCT");
+        let data = VatsimData {
+            pilots: vec![
+                pilot("GRD1", 42.36, -71.0, 0, 0, plan.clone()),
+                pilot("AIR", 41.9, -87.9, 35_000, 450, fp("KORD", "KJFK", "DCT")),
+            ],
+            ..Default::default()
+        };
+        let (ap, nav, winds, profiles) = (
+            airports(),
+            NavData::default(),
+            Winds::default(),
+            trajectory::ProfileTable::default(),
+        );
+        let old_cfr = now - Duration::minutes(20);
+        let issued = HashMap::from([("GRD1".to_string(), old_cfr)]);
+        let inp = predict::Inputs {
+            locked: &issued,
+            ..inputs_with(&ap, &nav, &winds, &profiles)
+        };
+        let flow = compute(
+            "KJFK",
+            Some(&base_program()),
+            &data,
+            &inp,
+            &issued,
+            &HashSet::new(),
+            now,
+        );
+        let by = |cs: &str| flow.flights.iter().find(|f| f.callsign == cs).unwrap();
+        let grd = by("GRD1");
+        assert!(grd.cfr_issued, "positive control: GRD1 holds its CFR");
+        assert_eq!(grd.etd, Some(now), "a passed CFR times it from now");
+        let ete = grd.eta.unwrap() - grd.etd.unwrap();
+        let ready = by("AIR").sta.unwrap() - ete + Duration::minutes(1);
+        assert!(ready > now, "ready {ready} must be after now {now}");
+        let slot = ready_time_slot(
+            "KJFK",
+            &base_program(),
+            &data,
+            &inp,
+            &issued,
+            &HashSet::new(),
+            "GRD1",
+            ready,
+            now,
+        );
+        assert_eq!(
+            slot,
+            Some(ready + Duration::minutes(1)),
+            "pushed past AIR by the runway interval"
+        );
+    }
+
     /// A CFR behind an airborne flight on the same gate is spaced by the gate's MIT at the CFR
     /// flight's own predicted crossing speed (`FlowFlight::mit_cross_kt`), the trailing flight's.
     #[test]
@@ -1916,7 +1980,7 @@ mod tests {
             // Already past (negative offset) — must not land in bucket 0.
             ff("SWA2", "airborne", -5, None),
             // Beyond the fixed 4-hour window.
-            ff("JBU3", "proposed", 300, None),
+            ff("JBU3", "ground", 300, None),
             // Excluded from metering — should still be excluded from AADC demand too.
             FlowFlight {
                 excluded: true,

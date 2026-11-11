@@ -17,7 +17,7 @@ import {
 import {Clock, Filter, Lock, PictureInPicture2, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
-import {ladderStatuses, type LadderFilters} from "@/features/dashboard/types";
+import {activeLadderFilters, ladderStatuses, type LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
@@ -478,9 +478,7 @@ export function LadderView({
   // Despite the name, this is "is any filter category active" — not literally "no match" (that's
   // only true once it's also combined with an empty `items`). Drives both the empty-state message
   // below and the header's filter indicator (see #96), since both need the same "filtered?" check.
-  const noMatch =
-    filters &&
-    (filters.gates?.length || ladderStatuses(filters).length || filters.origins?.length || filters.types?.length);
+  const noMatch = activeLadderFilters(filters) > 0;
 
   return (
     <Card className="p-4">

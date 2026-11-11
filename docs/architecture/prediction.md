@@ -60,8 +60,9 @@ Every trajectory starts at wheels-up and flies from the runway. No taxi time is 
 - An airborne flight is wheels-up now.
 - A ground flight held to a wheels-up is wheels-up then, or now if that time has passed. The hold is
   the latest of its issued CFR, its releases in live FCAs (RDY and SET each store one) and its
-  published GDP slot (`repos::flow::locked_wheels_up`), which the FCA board, airport flow, the
-  departures list and the per-fix table read for every flight (`TimingTables::live`). The GDP draft
+  published GDP slot (`repos::flow::locked_wheels_up`), which the FCA board, airport flow and the
+  departures list read for every flight (`TimingTables::live`) and the per-fix table for its one
+  flight (`TimingTables::live_for`). The GDP draft
   reads every lock but its own airport's GDP slots, so a revise or compress can still move a flight
   earlier (`repos::flow::locked_wheels_up_outside_gdps_at`). Such a flight's ETA runs from its
   lock, so its delay column shows only delay added after the lock; the delay it took on the ground
@@ -128,7 +129,8 @@ OIS re-predicts a flight on every request, from the latest VATSIM publish, befor
 freeze. What freezes is the schedule, in three places:
 
 - an FCA release: its crossing time (`MeterInput::frozen_ms`) pins the flight in metering;
-- an issued CFR: airport flow reserves its slot at the locked wheels-up plus the airborne ETE;
+- an issued CFR: airport flow reserves its slot at the later of the CFR and the wheels-up the
+  flight is held to, plus the airborne ETE;
 - a published GDP: its slots are frozen at publish.
 
 There is no freeze horizon, a distance or time inside which an unreleased flight's slot stops

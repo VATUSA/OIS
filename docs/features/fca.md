@@ -136,10 +136,10 @@ short-circuit. `dir`.
 1. No flight plan: skipped.
 2. `predict::trajectory(inp, Flight::Pilot(p), released, now)` (#813) resolves the route from the
    live position, heading and groundspeed, and decides airborne (`gs >= 50`) and the direct-route
-   padding. `released` is the flight's locked wheels-up (`inp.locked`: its CFR, its releases in
-   live FCAs, its GDP slot), else this FCA's release; a ground flight with neither is timed from
-   its proposed wheels-up, its filed departure time plus 10 min (#814). No route and no known
-   destination: skipped.
+   padding. `released` is the later of the flight's locked wheels-up (`inp.locked`: its CFR, its
+   releases in live FCAs, its GDP slot) and this FCA's release; a ground flight with neither is
+   timed from its proposed wheels-up, its filed departure time plus 10 min (#814). No route and no
+   known destination: skipped.
 3. `fca_crossing_for` with the current altitude, on `traj.path()`. Skipped before either push,
    because the two lists are consumed as parallel slices.
 4. The trajectory builds its profile and wind only now, for a flight that crosses.

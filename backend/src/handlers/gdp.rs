@@ -147,21 +147,16 @@ async fn live_inbounds(
     // Every lock but this airport's own GDP slots: a flight held by an FCA release or a CFR is ranked
     // from when it can arrive, while one timed from its own published slot would have its CTA as its
     // ETA, so a revise or compress could never move it earlier and would store a delay of zero (#814).
-    let tables = match state.db.as_ref() {
-        Some(pool) => {
-            let callsigns: Vec<String> = snap
-                .data
-                .pilots
-                .iter()
-                .map(|p| p.callsign.clone())
-                .collect();
-            let locked =
-                crate::repos::flow::locked_wheels_up_outside_gdps_at(pool, &callsigns, icao)
-                    .await?;
-            crate::handlers::feed::TimingTables::with_locks(state, locked).await
-        }
-        None => crate::handlers::feed::TimingTables::load(state, state.winds.load_full()).await,
-    };
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let callsigns: Vec<String> = snap
+        .data
+        .pilots
+        .iter()
+        .map(|p| p.callsign.clone())
+        .collect();
+    let locked =
+        crate::repos::flow::locked_wheels_up_outside_gdps_at(pool, &callsigns, icao).await?;
+    let tables = crate::handlers::feed::TimingTables::with_locks(state, locked).await;
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();

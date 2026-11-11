@@ -663,9 +663,13 @@ pub(crate) async fn departures_response(
         })
         .collect();
     // Each issued CFR's version, so a writer can send `If-Match` without provoking a 412 (#585 QA).
+    // Only on a row the tables lock: a replay holds none of today's CFRs, so it shows no version.
     let versions = tmu_repo::issued_cfr_versions(pool).await?;
     for d in &mut departures {
-        d.cfr_version = versions.get(&d.callsign).copied();
+        d.cfr_version = versions
+            .get(&d.callsign)
+            .copied()
+            .filter(|_| tables.locked.contains_key(&d.callsign));
     }
     // Metered (with a CFR) first, ordered by release; unmetered fall to the bottom.
     departures.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));

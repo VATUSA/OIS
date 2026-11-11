@@ -284,3 +284,9 @@ export function ladderStatuses(filters: LadderFilters | undefined): string[] {
   const offered: readonly string[] = LADDER_STATUSES;
   return (filters?.statuses ?? []).filter((s) => offered.includes(s));
 }
+
+/** How many filter categories narrow the ladder: the filter badge's count, and 0 means unfiltered. */
+export function activeLadderFilters(filters: LadderFilters | undefined): number {
+  return [filters?.gates?.length, ladderStatuses(filters).length, filters?.origins?.length, filters?.types?.length]
+    .filter((n) => (n ?? 0) > 0).length;
+}

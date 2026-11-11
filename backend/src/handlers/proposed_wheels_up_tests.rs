@@ -512,13 +512,16 @@ async fn clearing_a_release_times_the_flight_from_what_it_still_holds(pool: PgPo
     grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
     let cookie = session_cookie(&pool, &user).await;
     let release = |cs: &str| format!("/api/v1/flow/fcas/{id}/release/{cs}");
-    for cs in ["FREE", "CFR"] {
+    // FREE by RDY; CFR by SET an hour out, later than its CFR, so the cleared release is the lock
+    // the flight was timed from and clearing it must hand the CFR back.
+    let later = whole_minute(60).format("%H%M").to_string();
+    for (cs, body) in [("FREE", json!({})), ("CFR", json!({ "ready": later }))] {
         let (status, body) = call(
             &state,
             Method::POST,
             &release(cs),
             &[("cookie", &cookie), ("if-none-match", "*")],
-            Some(json!({})),
+            Some(body),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{cs}: {body}");
@@ -553,7 +556,7 @@ async fn clearing_a_release_times_the_flight_from_what_it_still_holds(pool: PgPo
     let shift = gap(&cfr["eta"], &free["eta"]);
     assert!(
         (shift - 35 * 60).abs() <= 2,
-        "timed from its CFR, not the cleared RDY release: {shift} s"
+        "timed from its CFR, not the cleared release an hour out: {shift} s"
     );
 }
 
@@ -632,11 +635,11 @@ async fn rdy_and_set_release_no_sooner_than_a_lock_held_elsewhere(pool: PgPool) 
     );
 }
 
-/// #814 AC4: a prefile gets no proposed wheels-up, so airport flow, its demand ranking and the
-/// departures list leave it out, locked or not, beside a connected pilot on the same plan that each
-/// lists. Its route popup draws the route with no per-fix table unless it holds a lock.
+/// #814 AC4: a prefile gets no proposed wheels-up, so airport flow and the departures list leave
+/// it out, locked or not, beside a connected pilot on the same plan that each lists. Its route popup
+/// draws the route with no per-fix table unless it holds a lock.
 #[sqlx::test]
-async fn a_prefile_is_on_no_timing_surface_and_gets_a_fix_table_only_when_locked(pool: PgPool) {
+async fn a_prefile_leaves_flow_and_departures_and_gets_a_fix_table_only_when_locked(pool: PgPool) {
     let prefile = |cs: &str| Prefile {
         callsign: cs.into(),
         flight_plan: Some(plan("")),
@@ -860,10 +863,11 @@ async fn the_release_response_is_timed_like_the_board(pool: PgPool) {
 #[sqlx::test]
 async fn a_disabled_fcas_board_times_a_flight_from_its_release_there(pool: PgPool) {
     let data = VatsimData {
-        pilots: vec![parked("REL", "")],
+        pilots: vec![parked("REL", ""), parked("FREE", "")],
         ..Default::default()
     };
     let state = state_with(&pool, data).await;
+    let proposed = Utc::now() + Duration::minutes(10);
     let id = corridor_fca(&pool).await;
     sqlx::query("update flow.fca set enabled = false where id = $1")
         .bind(&id)
@@ -885,9 +889,11 @@ async fn a_disabled_fcas_board_times_a_flight_from_its_release_there(pool: PgPoo
     assert_eq!(rel["released"], true, "{rel}");
     assert_eq!(rel["wheels_up_proposed"], false, "{rel}");
     assert_eq!(at(&rel["edct"]), release, "{rel}");
+    let shift = gap(&rel["eta"], &row(&board, "FREE")["eta"]);
+    let want = (release - proposed).num_seconds();
     assert!(
-        at(&rel["eta"]) > release,
-        "timed from the release here, not the CFR 30 min before it: {rel}"
+        (shift - want).abs() <= 3,
+        "timed from the release here, {want} s after an unlocked twin, not the CFR: {shift} s"
     );
 }
 
@@ -1017,5 +1023,54 @@ async fn idst_shows_the_assigned_departure_runway(pool: PgPool) {
     assert!(
         none["runway"].is_null(),
         "positive control: no row, no runway: {none}"
+    );
+}
+
+/// #814 decision 26: a CFR for a callsign that is only a prefile, which airport flow no longer
+/// lists, keeps the fallback for any unlisted flight: now with no ready time, the ready time
+/// unmetered with one.
+#[sqlx::test]
+async fn a_cfr_for_a_prefile_only_callsign_takes_the_unlisted_fallback(pool: PgPool) {
+    let data = VatsimData {
+        pilots: vec![parked("GRD", "")],
+        prefiles: vec![Prefile {
+            callsign: "PRE".into(),
+            flight_plan: Some(plan("")),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let state = state_with(&pool, data).await;
+    program_at_kdca(&pool, 30).await;
+    let cookie = holder(&pool, &["tmu.cfr.assign", "tmu.program.read"]).await;
+    let before = Utc::now();
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        "/api/v1/tmu/cfr",
+        &[("cookie", &cookie), ("if-none-match", "*")],
+        Some(json!({ "callsign": "PRE", "airport": "KDCA" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let locked = at(&body["wheels_up"]);
+    assert!(
+        locked >= before && locked <= Utc::now(),
+        "now, with no ready time: {body}"
+    );
+    let ready = whole_minute(40);
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        "/api/v1/tmu/cfr",
+        &[("cookie", &cookie)],
+        Some(json!({ "callsign": "PRE", "airport": "KDCA", "ready_time": ready })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        at(&body["wheels_up"]),
+        ready,
+        "the ready time, unmetered: {body}"
     );
 }

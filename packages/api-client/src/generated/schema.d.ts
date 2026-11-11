@@ -5637,10 +5637,12 @@ export interface components {
             category?: string | null;
             /**
              * Format: date-time
-             * @description Proposed wheels-up (EDCT / Call-For-Release) for ground flights.
+             * @description The CFR (Call-For-Release) wheels-up of a metered ground flight: the issued CFR when
+             *     `cfr_issued`, else the metered one, its STA less the airborne ETE. Not the proposed wheels-up
+             *     (`etd` when `wheels_up_proposed`).
              */
             cfr?: string | null;
-            /** @description True when the CFR has been issued (locked) rather than merely proposed. */
+            /** @description True when the CFR has been issued (locked) rather than only metered. */
             cfr_issued: boolean;
             /**
              * Format: int64

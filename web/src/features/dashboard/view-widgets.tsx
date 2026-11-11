@@ -16,7 +16,7 @@ import {DeparturesView} from "@/pages/departures";
 import {TaxiView} from "@/pages/taxi";
 import {type Flow, useAirportFlow} from "@/lib/feed";
 
-import {LADDER_STATUSES, ladderStatuses, type LadderFilters, type ViewId, type ViewWidget} from "./types";
+import {activeLadderFilters, LADDER_STATUSES, type LadderFilters, type ViewId, type ViewWidget} from "./types";
 import {useReportWidgetStatus} from "./widget-status";
 
 /** Views that need only an ICAO and self-fetch. */
@@ -80,11 +80,7 @@ function LadderFilterBar({
 }) {
   const [open, setOpen] = useState(false);
   const gates = useMemo(() => ladderGateOptions(flow, filters.gates), [flow, filters.gates]);
-  const activeCount =
-    (filters.gates?.length ? 1 : 0) +
-    (ladderStatuses(filters).length ? 1 : 0) +
-    (filters.origins?.length ? 1 : 0) +
-    (filters.types?.length ? 1 : 0);
+  const activeCount = activeLadderFilters(filters);
 
   const toggleIn = (key: "gates" | "statuses", val: string) => {
     const cur = filters[key] ?? [];
