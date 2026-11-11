@@ -161,16 +161,19 @@ mod tests {
     }
 
     #[test]
-    fn a_release_build_refuses_file_and_custom_schemes() {
-        assert_refuses(
-            &debug(Some(PIN)),
-            &[
-                "file:///etc/passwd",
-                "ois://ois.example.org",
-                "wss://ois.example.org",
-                "javascript:alert(1)",
-            ],
-        );
+    fn release_and_debug_builds_refuse_file_and_custom_schemes() {
+        for build in [release(Some(PIN)), debug(Some(PIN))] {
+            assert!(build.allows(PIN), "positive control");
+            assert_refuses(
+                &build,
+                &[
+                    "file:///etc/passwd",
+                    "ois://ois.example.org",
+                    "wss://ois.example.org",
+                    "javascript:alert(1)",
+                ],
+            );
+        }
     }
 
     #[test]
@@ -208,6 +211,7 @@ mod tests {
             &[
                 "https://user@ois.example.org",
                 "https://user:pw@ois.example.org",
+                "https://:pw@ois.example.org",
                 "https://ois.example.org@evil.test",
             ],
         );
@@ -436,21 +440,38 @@ mod tests {
         assert!(records.is_empty(), "{records:?}");
     }
 
+    #[test]
+    fn a_release_build_with_no_pin_is_logged_at_warn() {
+        captured();
+        assert!(release(None).api_origin().is_err());
+        let records = records_naming("no API origin pinned");
+        assert!(!records.is_empty(), "{records:?}");
+        assert!(
+            records.iter().all(|(level, _)| *level == log::Level::Warn),
+            "{records:?}"
+        );
+    }
+
     // ---- AC2: the build-time pin is the one the release script writes ----
 
-    /// The variable name is a contract between two files no test runs together.
+    /// `THIS_BUILD` is pinned by its source: the variable name is a contract with a script no test
+    /// runs, and tests always compile with debug assertions on, so neither field can be checked by
+    /// reading its value here.
     #[test]
-    fn this_build_reads_the_variable_the_release_script_writes() {
+    fn this_build_reads_the_release_pin_and_the_build_profile() {
         let script = include_str!("../../scripts/pin-release-api.py");
         let (_, written) = script
             .split_once("f.write(f\"")
             .expect("the script's env-file write");
         let (name, _) = written.split_once("={origin}").expect("NAME={origin}");
         let source = include_str!("api_origin.rs");
-        assert!(
-            source.contains(&format!("option_env!(\"{name}\")")),
-            "THIS_BUILD must read {name}"
-        );
-        assert_eq!(THIS_BUILD.debug, cfg!(debug_assertions));
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let (_, initializer) = production
+            .split_once("pub const THIS_BUILD: Build = Build {")
+            .expect("THIS_BUILD's initializer");
+        let (fields, _) = initializer.split_once("};").expect("the end of THIS_BUILD");
+        let fields: Vec<&str> = fields.split_whitespace().collect();
+        let expected = format!("pinned: option_env!(\"{name}\"), debug: cfg!(debug_assertions),");
+        assert_eq!(fields.join(" "), expected);
     }
 }

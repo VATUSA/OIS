@@ -310,6 +310,7 @@ mod tests {
     #[test]
     fn send_diagnostics_resolves_its_url_through_upload_url_before_any_io() {
         let source = include_str!("diagnostics.rs");
+        let source = &source[..source.find("#[cfg(test)]").expect("the test module")];
         let start = source.find("pub async fn send_diagnostics(").unwrap();
         let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
         let signature = &body[..body.find('{').unwrap()];

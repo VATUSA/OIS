@@ -893,6 +893,7 @@ mod tests {
     #[test]
     fn begin_login_resolves_its_url_through_login_url_before_any_effect() {
         let source = include_str!("auth.rs");
+        let source = &source[..source.find("#[cfg(test)]").expect("the test module")];
         let start = source
             .find("pub async fn begin_login() ->")
             .expect("begin_login takes no origin");
