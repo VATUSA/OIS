@@ -336,9 +336,12 @@ pub struct MeterInput {
     pub held_ms: Option<i64>,
     /// The ground allowance (pushback + start-up + taxi) inside `eta_ms`, millis; 0 when airborne.
     /// A release is a wheels-up time, so the release math backs out only the airborne part of the
-    /// ETA (#815), and metering holds a release against the ETA less it: a ground release runs late
-    /// only once now is past its wheels-up (#817).
+    /// ETA (#815); a ground release that runs late crosses no earlier than the ETA less it (#817).
     pub ground_allowance_ms: i64,
+    /// A release's issued wheels-up, epoch millis. A ground release runs late only once now is past
+    /// it: its ETA counts the whole taxi until takeoff, so it passes the release time while the
+    /// aircraft waits or taxis (#817).
+    pub wheels_up_ms: Option<i64>,
 }
 
 /// The FCA's spacing settings and the instant the freeze horizon is measured from.
@@ -393,7 +396,7 @@ pub fn separation_ms(mode: &str, rate: i32, mit: i32, cross_speed: f64) -> i64 {
 ///
 /// Two crossings are spaced by the larger of their two separations. A release keeps its time
 /// until it runs late: airborne, once its ETA has run past it; on the ground, once now is past its
-/// wheels-up. An airborne flight inside the freeze horizon is
+/// issued wheels-up. An airborne flight inside the freeze horizon is
 /// anchored at its stored STA, or at its ETA once it runs late, and is still spaced from
 /// everything placed before it. Released and held flights report how late they run in
 /// `late_sec`; a release left inside another crossing's gap is flagged `slot_conflict`.
@@ -418,16 +421,29 @@ pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -
                 .or(cands[i].held_ms.filter(|_| frozen[i]))
         })
         .collect();
-    // A fixed time is held against the ETA less any ground allowance: a ground flight's ETA counts
-    // its whole taxi until it is airborne, so it would pass its release while the aircraft waits
-    // or taxis. This way a ground release runs late only once now is past its wheels-up.
-    let due: Vec<i64> = cands
-        .iter()
-        .map(|c| c.eta_ms - c.ground_allowance_ms)
-        .collect();
-    let anchor: Vec<i64> = (0..n)
-        .map(|i| fixed[i].map_or(cands[i].eta_ms, |f| f.max(due[i])))
-        .collect();
+    // How far each fixed flight runs past its fixed time, ms, and the earliest it can then cross.
+    // Airborne: how far its ETA has run past it, crossing at its ETA. A ground release: how long now
+    // is past its issued wheels-up, crossing no earlier than a takeoff now (its ETA less the taxi
+    // allowance); before that wheels-up it keeps its time, however far its ETA, which counts the
+    // whole taxi until takeoff, has run past it.
+    let (late_ms, anchor): (Vec<i64>, Vec<i64>) = (0..n)
+        .map(|i| {
+            let c = &cands[i];
+            match (fixed[i], c.wheels_up_ms) {
+                (None, _) => (0, c.eta_ms),
+                (Some(f), Some(w)) if !c.airborne => {
+                    let late = (cfg.now_ms - w).max(0);
+                    let at = if late > 0 {
+                        f.max(c.eta_ms - c.ground_allowance_ms)
+                    } else {
+                        f
+                    };
+                    (late, at)
+                }
+                (Some(f), _) => ((c.eta_ms - f).max(0), f.max(c.eta_ms)),
+            }
+        })
+        .unzip();
     let (sched, seq_of) = match order {
         Some(seq) => meter_manual(cands, &sep, &anchor, seq),
         None => meter_auto(cands, &sep, &anchor, &fixed),
@@ -438,7 +454,7 @@ pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -
             sched_ms: sched[i],
             delay_sec: ((sched[i] - cands[i].eta_ms).max(0)) / 1000,
             seq: seq_of[i],
-            late_sec: fixed[i].map_or(0, |f| (due[i] - f).max(0) / 1000),
+            late_sec: late_ms[i] / 1000,
             slot_conflict: cands[i].frozen_ms.is_some()
                 && (0..n).any(|j| j != i && (sched[i] - sched[j]).abs() < sep[i].max(sep[j])),
             sta_frozen: frozen[i],
@@ -681,6 +697,7 @@ mod tests {
             frozen_ms: None,
             held_ms: None,
             ground_allowance_ms: 0,
+            wheels_up_ms: None,
         }
     }
 
@@ -790,14 +807,16 @@ mod tests {
         assert_eq!(earliest_slot(T0, 0, &[(T0, 0)]), T0, "no spacing at rate 0");
     }
 
-    /// Rate 30 (120 s) at the default freeze horizon, measured from `now_ms`.
     /// A ground release waiting at the gate or taxiing: its ETA counts the whole 10 min allowance,
-    /// so it passes the release while the aircraft is still due to make its wheels-up. Rate 30, a
-    /// 120 s gap. R is released for T0+1000 s; held H keeps T0+1200 s (ETA T0+1150 s, on time).
-    /// - Waiting: R's ETA is T0+1300 s, ETA less allowance T0+700 s, before its release. R stays at
-    ///   T0+1000 s with no lateness and H keeps its STA. Re-anchored at its ETA, R would push H to
-    ///   T0+1420 s.
-    /// - Past its wheels-up by 100 s: ETA T0+1700 s, less allowance T0+1100 s. R crosses at
+    /// so it passes the release time while the aircraft is still due to make its wheels-up. Rate 30,
+    /// a 120 s gap. R is released for T0+1000 s with wheels-up T0+300 s (a 700 s airborne ETE); held
+    /// H keeps T0+1200 s (ETA T0+1150 s, on time).
+    /// - Waiting at T0: R's ETA is T0+1300 s. R keeps T0+1000 s with no lateness and H keeps its
+    ///   STA. Re-anchored at its ETA, R would push H to T0+1420 s.
+    /// - At T0+290 s, before its wheels-up, with the ETE grown to 790 s (ETA T0+1680 s, a takeoff
+    ///   now at T0+1080 s): still not late, so R keeps T0+1000 s. Measured from the ETA less the
+    ///   allowance it would read 80 s late and cross at T0+1080 s.
+    /// - At T0+400 s, 100 s past its wheels-up (ETA T0+1700 s): R crosses at a takeoff now,
     ///   T0+1100 s, 100 s late, and H, 100 s behind it, goes to T0+1220 s.
     #[test]
     fn a_ground_release_runs_late_only_once_now_is_past_its_wheels_up() {
@@ -807,6 +826,7 @@ mod tests {
         };
         let release = |eta: i64| MeterInput {
             frozen_ms: Some(T0 + 1000 * S),
+            wheels_up_ms: Some(T0 + 300 * S),
             ground_allowance_ms: 10 * MIN,
             ..mk(eta, false, 400.0)
         };
@@ -827,7 +847,27 @@ mod tests {
         );
         assert!(waiting[1].sta_frozen);
 
-        let past = meter(&[release(T0 + 1700 * S), held], &freeze_cfg(T0), None);
+        let drifted = meter(
+            &[release(T0 + 1680 * S), held.clone()],
+            &freeze_cfg(T0 + 290 * S),
+            None,
+        );
+        assert_eq!(
+            (drifted[0].sched_ms, drifted[0].late_sec),
+            (T0 + 1000 * S, 0),
+            "before its wheels-up a longer ETE does not make it late"
+        );
+        assert_eq!(
+            drifted[1].sched_ms,
+            T0 + 1200 * S,
+            "the held neighbor does not move"
+        );
+
+        let past = meter(
+            &[release(T0 + 1700 * S), held],
+            &freeze_cfg(T0 + 400 * S),
+            None,
+        );
         assert_eq!(
             (past[0].sched_ms, past[0].late_sec),
             (T0 + 1100 * S, 100),
@@ -836,6 +876,7 @@ mod tests {
         assert_eq!(past[1].sched_ms, T0 + 1220 * S, "H is spaced behind it");
     }
 
+    /// Rate 30 (120 s) at the default freeze horizon, measured from `now_ms`.
     fn freeze_cfg(now_ms: i64) -> MeterConfig<'static> {
         MeterConfig {
             mode: "rate",
@@ -1604,6 +1645,7 @@ mod tests {
                     frozen_ms: None,
                     held_ms: None,
                     ground_allowance_ms: 0,
+                    wheels_up_ms: None,
                 },
                 MeterInput {
                     eta_ms: 0, // same ETA → the follower is spaced by exactly one gap
@@ -1612,6 +1654,7 @@ mod tests {
                     frozen_ms: None,
                     held_ms: None,
                     ground_allowance_ms: 0,
+                    wheels_up_ms: None,
                 },
             ]
         };
@@ -1649,6 +1692,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 60_000,
@@ -1657,6 +1701,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 200_000,
@@ -1665,6 +1710,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
         ];
         let out = meter(&cands, &cfg("rate", 30, 15), None);
@@ -1687,6 +1733,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 30_000,
@@ -1695,6 +1742,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
         ];
         let out = meter(&cands, &cfg("rate", 30, 15), None);
@@ -1720,6 +1768,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 90_000,
@@ -1728,6 +1777,7 @@ mod tests {
                 frozen_ms: Some(100_000),
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
         ];
         let out = meter(&cands, &cfg("rate", 30, 15), None);
@@ -1748,6 +1798,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 30_000, // within the 120s separation of #0
@@ -1756,6 +1807,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 400_000, // well clear
@@ -1764,6 +1816,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
         ];
         let out = meter(&cands, &cfg("rate", 30, 15), None); // 120s separation
@@ -1826,6 +1879,7 @@ mod tests {
             frozen_ms: None,
             held_ms: None,
             ground_allowance_ms: 0,
+            wheels_up_ms: None,
         };
         // Natural ETAs: A=200 B=400 C=600 D=900 (all airborne).
         let cands = vec![mk(200_000), mk(400_000), mk(600_000), mk(900_000)];
@@ -1858,6 +1912,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             })
             .collect::<Vec<_>>();
         let out = meter(&cands, &cfg("rate", 30, 15), Some(&[2, 1, 0]));
@@ -1881,6 +1936,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
             MeterInput {
                 eta_ms: 50_000, // airborne, earlier
@@ -1889,6 +1945,7 @@ mod tests {
                 frozen_ms: None,
                 held_ms: None,
                 ground_allowance_ms: 0,
+                wheels_up_ms: None,
             },
         ];
         let out = meter(&cands, &cfg("rate", 30, 15), Some(&[0, 1]));

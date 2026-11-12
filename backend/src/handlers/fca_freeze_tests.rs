@@ -475,6 +475,20 @@ async fn the_pass_keeps_every_hold_until_its_inputs_are_loaded(pool: PgPool) {
     seed_held(&pool, &id, "AIR1", sta).await;
     seed_held(&pool, &id, "GONE", sta).await;
     let kept = vec![("AIR1".to_string(), sta), ("GONE".to_string(), sta)];
+    // As at startup: both loaders registered and not finished, and an unrelated job failed.
+    state
+        .jobs
+        .register(crate::jobs::WINDS_REFRESH_JOB, "winds", Some(3600), false);
+    state.jobs.register(
+        crate::jobs::AIRCRAFT_PROFILES_REFRESH_JOB,
+        "profiles",
+        Some(300),
+        true,
+    );
+    state
+        .jobs
+        .register("airports_refresh", "airports", Some(3600), false);
+    state.jobs.finish("airports_refresh", false, "fetch failed");
 
     let snapshot = state.feed.write().await.snapshot.take();
     let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
@@ -557,16 +571,24 @@ async fn the_pass_fails_while_a_failed_loader_has_left_its_input_empty(pool: PgP
         "a failed winds load changes nothing"
     );
     state.winds_refreshed.store(winds_at, Ordering::Relaxed);
+    state
+        .jobs
+        .finish(crate::jobs::WINDS_REFRESH_JOB, true, "loaded");
 
     state
         .aircraft_profiles_loaded
         .store(false, Ordering::Relaxed);
-    state
-        .jobs
-        .register("aircraft_profiles_refresh", "profiles", Some(300), true);
-    state
-        .jobs
-        .finish("aircraft_profiles_refresh", false, "load failed");
+    state.jobs.register(
+        crate::jobs::AIRCRAFT_PROFILES_REFRESH_JOB,
+        "profiles",
+        Some(300),
+        true,
+    );
+    state.jobs.finish(
+        crate::jobs::AIRCRAFT_PROFILES_REFRESH_JOB,
+        false,
+        "load failed",
+    );
     let err = sync_fca_holds_once(&state, Utc::now()).await.unwrap_err();
     assert!(err.contains("aircraft profiles"), "{err}");
     assert_eq!(

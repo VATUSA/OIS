@@ -551,7 +551,8 @@ fn eta_ms(f: &FlowFlight, now_ms: i64) -> i64 {
 }
 
 /// CFR/EDCT scheduler (ported from vatflow). Issued CFRs are placed first at their locked
-/// wheels-up plus the enroute time (no earlier than their ETA, on-time CFRs ahead of late ones),
+/// wheels-up plus the enroute time (once past that wheels-up, no earlier than a takeoff now;
+/// on-time CFRs ahead of late ones),
 /// then airborne traffic at its ETA, then ground/proposed traffic,
 /// which absorbs its delay on the ground as a wheels-up (CFR). Every flight goes through one slot
 /// check (`earliest_clear_slot`, runway or same-gate in-trail spacing) against every flight placed
@@ -1872,6 +1873,10 @@ mod tests {
 
         assert_eq!(min_after(now, flights[0].sta), 10, "now + enroute");
         assert_eq!(flights[0].cfr, Some(wheels), "and keeps its wheels-up");
+        assert_eq!(
+            flights[0].delay_min, 0,
+            "crossing ahead of its ETA is no delay"
+        );
         assert_eq!(min_after(now, flights[1].sta), 16, "A goes behind it");
         assert_eq!(
             min_after(now, flights[2].sta),

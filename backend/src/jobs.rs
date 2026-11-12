@@ -568,6 +568,24 @@ pub fn spawn_winds_refresh(
     });
 }
 
+/// The registry name of the aircraft-profiles refresh; the held-STA pass reads its outcome.
+pub(crate) const AIRCRAFT_PROFILES_REFRESH_JOB: &str = "aircraft_profiles_refresh";
+
+/// One aircraft-profiles load: install the DB catalog and mark the table loaded (the held-STA pass
+/// waits on it, #817). A failed load keeps the current table and leaves the flag as it was.
+pub(crate) async fn refresh_aircraft_profiles_once(
+    pool: &PgPool,
+    profiles: &ArcSwap<ProfileTable>,
+    loaded: &AtomicBool,
+) -> Result<String, String> {
+    let table = aircraft_profiles_repo::load_all(pool)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    profiles.store(Arc::new(table));
+    loaded.store(true, Ordering::Relaxed);
+    Ok("reloaded".to_string())
+}
+
 /// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
 /// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
 /// current table (initially the legacy default).
@@ -579,21 +597,12 @@ pub fn spawn_aircraft_profiles_refresh(
 ) {
     tokio::spawn(run_interval(
         reg,
-        "aircraft_profiles_refresh",
+        AIRCRAFT_PROFILES_REFRESH_JOB,
         "Reload aircraft performance profiles from the DB",
         AIRCRAFT_PROFILES_INTERVAL,
         move || {
             let (pool, profiles, loaded) = (pool.clone(), profiles.clone(), loaded.clone());
-            async move {
-                match aircraft_profiles_repo::load_all(&pool).await {
-                    Ok(table) => {
-                        profiles.store(Arc::new(table));
-                        loaded.store(true, Ordering::Relaxed);
-                        Ok("reloaded".to_string())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
+            async move { refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await }
         },
     ));
 }
@@ -3382,5 +3391,32 @@ mod winds_refresh_tests {
             record_winds_run(None, &winds, loaded.clone(), now).await,
             loaded
         );
+    }
+}
+
+#[cfg(test)]
+mod aircraft_profiles_refresh_tests {
+    use super::*;
+
+    /// The held-STA pass waits on `aircraft_profiles_loaded` (#817): the refresh sets it on a
+    /// successful load and leaves it unset, with the table untouched, when the load fails.
+    #[sqlx::test]
+    async fn a_successful_load_marks_the_profiles_loaded_and_a_failed_one_does_not(pool: PgPool) {
+        let profiles = ArcSwap::from_pointee(ProfileTable::default());
+
+        let failed_flag = AtomicBool::new(false);
+        let closed = PgPool::connect_lazy_with(pool.connect_options().as_ref().clone());
+        closed.close().await;
+        let err = refresh_aircraft_profiles_once(&closed, &profiles, &failed_flag).await;
+        assert!(err.is_err(), "a closed pool cannot load");
+        assert!(
+            !failed_flag.load(Ordering::Relaxed),
+            "a failed load leaves it unset"
+        );
+
+        let loaded = AtomicBool::new(false);
+        let ok = refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await;
+        assert_eq!(ok.as_deref(), Ok("reloaded"));
+        assert!(loaded.load(Ordering::Relaxed), "a successful load sets it");
     }
 }

@@ -1954,6 +1954,7 @@ fn build_candidates(
             frozen_ms: rel.map(|(cta, _)| *cta),
             held_ms: None,
             ground_allowance_ms: (allowance * 1000.0) as i64,
+            wheels_up_ms: rel.map(|(_, e)| *e),
         });
         let mut flight = fca_flight(
             &p.callsign,
@@ -2191,6 +2192,7 @@ fn set_slot(
             frozen_ms: m.frozen_ms,
             held_ms: m.held_ms,
             ground_allowance_ms: m.ground_allowance_ms,
+            wheels_up_ms: m.wheels_up_ms,
         })
         .collect();
     let metered = fca::meter(&others, &meter_config(fca, now_ms), None);
@@ -2400,8 +2402,8 @@ pub(crate) async fn sync_fca_holds_once(
 
 /// Whether this replica has loaded every input a held STA is metered from: a feed snapshot, the
 /// airport table, winds and the aircraft profiles. `Ok(Some(reason))` while one is still loading
-/// for the first time since start. A source whose loader has run and failed with nothing loaded is
-/// an `Err`, so the job registry shows the pass failing instead of skipping quietly.
+/// for the first time since start. Winds or profiles whose loader has run and failed with nothing
+/// loaded are an `Err`, so the job registry shows the pass failing instead of skipping quietly.
 async fn hold_inputs_ready(state: &AppState) -> Result<Option<&'static str>, String> {
     let (snapshot, airports) = feed_view(state).await;
     if snapshot.is_none() || airports.is_empty() {
@@ -2421,7 +2423,7 @@ async fn hold_inputs_ready(state: &AppState) -> Result<Option<&'static str>, Str
         return Ok(Some("skipped: winds not loaded yet"));
     }
     if !state.aircraft_profiles_loaded.load(Ordering::Relaxed) {
-        if last_failed("aircraft_profiles_refresh") {
+        if last_failed(crate::jobs::AIRCRAFT_PROFILES_REFRESH_JOB) {
             return Err(
                 "aircraft profiles have not loaded since start and the last load failed".into(),
             );
@@ -4385,6 +4387,7 @@ mod release_spacing_tests {
             frozen_ms,
             held_ms: None,
             ground_allowance_ms: 0,
+            wheels_up_ms: None,
         }
     }
 
@@ -4674,6 +4677,33 @@ mod release_spacing_tests {
         );
         let cta = rdy_slot(&fca, &metas, &metered, 1, false, T0);
         assert_eq!(cta, T0 + 1_000_000 + SEP_MS + RELEASE_MARGIN_MS);
+    }
+
+    /// A Set beside a ground release still waiting for its wheels-up is spaced from the release's
+    /// time, not its ETA (which counts the whole taxi). Rate 30: 120 s plus the 15 s margin. R is
+    /// released for T0+1000 s, wheels-up T0+300 s, a 10 min allowance, ETA T0+1300 s. A Set asking
+    /// for T0+1050 s goes to T0+1000+135 s. Read at its ETA, R would leave T0+1050 s clear.
+    #[test]
+    fn a_set_beside_a_waiting_ground_release_is_spaced_from_its_release_time() {
+        const T0: i64 = 1_800_000_000_000;
+        let fca = rate_fca(vec![]);
+        let metas = vec![
+            MeterInput {
+                wheels_up_ms: Some(T0 + 300_000),
+                ground_allowance_ms: 600_000,
+                ..cand(T0 + 1_300_000, false, Some(T0 + 1_000_000))
+            },
+            cand(T0 + 900_000, false, None),
+            cand(T0 + 5_000_000, true, None),
+        ];
+        let metered = fca::meter(&metas, &meter_config(&fca, T0), None);
+        assert_eq!(
+            metered[0].sched_ms,
+            T0 + 1_000_000,
+            "R keeps its release time"
+        );
+        let slot = super::set_slot(&fca, &metas, &metered, false, 1, T0 + 1_050_000, T0);
+        assert_eq!(slot, T0 + 1_000_000 + SEP_MS + RELEASE_MARGIN_MS);
     }
 
     /// A Set beside an airborne flight inside the freeze horizon is spaced from its held STA, not

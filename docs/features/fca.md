@@ -215,11 +215,12 @@ release and its ETA is within `freeze_ms` of `now_ms`, by its held STA (`held_ms
 `flow.fca_held_sta`). A flight that already has a held STA stays frozen until its ETA runs
 `FREEZE_HYSTERESIS_MS` (2 min) past the horizon, so ETA noise at the edge does not drop and re-store
 it every tick. The margin is bounded rather than permanent: a re-routed flight leaves the hold
-instead of showing late until it crosses. Its anchor is `max(fixed, due)` and it reports
-`late_sec = max(due - fixed, 0) / 1000`, where `due = eta - ground_allowance_ms`. Airborne that is
-the ETA. On the ground the ETA counts the whole taxi allowance until takeoff, so it passes a release
-while the aircraft waits or taxis; `due` passes it only once now is past the release's wheels-up.
-`freeze_min` 0 turns holding off.
+instead of showing late until it crosses. An airborne fixed flight is anchored at `max(fixed, eta)`
+and reports `late_sec = max(eta - fixed, 0) / 1000`. A ground release carries its issued wheels-up
+(`wheels_up_ms`): its ETA counts the whole taxi allowance until takeoff, so it passes the release
+time while the aircraft waits or taxis. It is late only once `now_ms` is past that wheels-up, then
+reports `late_sec = (now - wheels_up) / 1000` and is anchored at `max(fixed, eta - allowance)`, a
+takeoff now. `freeze_min` 0 turns holding off.
 
 **Auto mode** (`meter_auto`). Flights sort by tier, then by anchor: releases; held flights still on
 time (`eta <= held`); held flights running late; other airborne; ground. A release is placed at its
