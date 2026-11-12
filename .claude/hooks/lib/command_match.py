@@ -291,31 +291,14 @@ def join_and_strip(text):
 
     Tracks single, double and backtick state. `$'…'` (ANSI-C) quoting becomes the ANSI_C placeholder, which
     invocation_details refuses wherever a command could run it: a static parser cannot reproduce its quote
-    removal. A `"$(…)"` substitution starts its own quoting, so `"$(grep " # " f)"` keeps its `#` as text.
-    A `#` opening a comment inside backticks or a quoted substitution is too ambiguous, so it fails closed
-    (Unparseable)."""
+    removal. A `#` opening a comment inside backticks is too ambiguous, so it fails closed (Unparseable)."""
     out, index, quote, backtick = [], 0, None, False
-    frames = []  # one [enclosing quote, open parens] per `"$(` the scan is inside
     boundary = set(" \t\n;&|()<>")
     while index < len(text):
         char = text[index]
         if quote == "'":
             if char == "'":
                 quote = None
-            out.append(char)
-            index += 1
-        elif char == "$" and text[index + 1:index + 2] == "(" and quote == '"':
-            frames.append([quote, 0])
-            quote = None
-            out.append("$(")
-            index += 2
-        elif char in "()" and quote is None and frames:
-            if char == "(":
-                frames[-1][1] += 1
-            elif frames[-1][1]:
-                frames[-1][1] -= 1
-            else:
-                quote = frames.pop()[0]
             out.append(char)
             index += 1
         elif char == "\\":
@@ -345,8 +328,6 @@ def join_and_strip(text):
         elif char == "#" and (not out or out[-1] in boundary):
             if backtick:
                 raise Unparseable("a comment inside backticks")
-            if quote is None and frames:
-                raise Unparseable("a comment inside a quoted command substitution")
             if quote is None:
                 end = text.find("\n", index)  # a comment ends at the newline; a backslash in it continues nothing
                 index = len(text) if end == -1 else end

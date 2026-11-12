@@ -92,8 +92,6 @@ echo "Any line the gate cannot parse blocks, whether or not gh or update-branch 
 expect block "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
 expect block "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
 expect block "a comment inside a substitution"   "echo \$(echo x # it's)"
-expect block "a comment inside a quoted \$(...)" "echo \"\$(ls # c
-)\""
 # Lines that build `gh pr update-branch` (or its REST path) at run time, so no literal gh or update-branch
 # appears; each is unparseable (`$'..'`, or a `<<x` after `#`).
 IFS= read -r L1 <<'EOF'
@@ -124,6 +122,9 @@ expect block "printf octal escapes piped to bash" "$L4"
 expect block "reversed text piped through rev to bash" "$L5"
 expect block "base64 -d piped to bash"            "$L6"
 expect block "xxd -r hex piped to bash"           "$L7"
+# A `#` right after `"$(`, quotes after it: the gate must still see the update-branch on the line.
+NL=$'\n'
+expect block "update-branch after a # right after \"\$(" "echo \"\$(#'${NL})\" ' ) \" # '; gh pr update-branch 202; echo '${NL}'"
 
 echo "A # inside quotes is text, so these parse and pass:"
 expect allow "sed with # delimiters"             "sed -n 's#a#b#p' file"
@@ -131,7 +132,6 @@ expect allow "sed with ' #' in its script"       "sed -n 's/ #.*//p' f"
 expect allow "grep for ' # ' in single quotes"   "grep -n 'x # y' f"
 expect allow "grep for \" # \" in double quotes" "grep -n \"x # y\" f"
 expect allow "jq with \"#\""                     "jq -r '.[] | \"PR # \\(.number)\"' f"
-expect allow "\" # \" inside a quoted \$(...)"   "echo \"\$(grep -c \" # \" f)\""
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1
