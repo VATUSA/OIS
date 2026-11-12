@@ -50,11 +50,13 @@ done
 
 echo "Which paths are test files (lens tests in any tier):"
 for p in web/src/lib/time.test.ts web/src/pages/x.test.tsx tests/smoke.sh backend/tests/feed.rs \
-        backend/src/handlers/flow_event_fca_visibility_tests.rs bin/lib/pre-push.test.sh; do
-    is_test_path "$p" && ok "test file: $p" || bad "$p should be a test file"
+        bin/lib/pre-push.test.sh; do
+    test_file "$p" && ok "test file: $p" || bad "$p should be a test file"
 done
-for p in docs/x.md backend/src/handlers/tmu.rs bin/lib/review-tier.sh bin/lib/nested/x.test.sh web/src/lib/time.ts; do
-    is_test_path "$p" && bad "$p is not a test file" || ok "not a test file: $p"
+# A *_tests.rs module compiles into the crate, so it is Full (above) and already gets lens tests.
+for p in docs/x.md backend/src/handlers/tmu.rs backend/src/handlers/flow_event_fca_visibility_tests.rs \
+        bin/lib/review-tier.sh bin/lib/nested/x.test.sh web/src/lib/time.ts; do
+    test_file "$p" && bad "$p is not a test file" || ok "not a test file: $p"
 done
 
 echo "Each tier's lenses:"

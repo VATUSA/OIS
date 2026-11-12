@@ -1045,11 +1045,12 @@ def stages_everything(text):
 def names_update_branch(text):
     """Whether an unparseable line could still name an update-branch: its text, with quotes, backslashes and
     whitespace removed and case folded, holds `update-branch`, `update_branch` or `updatepullrequestbranch`,
-    or it holds a `$`, a backtick or a `\\x`/`\\0` escape, which can build any word (`gh` included) at run time."""
+    or it holds a `$`, a backtick or a backslash, any of which can build any word (`gh` included) at run time
+    (`\\x67`, `\\147`, `\\u0067` through printf or echo -e)."""
     flat = re.sub(r"[\s'\"\\]", "", text).lower()
     if re.search(r"update[-_]?branch|updatepullrequestbranch", flat):
         return True
-    return bool(re.search(r"[$`]|\\[x0]", text))
+    return bool(re.search(r"[$`\\]", text))
 
 
 def main():
@@ -1064,7 +1065,7 @@ def main():
                 targets = update_branch_targets(text)
             except Unparseable:
                 if not names_update_branch(text):
-                    return 0  # shlex cannot split it; it neither spells update-branch nor expands anything
+                    return 0  # the gate cannot parse it; it neither spells update-branch nor expands anything
                 raise
             for target in targets:
                 print(target)

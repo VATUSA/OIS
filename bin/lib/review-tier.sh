@@ -11,25 +11,19 @@
 #   Light     code ac                  docs, guidance, test files
 #   Standard  code ac security         gates, review commands and agents, tooling, the security rules
 #   Full      code ac tests security   everything else (the bot included), and whenever the tier cannot be read
-# Any tier adds lens tests when the diff changes a test file (is_test_path).
+# Any tier adds lens tests when the diff changes a test file (test_file).
 # The builder never declares the tier: an unresolvable base, an empty diff or an unknown path is Full.
 # Backend source is Full: a path cannot tell whether a handler or repo change reaches scope or the contract.
 # Bash 3.2 and BSD/GNU safe.
 # ==============================================================================
 
-# test_file PATH: true for a test file outside a crate's source (Light, like docs).
+# test_file PATH: true for a test file outside a crate's source (Light, like docs); puts lens tests in any tier.
 test_file() {
     case "$1" in
         *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
         bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
     esac
     return 1
-}
-
-# is_test_path PATH: true for any test file, a `*_tests.rs` module included; puts lens tests in any tier.
-is_test_path() {
-    case "$1" in *_tests.rs) return 0 ;; esac
-    test_file "$1"
 }
 
 # tier_of_path PATH: prints 1 (Light), 2 (Standard) or 3 (Full).
@@ -92,7 +86,7 @@ review_lenses() {
     lenses="$(tier_lenses "$(review_tier "$sha" "$root")")"
     case " $lenses " in *" tests "*) echo "$lenses"; return 0 ;; esac
     while IFS= read -r path; do
-        if [ -n "$path" ] && is_test_path "$path"; then
+        if [ -n "$path" ] && test_file "$path"; then
             echo "code ac tests${lenses#code ac}"
             return 0
         fi

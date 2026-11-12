@@ -110,14 +110,26 @@ EOF
 IFS= read -r L4 <<'EOF'
 printf '\x67\x68' "unterminated
 EOF
+IFS= read -r L5 <<'EOF'
+printf '\147\150 api -X PUT repos/o/r/pulls/1/upd\141te-br\141nch' | bash # <<x
+EOF
+IFS= read -r L6 <<'EOF'
+printf 'gh pr \165pdate-branch 5' | bash; echo 'x
+EOF
+IFS= read -r L7 <<'EOF'
+printf '\0147\0150 pr upd\0141te-br\0141nch 5' | bash; echo 'x
+EOF
 expect block "unparseable, gh built from \$'..'"  "$L1"
 expect block "unparseable, after an escaped quote" "$L2"
 expect block "unparseable, \\x escapes"           "$L3"
 expect block "unparseable, a \\x escape and no \$" "$L4"
+expect block "unparseable, octal escapes"         "$L5"
+expect block "unparseable, a \\u escape"          "$L6"
+expect block "unparseable, \\0 octal escapes"     "$L7"
 expect block "unparseable, a substitution and no gh" "echo \$(echo x # it's)"
 echo "An unparseable line that neither names update-branch nor expands anything passes:"
 expect allow "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
-expect allow "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#\\(.number)\""
+expect allow "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1

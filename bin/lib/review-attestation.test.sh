@@ -402,7 +402,10 @@ mkdir -p "$WORK/notier" && cp "$LIB" "$WORK/notier/review-attestation.sh"
 (cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
 [[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "without review-tier.sh beside it, every lens is required (Full)" \
     || bad "missing classifier did not fail closed: $(head -2 "$WORK/out")"
-printf '# a classifier with no review_lenses\n' > "$WORK/notier/review-tier.sh"
+# Defines review_tier and tier_lenses but not review_lenses: the probe must ask for review_lenses.
+printf '%s\n' 'review_tier() { echo Light; }' \
+    'tier_lenses() { case "$1" in Full) echo "code ac tests security" ;; *) echo "code ac" ;; esac; }' \
+    > "$WORK/notier/review-tier.sh"
 (cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
 [[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "a review-tier.sh that defines no review_lenses is Full" \
     || bad "classifier without review_lenses did not fail closed: $(head -2 "$WORK/out")"

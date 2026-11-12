@@ -43,6 +43,13 @@ if ! . "$ATTEST_SELF_DIR/review-tier.sh" 2>/dev/null || ! type review_lenses >/d
     review_tier() { echo Full; }
     tier_lenses() { echo "code ac tests security"; }
     review_lenses() { tier_lenses Full; }
+    test_file() {
+        case "$1" in
+            *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
+            bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
+        esac
+        return 1
+    }
 fi
 
 # attest_rows FILE: "file<TAB>heading<TAB>status<TAB>evidence" per table row, cells trimmed.
@@ -75,14 +82,10 @@ ATTEST_CARRY_LENSES="code security"
 
 # attest_test_path PATH: 0 when PATH holds only tests, so a change to it is a tests-only delta.
 # A vitest file (*.test.ts, *.test.tsx), anything under a tests/ directory, or a shell test of the
-# tooling (bin/lib/*.test.sh). An inline Rust `#[cfg(test)] mod tests` does not qualify: its file
-# also holds the production code the code and security lenses attested.
+# tooling (bin/lib/*.test.sh): review-tier.sh's test_file. An inline Rust `#[cfg(test)] mod tests`
+# does not qualify: its file also holds the production code the code and security lenses attested.
 attest_test_path() {
-    case "$1" in
-        *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
-        bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
-    esac
-    return 1
+    test_file "$1"
 }
 
 # attest_non_test_paths: reads paths on stdin, prints each one attest_test_path refuses.

@@ -32,7 +32,7 @@ Use absolute paths. The session cwd is shared with the orchestrator and pins to 
 
 Time-box `gh` (`timeout 60 gh …`; `git push` uses it as its credential helper): a call that times out is waiting on a locked keyring, so return `STATUS: blocked` and say so.
 
-The scratchpad and port 3000 are shared with other agents. Prefix every scratchpad file with the issue number, and run the stack on a spare port. A walk that needs port 3000 asks the orchestrator for it with `STATUS: needs-operator` (`ticket-lifecycle.md` → "Worktrees").
+The scratchpad and port 3000 are shared with other agents. Prefix every scratchpad file with the issue number, and run the stack on a spare port. For a walk that needs port 3000, request it as its own report item, not an operator question, and wait for the grant; the next report after the walk says "stack stopped, port 3000 released".
 
 ## Phase A: Intake (first dispatch)
 
