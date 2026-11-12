@@ -22,7 +22,11 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   scoped to one facility that wrote another facility's event FCAs now gets `403` and must use a
   credential scoped to that facility. `PUT` and `DELETE /api/v1/flow/fcas/{id}` on an event FCA now
   also need `events.plan.update` at its `artcc` (the stored one, and on `PUT` the payload's), on top
-  of `flow.fca.update` or `flow.fca.delete` there; an ordinary FCA is unaffected. (#854)
+  of `flow.fca.update` or `flow.fca.delete` there; an ordinary FCA is unaffected. On a planned or
+  archived event FCA, `PUT /api/v1/flow/fcas/{id}/order`, `POST` and `DELETE
+  /api/v1/flow/fcas/{id}/release/{callsign}` and `POST /api/v1/flow/fcas/{id}/swap` answer
+  `403` to an event planner without `events.plan.update` at its `artcc`; a non-planner still gets
+  `404`. (#854)
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,

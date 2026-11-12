@@ -3,8 +3,9 @@
 //! `404` for it to anyone who isn't an event planner, and write nothing. The check runs before the
 //! ARTCC scope check, so a non-planner at another facility gets the `404` a missing id gets rather than
 //! a `403` that confirms the FCA exists. An event planner keeps all four on a planned or archived FCA
-//! (owner decision: the rule #736 applies to `PUT`/`DELETE`, with the same planner test). A published
-//! event FCA and an ordinary FCA behave as before.
+//! (owner decision: the rule #736 applies to `PUT`/`DELETE`, with the same planner test), but only at
+//! an ARTCC where they hold `events.plan.update` (#854). A published event FCA and an ordinary FCA
+//! behave as before.
 //!
 //! Everything goes through the real router with a feed that has real crossings, so each allowed call
 //! actually writes and each refused one would have written. A handler that stops calling the guard,
@@ -375,9 +376,8 @@ async fn a_planner_operates_hidden_fcas(pool: PgPool, op: Op) {
     }
 }
 
-/// #736's planner test is "holds `events.plan.update` anywhere", and #746 reuses it verbatim, so a
-/// planner whose grants are all at ZTL passes the visibility check on ZDC's hidden FCAs and is then
-/// refused by the ARTCC scope check: `403`, as on `PUT`/`DELETE`, and nothing changes.
+/// A planner whose grants are all at ZTL is a planner, so ZDC's hidden FCAs answer `403`, not the
+/// non-planner's `404`, as on `PUT`/`DELETE`, and nothing changes.
 async fn a_planner_elsewhere_gets_403_on_hidden_fcas(pool: PgPool, op: Op) {
     let state = seed(&pool).await;
     let ztl = planner(&pool, "ZTL").await;
@@ -394,6 +394,31 @@ async fn a_planner_elsewhere_gets_403_on_hidden_fcas(pool: PgPool, op: Op) {
             "{op:?} left {id} unchanged"
         );
     }
+}
+
+/// #854: a ZTL planner who also holds `flow.fca.update` at ZDC passes the `flow.fca.update` scope
+/// check on ZDC's hidden FCAs, and is refused by the `events.plan.update` scope check: `403`, and
+/// nothing changes. The same caller still operates ZDC's ordinary FCA.
+async fn a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool: PgPool, op: Op) {
+    let state = seed(&pool).await;
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "events.plan.update", Some("ZTL")).await;
+    grant(&pool, &user, "flow.fca.update", Some("ZDC")).await;
+    let cookie = session_cookie(&pool, &user).await;
+    for id in HIDDEN {
+        let before = snapshot(&pool, id).await;
+        assert_eq!(
+            call(&state, op, id, &cookie).await.0,
+            StatusCode::FORBIDDEN,
+            "{op:?} on {id}"
+        );
+        assert_eq!(
+            snapshot(&pool, id).await,
+            before,
+            "{op:?} left {id} unchanged"
+        );
+    }
+    assert_operable(&pool, &state, op, ORDINARY, &cookie).await;
 }
 
 /// One module per route, so a failing test names the route whose check broke.
@@ -430,6 +455,11 @@ macro_rules! route_tests {
             #[sqlx::test]
             async fn a_planner_elsewhere_gets_403_on_hidden_fcas(pool: PgPool) {
                 super::a_planner_elsewhere_gets_403_on_hidden_fcas(pool, $op).await;
+            }
+
+            #[sqlx::test]
+            async fn a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool: PgPool) {
+                super::a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool, $op).await;
             }
         }
     };

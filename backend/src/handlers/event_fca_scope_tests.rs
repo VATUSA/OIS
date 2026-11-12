@@ -845,7 +845,7 @@ async fn the_plain_routes_refuse_an_event_fca_outside_the_planners_artcc(pool: P
     assert_eq!(status, StatusCode::OK);
     assert_eq!(row(&pool, "plain-zdc").await.0, "Plain edit");
 
-    // And a ZDC planner and a national planner with the same flow grants write the event FCA.
+    // And a ZDC planner with ZDC flow grants and a national planner with national ones write it.
     let zdc = planner_with_fca_grants(&pool, Some("ZDC"), &[Some("ZDC")]).await;
     let uri = "/api/v1/flow/fcas/ev-planned";
     let status = send(&state, Method::PUT, uri, &zdc, Some(fca("ZDC edit", "ZDC"))).await;

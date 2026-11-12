@@ -322,20 +322,20 @@ async fn is_event_planner(state: &AppState, principal: &Principal) -> Result<boo
 /// unlike `PUT`/`DELETE` this does not refuse it.
 ///
 /// Runs before the ARTCC scope check, so a non-planner elsewhere gets the `404` a missing id gets
-/// rather than a `403` that confirms the FCA exists. A planner passes on to the scope check, as on
-/// `PUT`/`DELETE`.
+/// rather than a `403` that confirms the FCA exists. A planner then needs `events.plan.update` at the
+/// FCA's ARTCC (`403` otherwise), the rule `PUT`/`DELETE` apply to an event FCA (#854).
 async fn require_visible_event_fca(
     state: &AppState,
     principal: &Principal,
     fca: &FcaBody,
 ) -> Result<(), ApiError> {
-    if fca.event_id.is_none()
-        || fca.event_status.as_deref() == Some("published")
-        || is_event_planner(state, principal).await?
-    {
+    if fca.event_id.is_none() || fca.event_status.as_deref() == Some("published") {
         return Ok(());
     }
-    Err(ApiError::NotFound)
+    if !is_event_planner(state, principal).await? {
+        return Err(ApiError::NotFound);
+    }
+    require_fca_write_scope(state, principal, "events.plan.update", &[&fca.artcc]).await
 }
 
 /// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
