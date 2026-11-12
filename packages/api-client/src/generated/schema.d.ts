@@ -3980,8 +3980,9 @@ export interface components {
         };
         /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
-         *     trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
-         *     token, or empty). See migration 0059 and `feed::trajectory`.
+         *     trajectory / ETA model. Keyed by `kind` (`type` / `family` / `wake` / `default`) + `key` (ICAO
+         *     type, engine family `jet` / `turboprop` / `piston`, wake token, or empty). See migrations 0059
+         *     and 0134 and `feed::trajectory`.
          */
         AircraftProfileBody: {
             /** Format: double */
@@ -5410,7 +5411,10 @@ export interface components {
              *     (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
              */
             headwind?: number | null;
-            /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
+            /**
+             * @description The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
+             *     "default".
+             */
             profile: string;
             taxi_estimate?: components["schemas"]["TaxiEstimateDebug"] | null;
             /**

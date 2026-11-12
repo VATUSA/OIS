@@ -1060,8 +1060,9 @@ fn engine(ty: &str) -> Option<Engine> {
 }
 
 /// The engine family of an ICAO type from [`ENGINE_REF`] (`"jet"`, `"turboprop"`, `"piston"`), or
-/// None for a type the reference doesn't list. The aircraft-profile builder (#828) reports it for
-/// types too thin to profile, so #818 can give them a family fallback.
+/// None for a type the reference doesn't list; always one of [`ENGINE_FAMILIES`]. It keys the
+/// engine-family tier of `trajectory::ProfileTable::resolve` (#818) and the profile builder's
+/// family pools.
 pub(crate) fn engine_family(ty: &str) -> Option<&'static str> {
     engine(ty).map(|e| match e {
         Engine::Piston => "piston",
@@ -1070,8 +1071,12 @@ pub(crate) fn engine_family(ty: &str) -> Option<&'static str> {
     })
 }
 
-// Aircraft engine reference for jets-only metering — ported from vatflow's
-// FALLBACK_AIRCRAFT_REF. Not exhaustive; unknown types are treated as includable.
+/// Every value [`engine_family`] returns: the keys a `family` aircraft profile may carry.
+pub(crate) const ENGINE_FAMILIES: [&str; 3] = ["jet", "turboprop", "piston"];
+
+// Aircraft engine reference for jets-only metering and the engine-family profile tier — ported from
+// vatflow's FALLBACK_AIRCRAFT_REF. Not exhaustive; unknown types are treated as includable, and get
+// no family profile.
 static ENGINE_REF: LazyLock<HashMap<&'static str, Engine>> = LazyLock::new(|| {
     use Engine::*;
     let mut m = HashMap::new();
@@ -2857,5 +2862,85 @@ mod tests {
         );
         assert_eq!(flow.flights[0].distance_nm, Some(300.0));
         assert_eq!(flow.flights[0].etd, Some(now + Duration::seconds(660)));
+    }
+
+    // ---- #818: airport-flow demand times a jet with no type row on its engine-family row ----
+
+    /// `compute` resolves each pilot's and each prefile's profile through the table it is given
+    /// (`feed::flow::compute`, both resolve sites): a B772 (a jet in `ENGINE_REF`, no type row here)
+    /// is timed on the jet family row, a QQQQ (no engine family) is not.
+    #[test]
+    fn compute_times_a_jet_with_no_type_row_on_its_family_row() {
+        let typed = |ty: &str, route: &str| FlightPlan {
+            aircraft_short: ty.into(),
+            ..fp("KBOS", "KJFK", route)
+        };
+        let data = VatsimData {
+            pilots: vec![
+                pilot("GRD1", 42.36, -71.0, 0, 0, typed("B772", "DCT CAMRN KJFK")),
+                pilot("AIR1", 40.0, -73.7781, 15_000, 300, typed("B772", "PARCH4")),
+                pilot("CTL1", 42.36, -71.0, 0, 0, typed("QQQQ", "DCT CAMRN KJFK")),
+            ],
+            prefiles: vec![Prefile {
+                callsign: "PRE1".into(),
+                flight_plan: Some(typed("B772", "DCT LENDY KJFK")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let jet = trajectory::ProfileTable::new(
+            trajectory::AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([(
+                "jet".to_string(),
+                trajectory::AircraftProfile {
+                    desc_fpm: 3_000.0,
+                    climb_fpm_lo: 3_500.0,
+                    climb_fpm_hi: 3_000.0,
+                    ..trajectory::AircraftProfile::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        let pg = base_program();
+        let etas = |table: &trajectory::ProfileTable| {
+            let flow = compute(
+                "KJFK",
+                Some(&pg),
+                &data,
+                &airports(),
+                &NavData::default(),
+                &Winds::default(),
+                table,
+                &HashMap::new(),
+                &HashMap::new(),
+                &RunwayDb::default(),
+                &HashMap::new(),
+                &HashSet::new(),
+                t0(),
+            );
+            flow.flights
+                .into_iter()
+                .map(|f| (f.callsign, f.eta.expect("an ETA")))
+                .collect::<HashMap<_, _>>()
+        };
+        let (without, with) = (etas(&trajectory::ProfileTable::default()), etas(&jet));
+        for cs in ["GRD1", "AIR1", "PRE1"] {
+            assert_ne!(
+                with[cs], without[cs],
+                "{cs}: the jet family row must move its ETA"
+            );
+        }
+        assert_eq!(with["CTL1"], without["CTL1"], "control: no engine family");
+    }
+
+    /// #818: `engine_family` returns exactly the keys the profiles handler accepts
+    /// (`ENGINE_FAMILIES`), one type per family, so a family row an admin can store is a row
+    /// resolution can reach.
+    #[test]
+    fn engine_family_returns_each_storable_family_key() {
+        let got = ["B772", "AT72", "PA34"].map(engine_family);
+        assert_eq!(got, ENGINE_FAMILIES.map(Some));
+        assert_eq!(ENGINE_FAMILIES, ["jet", "turboprop", "piston"]);
     }
 }

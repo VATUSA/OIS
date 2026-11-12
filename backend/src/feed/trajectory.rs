@@ -330,49 +330,74 @@ impl Default for AircraftProfile {
     }
 }
 
-/// A resolved set of aircraft profiles with the three-tier fallback used to pick performance for
-/// a flight: exact ICAO type → wake class (`L/M/H/J`) → the global default. Built from the DB by
-/// [`crate::repos::aircraft_profiles`] and cached in `AppState`; `Default` (legacy numbers, no
-/// type/wake overrides) is the safe fallback before the table has loaded.
+/// A resolved set of aircraft profiles with the four-tier fallback used to pick performance for a
+/// flight: exact ICAO type → engine family (`jet` / `turboprop` / `piston`, from
+/// [`crate::feed::flow::engine_family`]) → wake class (`L/M/H/J`) → the global default. Built from
+/// the DB by [`crate::repos::aircraft_profiles`] and cached in `AppState`; `Default` (legacy
+/// numbers, no type/family/wake overrides) is the safe fallback before the table has loaded.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileTable {
     default: AircraftProfile,
     by_wake: std::collections::HashMap<String, AircraftProfile>,
+    by_family: std::collections::HashMap<String, AircraftProfile>,
     by_type: std::collections::HashMap<String, AircraftProfile>,
 }
 
+/// The tier [`ProfileTable`] matched, so `resolve` and `resolve_label` read one decision.
+enum Tier {
+    Type(String),
+    Family(&'static str),
+    Wake(String),
+    Default,
+}
+
 impl ProfileTable {
+    /// `by_wake` and `by_type` are keyed uppercase, `by_family` lowercase, as
+    /// `repos::aircraft_profiles::StoredTiers` stores them.
     pub fn new(
         default: AircraftProfile,
         by_wake: std::collections::HashMap<String, AircraftProfile>,
+        by_family: std::collections::HashMap<String, AircraftProfile>,
         by_type: std::collections::HashMap<String, AircraftProfile>,
     ) -> Self {
         Self {
             default,
             by_wake,
+            by_family,
             by_type,
         }
     }
 
-    /// The performance profile for an aircraft: exact type → wake class → global default.
-    pub fn resolve(&self, ty: &str, wake: &str) -> &AircraftProfile {
-        self.by_type
-            .get(&ty.to_ascii_uppercase())
-            .or_else(|| self.by_wake.get(&wake.to_ascii_uppercase()))
-            .unwrap_or(&self.default)
+    fn tier(&self, ty: &str, wake: &str) -> (Tier, &AircraftProfile) {
+        let ty = ty.to_ascii_uppercase();
+        if let Some(p) = self.by_type.get(&ty) {
+            return (Tier::Type(ty), p);
+        }
+        let family = crate::feed::flow::engine_family(&ty);
+        if let Some((f, p)) = family.and_then(|f| self.by_family.get(f).map(|p| (f, p))) {
+            return (Tier::Family(f), p);
+        }
+        let wake = wake.to_ascii_uppercase();
+        if let Some(p) = self.by_wake.get(&wake) {
+            return (Tier::Wake(wake), p);
+        }
+        (Tier::Default, &self.default)
     }
 
-    /// A label for which tier `resolve` matched, for the debug view: `type:<T>`, `wake:<W>`, or
-    /// `default`.
+    /// The performance profile for an aircraft: exact type → engine family → wake class → global
+    /// default.
+    pub fn resolve(&self, ty: &str, wake: &str) -> &AircraftProfile {
+        self.tier(ty, wake).1
+    }
+
+    /// A label for which tier `resolve` matched, for the debug view: `type:<T>`, `family:<F>`,
+    /// `wake:<W>`, or `default`.
     pub fn resolve_label(&self, ty: &str, wake: &str) -> String {
-        let ty = ty.to_ascii_uppercase();
-        let wake = wake.to_ascii_uppercase();
-        if self.by_type.contains_key(&ty) {
-            format!("type:{ty}")
-        } else if self.by_wake.contains_key(&wake) {
-            format!("wake:{wake}")
-        } else {
-            "default".to_string()
+        match self.tier(ty, wake).0 {
+            Tier::Type(t) => format!("type:{t}"),
+            Tier::Family(f) => format!("family:{f}"),
+            Tier::Wake(w) => format!("wake:{w}"),
+            Tier::Default => "default".to_string(),
         }
     }
 }
@@ -2089,5 +2114,142 @@ mod tests {
             knot(200.0, vec![(35_000.0, 60.0, Some(220.0))]),
         ]);
         assert_eq!(w.temp_k(150.0, 35_000.0), Some(220.0));
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#818)
+//
+// Requirement                                         | Test
+// ----------------------------------------------------|----------------------------------------------------------
+// AC1 resolve order type -> family -> wake -> default | resolve_falls_through_type_family_wake_default_in_that_order
+// AC1 family keyed on the type's own family           | a_family_row_for_another_engine_family_is_not_used
+// AC1 a type outside ENGINE_REF skips family          | a_type_outside_the_engine_reference_skips_the_family_tier
+// AC1 label agrees with resolve at every tier         | resolve_label_names_the_tier_resolve_used_at_every_tier
+// AC1 no family rows behaves as next                  | with_no_family_rows_resolution_is_type_then_wake_then_default
+#[cfg(test)]
+mod profile_table_family_tests {
+    // B772 is a jet in `feed::flow::ENGINE_REF` with no 0059 seed row; AT72 a turboprop; QQQQ is in
+    // neither. Each tier carries its own literal `desc_fpm`, so the profile `resolve` returns names
+    // the tier it came from.
+    use std::collections::HashMap;
+
+    use super::{AircraftProfile, ProfileTable};
+
+    fn fpm(desc_fpm: f64) -> AircraftProfile {
+        AircraftProfile {
+            desc_fpm,
+            ..AircraftProfile::default()
+        }
+    }
+
+    /// The table with the tiers named in `tiers` ("type", "family", "wake", "default"); the
+    /// default tier is 4_444 when named, else `AircraftProfile::default()`.
+    fn table(tiers: &[&str]) -> ProfileTable {
+        let has = |t: &str| tiers.contains(&t);
+        let map = |on: bool, rows: &[(&str, f64)]| -> HashMap<String, AircraftProfile> {
+            if !on {
+                return HashMap::new();
+            }
+            rows.iter().map(|(k, v)| (k.to_string(), fpm(*v))).collect()
+        };
+        ProfileTable::new(
+            if has("default") {
+                fpm(4_444.0)
+            } else {
+                AircraftProfile::default()
+            },
+            map(has("wake"), &[("H", 3_333.0)]),
+            map(has("family"), &[("jet", 2_222.0), ("turboprop", 2_777.0)]),
+            map(has("type"), &[("B772", 1_111.0)]),
+        )
+    }
+
+    #[test]
+    fn resolve_falls_through_type_family_wake_default_in_that_order() {
+        let steps: [(&[&str], f64); 4] = [
+            (&["type", "family", "wake", "default"], 1_111.0),
+            (&["family", "wake", "default"], 2_222.0),
+            (&["wake", "default"], 3_333.0),
+            (&["default"], 4_444.0),
+        ];
+        for (tiers, want) in steps {
+            assert_eq!(
+                table(tiers).resolve("B772", "H").desc_fpm,
+                want,
+                "tiers {tiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_family_row_for_another_engine_family_is_not_used() {
+        let t = ProfileTable::new(
+            fpm(4_444.0),
+            HashMap::new(),
+            HashMap::from([("turboprop".to_string(), fpm(2_777.0))]),
+            HashMap::new(),
+        );
+        assert_eq!(
+            t.resolve("B772", "").desc_fpm,
+            4_444.0,
+            "a jet ignores the turboprop row"
+        );
+        assert_eq!(
+            t.resolve("AT72", "").desc_fpm,
+            2_777.0,
+            "a turboprop takes it"
+        );
+    }
+
+    #[test]
+    fn a_type_outside_the_engine_reference_skips_the_family_tier() {
+        let t = table(&["type", "family", "wake", "default"]);
+        assert_eq!(t.resolve("QQQQ", "H").desc_fpm, 3_333.0);
+        assert_eq!(t.resolve("QQQQ", "").desc_fpm, 4_444.0);
+        assert_eq!(t.resolve("B772", "").desc_fpm, 1_111.0, "control: type row");
+        let no_type = table(&["family", "wake", "default"]);
+        assert_eq!(
+            no_type.resolve("B772", "").desc_fpm,
+            2_222.0,
+            "control: family row"
+        );
+    }
+
+    #[test]
+    fn resolve_label_names_the_tier_resolve_used_at_every_tier() {
+        let steps: [(&[&str], &str, f64); 4] = [
+            (&["type", "family", "wake", "default"], "type:B772", 1_111.0),
+            (&["family", "wake", "default"], "family:jet", 2_222.0),
+            (&["wake", "default"], "wake:H", 3_333.0),
+            (&["default"], "default", 4_444.0),
+        ];
+        for (tiers, label, want) in steps {
+            let t = table(tiers);
+            assert_eq!(t.resolve_label("B772", "H"), label, "tiers {tiers:?}");
+            assert_eq!(t.resolve("B772", "H").desc_fpm, want, "tiers {tiers:?}");
+        }
+        let lower = table(&["family", "wake", "default"]);
+        assert_eq!(lower.resolve_label("b772", "h"), "family:jet");
+        assert_eq!(lower.resolve("b772", "h").desc_fpm, 2_222.0);
+        assert_eq!(lower.resolve_label("at72", ""), "family:turboprop");
+        let piston = ProfileTable::new(
+            fpm(4_444.0),
+            HashMap::new(),
+            HashMap::from([("piston".to_string(), fpm(1_000.0))]),
+            HashMap::new(),
+        );
+        assert_eq!(piston.resolve_label("PA34", ""), "family:piston");
+        assert_eq!(piston.resolve("PA34", "").desc_fpm, 1_000.0);
+    }
+
+    #[test]
+    fn with_no_family_rows_resolution_is_type_then_wake_then_default() {
+        let t = table(&["type", "wake", "default"]);
+        assert_eq!(t.resolve("B772", "H").desc_fpm, 1_111.0);
+        assert_eq!(t.resolve("B738", "H").desc_fpm, 3_333.0);
+        assert_eq!(t.resolve("B738", "").desc_fpm, 4_444.0);
+        assert_eq!(t.resolve_label("B772", "H"), "type:B772");
+        assert_eq!(t.resolve_label("B738", "H"), "wake:H");
+        assert_eq!(t.resolve_label("B738", ""), "default");
     }
 }

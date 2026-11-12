@@ -227,8 +227,9 @@ pub struct Replay<'a> {
     pub airports: &'a AirportDb,
     pub set_a: &'a ProfileTable,
     pub set_b: &'a ProfileTable,
-    /// The types set B changed.
-    pub b_types: &'a BTreeSet<String>,
+    /// The tiers set B changed, as [`ProfileTable::resolve_label`] names them (`type:B738`,
+    /// `family:jet`, `wake:H`).
+    pub b_tiers: &'a BTreeSet<String>,
 }
 
 /// Replay the held-out flights wholly inside `[from, to)` under both sets. Flights are read in
@@ -303,17 +304,20 @@ fn score_flight(
         }
     };
     Some(Scored {
-        in_b: replay.b_types.contains(&ty),
+        in_b: replay
+            .b_tiers
+            .contains(&replay.set_b.resolve_label(&ty, &wake)),
         a: err(replay.set_a.resolve(&ty, &wake)),
         b: err(replay.set_b.resolve(&ty, &wake)),
         ty,
     })
 }
 
-/// Set A is the catalog as stored (`flow.aircraft_profile` rows); set B is set A with every type the
-/// builder profiled replaced by its measurement, starting from the profile that type resolves to in
-/// set A (its own row, else its wake class, else the default). Returns both tables and the types set
-/// B changed.
+/// Set A is the catalog as stored (`flow.aircraft_profile` rows). Set B is set A with each row the
+/// builder profiled laid over it: a type's measurement starts from the profile that type resolves to
+/// in set A, a family's or wake class's from set A's row for it, else set A's default. Returns both
+/// tables and the tiers set B changed, as `resolve_label` names them, so a flight counts as set B's
+/// when set B times it on one of them.
 pub fn profile_sets(
     rows: &[crate::models::AircraftProfileBody],
     built: &super::stats::ProfileSet,
@@ -326,20 +330,49 @@ pub fn profile_sets(
     let a = ProfileTable::new(
         stored.default.clone(),
         stored.by_wake.clone(),
+        stored.by_family.clone(),
         stored.by_type.clone(),
     );
-    let mut b_types = std::collections::BTreeSet::new();
+    let mut changed = std::collections::BTreeSet::new();
     let mut b_by_type = stored.by_type;
     for (ty, tp) in built.types.iter().filter(|(_, tp)| tp.profiled) {
         let base = a.resolve(ty, tp.wake.as_deref().unwrap_or("")).clone();
-        b_by_type.insert(ty.to_ascii_uppercase(), tp.apply_to(&base));
-        b_types.insert(ty.clone());
+        let ty = ty.to_ascii_uppercase();
+        b_by_type.insert(ty.clone(), tp.apply_to(&base));
+        changed.insert(format!("type:{ty}"));
     }
+    let mut b_by_family = stored.by_family;
+    let mut b_by_wake = stored.by_wake;
+    let default = &stored.default;
+    overlay(
+        "family",
+        &mut b_by_family,
+        &built.families,
+        default,
+        &mut changed,
+    );
+    overlay("wake", &mut b_by_wake, &built.wakes, default, &mut changed);
     (
         a,
-        ProfileTable::new(stored.default, stored.by_wake, b_by_type),
-        b_types,
+        ProfileTable::new(stored.default, b_by_wake, b_by_family, b_by_type),
+        changed,
     )
+}
+
+/// Lay each profiled pooled row over `rows` (keys as the builder writes them: families lowercase,
+/// wakes uppercase), each built on the stored row for its key, else `default`.
+fn overlay(
+    tier: &str,
+    rows: &mut std::collections::HashMap<String, AircraftProfile>,
+    built: &std::collections::BTreeMap<String, super::stats::PooledProfile>,
+    default: &AircraftProfile,
+    changed: &mut BTreeSet<String>,
+) {
+    for (k, pp) in built.iter().filter(|(_, pp)| pp.profiled) {
+        let base = rows.get(k).unwrap_or(default).clone();
+        rows.insert(k.clone(), pp.apply_to(&base));
+        changed.insert(format!("{tier}:{k}"));
+    }
 }
 
 /// The backtest result as Markdown. Aggregates only.
@@ -376,7 +409,11 @@ pub fn report(scored: &[Scored], held_out: usize, label_a: &str, label_b: &str) 
     let all: Vec<&Scored> = scored.iter().collect();
     let in_b: Vec<&Scored> = scored.iter().filter(|s| s.in_b).collect();
     table(&mut out, "All scored flights", &all);
-    table(&mut out, "Flights of types the new set profiles", &in_b);
+    table(
+        &mut out,
+        "Flights the new set times on a measured row",
+        &in_b,
+    );
     out
 }
 
@@ -389,7 +426,7 @@ mod tests {
     use super::*;
     use crate::feed::airports::Airport;
 
-    fn t0() -> DateTime<Utc> {
+    pub(super) fn t0() -> DateTime<Utc> {
         DateTime::from_timestamp(1_790_000_000, 0).unwrap()
     }
 
@@ -417,7 +454,7 @@ mod tests {
         .unwrap()
     }
 
-    fn airports() -> AirportDb {
+    pub(super) fn airports() -> AirportDb {
         HashMap::from([
             ("KJFK".to_string(), Airport::at(40.64, -73.78)),
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
@@ -480,7 +517,7 @@ mod tests {
     }
 
     /// A full flight: roll at 15 kt steps, climb, cruise at 24,000 ft, descend, land near KDCA.
-    fn flight() -> Vec<HistPosition> {
+    pub(super) fn flight() -> Vec<HistPosition> {
         let mut v = vec![
             pos(0, 40.64, -73.78, 20, 10),
             pos(15, 40.64, -73.78, 20, 120),
@@ -524,7 +561,7 @@ mod tests {
         assert!(observe(&flight(), [38.85, -77.04]).is_some());
     }
 
-    fn row(kind: &str, key: &str, desc_fpm: f64) -> crate::models::AircraftProfileBody {
+    pub(super) fn row(kind: &str, key: &str, desc_fpm: f64) -> crate::models::AircraftProfileBody {
         crate::models::AircraftProfileBody {
             kind: kind.into(),
             key: key.into(),
@@ -583,9 +620,10 @@ mod tests {
         };
         let built = acc.finish(src, |_| None);
         let (a, b, changed) = profile_sets(&rows, &built);
+        // The 20 heavy flights also pool into a profiled wake H row (#818).
         assert_eq!(
             changed.into_iter().collect::<Vec<_>>(),
-            vec!["B77W".to_string()]
+            vec!["type:B77W".to_string(), "wake:H".to_string()]
         );
         assert_eq!(
             a.resolve("B77W", "H").desc_fpm,
@@ -715,7 +753,12 @@ mod tests {
     }
 
     /// One stored flight: its row (`route` filed on the flight) and its positions.
-    async fn seed(pool: &PgPool, session_id: i64, route: &str, positions: &[HistPosition]) {
+    pub(super) async fn seed(
+        pool: &PgPool,
+        session_id: i64,
+        route: &str,
+        positions: &[HistPosition],
+    ) {
         let (first, last) = (positions[0].ts, positions[positions.len() - 1].ts);
         sqlx::query(
             "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, \
@@ -762,14 +805,19 @@ mod tests {
     /// profile (so `a` and `b` agree), on `nav`.
     async fn run_all(pool: &PgPool, nav: &NavData) -> (Vec<Scored>, usize) {
         let ap = airports();
-        let table = ProfileTable::new(AircraftProfile::default(), HashMap::new(), HashMap::new());
+        let table = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         let none = BTreeSet::new();
         let replay = Replay {
             nav,
             airports: &ap,
             set_a: &table,
             set_b: &table,
-            b_types: &none,
+            b_tiers: &none,
         };
         run(
             pool,
@@ -787,7 +835,7 @@ mod tests {
     }
 
     /// As [`expected`], flown on `profile`.
-    fn expected_on(
+    pub(super) fn expected_on(
         nav: &NavData,
         winds: &Winds,
         profile: &AircraftProfile,
@@ -814,19 +862,25 @@ mod tests {
             climb_fpm_hi: 3_000.0,
             ..AircraftProfile::default()
         };
-        let set_a = ProfileTable::new(AircraftProfile::default(), HashMap::new(), HashMap::new());
+        let set_a = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         let set_b = ProfileTable::new(
             AircraftProfile::default(),
             HashMap::new(),
+            HashMap::new(),
             HashMap::from([("B738".to_string(), fast.clone())]),
         );
-        let b_types = BTreeSet::from(["B738".to_string()]);
+        let b_tiers = BTreeSet::from(["type:B738".to_string()]);
         let replay = Replay {
             nav: &nav,
             airports: &ap,
             set_a: &set_a,
             set_b: &set_b,
-            b_types: &b_types,
+            b_tiers: &b_tiers,
         };
         let (scored, _) = run(
             &pool,
@@ -984,7 +1038,7 @@ mod tests {
         assert!(r.contains("5 held-out flights, 2 scored"), "{r}");
         assert!(r.contains("## All scored flights (2 flights)"), "{r}");
         assert!(
-            r.contains("## Flights of types the new set profiles (1 flights)"),
+            r.contains("## Flights the new set times on a measured row (1 flights)"),
             "{r}"
         );
         // All flights. A TOD: |60|,|30| → MAE 45, bias +15, p90 = 30 + 0.9·30 = 57.
@@ -999,5 +1053,234 @@ mod tests {
         ] {
             assert!(r.contains(row), "missing {row}\n{r}");
         }
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#818)
+//
+// Requirement                                          | Test
+// -----------------------------------------------------|----------------------------------------------------------------------
+// AC3 built family row enters B on A's default         | set_b_puts_a_profiled_family_row_in_its_family_tier_built_on_a_default
+// AC3 built family row builds on A's stored family row | set_b_builds_a_family_row_on_the_family_row_set_a_already_stores
+// AC3 built wake row builds on A's wake row / default  | set_b_builds_a_wake_row_on_set_a_wake_row_else_its_default
+// AC3 unprofiled pooled rows leave B as A              | an_unprofiled_family_or_wake_row_changes_nothing_in_set_b
+// AC3 in_b attributes by resolve label (through run)   | run_marks_in_b_only_for_a_flight_set_b_times_on_a_changed_tier
+#[cfg(test)]
+mod family_backtest_tests {
+    //! `engine_of` is written out per test; B772 is the jet with no type row.
+    use std::collections::{BTreeSet, HashMap};
+
+    use chrono::Duration;
+    use sqlx::PgPool;
+
+    use super::super::samples::Field;
+    use super::super::stats::{Accumulator, ProfileSet, Source};
+    use super::tests::{airports, expected_on, flight, row, seed, t0};
+    use super::{Replay, profile_sets, run};
+    use crate::feed::{
+        nav::NavData,
+        trajectory::{AircraftProfile, ProfileTable},
+        winds::Winds,
+    };
+
+    fn jet(t: &str) -> Option<&'static str> {
+        matches!(t, "B772" | "CRJ2").then_some("jet")
+    }
+
+    fn measured(desc_fpm: f64) -> [(Field, f64); 3] {
+        [
+            (Field::ClimbFpmLo, 1_700.0),
+            (Field::CruiseTas, 480.0),
+            (Field::DescFpm, desc_fpm),
+        ]
+    }
+
+    fn built(acc: Accumulator, engine_of: fn(&str) -> Option<&'static str>) -> ProfileSet {
+        let src = Source {
+            from: "a".into(),
+            to: "b".into(),
+            flights_read: 0,
+            training_flights: 0,
+            held_out_flights: 0,
+            held_out_rule: "t".into(),
+        };
+        acc.finish(src, engine_of)
+    }
+
+    /// 10 B772 + 10 CRJ2 flights with no wake: a profiled jet family, no profiled type.
+    fn jet_pool(desc_fpm: f64) -> ProfileSet {
+        let mut acc = Accumulator::default();
+        for _ in 0..10 {
+            acc.add_flight("B772", "", &measured(desc_fpm));
+            acc.add_flight("CRJ2", "", &measured(desc_fpm));
+        }
+        built(acc, jet)
+    }
+
+    fn labels(changed: BTreeSet<String>) -> Vec<String> {
+        changed.into_iter().collect()
+    }
+
+    #[test]
+    fn set_b_puts_a_profiled_family_row_in_its_family_tier_built_on_a_default() {
+        let mut rows = vec![
+            row("default", "default", 1_800.0),
+            row("wake", "H", 2_200.0),
+        ];
+        rows[0].desc_ias_hi = 305.0;
+
+        let (a, b, changed) = profile_sets(&rows, &jet_pool(2_600.0));
+
+        assert_eq!(labels(changed), ["family:jet"]);
+        assert_eq!(a.resolve_label("B772", ""), "default");
+        assert_eq!(a.resolve("B772", "").desc_fpm, 1_800.0);
+        assert_eq!(b.resolve_label("B772", ""), "family:jet");
+        let p = b.resolve("B772", "");
+        assert_eq!(
+            (p.desc_fpm, p.climb_fpm_lo, p.desc_ias_hi),
+            (2_600.0, 1_700.0, 305.0)
+        );
+        assert_eq!(
+            b.resolve("AT72", ""),
+            a.resolve("AT72", ""),
+            "a turboprop is not moved"
+        );
+    }
+
+    #[test]
+    fn set_b_builds_a_family_row_on_the_family_row_set_a_already_stores() {
+        let mut rows = vec![
+            row("default", "default", 1_800.0),
+            row("family", "jet", 2_100.0),
+        ];
+        rows[0].desc_ias_hi = 305.0;
+        rows[1].desc_ias_hi = 315.0;
+
+        let (a, b, changed) = profile_sets(&rows, &jet_pool(2_600.0));
+
+        assert_eq!(labels(changed), ["family:jet"]);
+        assert_eq!(a.resolve("B772", "").desc_fpm, 2_100.0);
+        let p = b.resolve("B772", "");
+        assert_eq!((p.desc_fpm, p.desc_ias_hi), (2_600.0, 315.0));
+    }
+
+    #[test]
+    fn set_b_builds_a_wake_row_on_set_a_wake_row_else_its_default() {
+        let mut rows = vec![
+            row("default", "default", 1_800.0),
+            row("wake", "H", 2_200.0),
+        ];
+        rows[0].desc_ias_hi = 305.0;
+        rows[1].desc_ias_hi = 310.0;
+        let mut acc = Accumulator::default();
+        for _ in 0..10 {
+            acc.add_flight("QQQ1", "H", &measured(2_700.0));
+            acc.add_flight("QQQ3", "H", &measured(2_700.0));
+            acc.add_flight("QQQ2", "L", &measured(900.0));
+            acc.add_flight("QQQ4", "L", &measured(900.0));
+        }
+
+        let (a, b, changed) = profile_sets(&rows, &built(acc, |_| None));
+
+        assert_eq!(labels(changed), ["wake:H", "wake:L"]);
+        let h = b.resolve("QQQ1", "H");
+        assert_eq!((h.desc_fpm, h.desc_ias_hi), (2_700.0, 310.0));
+        let l = b.resolve("QQQ2", "L");
+        assert_eq!((l.desc_fpm, l.desc_ias_hi), (900.0, 305.0));
+        assert_eq!(a.resolve("QQQ2", "L").desc_fpm, 1_800.0);
+    }
+
+    #[test]
+    fn an_unprofiled_family_or_wake_row_changes_nothing_in_set_b() {
+        let rows = vec![
+            row("default", "default", 1_800.0),
+            row("wake", "H", 2_200.0),
+        ];
+        let mut acc = Accumulator::default();
+        for _ in 0..19 {
+            acc.add_flight("B772", "H", &measured(2_600.0));
+        }
+        let (a, b, changed) = profile_sets(&rows, &built(acc, jet));
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(a.resolve_label("B772", "H"), "wake:H");
+        assert_eq!(b.resolve_label("B772", "H"), "wake:H");
+        assert_eq!(b.resolve("B772", "H"), a.resolve("B772", "H"));
+
+        let mut acc = Accumulator::default();
+        for _ in 0..20 {
+            acc.add_flight("B772", "H", &measured(2_600.0));
+        }
+        let (_, _, changed) = profile_sets(&rows, &built(acc, jet));
+        assert_eq!(
+            labels(changed),
+            ["family:jet", "type:B772", "wake:H"],
+            "positive control: a 20th flight profiles all three"
+        );
+    }
+
+    /// Through `run`: a B772 that set B times on its new family row is set B's; a C172 that set B
+    /// still times on the default tier set A uses is not.
+    #[sqlx::test]
+    async fn run_marks_in_b_only_for_a_flight_set_b_times_on_a_changed_tier(pool: PgPool) {
+        let nav = NavData::default();
+        let ap = airports();
+        let f = flight();
+        for (session_id, ty) in [(5, "B772"), (10, "C172")] {
+            seed(&pool, session_id, "", &f).await;
+            sqlx::query(
+                "update stats.flight set aircraft_short = $2, aircraft_faa = $2 || '/L' \
+                 where session_id = $1",
+            )
+            .bind(session_id)
+            .bind(ty)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let fast = AircraftProfile {
+            desc_fpm: 3_000.0,
+            climb_fpm_hi: 3_000.0,
+            ..AircraftProfile::default()
+        };
+        let set_a = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let set_b = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([("jet".to_string(), fast.clone())]),
+            HashMap::new(),
+        );
+        let b_tiers = BTreeSet::from(["family:jet".to_string()]);
+        let replay = Replay {
+            nav: &nav,
+            airports: &ap,
+            set_a: &set_a,
+            set_b: &set_b,
+            b_tiers: &b_tiers,
+        };
+
+        let (scored, _) = run(
+            &pool,
+            &replay,
+            t0() - Duration::hours(1),
+            t0() + Duration::hours(3),
+        )
+        .await
+        .unwrap();
+
+        let by = |ty: &str| scored.iter().find(|s| s.ty == ty).expect(ty);
+        let (b772, c172) = (by("B772"), by("C172"));
+        assert!(b772.in_b);
+        assert_eq!(
+            b772.b.arrival_sec,
+            expected_on(&nav, &Winds::default(), &fast, "", &f)
+        );
+        assert_ne!(b772.a.arrival_sec, b772.b.arrival_sec);
+        assert!(!c172.in_b);
+        assert_eq!(c172.a.arrival_sec, c172.b.arrival_sec);
     }
 }
