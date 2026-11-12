@@ -85,7 +85,7 @@ not meter. See `docs/features/fca.md` for the write rules.
 One row per released crossing. When a controller issues a release, the flight's metered
 crossing (`cta_ms`) and wheels-up/release time (`edct_ms`) are **frozen**; the metering
 engine then treats it as a fixed constraint that unreleased traffic floats around (a late
-release sits at its ETA, #817).
+release crosses no earlier than a takeoff now would give once it is past its wheels-up, #817).
 
 | column | type | notes |
 | --- | --- | --- |

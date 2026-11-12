@@ -95,6 +95,7 @@ pub async fn run() -> color_eyre::Result<()> {
             state.jobs.clone(),
             pool.clone(),
             state.aircraft_profiles.clone(),
+            state.aircraft_profiles_loaded.clone(),
         );
         // ATC sector volumes (#594); kept as a dataset when the Monitor went (#719).
         jobs::spawn_airspace_sectors_refresh(

@@ -5367,9 +5367,11 @@ export interface components {
             lat: number;
             /**
              * Format: int64
-             * @description Seconds the live ETA has run past this flight's release or held STA; 0 when on time. A
-             *     late flight's `cross_time` is never before its ETA: a late release crosses at its ETA, and a
-             *     late held flight is still spaced from the traffic placed ahead of it (#817).
+             * @description Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
+             *     far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
+             *     since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
+             *     than that gives, and a late held flight is still spaced from the traffic placed ahead of it
+             *     (#817).
              */
             late_sec: number;
             /** Format: double */

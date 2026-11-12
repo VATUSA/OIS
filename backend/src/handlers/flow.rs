@@ -2339,8 +2339,9 @@ async fn meter_fca(
 /// building and metering, which every FCA read also runs. Every FCA is attempted; the `Err`
 /// names the ones that failed.
 ///
-/// Until the feed has a snapshot and the airport table is loaded (a replica that has just
-/// started), the tick changes nothing: an empty board would read as every held flight having left.
+/// Until this replica has loaded what the ETAs are built from ([`hold_inputs_ready`]) the tick
+/// changes nothing: an empty board would read as every held flight having left, and an STA metered
+/// on still air or default profiles would be stored for the life of the hold.
 pub(crate) async fn sync_fca_holds_once(
     state: &AppState,
     now: DateTime<Utc>,
@@ -2348,9 +2349,8 @@ pub(crate) async fn sync_fca_holds_once(
     let Some(pool) = state.db.as_ref() else {
         return Ok("no database");
     };
-    let (snapshot, airports) = feed_view(state).await;
-    if snapshot.is_none() || airports.is_empty() {
-        return Ok("skipped: feed or airports not loaded yet");
+    if let Some(waiting) = hold_inputs_ready(state).await? {
+        return Ok(waiting);
     }
     let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
         .await
@@ -2396,6 +2396,39 @@ pub(crate) async fn sync_fca_holds_once(
     } else {
         Err(format!("held STAs not synced for: {}", failed.join(", ")))
     }
+}
+
+/// Whether this replica has loaded every input a held STA is metered from: a feed snapshot, the
+/// airport table, winds and the aircraft profiles. `Ok(Some(reason))` while one is still loading
+/// for the first time since start. A source whose loader has run and failed with nothing loaded is
+/// an `Err`, so the job registry shows the pass failing instead of skipping quietly.
+async fn hold_inputs_ready(state: &AppState) -> Result<Option<&'static str>, String> {
+    let (snapshot, airports) = feed_view(state).await;
+    if snapshot.is_none() || airports.is_empty() {
+        return Ok(Some("skipped: feed or airports not loaded yet"));
+    }
+    let last_failed = |job: &str| {
+        state
+            .jobs
+            .snapshot()
+            .iter()
+            .any(|j| j.name == job && j.last_ok == Some(false))
+    };
+    if state.winds_refreshed.load(Ordering::Relaxed) == 0 {
+        if last_failed(crate::jobs::WINDS_REFRESH_JOB) {
+            return Err("winds have not loaded since start and the last fetch failed".into());
+        }
+        return Ok(Some("skipped: winds not loaded yet"));
+    }
+    if !state.aircraft_profiles_loaded.load(Ordering::Relaxed) {
+        if last_failed("aircraft_profiles_refresh") {
+            return Err(
+                "aircraft profiles have not loaded since start and the last load failed".into(),
+            );
+        }
+        return Ok(Some("skipped: aircraft profiles not loaded yet"));
+    }
+    Ok(None)
 }
 
 /// Query for the FCA traffic endpoint.
@@ -4614,6 +4647,33 @@ mod release_spacing_tests {
         );
         let cta = rdy_slot(&fca, &metas, &metered, 1, false, 0);
         assert_eq!(cta, T0 + 1_000_000 + 240_000 + RELEASE_MARGIN_MS);
+    }
+
+    /// A RDY on a held airborne flight searches with its own hold taken out. Rate 30: 120 s plus the
+    /// 15 s margin. F is held at T0+1100 s with its ETA at T0+1050 s, 17.5 min out, inside the
+    /// 30 min horizon; A's ETA is T0+1000 s. With the hold left in, F would sit at T0+1100 s, push A
+    /// to T0+1220 s and take T0+1050 s, ahead of the A it pushed. With it out, A stays at
+    /// T0+1000 s and F goes to T0+1000+135 s. The far arrival does not bound it.
+    #[test]
+    fn a_rdy_on_a_held_flight_is_not_spaced_against_what_its_hold_pushed() {
+        const T0: i64 = 1_800_000_000_000;
+        let fca = rate_fca(vec![]);
+        let metas = vec![
+            cand(T0 + 1_000_000, true, None),
+            MeterInput {
+                held_ms: Some(T0 + 1_100_000),
+                ..cand(T0 + 1_050_000, true, None)
+            },
+            cand(T0 + 5_000_000, true, None),
+        ];
+        let metered = fca::meter(&metas, &meter_config(&fca, T0), None);
+        assert_eq!(
+            (metered[1].sched_ms, metered[0].sched_ms),
+            (T0 + 1_100_000, T0 + 1_220_000),
+            "the scenario needs F's hold to push A on the ladder"
+        );
+        let cta = rdy_slot(&fca, &metas, &metered, 1, false, T0);
+        assert_eq!(cta, T0 + 1_000_000 + SEP_MS + RELEASE_MARGIN_MS);
     }
 
     /// A Set beside an airborne flight inside the freeze horizon is spaced from its held STA, not

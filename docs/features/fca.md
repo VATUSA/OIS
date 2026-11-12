@@ -215,8 +215,11 @@ release and its ETA is within `freeze_ms` of `now_ms`, by its held STA (`held_ms
 `flow.fca_held_sta`). A flight that already has a held STA stays frozen until its ETA runs
 `FREEZE_HYSTERESIS_MS` (2 min) past the horizon, so ETA noise at the edge does not drop and re-store
 it every tick. The margin is bounded rather than permanent: a re-routed flight leaves the hold
-instead of showing late until it crosses. Its anchor is `max(fixed, eta)`, and it reports
-`late_sec = max(eta - fixed, 0) / 1000`. `freeze_min` 0 turns holding off.
+instead of showing late until it crosses. Its anchor is `max(fixed, due)` and it reports
+`late_sec = max(due - fixed, 0) / 1000`, where `due = eta - ground_allowance_ms`. Airborne that is
+the ETA. On the ground the ETA counts the whole taxi allowance until takeoff, so it passes a release
+while the aircraft waits or taxis; `due` passes it only once now is past the release's wheels-up.
+`freeze_min` 0 turns holding off.
 
 **Auto mode** (`meter_auto`). Flights sort by tier, then by anchor: releases; held flights still on
 time (`eta <= held`); held flights running late; other airborne; ground. A release is placed at its
@@ -266,8 +269,9 @@ next tick drops its row, and every other hold is spaced around the release by th
 
 - **RDY**, `rdy_slot` (`handlers/flow.rs`): in manual mode the ladder's slot plus
   `RELEASE_MARGIN_MS` = 15 s. In auto mode, `earliest_slot` against every other pinned
-  flight at its **metered** time (`committed_crossings`, #356), with the margin added to
-  the separation.
+  flight at its **metered** time (`committed_crossings`, #356), metered with the flight's own
+  release and hold taken out so a repeat RDY is not spaced behind arrivals its old release pushed,
+  with the margin added to the separation.
 - **SET**, `set_slot` (`handlers/flow.rs`, #816): the typed time is a ready (runway) time. The
   desired crossing is that time plus the airborne ETE, `eta - now - ground_allowance` (#815), and
   the slot is `earliest_slot` from there against every other pinned flight, metered without the
@@ -309,7 +313,7 @@ MIT 0 through `meter`.
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
 | `PUT /api/v1/flow/fcas/{id}` | `update_fca` | `flow.fca.update` + event-planner rule (`require_event_fca_planner`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows when a metering field changes (#817) | `flow.fca` |
 | `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` |
-| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq`; deletes the FCA's `flow.fca_held_sta` rows when the order or the manual flag changes | `flow.fca` (`:2859`) |
+| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` | `flow.fca.update` + hidden-event 404 (#746) + ARTCC | `manual_order`, `manual_seq`; deletes the FCA's `flow.fca_held_sta` rows when the order or the manual flag changes | `flow.fca` |
 | `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |
 | `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2639`) | same | delete `flow.fca_release` | `flow.release` (`:2672`) |
 | `POST /api/v1/flow/fcas/{id}/swap` | `swap_releases` (`:2741`) | same, plus same airport and runway (`:2791`) | swap two rows | `flow.release` (`:2782`) |

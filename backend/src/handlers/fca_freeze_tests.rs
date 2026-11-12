@@ -10,7 +10,7 @@
 //! assert a read serves the pass's STA exactly run the pass 60 s ahead of the wall clock, so the
 //! read that follows sees the flight on time and the STA unchanged, not late by a few ms.
 //
-// Coverage matrix (VATUSA/OIS#817: the pass is the only writer)
+// Coverage matrix (VATUSA/OIS#817: the pass is the only thing that stores holds)
 //
 // Requirement                                   | Test                                                              | Status
 // ----------------------------------------------|-------------------------------------------------------------------|-------
@@ -22,6 +22,9 @@
 // retention constant pinned                     | the_retention_window_sits_between_the_fixtures                     | DONE
 // sync_held_stas repo contract                  | sync_held_stas_* (3)                                               | DONE
 // pass drops a flight gone from the feed        | the_pass_drops_the_held_sta_of_a_flight_gone_from_the_feed         | DONE
+// pass waits for feed, airports, winds, profiles| the_pass_keeps_every_hold_until_its_inputs_are_loaded             | DONE
+// a failed loader fails the pass, changes none | the_pass_fails_while_a_failed_loader_has_left_its_input_empty      | DONE
+// a release in another's gap is flagged       | the_traffic_route_flags_a_release_left_inside_the_gap              | DONE
 // 1 min horizon is 60 000 ms                    | a_one_minute_horizon_does_not_freeze_a_flight_minutes_out          | DONE
 // AC2: STA holds as the pilot moves on          | a_held_sta_stays_put_when_the_pilot_moves_on                       | DONE
 // a read never prunes or rewrites a hold        | a_read_never_prunes_or_rewrites_the_held_stas                      | DONE
@@ -44,6 +47,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use axum::http::{Method, StatusCode};
 use chrono::Utc;
@@ -109,6 +113,13 @@ async fn state_with(pool: PgPool, pilots: Vec<Pilot>) -> AppState {
             ..Default::default()
         })));
     }
+    // The hold pass waits until winds and profiles have loaded once (`hold_inputs_ready`).
+    state
+        .winds_refreshed
+        .store(Utc::now().timestamp_millis(), Ordering::Relaxed);
+    state
+        .aircraft_profiles_loaded
+        .store(true, Ordering::Relaxed);
     state
 }
 
@@ -454,9 +465,10 @@ async fn the_pass_drops_the_held_sta_of_a_flight_gone_from_the_feed(pool: PgPool
 }
 
 /// A replica that has just started has no feed snapshot, then a snapshot before the airport table
-/// loads. Neither tick may read the empty board as every held flight having left.
+/// loads, then no winds or aircraft profiles yet. No such tick may read the empty board as every
+/// held flight having left, or store an STA metered on still air or default profiles.
 #[sqlx::test]
-async fn the_pass_keeps_every_hold_until_the_feed_and_airports_are_loaded(pool: PgPool) {
+async fn the_pass_keeps_every_hold_until_its_inputs_are_loaded(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
     let id = corridor_fca(&pool, 30).await;
     let sta = Utc::now().timestamp_millis() + 600_000;
@@ -466,10 +478,7 @@ async fn the_pass_keeps_every_hold_until_the_feed_and_airports_are_loaded(pool: 
 
     let snapshot = state.feed.write().await.snapshot.take();
     let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
-    assert_ne!(
-        tick, "synced",
-        "a tick with no snapshot reports that it skipped"
-    );
+    assert_eq!(tick, "skipped: feed or airports not loaded yet");
     assert_eq!(
         held_rows(&pool, &id).await,
         kept,
@@ -481,20 +490,101 @@ async fn the_pass_keeps_every_hold_until_the_feed_and_airports_are_loaded(pool: 
         feed.snapshot = snapshot;
         std::mem::take(&mut feed.airports)
     };
-    sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(tick, "skipped: feed or airports not loaded yet");
     assert_eq!(
         held_rows(&pool, &id).await,
         kept,
         "no airports: every hold kept"
     );
-
     state.feed.write().await.airports = airports;
+
+    let winds_at = state.winds_refreshed.swap(0, Ordering::Relaxed);
+    let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(tick, "skipped: winds not loaded yet");
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "no winds: every hold kept"
+    );
+    state.winds_refreshed.store(winds_at, Ordering::Relaxed);
+
+    state
+        .aircraft_profiles_loaded
+        .store(false, Ordering::Relaxed);
+    let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(tick, "skipped: aircraft profiles not loaded yet");
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "no profiles: every hold kept"
+    );
+    state
+        .aircraft_profiles_loaded
+        .store(true, Ordering::Relaxed);
+
     let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
     assert_eq!(tick, "synced");
     assert_eq!(
         held_rows(&pool, &id).await,
         vec![("AIR1".to_string(), sta)],
-        "positive control: once both are loaded, the pass drops the flight that left"
+        "positive control: once every input is loaded, the pass drops the flight that left"
+    );
+}
+
+/// A loader that has run and failed with nothing loaded fails the pass instead of skipping it, so
+/// the job registry shows it, and still stores and drops nothing.
+#[sqlx::test]
+async fn the_pass_fails_while_a_failed_loader_has_left_its_input_empty(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let sta = Utc::now().timestamp_millis() + 600_000;
+    seed_held(&pool, &id, "GONE", sta).await;
+    let kept = vec![("GONE".to_string(), sta)];
+
+    let winds_at = state.winds_refreshed.swap(0, Ordering::Relaxed);
+    state
+        .jobs
+        .register(crate::jobs::WINDS_REFRESH_JOB, "winds", Some(3600), false);
+    state
+        .jobs
+        .finish(crate::jobs::WINDS_REFRESH_JOB, false, "fetch failed");
+    let err = sync_fca_holds_once(&state, Utc::now()).await.unwrap_err();
+    assert!(err.contains("winds"), "{err}");
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "a failed winds load changes nothing"
+    );
+    state.winds_refreshed.store(winds_at, Ordering::Relaxed);
+
+    state
+        .aircraft_profiles_loaded
+        .store(false, Ordering::Relaxed);
+    state
+        .jobs
+        .register("aircraft_profiles_refresh", "profiles", Some(300), true);
+    state
+        .jobs
+        .finish("aircraft_profiles_refresh", false, "load failed");
+    let err = sync_fca_holds_once(&state, Utc::now()).await.unwrap_err();
+    assert!(err.contains("aircraft profiles"), "{err}");
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "a failed profiles load changes nothing"
+    );
+
+    state
+        .aircraft_profiles_loaded
+        .store(true, Ordering::Relaxed);
+    assert_eq!(
+        sync_fca_holds_once(&state, Utc::now()).await.unwrap(),
+        "synced"
+    );
+    assert!(
+        held_rows(&pool, &id).await.iter().all(|(c, _)| c != "GONE"),
+        "positive control: with both loaded the pass runs and drops the flight that left"
     );
 }
 
@@ -1028,7 +1118,7 @@ async fn a_new_fca_gets_the_default_horizon(pool: PgPool) {
     assert_eq!(efca.event_id, Some(event_id));
 }
 
-// --- the pass is the only writer ---
+// --- the pass is the only thing that stores holds ---
 
 /// A corridor FCA with every state the pass's metering and prune read set explicitly.
 struct FcaRow<'a> {

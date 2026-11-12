@@ -22,11 +22,14 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   clears them when the order or the manual flag changes; `DELETE /api/v1/flow/fcas/{id}` clears them.
   A background pass stores the held times; no read writes them. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
   `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
-  held times. A flight whose ETA has passed its
-  release or held time reports how far in `late_sec`, and its `cross_time` is never before its ETA.
-  In airport flow, an issued CFR's `FlowFlight.sta` and `delay_min` now go through the same slot
-  check as every other arrival and are never before its ETA, so a CFR the flight can no longer make
-  shows its ETA and a CFR whose slot is taken shows the delay. (#817)
+  held times. A flight that runs past its release or held time reports how far in `late_sec`, and
+  its `cross_time` is never before that: for an airborne flight, how far its ETA has passed it; for
+  a ground release, how long now is past its wheels-up. In airport flow, an issued CFR's
+  `FlowFlight.sta` and `delay_min` now go through the same slot check as every other arrival; a CFR
+  is late only once now is past its wheels-up, and then crosses no earlier than a takeoff now would
+  give, and a CFR whose slot is taken shows the delay. A repeat RDY and a CFR re-issue search for the
+  new slot with the flight's own old release or CFR taken out, and RDY and Set space each pair by the
+  larger of the two gaps. (#817)
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,

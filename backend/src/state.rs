@@ -39,6 +39,10 @@ pub struct AppState {
     /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
+    /// Set by `jobs::spawn_aircraft_profiles_refresh` once a load from the DB succeeds, never
+    /// cleared: until then `aircraft_profiles` is the legacy default table, so the held-STA pass
+    /// waits on it (#817).
+    pub aircraft_profiles_loaded: Arc<AtomicBool>,
     /// ATC sector volumes (#594), the dataset kept when the Monitor was removed (#719). Starts empty and is reloaded from the DB
     /// by `jobs::spawn_airspace_sectors_refresh`, which the `airspace_sector_seed` job triggers when it
     /// writes the table (#821; see `feed::sectors`). Behind `ArcSwap` for lock-free reads
@@ -123,6 +127,7 @@ impl AppState {
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let aircraft_profiles_loaded = Arc::new(AtomicBool::new(false));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let airspace_sectors_loaded = Arc::new(AtomicBool::new(false));
         let sector_limits = Arc::new(ArcSwap::from_pointee(SectorLimits::default()));
@@ -169,6 +174,7 @@ impl AppState {
                 runways,
                 winds,
                 aircraft_profiles,
+                aircraft_profiles_loaded: aircraft_profiles_loaded.clone(),
                 airspace_sectors,
                 airspace_sectors_loaded: airspace_sectors_loaded.clone(),
                 sector_limits,
@@ -199,6 +205,7 @@ impl AppState {
             runways,
             winds,
             aircraft_profiles,
+            aircraft_profiles_loaded,
             airspace_sectors,
             airspace_sectors_loaded,
             sector_limits,
@@ -230,6 +237,7 @@ impl AppState {
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
+            aircraft_profiles_loaded: Arc::new(AtomicBool::new(false)),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             airspace_sectors_loaded: Arc::new(AtomicBool::new(false)),
             sector_limits: Arc::new(ArcSwap::from_pointee(SectorLimits::default())),
