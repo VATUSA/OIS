@@ -361,7 +361,8 @@ pub struct MeterOutput {
     pub delay_sec: i64,
     /// 1-based order by metered time.
     pub seq: i64,
-    /// How far the live ETA has run past a released or frozen time, seconds; 0 when on time.
+    /// How late a released or frozen flight runs, seconds; 0 when on time. Airborne, how far its
+    /// ETA has run past the time; a ground release, how long now is past its issued wheels-up.
     pub late_sec: i64,
     /// A release that sits inside another crossing's required gap.
     pub slot_conflict: bool,
@@ -710,10 +711,12 @@ mod tests {
     fn a_late_release_is_placed_at_its_live_eta_and_shows_its_lateness() {
         // Case 1 of #817. A released airborne flight F is frozen at T0+1000 s, but its live ETA is
         // T0+1300 s. It crosses where it really is, 300 s late, and ground G (ETA 1350 s) is spaced
-        // behind that real crossing. N, well clear, does not move.
+        // behind that real crossing. N, well clear, does not move. F carries its wheels-up, as every
+        // release does; airborne, its lateness is still measured from its ETA.
         let cands = vec![
             MeterInput {
                 frozen_ms: Some(T0 + 1000 * S),
+                wheels_up_ms: Some(T0),
                 ..mk(T0 + 1300 * S, true, 400.0)
             },
             mk(T0 + 1350 * S, false, 400.0),

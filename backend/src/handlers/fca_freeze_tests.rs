@@ -475,7 +475,8 @@ async fn the_pass_keeps_every_hold_until_its_inputs_are_loaded(pool: PgPool) {
     seed_held(&pool, &id, "AIR1", sta).await;
     seed_held(&pool, &id, "GONE", sta).await;
     let kept = vec![("AIR1".to_string(), sta), ("GONE".to_string(), sta)];
-    // As at startup: both loaders registered and not finished, and an unrelated job failed.
+    // As at startup: both loaders registered and not finished, and the airport load failed (a skip,
+    // not an error, while the table is empty).
     state
         .jobs
         .register(crate::jobs::WINDS_REFRESH_JOB, "winds", Some(3600), false);
@@ -761,6 +762,57 @@ async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
         vec![("AIR1".to_string(), held)],
         "RDY reads the hold and writes none"
     );
+}
+
+/// A Set two minutes out on a parked flight: its release time is its ETA less the 8 min taxi plus
+/// 2 min, so the ETA, which counts the whole taxi, is already past it, while the wheels-up is still
+/// ahead. The Set's own response and the next traffic read both keep the release time with no
+/// lateness, and the held airborne flight keeps its STA.
+#[sqlx::test]
+async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    // Held a minute after its ETA, so it stays on time while the clock moves (module doc).
+    let air = ms(&row(&traffic(&state, &id).await, "AIR1")["cross_time"]) + 60_000;
+    seed_held(&pool, &id, "AIR1", air).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    let ready = (Utc::now() + chrono::Duration::minutes(2))
+        .format("%H%M")
+        .to_string();
+
+    let rows = release(&state, &cookie, &id, "GND1", json!({ "ready": ready })).await;
+    let (cta, edct): (i64, i64) = sqlx::query_as(
+        "select cta_ms, edct_ms from flow.fca_release where fca_id = $1 and callsign = 'GND1'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        edct > Utc::now().timestamp_millis(),
+        "the wheels-up is still ahead"
+    );
+    for (label, rows) in [
+        ("Set response", rows),
+        ("traffic read", traffic(&state, &id).await),
+    ] {
+        let g = row(&rows, "GND1");
+        assert!(
+            ms(&g["eta"]) > cta,
+            "{label}: the scenario needs the ETA past the release: {g}"
+        );
+        assert_eq!(
+            ms(&g["cross_time"]),
+            cta,
+            "{label}: keeps its release time: {g}"
+        );
+        assert_eq!(g["late_sec"], 0, "{label}: not late before its wheels-up");
+        assert_eq!(
+            ms(&row(&rows, "AIR1")["cross_time"]),
+            air,
+            "{label}: AIR1 keeps its STA"
+        );
+    }
 }
 
 #[sqlx::test]

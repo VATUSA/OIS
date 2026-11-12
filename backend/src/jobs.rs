@@ -3403,6 +3403,7 @@ mod aircraft_profiles_refresh_tests {
     #[sqlx::test]
     async fn a_successful_load_marks_the_profiles_loaded_and_a_failed_one_does_not(pool: PgPool) {
         let profiles = ArcSwap::from_pointee(ProfileTable::default());
+        let default_table = profiles.load_full();
 
         let failed_flag = AtomicBool::new(false);
         let closed = PgPool::connect_lazy_with(pool.connect_options().as_ref().clone());
@@ -3413,10 +3414,18 @@ mod aircraft_profiles_refresh_tests {
             !failed_flag.load(Ordering::Relaxed),
             "a failed load leaves it unset"
         );
+        assert!(
+            Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a failed load leaves the table untouched"
+        );
 
         let loaded = AtomicBool::new(false);
         let ok = refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await;
         assert_eq!(ok.as_deref(), Ok("reloaded"));
         assert!(loaded.load(Ordering::Relaxed), "a successful load sets it");
+        assert!(
+            !Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a successful load installs the DB table"
+        );
     }
 }

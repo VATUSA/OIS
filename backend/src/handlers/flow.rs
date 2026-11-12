@@ -2828,6 +2828,7 @@ pub async fn mark_release(
 
     // Reflect the new release and re-meter without another snapshot read.
     metas[ti].frozen_ms = Some(cta);
+    metas[ti].wheels_up_ms = Some(edct);
     flights[ti].released = true;
     flights[ti].edct = DateTime::from_timestamp_millis(edct);
     let mut flights = finalize(&fca, flights, &metas, now_ms);

@@ -23,7 +23,7 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   A background pass stores the held times; no read writes them. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
   `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
   held times. A flight that runs past its release or held time reports how far in `late_sec`: for an
-  airborne flight, how far its ETA has passed it, and it then crosses at its ETA; for a ground
+  airborne flight, how far its ETA has passed it, and it then crosses no earlier than its ETA; for a ground
   release, how long now is past its wheels-up, and it then crosses no earlier than a takeoff now. In airport flow, an issued CFR's
   `FlowFlight.sta` and `delay_min` now go through the same slot check as every other arrival; a CFR
   is late only once now is past its wheels-up, and then crosses no earlier than a takeoff now would

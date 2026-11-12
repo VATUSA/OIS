@@ -59,7 +59,7 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
-  // Its ETA has run past its release or held STA (#817); shown beside any delay.
+  // It runs past its release or held STA (#817; `late_sec`); shown beside any delay.
   const late = f.late_sec >= DELAY_THRESHOLD_SEC;
   const status =
     [
