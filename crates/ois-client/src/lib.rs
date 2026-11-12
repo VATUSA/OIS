@@ -377,7 +377,7 @@ mod tests {
     use super::{AckBody, ClientError, OisClient, ack_query, lease_query};
 
     /// AC 2 and AC 3 (#930): a backend that accepts the connection and never answers. The bounds are
-    /// D72's values written as literals, so a changed constant fails here too.
+    /// D72's 15 s written as literals, so a request timeout outside [15 s, 15.5 s) fails here.
     ///
     /// The outer `tokio::time::timeout` is what turns a missing request timeout into a failed test
     /// rather than a stalled one. The clock is real: a paused clock auto-advances past the timers
@@ -406,8 +406,8 @@ mod tests {
             other => panic!("expected a timeout error, got {other:?}"),
         }
         assert!(
-            elapsed >= Duration::from_secs(15),
-            "failed after {elapsed:?}, before the 15 s request timeout"
+            elapsed >= Duration::from_secs(15) && elapsed < Duration::from_millis(15_500),
+            "failed after {elapsed:?}, not at the 15 s request timeout"
         );
     }
 
