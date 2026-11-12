@@ -5370,8 +5370,8 @@ export interface components {
              * @description Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
              *     far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
              *     since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
-             *     than that gives, and a late held flight is still spaced from the traffic placed ahead of it
-             *     (#817).
+             *     than that gives. A late held flight crosses at its ETA, never before its held STA, and moves
+             *     no other flight (#817).
              */
             late_sec: number;
             /** Format: double */
@@ -5393,7 +5393,10 @@ export interface components {
              * @description 1-based sequence in the metered order.
              */
             seq: number;
-            /** @description A released crossing that sits inside another crossing's required gap (#817). */
+            /**
+             * @description A released crossing, or a held crossing running late, that sits inside another crossing's
+             *     required gap (#817).
+             */
             slot_conflict: boolean;
             /**
              * @description An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once

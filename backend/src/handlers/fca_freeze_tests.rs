@@ -17,6 +17,7 @@
 // pass stores airborne, not ground              | the_pass_holds_an_airborne_flights_sta_and_not_a_ground_one        | DONE
 // read serves a held STA while ETA differs      | a_held_sta_is_served_on_the_next_read_while_the_eta_differs        | DONE
 // late held flight crosses at ETA               | a_late_held_flight_crosses_at_its_eta_and_shows_lateness           | DONE
+// late held flight in a gap: flagged, no move  | a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nobody | DONE
 // freeze_min 0 stores nothing                   | freezing_off_stores_nothing                                        | DONE
 // stale row ignored by read, replaced by pass   | a_stale_held_row_is_ignored_by_the_read_then_replaced_by_the_pass  | DONE
 // retention constant pinned                     | the_retention_window_sits_between_the_fixtures                     | DONE
@@ -254,6 +255,81 @@ async fn a_late_held_flight_crosses_at_its_eta_and_shows_lateness(pool: PgPool) 
     );
     assert_eq!(air["late_sec"], (eta_now - (eta - 120_000)) / 1000);
     assert_eq!(air["delay_sec"], 0);
+}
+
+#[sqlx::test]
+async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nobody(pool: PgPool) {
+    // AIRB crosses first (about 50 s ahead) and is held on time at exactly AIRA's ETA. AIRA was held 60 s before its
+    // ETA, so it runs 60 s late: it crosses at its ETA, inside AIRB's gap, and is flagged. AIRB
+    // keeps its STA. Spacing AIRA clear of AIRB instead puts it a full gap behind.
+    let state = state_with(pool.clone(), trailing_pair()).await;
+    let id = corridor_fca(&pool, 30).await;
+    let first = traffic(&state, &id).await;
+    let eta_a = ms(&row(&first, "AIRA")["eta"]);
+    assert!(
+        ms(&row(&first, "AIRB")["eta"]) < eta_a - 5_000,
+        "AIRB crosses ahead, so a hold at AIRA's ETA keeps it on time: {} vs {eta_a}",
+        ms(&row(&first, "AIRB")["eta"])
+    );
+    seed_held(&pool, &id, "AIRB", eta_a).await;
+    seed_held(&pool, &id, "AIRA", eta_a - 60_000).await;
+
+    let rows = traffic(&state, &id).await;
+    let a = row(&rows, "AIRA");
+    let b = row(&rows, "AIRB");
+    let eta_now = ms(&a["eta"]);
+    assert!(
+        (eta_now - eta_a).abs() < 5_000,
+        "the fixture's ETA is stable to a few seconds"
+    );
+    assert_eq!(
+        ms(&b["cross_time"]),
+        eta_a,
+        "the on-time neighbor keeps its STA"
+    );
+    assert_eq!(b["slot_conflict"], false);
+    assert_eq!(b["late_sec"], 0);
+    assert_eq!(
+        ms(&a["cross_time"]),
+        eta_now,
+        "the late one crosses at its ETA"
+    );
+    assert_eq!(a["late_sec"], (eta_now - (eta_a - 60_000)) / 1000);
+    assert_eq!(a["slot_conflict"], true, "inside AIRB's gap");
+    assert_eq!(a["sta_frozen"], true);
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![
+            ("AIRA".to_string(), eta_a - 60_000),
+            ("AIRB".to_string(), eta_a)
+        ],
+        "the read changed no hold"
+    );
+}
+
+/// The hold pass waits on `aircraft_profiles_loaded`; a profile write reloads the table, so it
+/// marks the profiles loaded too, through the real route.
+#[sqlx::test]
+async fn a_profile_write_marks_the_profiles_loaded(pool: PgPool) {
+    let state = test_state(pool.clone(), HashMap::new());
+    assert!(
+        !state.aircraft_profiles_loaded.load(Ordering::Relaxed),
+        "a fresh state starts unloaded"
+    );
+    let cookie = national(&pool, "flow.aircraft_profiles.update").await;
+    let profile = json!({ "name": "Test jet", "climb_ias_lo": 250.0, "climb_ias_hi": 290.0,
+        "climb_fpm_lo": 1500.0, "climb_fpm_hi": 2500.0, "service_ceiling_ft": 41000.0,
+        "desc_ias_hi": 290.0, "desc_ias_lo": 250.0, "desc_fpm": 2000.0 });
+    let (status, body) = call(
+        &state,
+        Method::PUT,
+        "/api/v1/flow/aircraft-profiles/type/T607",
+        &cookie,
+        Some(profile),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(state.aircraft_profiles_loaded.load(Ordering::Relaxed));
 }
 
 #[sqlx::test]
@@ -764,9 +840,9 @@ async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
     );
 }
 
-/// A Set two minutes out on a parked flight: its release time is its ETA less the 8 min taxi plus
-/// 2 min, so the ETA, which counts the whole taxi, is already past it, while the wheels-up is still
-/// ahead. The Set's own response and the next traffic read both keep the release time with no
+/// A Set two minutes out on a parked flight: its release time is the first legal slot from its
+/// ETA less the whole ground allowance (pushback, start-up and taxi) plus 2 min, so the ETA, which
+/// counts that allowance, is already past it, while the wheels-up is still ahead. The Set's own response and the next traffic read both keep the release time with no
 /// lateness, and the held airborne flight keeps its STA.
 #[sqlx::test]
 async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
@@ -813,6 +889,69 @@ async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
             "{label}: AIR1 keeps its STA"
         );
     }
+}
+
+/// The stored release is moved so its wheels-up passed 120 s ago and its release time is 10 min
+/// ahead. The traffic read times its lateness from the wheels-up: 120 s, where the release time
+/// would give none. A re-release two minutes out then answers with the new wheels-up, still
+/// ahead, so the response shows no lateness; the old wheels-up would show it late again.
+#[sqlx::test]
+async fn a_ground_release_runs_late_from_its_stored_wheels_up_and_a_re_release_takes_the_new_one(
+    pool: PgPool,
+) {
+    let state = state_with(pool.clone(), vec![parked("GND1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    let in_2_min = (Utc::now() + chrono::Duration::minutes(2))
+        .format("%H%M")
+        .to_string();
+    release(&state, &cookie, &id, "GND1", json!({ "ready": in_2_min })).await;
+    let now = Utc::now().timestamp_millis();
+    let (old_edct, old_cta) = (now - 120_000, now + 600_000);
+    sqlx::query(
+        "update flow.fca_release set edct_ms = $2, cta_ms = $3 \
+         where fca_id = $1 and callsign = 'GND1'",
+    )
+    .bind(&id)
+    .bind(old_edct)
+    .bind(old_cta)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let read = traffic(&state, &id).await;
+    let g = row(&read, "GND1");
+    let late = g["late_sec"].as_i64().unwrap();
+    assert!(
+        (120..130).contains(&late),
+        "late from the wheels-up, not the release time: {g}"
+    );
+    assert!(
+        ms(&g["cross_time"]) >= old_cta,
+        "no earlier than its release: {g}"
+    );
+
+    let in_3_min = (Utc::now() + chrono::Duration::minutes(3))
+        .format("%H%M")
+        .to_string();
+    let rows = release(&state, &cookie, &id, "GND1", json!({ "ready": in_3_min })).await;
+    let (cta, edct): (i64, i64) = sqlx::query_as(
+        "select cta_ms, edct_ms from flow.fca_release where fca_id = $1 and callsign = 'GND1'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        edct > Utc::now().timestamp_millis(),
+        "the new wheels-up is ahead"
+    );
+    let g = row(&rows, "GND1");
+    assert_eq!(
+        g["late_sec"], 0,
+        "the response reads the new wheels-up: {g}"
+    );
+    assert_eq!(ms(&g["cross_time"]), cta, "the new release time: {g}");
 }
 
 #[sqlx::test]

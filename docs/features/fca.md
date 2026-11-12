@@ -224,9 +224,10 @@ takeoff now. `freeze_min` 0 turns holding off.
 
 **Auto mode** (`meter_auto`). Flights sort by tier, then by anchor: releases; held flights still on
 time (`eta <= held`); held flights running late; other airborne; ground. A release is placed at its
-anchor and never moved. Every other flight is placed at `earliest_slot(anchor, sep, committed)`, so
-a late held flight goes behind an on-time one instead of bumping it, and a held STA moves later when
-a release sits in its gap or the pair's gap grows (under MIT the gap follows each aircraft's
+anchor and never moved, and so is a held flight running late: it crosses at its ETA, never before
+its held STA, and moves no flight placed ahead of it. Every other flight is placed at
+`earliest_slot(anchor, sep, committed)`, so an on-time held STA moves later only when a release
+sits in its gap or the pair's gap grows (under MIT the gap follows each aircraft's
 predicted crossing speed). Sequence numbers follow the scheduled time.
 
 **`earliest_slot`** (`feed/fca.rs`): from the start time, move past any committed crossing closer
@@ -237,8 +238,8 @@ keeps its anchor; every other flight goes no earlier than its anchor and behind 
 placed before it in the order, by the larger separation of each pair. Sequence numbers are the order
 itself.
 
-`delay_sec = max(sched - eta, 0) / 1000`. A release that ends inside another crossing's gap is
-returned with `slot_conflict` set; it is the only crossing allowed there.
+`delay_sec = max(sched - eta, 0) / 1000`. A release or a late held flight that ends inside another
+crossing's gap is returned with `slot_conflict` set; those are the only crossings allowed there.
 
 **Held STAs.** The held-STA pass (`jobs::spawn_fca_hold_sync`, every 15 s, running
 `handlers::flow::sync_fca_holds_once`) is the only writer besides the clears below. Each tick it

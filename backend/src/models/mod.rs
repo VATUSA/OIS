@@ -2657,10 +2657,11 @@ pub struct FcaFlight {
     /// Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
     /// far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
     /// since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
-    /// than that gives, and a late held flight is still spaced from the traffic placed ahead of it
-    /// (#817).
+    /// than that gives. A late held flight crosses at its ETA, never before its held STA, and moves
+    /// no other flight (#817).
     pub late_sec: i64,
-    /// A released crossing that sits inside another crossing's required gap (#817).
+    /// A released crossing, or a held crossing running late, that sits inside another crossing's
+    /// required gap (#817).
     pub slot_conflict: bool,
     /// An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
     /// its STA is stored. A background pass, every 15 s, stores its STA from the first pass that

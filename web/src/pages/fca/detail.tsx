@@ -135,7 +135,7 @@ function Strip({
         {f.altitude > 0 && <span className="font-mono">FL{Math.round(f.altitude / 100)}</span>}
         {delayed && f.delay_nm > 0 && <span className="font-mono text-danger">+{f.delay_nm}nm</span>}
         {f.slot_conflict && (
-          <span title="Released inside another crossing's gap">
+          <span title="Inside another crossing's gap">
             <StatusPill tone="bad" className="px-1.5 text-[10px] leading-4">
               IN GAP
             </StatusPill>

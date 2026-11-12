@@ -4707,6 +4707,36 @@ mod release_spacing_tests {
         assert_eq!(slot, T0 + 1_000_000 + SEP_MS + RELEASE_MARGIN_MS);
     }
 
+    /// A Set beside a ground release running late is spaced from where the release can now cross:
+    /// a takeoff now, its ETA less its ground allowance. R is released for T0+1000 s with wheels-up
+    /// T0+300 s, a 10 min allowance and ETA T0+1700 s; at T0+400 s it is 100 s past its wheels-up,
+    /// so it crosses at T0+1100 s. A Set asking for T0+1150 s goes to T0+1100+135 s. Without the
+    /// allowance R would sit at its ETA, T0+1700 s, and leave T0+1150 s clear.
+    #[test]
+    fn a_set_beside_a_late_ground_release_is_spaced_from_its_takeoff_now() {
+        const T0: i64 = 1_800_000_000_000;
+        let fca = rate_fca(vec![]);
+        let metas = vec![
+            MeterInput {
+                wheels_up_ms: Some(T0 + 300_000),
+                ground_allowance_ms: 600_000,
+                ..cand(T0 + 1_700_000, false, Some(T0 + 1_000_000))
+            },
+            cand(T0 + 900_000, false, None),
+            cand(T0 + 5_000_000, true, None),
+        ];
+        let now = T0 + 400_000;
+        let metered = fca::meter(&metas, &meter_config(&fca, now), None);
+        assert_eq!(
+            metered[0].sched_ms,
+            T0 + 1_100_000,
+            "R crosses at a takeoff now"
+        );
+        assert_eq!(metered[0].late_sec, 100);
+        let slot = super::set_slot(&fca, &metas, &metered, false, 1, T0 + 1_150_000, now);
+        assert_eq!(slot, T0 + 1_100_000 + SEP_MS + RELEASE_MARGIN_MS);
+    }
+
     /// A Set beside an airborne flight inside the freeze horizon is spaced from its held STA, not
     /// its ETA. Rate 30: 120 s plus the 15 s margin. H's ETA is T0+1000 s, 16.7 min out, and its
     /// held STA T0+1200 s; the Set asks for T0+1100 s, 100 s ahead of the held STA, so it goes to

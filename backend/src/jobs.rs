@@ -2858,6 +2858,26 @@ mod registration_tests {
         );
     }
 
+    /// #817: the held-STA pass reads `AppState::aircraft_profiles_loaded`, so the profile refresh
+    /// must be handed that flag and not one of its own.
+    #[test]
+    fn the_profile_refresh_sets_the_states_own_loaded_flag() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_aircraft_profiles_refresh")
+                .is_some_and(|args| args.contains("state.aircraft_profiles_loaded.clone()"))
+        };
+        assert!(
+            wired(LIB_RS),
+            "lib.rs must pass state.aircraft_profiles_loaded"
+        );
+        let detached = "jobs::spawn_aircraft_profiles_refresh(reg, pool, state.aircraft_profiles.clone(), \
+                        Arc::new(AtomicBool::new(false)));";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a flag of the job's own"
+        );
+    }
+
     /// The seed triggers `airspace_sectors_refresh` by name in the registry it is given, and Admin →
     /// Jobs reads `state.jobs`; a registry of its own would make both silently miss it (#821).
     #[test]
