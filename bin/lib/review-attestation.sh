@@ -39,17 +39,11 @@
 ATTEST_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=review-tier.sh
 if ! . "$ATTEST_SELF_DIR/review-tier.sh" 2>/dev/null || ! type review_lenses >/dev/null 2>&1; then
-    # Without the classifier every lens is required: Full, never none.
+    # Without the classifier every lens is required (Full) and no path is a test file, so nothing carries.
     review_tier() { echo Full; }
     tier_lenses() { echo "code ac tests security"; }
     review_lenses() { tier_lenses Full; }
-    test_file() {
-        case "$1" in
-            *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
-            bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
-        esac
-        return 1
-    }
+    test_file() { return 1; }
 fi
 
 # attest_rows FILE: "file<TAB>heading<TAB>status<TAB>evidence" per table row, cells trimmed.

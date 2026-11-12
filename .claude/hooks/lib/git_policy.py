@@ -12,8 +12,7 @@
   printf '%s' "$COMMAND" | python3 git_policy.py migrations
 
 Exit 0 with nothing printed: allow. Exit 0 with a reason printed: block. Any other exit
-(unparseable line, python3 missing): the caller blocks; for `update-branch`, only an unparseable line
-that could name one (names_update_branch). `update-branch` instead prints
+(unparseable line, python3 missing): the caller blocks. `update-branch` instead prints
 one PR per line (`OWNER/REPO#N`, `#N` for the current repo, or `?` where the line does not
 name one it can be checked by); the caller asks GitHub for each PR's base. `pr-head` prints
 nothing when the line opens no PR, `=BRANCH` for the branch the PR opens from (`=` alone for
@@ -1042,17 +1041,6 @@ def stages_everything(text):
     return None
 
 
-def names_update_branch(text):
-    """Whether an unparseable line could still name an update-branch: its text, with quotes, backslashes and
-    whitespace removed and case folded, holds `update-branch`, `update_branch` or `updatepullrequestbranch`,
-    or it holds a `$`, a backtick or a backslash, any of which can build any word (`gh` included) at run time
-    (`\\x67`, `\\147`, `\\u0067` through printf or echo -e)."""
-    flat = re.sub(r"[\s'\"\\]", "", text).lower()
-    if re.search(r"update[-_]?branch|updatepullrequestbranch", flat):
-        return True
-    return bool(re.search(r"[$`\\]", text))
-
-
 def main():
     if len(sys.argv) < 2:
         print("usage: git_policy.py protected-push BRANCH | non-main-integration | update-branch | pr-head"
@@ -1061,13 +1049,7 @@ def main():
     text = sys.stdin.read()
     try:
         if sys.argv[1] == "update-branch":
-            try:
-                targets = update_branch_targets(text)
-            except Unparseable:
-                if not names_update_branch(text):
-                    return 0  # the gate cannot parse it; it neither spells update-branch nor expands anything
-                raise
-            for target in targets:
+            for target in update_branch_targets(text):
                 print(target)
             return 0
         if sys.argv[1] == "push-checkout":

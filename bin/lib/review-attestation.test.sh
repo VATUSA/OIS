@@ -373,6 +373,13 @@ carry_set "$TH" "$TP"; printf '| rules/a.md | Alpha | Checked | written by hand 
 expect_carry 1 "a copy whose rows differ from the prior attestation" "$TH" "rows differ"
 carry_set "$TH" "$TP"; printf '| rules/a.md | Alpha | Checked | backend/src/foo.rs:1 |\n' > "$TC/.claude/markers/attest/$TH/code.md"
 expect_carry 0 "positive control: the same commit with a lens-written file passes without a carry line" "$TH"
+mkdir -p "$WORK/nocarry" && cp "$LIB" "$WORK/nocarry/review-attestation.sh"
+carry_set "$TH" "$TP"
+(cd "$TC" && REVIEW_LENSES_MAP="$WORK/carry.tsv" bash "$WORK/nocarry/review-attestation.sh" check "$TH" >"$WORK/out" 2>"$WORK/err")
+rc=$?
+[[ $rc == 1 ]] && grep -qF "not tests-only: " "$WORK/out" && ! [[ -s "$WORK/err" ]] \
+    && ok "without review-tier.sh beside it, a tests-only carry is refused, and quietly" \
+    || bad "carry without the classifier (rc=$rc): $(head -2 "$WORK/out") / stderr: $(head -2 "$WORK/err")"
 carry_set "$TH" "$TP"
 got="$(cd "$TC" && REVIEW_LENSES_MAP="$WORK/carry.tsv" bash "$LIB" prior "$TH" 2>/dev/null)"
 [[ "$got" == "$TH" ]] && ok "a set holding a valid carry is a baseline for the next round" || bad "prior over a carried set: '${got:0:8}'"

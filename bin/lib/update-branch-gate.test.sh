@@ -88,16 +88,14 @@ expect block "two PR numbers, the first on next" "gh pr update-branch 101 202"
 expect block "GraphQL mutation"                  "gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
 expect block "unrecognized update-branch path"   "gh api -X PUT repos/x/pulls/101/update-branch/extra"
 expect block "unparseable line"                  "gh api -X PUT $A/101/update-branch \"unterminated"
-expect block "unparseable, token split by quotes" "gh api -X PUT $A/101/update-\"\"branch \"unterminated"
-expect block "unparseable, GraphQL token"        "gh api graphql -f query='mutation { updatePullRequestBranch } \"x"
-expect block "unparseable, gh with an expansion" "gh pr \$CMD 101 \"unterminated"
-expect block "unparseable, update_branch"        "gh api -X PUT $A/101/update_branch \"unterminated"
-expect block "unparseable, updatebranch"         "gh api -X PUT $A/101/updatebranch \"unterminated"
-expect block "unparseable, backslash in the word" "gh api -X PUT $A/101/update\\-branch \"unterminated"
-expect block "unparseable, backtick expansion"   "gh pr \`echo up\`date-br \"unterminated"
-expect block "unparseable, quotes split gh pr"   "g\"h\" p\"r\" \$X 5 \"unterminated"
-expect block "unparseable, quotes split gh api"  "g'h' a'pi' -X PUT \$P \"unterminated"
-# Unparseable lines that build `gh` itself out of ANSI-C quotes or escapes: no literal gh appears.
+echo "Any line the gate cannot parse blocks, whether or not gh or update-branch appears in it:"
+expect block "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
+expect block "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
+expect block "a comment inside a substitution"   "echo \$(echo x # it's)"
+expect block "a comment inside a quoted \$(...)" "echo \"\$(ls # c
+)\""
+# Lines that build `gh pr update-branch` (or its REST path) at run time, so no literal gh or update-branch
+# appears; each is unparseable (`$'..'`, or a `<<x` after `#`).
 IFS= read -r L1 <<'EOF'
 g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
 EOF
@@ -108,28 +106,32 @@ IFS= read -r L3 <<'EOF'
 $'\x67\x68' pr $'\x75pdate-branch' 5
 EOF
 IFS= read -r L4 <<'EOF'
-printf '\x67\x68' "unterminated
-EOF
-IFS= read -r L5 <<'EOF'
 printf '\147\150 api -X PUT repos/o/r/pulls/1/upd\141te-br\141nch' | bash # <<x
 EOF
+IFS= read -r L5 <<'EOF'
+echo 5 hcnarb-etadpu rp hg | rev | bash # <<x
+EOF
 IFS= read -r L6 <<'EOF'
-printf 'gh pr \165pdate-branch 5' | bash; echo 'x
+echo Z2ggcHIgdXBkYXRlLWJyYW5jaCA1 | base64 -d | bash # <<x
 EOF
 IFS= read -r L7 <<'EOF'
-printf '\0147\0150 pr upd\0141te-br\0141nch 5' | bash; echo 'x
+echo 6768207072207570646174652d6272616e63682035 | xxd -r -p | bash # <<x
 EOF
-expect block "unparseable, gh built from \$'..'"  "$L1"
-expect block "unparseable, after an escaped quote" "$L2"
-expect block "unparseable, \\x escapes"           "$L3"
-expect block "unparseable, a \\x escape and no \$" "$L4"
-expect block "unparseable, octal escapes"         "$L5"
-expect block "unparseable, a \\u escape"          "$L6"
-expect block "unparseable, \\0 octal escapes"     "$L7"
-expect block "unparseable, a substitution and no gh" "echo \$(echo x # it's)"
-echo "An unparseable line that neither names update-branch nor expands anything passes:"
-expect allow "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
-expect allow "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
+expect block "gh and update-branch from \$'..' parts" "$L1"
+expect block "the same after \$'\\'' (an escaped quote)" "$L2"
+expect block "gh pr update-branch from \$'\\x..'"  "$L3"
+expect block "printf octal escapes piped to bash" "$L4"
+expect block "reversed text piped through rev to bash" "$L5"
+expect block "base64 -d piped to bash"            "$L6"
+expect block "xxd -r hex piped to bash"           "$L7"
+
+echo "A # inside quotes is text, so these parse and pass:"
+expect allow "sed with # delimiters"             "sed -n 's#a#b#p' file"
+expect allow "sed with ' #' in its script"       "sed -n 's/ #.*//p' f"
+expect allow "grep for ' # ' in single quotes"   "grep -n 'x # y' f"
+expect allow "grep for \" # \" in double quotes" "grep -n \"x # y\" f"
+expect allow "jq with \"#\""                     "jq -r '.[] | \"PR # \\(.number)\"' f"
+expect allow "\" # \" inside a quoted \$(...)"   "echo \"\$(grep -c \" # \" f)\""
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1

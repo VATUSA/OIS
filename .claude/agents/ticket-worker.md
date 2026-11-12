@@ -32,7 +32,7 @@ Use absolute paths. The session cwd is shared with the orchestrator and pins to 
 
 Time-box `gh` (`timeout 60 gh …`; `git push` uses it as its credential helper): a call that times out is waiting on a locked keyring, so return `STATUS: blocked` and say so.
 
-The scratchpad and port 3000 are shared with other agents. Prefix every scratchpad file with the issue number, and run the stack on a spare port. For a walk that needs port 3000, request it as its own report item, not an operator question, and wait for the grant; the next report after the walk says "stack stopped, port 3000 released".
+The scratchpad and port 3000 are shared with other agents. Prefix every scratchpad file with the issue number, and run the stack on a spare port. For a walk that needs port 3000, return `PORT_3000: request` (not an operator question) and wait for the grant; the next report after the walk returns `PORT_3000: released` once the stack is stopped.
 
 ## Phase A: Intake (first dispatch)
 
@@ -131,6 +131,7 @@ ACS:
 - [ ] / [x] <each confirmed acceptance criterion, N of M>
 PR: #<n read from gh output, never predicted> or none
 CI: <per-job conclusions on the PR head SHA> or not run
+PORT_3000: request | released | none
 OPERATOR_QUESTIONS:
 - question: <one decision>
   options: <recommended first> | <alternative> | ...
