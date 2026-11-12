@@ -315,6 +315,7 @@ pub fn crossing_for(
 // --- metering (sequence crossing traffic) ---
 
 /// One aircraft to sequence across the FCA.
+#[derive(Clone)]
 pub struct MeterInput {
     /// Unmetered ETA to the crossing, epoch millis.
     pub eta_ms: i64,
@@ -1035,7 +1036,8 @@ mod tests {
     #[test]
     fn the_hysteresis_margin_sits_between_the_fixtures() {
         // The edge fixtures below sit at 31 and 33 min with a 30 min horizon: a margin of 2 min
-        // keeps the first and drops the second; 1 min or 3 min would flip one of them.
+        // keeps the first and drops the second, and 3 min or more would keep both. The exact edge
+        // (horizon + margin, and 1 ms past it) is asserted in the test that follows.
         let margin = std::hint::black_box(FREEZE_HYSTERESIS_MS);
         assert!(MIN < margin && margin < 3 * MIN, "margin {margin} ms");
     }

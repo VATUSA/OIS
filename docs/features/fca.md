@@ -241,7 +241,7 @@ returned with `slot_conflict` set; it is the only crossing allowed there.
 meters every enabled live FCA with its stored holds; `flow_repo::sync_held_stas` stores the STA of
 each newly frozen flight (first STA wins, `on conflict do nothing`, so replicas agree), deletes the
 rows of held flights the tick no longer holds (past the horizon and margin, released, or gone from
-the feed) and rows more than an hour past their STA. A new row is stored only while the FCA is not
+the feed) and, on a tick that stores or drops anything, rows more than an hour past their STA. A new row is stored only while the FCA is not
 deleted and `flow.fca.updated_at` still matches the FCA the tick metered, so a tick that metered
 before a committed edit, reorder or delete stores nothing. Then `prune_unmetered_held_stas` deletes
 the rows of every FCA the pass does not meter (disabled, deleted, or an unpublished or archived
@@ -249,6 +249,8 @@ event FCA). A sync that commits while an edit's, reorder's or delete's own state
 rows its clear missed; each is only an earliest crossing until the flight leaves the horizon or the
 feed, and after an edit that moves the line it can show the flight late or delayed at the new line
 until then. A failed FCA is logged and reported to the job registry; the other FCAs still sync.
+A tick on a replica with no feed snapshot or airport table yet (just started) changes nothing, so
+an empty board never reads as every held flight having left.
 
 The traffic route, the flight advisory, IDST, `mark_release` and `clear_release` read the rows and
 never write them; a flight that entered the horizon since the last tick is re-metered by a read
@@ -307,7 +309,7 @@ MIT 0 through `meter`.
 | `POST /api/v1/flow/fcas` | `create_fca` (`handlers/flow.rs:361`) | `flow.fca.update` + ARTCC (`require_fca_write_scope`, `:252`) | `flow.fca` | `flow.fca` (`:372`) |
 | `PUT /api/v1/flow/fcas/{id}` | `update_fca` | `flow.fca.update` + event-planner rule (`require_event_fca_planner`, #736) + old and new ARTCC | `flow.fca`; delete its `flow.fca_held_sta` rows when a metering field changes (#817) | `flow.fca` |
 | `DELETE /api/v1/flow/fcas/{id}` | `delete_fca` | `flow.fca.delete` + event-planner rule + ARTCC | `deleted_at = now()`; delete its `flow.fca_held_sta` rows (`repos/flow.rs`, #817) | `flow.fca` |
-| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq` | `flow.fca` (`:2859`) |
+| `PUT /api/v1/flow/fcas/{id}/order` | `reorder_fca` (`:2840`) | `flow.fca.update` + hidden-event 404 (`:311`, #746) + ARTCC | `manual_order`, `manual_seq`; deletes the FCA's `flow.fca_held_sta` rows when the order or the manual flag changes | `flow.fca` (`:2859`) |
 | `POST /api/v1/flow/fcas/{id}/release/{callsign}` | `mark_release` (`:2536`) | `flow.fca.update` + hidden-event 404 + ARTCC (`:488`) + release authority (#585) | upsert `flow.fca_release` | `flow.release` (`:2609`) |
 | `DELETE /api/v1/flow/fcas/{id}/release/{callsign}` | `clear_release` (`:2639`) | same | delete `flow.fca_release` | `flow.release` (`:2672`) |
 | `POST /api/v1/flow/fcas/{id}/swap` | `swap_releases` (`:2741`) | same, plus same airport and runway (`:2791`) | swap two rows | `flow.release` (`:2782`) |

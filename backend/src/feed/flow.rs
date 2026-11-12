@@ -718,6 +718,13 @@ pub fn ready_time_slot(
     ready: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
+    // The flight's own CFR is left out: issued CFRs are placed ahead of airborne arrivals (#817),
+    // so a re-issue searched with it in would be spaced behind arrivals its old CFR pushed later.
+    let others_issued: HashMap<String, DateTime<Utc>> = issued
+        .iter()
+        .filter(|(cs, _)| !cs.eq_ignore_ascii_case(callsign))
+        .map(|(cs, t)| (cs.clone(), *t))
+        .collect();
     let flow = compute(
         icao,
         Some(program),
@@ -726,7 +733,7 @@ pub fn ready_time_slot(
         nav,
         winds,
         profiles,
-        issued,
+        &others_issued,
         gates,
         runways,
         taxi_samples,
@@ -735,7 +742,7 @@ pub fn ready_time_slot(
     );
     let target = flow.flights.iter().find(|f| f.callsign == callsign)?;
     // The airborne enroute time: ETA less the estimated wheels-up, as tier 1 of `apply_metering`
-    // takes it. `sta − cfr` would carry an issued CFR's lateness when it is re-issued (#817).
+    // takes it.
     target.sta?;
     let flight_ms = target.eta?.timestamp_millis() - target.etd?.timestamp_millis();
     let runway = 3_600_000.0 / program.aar.max(1) as f64;
@@ -2080,6 +2087,118 @@ mod tests {
             now,
         );
         assert_eq!(reissued, Some(ready + Duration::minutes(1)));
+    }
+
+    /// #817: a CFR re-issue searches with the flight's own CFR left out. Issued CFRs are placed
+    /// ahead of airborne arrivals, so with it in the search would space the new slot behind an
+    /// arrival the old CFR pushed (AAR 30, a 2 min interval).
+    #[test]
+    fn a_cfr_reissue_is_not_spaced_behind_an_arrival_its_own_old_cfr_pushed() {
+        let now = t0();
+        // Five samples at KBOS; no gate list and a parked pilot, so the airport tier: 50 + 40 + 570 s.
+        let samples = HashMap::from([(
+            "KBOS".to_string(),
+            (0..5)
+                .map(|_| taxi_sample("A1", "B738", "04L", 570))
+                .collect::<Vec<_>>(),
+        )]);
+        let plan = fp("KBOS", "KJFK", "DCT");
+        let data = VatsimData {
+            pilots: vec![
+                pilot("GRD1", 42.36, -71.0, 0, 0, plan.clone()),
+                // Airborne over Chicago, far enough out that GRD1's ready time is after now.
+                pilot("AIR", 41.9, -87.9, 35_000, 450, fp("KORD", "KJFK", "DCT")),
+            ],
+            ..Default::default()
+        };
+        let flow = compute(
+            "KJFK",
+            Some(&base_program()),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            now,
+        );
+        let air = flow.flights.iter().find(|f| f.callsign == "AIR").unwrap();
+        assert_eq!(
+            air.status, "airborne",
+            "positive control: AIR's slot ignores any ETD"
+        );
+        let air_sta = air.sta.unwrap();
+        // GRD1's full ground flight time from the same inputs; its airborne ETE is that less 660 s.
+        let (_, ft_min, allowance) = ground_estimate(
+            &NavData::default(),
+            "KBOS",
+            Some((40.6413, -73.7781)),
+            &plan,
+            &airports(),
+            &Winds::default(),
+            &trajectory::AircraftProfile::default(),
+            Some((42.36, -71.0, 0, 0)),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            now,
+        );
+        assert_eq!(allowance, 660.0, "positive control: the samples were read");
+        let airborne_ete = Duration::milliseconds((ft_min * 60_000.0) as i64 - 660_000);
+
+        // GRD1's old CFR puts its STA 1 min before AIR's, inside the 2 min interval, so the board
+        // pushes AIR 1 min behind it.
+        let issued = HashMap::from([(
+            "GRD1".to_string(),
+            air_sta - Duration::minutes(1) - airborne_ete,
+        )]);
+        let pushed = compute(
+            "KJFK",
+            Some(&base_program()),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &issued,
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            now,
+        );
+        let pushed_air = pushed.flights.iter().find(|f| f.callsign == "AIR").unwrap();
+        assert_eq!(
+            pushed_air.sta,
+            Some(air_sta + Duration::minutes(1)),
+            "the scenario needs the old CFR to push AIR"
+        );
+        // A re-issue arriving 2 min after AIR's own STA is clear of it. Searched against the
+        // pushed AIR (1 min after its STA) it would land 1 min later.
+        let ready = air_sta + Duration::minutes(2) - airborne_ete;
+        assert!(ready > now, "ready {ready} must be after now {now}");
+        let reissued = ready_time_slot(
+            "KJFK",
+            &base_program(),
+            &data,
+            &airports(),
+            &NavData::default(),
+            &Winds::default(),
+            &trajectory::ProfileTable::default(),
+            &issued,
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &samples,
+            &HashSet::new(),
+            "GRD1",
+            ready,
+            now,
+        );
+        assert_eq!(reissued, Some(ready));
     }
 
     /// #815 AC1 wiring: `compute` puts a ground flight's and a prefile's ETD at its estimated

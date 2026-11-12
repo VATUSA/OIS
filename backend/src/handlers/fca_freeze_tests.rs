@@ -10,7 +10,7 @@
 //! assert a read serves the pass's STA exactly run the pass 60 s ahead of the wall clock, so the
 //! read that follows sees the flight on time and the STA unchanged, not late by a few ms.
 //
-// Coverage matrix (VATUSA/OIS#817, rework round: the pass is the only writer)
+// Coverage matrix (VATUSA/OIS#817: the pass is the only writer)
 //
 // Requirement                                   | Test                                                              | Status
 // ----------------------------------------------|-------------------------------------------------------------------|-------
@@ -25,18 +25,18 @@
 // 1 min horizon is 60 000 ms                    | a_one_minute_horizon_does_not_freeze_a_flight_minutes_out          | DONE
 // AC2: STA holds as the pilot moves on          | a_held_sta_stays_put_when_the_pilot_moves_on                       | DONE
 // a read never prunes or rewrites a hold        | a_read_never_prunes_or_rewrites_the_held_stas                      | DONE
-// GET /traffic anon + signed in writes nothing  | a_traffic_read_signed_out_or_in_writes_no_held_row                 | TODO
-// pass: store live, prune 4 unmetered kinds     | the_pass_stores_for_live_fcas_and_prunes_every_unmetered_fca       | TODO
-// pass: one FCA failing does not stop the rest  | one_fcas_failed_sync_does_not_stop_the_pass                        | TODO
-// hysteresis: held kept to +2 min, then dropped | a_held_flight_stays_frozen_up_to_two_minutes_past_the_horizon     | TODO
-// reorder: real change clears, re-held by ETA   | a_real_reorder_clears_the_holds_and_the_pass_re_holds_in_the_new_order | TODO
-// reorder: no-op save keeps; swap / auto clears | a_manual_order_save_that_changes_nothing_keeps_the_holds          | TODO
-// PUT: name/color/artcc/enabled keep holds      | an_edit_to_name_color_artcc_or_enabled_keeps_the_held_stas        | TODO
-// PUT: each metering field alone clears holds   | an_edit_to_any_one_metering_field_clears_the_held_stas            | TODO
-// released flight's hold dropped (RDY and SET)  | the_pass_drops_the_hold_of_a_flight_released_by_rdy_or_set        | TODO
+// GET /traffic anon + signed in writes nothing  | a_traffic_read_signed_out_or_in_writes_no_held_row                 | DONE
+// pass: store live, prune 4 unmetered kinds     | the_pass_stores_for_live_fcas_and_prunes_every_unmetered_fca       | DONE
+// pass: one FCA failing does not stop the rest  | one_fcas_failed_sync_does_not_stop_the_pass                        | DONE
+// hysteresis: held kept to +2 min, then dropped | a_held_flight_stays_frozen_up_to_two_minutes_past_the_horizon     | DONE
+// reorder: real change clears, re-held by ETA   | a_real_reorder_clears_the_holds_and_the_pass_re_holds_in_the_new_order | DONE
+// reorder: no-op save keeps; swap / auto clears | a_manual_order_save_that_changes_nothing_keeps_the_holds          | DONE
+// PUT: name/color/artcc/enabled keep holds      | an_edit_to_name_color_artcc_or_enabled_keeps_the_held_stas        | DONE
+// PUT: each metering field alone clears holds   | an_edit_to_any_one_metering_field_clears_the_held_stas            | DONE
+// released flight's hold dropped (RDY and SET)  | the_pass_drops_the_hold_of_a_flight_released_by_rdy_or_set        | DONE
 // RDY/clear/IDST read the hold, exact, no write | rdy_*, clearing_a_release_*, idst_* (exact values)                 | DONE
-// flight advisory serves the held STA           | the_flight_advisory_serves_the_held_sta                            | TODO
-// create with freeze_min 45 round-trips         | a_create_with_a_45_min_horizon_round_trips                         | TODO
+// flight advisory serves the held STA           | the_flight_advisory_serves_the_held_sta                            | DONE
+// create with freeze_min 45 round-trips         | a_create_with_a_45_min_horizon_round_trips                         | DONE
 // edit clears / omitted horizon kept            | an_fca_edit_clears_its_held_stas_and_keeps_an_omitted_horizon      | DONE
 // horizon bounds 0..=120                        | a_horizon_outside_0_to_120_min_is_refused                          | DONE
 // delete clears; deleted FCA never re-held      | deleting_an_fca_clears_its_held_stas, a_deleted_fca_gets_no_held_stas_from_a_read_or_the_pass | DONE
@@ -453,6 +453,51 @@ async fn the_pass_drops_the_held_sta_of_a_flight_gone_from_the_feed(pool: PgPool
     );
 }
 
+/// A replica that has just started has no feed snapshot, then a snapshot before the airport table
+/// loads. Neither tick may read the empty board as every held flight having left.
+#[sqlx::test]
+async fn the_pass_keeps_every_hold_until_the_feed_and_airports_are_loaded(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    let sta = Utc::now().timestamp_millis() + 600_000;
+    seed_held(&pool, &id, "AIR1", sta).await;
+    seed_held(&pool, &id, "GONE", sta).await;
+    let kept = vec![("AIR1".to_string(), sta), ("GONE".to_string(), sta)];
+
+    let snapshot = state.feed.write().await.snapshot.take();
+    let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_ne!(
+        tick, "synced",
+        "a tick with no snapshot reports that it skipped"
+    );
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "no snapshot: every hold kept"
+    );
+
+    let airports = {
+        let mut feed = state.feed.write().await;
+        feed.snapshot = snapshot;
+        std::mem::take(&mut feed.airports)
+    };
+    sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        kept,
+        "no airports: every hold kept"
+    );
+
+    state.feed.write().await.airports = airports;
+    let tick = sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(tick, "synced");
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![("AIR1".to_string(), sta)],
+        "positive control: once both are loaded, the pass drops the flight that left"
+    );
+}
+
 #[sqlx::test]
 async fn a_one_minute_horizon_does_not_freeze_a_flight_minutes_out(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
@@ -705,6 +750,62 @@ async fn a_second_set_for_the_same_time_is_spaced_behind_the_first(pool: PgPool)
     assert_eq!(row(&rows, "GND2")["slot_conflict"], false);
 }
 
+/// AC3's one exception reaches the board: two releases 135 s apart are clear at rate 30, and once
+/// the rate drops to 10 (a 360 s gap) the traffic route flags both, while the airborne flight
+/// crossing minutes out stays clear.
+#[sqlx::test]
+async fn the_traffic_route_flags_a_release_left_inside_the_gap(pool: PgPool) {
+    let state = state_with(
+        pool.clone(),
+        vec![parked("GND1"), parked("GND2"), airborne("AIR1")],
+    )
+    .await;
+    let id = corridor_fca(&pool, 30).await;
+    let cookie = national(&pool, "flow.fca.update").await;
+    let ready = (Utc::now() + chrono::Duration::minutes(40))
+        .format("%H%M")
+        .to_string();
+    release(&state, &cookie, &id, "GND1", json!({ "ready": ready })).await;
+    release(&state, &cookie, &id, "GND2", json!({ "ready": ready })).await;
+    let before = traffic(&state, &id).await;
+    assert_eq!(
+        ms(&row(&before, "GND2")["cross_time"]) - ms(&row(&before, "GND1")["cross_time"]),
+        135_000
+    );
+    assert_eq!(
+        row(&before, "GND1")["slot_conflict"],
+        false,
+        "clear at rate 30"
+    );
+    assert_eq!(
+        row(&before, "GND2")["slot_conflict"],
+        false,
+        "clear at rate 30"
+    );
+
+    sqlx::query("update flow.fca set rate = 10 where id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after = traffic(&state, &id).await;
+    assert_eq!(
+        row(&after, "GND1")["slot_conflict"],
+        true,
+        "inside GND2's 360 s gap"
+    );
+    assert_eq!(
+        row(&after, "GND2")["slot_conflict"],
+        true,
+        "inside GND1's 360 s gap"
+    );
+    assert_eq!(
+        row(&after, "AIR1")["slot_conflict"],
+        false,
+        "an unreleased flight is never flagged"
+    );
+}
+
 #[sqlx::test]
 async fn a_read_never_prunes_or_rewrites_the_held_stas(pool: PgPool) {
     // The pass holds AIR1; a stale row sits beside it. A read serves AIR1's hold and leaves both
@@ -927,7 +1028,7 @@ async fn a_new_fca_gets_the_default_horizon(pool: PgPool) {
     assert_eq!(efca.event_id, Some(event_id));
 }
 
-// --- rework round: the pass is the only writer ---
+// --- the pass is the only writer ---
 
 /// A corridor FCA with every state the pass's metering and prune read set explicitly.
 struct FcaRow<'a> {
@@ -1401,14 +1502,40 @@ async fn stored_field(pool: &PgPool, id: &str, field: &str) -> Value {
     serde_json::to_value(fca).unwrap()[field].clone()
 }
 
+/// A second FCA whose geometry and rate differ from `full_body()`, so the edit's clear has a row
+/// that does not match the request and must not be compared against it.
+async fn other_fca(pool: &PgPool) -> String {
+    sqlx::query_scalar(
+        "insert into flow.fca (name, color, artcc, points, dir, mode, rate, mit, enabled, freeze_min) \
+         values ('OTHER', '#fff', 'ZNY', $1, 'any', 'rate', 10, 0, true, 45) returning id",
+    )
+    .bind(json!([[41.0, -75.0], [41.0, -73.0]]))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[sqlx::test]
 async fn an_edit_to_name_color_artcc_or_enabled_keeps_the_held_stas(pool: PgPool) {
     let state = state_with(pool.clone(), vec![]).await;
     let id = corridor_fca(&pool, 30).await;
+    let other = other_fca(&pool).await;
     let cookie = national(&pool, "flow.fca.update").await;
     put_body(&state, &cookie, &id, full_body(), "base").await;
     let sta = Utc::now().timestamp_millis() + 10 * MIN;
     seed_held(&pool, &id, "AIR1", sta).await;
+    seed_held(&pool, &other, "OTH1", sta).await;
+
+    // A client that predates `freeze_min` sends no horizon; with nothing else changed the stored
+    // horizon is compared, so the holds stay.
+    let mut no_horizon = full_body();
+    no_horizon.as_object_mut().unwrap().remove("freeze_min");
+    put_body(&state, &cookie, &id, no_horizon, "no freeze_min").await;
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![("AIR1".to_string(), sta)],
+        "a save omitting freeze_min with nothing changed keeps the held STAs"
+    );
 
     for (field, value) in [
         ("name", json!("FRZ RENAMED")),
@@ -1438,6 +1565,11 @@ async fn an_edit_to_name_color_artcc_or_enabled_keeps_the_held_stas(pool: PgPool
     assert!(
         held_rows(&pool, &id).await.is_empty(),
         "positive control: a metering change clears"
+    );
+    assert_eq!(
+        held_rows(&pool, &other).await,
+        vec![("OTH1".to_string(), sta)],
+        "another FCA's holds survive every edit"
     );
 }
 

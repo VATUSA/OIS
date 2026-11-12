@@ -1656,7 +1656,7 @@ pub fn spawn_fca_hold_sync(reg: Arc<JobRegistry>, state: AppState) {
             async move {
                 crate::handlers::flow::sync_fca_holds_once(&state, chrono::Utc::now())
                     .await
-                    .map(|()| "synced".to_string())
+                    .map(str::to_string)
             }
         },
     ));

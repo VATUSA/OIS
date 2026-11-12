@@ -2120,18 +2120,27 @@ fn release_ms(cta_ms: i64, eta_ms: i64, now_ms: i64, ground_allowance_ms: i64) -
 /// explicitly ordered it ahead of, and does not even converge: re-metering moves them again.
 ///
 /// Both carry [`RELEASE_MARGIN_MS`] on top, so a release never takes a slot that only just fits.
+///
+/// In auto mode the others are metered with this flight's own release and hold taken out: a
+/// release is placed ahead of airborne traffic (#817), so a re-RDY measured against the ladder
+/// would be spaced behind arrivals its old release pushed later.
 fn rdy_slot(
     fca: &FcaBody,
     metas: &[fca::MeterInput],
     metered: &[fca::MeterOutput],
     ti: usize,
     manual: bool,
+    now_ms: i64,
 ) -> i64 {
     let sep_ms = separation_ms(fca, metas[ti].cross_speed);
     if manual {
         return metered[ti].sched_ms + RELEASE_MARGIN_MS;
     }
-    let committed: Vec<(i64, i64)> = committed_crossings(fca, metas, metered, ti)
+    let mut unpinned = metas.to_vec();
+    unpinned[ti].frozen_ms = None;
+    unpinned[ti].held_ms = None;
+    let metered = fca::meter(&unpinned, &meter_config(fca, now_ms), None);
+    let committed: Vec<(i64, i64)> = committed_crossings(fca, &unpinned, &metered, ti)
         .into_iter()
         .map(|(t, sep)| (t, sep + RELEASE_MARGIN_MS))
         .collect();
@@ -2250,7 +2259,7 @@ async fn load_releases(pool: &sqlx::PgPool, id: &str) -> Result<ReleaseMap, ApiE
 }
 
 /// Build the metered crossing list for one FCA from its stored holds. Reads only: the holds are
-/// written by [`sync_fca_holds_once`], never by a request (#817).
+/// stored by [`sync_fca_holds_once`] and cleared by the edit, reorder and delete routes (#817).
 async fn metered_flights(
     state: &AppState,
     fca: FcaBody,
@@ -2329,23 +2338,36 @@ async fn meter_fca(
 /// clears. It lives here, not in a repo or `feed/`, because it reuses this module's candidate
 /// building and metering, which every FCA read also runs. Every FCA is attempted; the `Err`
 /// names the ones that failed.
+///
+/// Until the feed has a snapshot and the airport table is loaded (a replica that has just
+/// started), the tick changes nothing: an empty board would read as every held flight having left.
 pub(crate) async fn sync_fca_holds_once(
     state: &AppState,
     now: DateTime<Utc>,
-) -> Result<(), String> {
+) -> Result<&'static str, String> {
     let Some(pool) = state.db.as_ref() else {
-        return Ok(());
+        return Ok("no database");
     };
+    let (snapshot, airports) = feed_view(state).await;
+    if snapshot.is_none() || airports.is_empty() {
+        return Ok("skipped: feed or airports not loaded yet");
+    }
     let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
         .await
-        .map_err(|_| "list FCAs failed".to_string())?
+        .map_err(|e| {
+            tracing::error!(error = %e, "held STA pass: list FCAs failed");
+            "list FCAs failed".to_string()
+        })?
         .into_iter()
         .filter(|f| f.enabled)
         .collect();
     let fca_ids: Vec<String> = fcas.iter().map(|f| f.id.clone()).collect();
     let mut held_by_fca = flow_repo::list_held_stas(pool, &fca_ids, now)
         .await
-        .map_err(|_| "list held STAs failed".to_string())?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "held STA pass: list held STAs failed");
+            "list held STAs failed".to_string()
+        })?;
     let mut failed: Vec<String> = Vec::new();
     for fca in fcas {
         let (fca_id, updated_at) = (fca.id.clone(), fca.updated_at);
@@ -2361,7 +2383,8 @@ pub(crate) async fn sync_fca_holds_once(
             flow_repo::sync_held_stas(pool, &fca_id, updated_at, &sync, now).await
         }
         .await;
-        if synced.is_err() {
+        if let Err(e) = synced {
+            tracing::error!(fca_id, error = %e, "held STA pass: FCA not synced");
             failed.push(fca_id);
         }
     }
@@ -2369,7 +2392,7 @@ pub(crate) async fn sync_fca_holds_once(
         failed.push("prune".into());
     }
     if failed.is_empty() {
-        Ok(())
+        Ok("synced")
     } else {
         Err(format!("held STAs not synced for: {}", failed.join(", ")))
     }
@@ -2755,7 +2778,7 @@ pub async fn mark_release(
             )
         }
         // RDY: the metered slot. Every part of that decision lives in `rdy_slot`.
-        None => rdy_slot(&fca, &metas, &metered, ti, order.is_some()),
+        None => rdy_slot(&fca, &metas, &metered, ti, order.is_some(), now_ms),
     };
     let edct = release_ms(cta, eta_ms, now_ms, allowance_ms);
     let Some(version) =
@@ -4426,7 +4449,7 @@ mod release_spacing_tests {
             "the scenario needs an arrival the ladder pushes back; got STA {a_sta} = ETA"
         );
 
-        let cta = rdy_slot(&fca, &metas, &metered, 2, false);
+        let cta = rdy_slot(&fca, &metas, &metered, 2, false, 0);
 
         // The combined guarantee: a full crossing-speed-sized gap behind A's *real* crossing.
         assert!(
@@ -4461,7 +4484,7 @@ mod release_spacing_tests {
             "the ladder must push A back to earn its own spacing behind the leader"
         );
 
-        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false);
+        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false, 0);
         assert!(
             cta - a_sta >= SEP_MS,
             "the release must sit a full separation behind A's metered crossing, got {}s",
@@ -4479,7 +4502,7 @@ mod release_spacing_tests {
     fn the_release_slot_reserves_the_margin_on_top_of_separation() {
         let metas = leader_arrival_and_departure();
         let metered = fca::meter(&metas, &meter_config(&rate_fca(vec![]), 0), None);
-        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false);
+        let cta = rdy_slot(&rate_fca(vec![]), &metas, &metered, 2, false, 0);
         assert_eq!(
             cta - metered[1].sched_ms,
             SEP_MS + RELEASE_MARGIN_MS,
@@ -4508,7 +4531,7 @@ mod release_spacing_tests {
         );
 
         let fca = rate_fca(vec!["LEAD".into(), "DEP".into(), "TRAIL".into()]);
-        let cta = rdy_slot(&fca, &metas, &metered, 1, true);
+        let cta = rdy_slot(&fca, &metas, &metered, 1, true, 0);
 
         assert!(
             cta < trailer_slot,
@@ -4553,12 +4576,70 @@ mod release_spacing_tests {
             T0 + 5_000_000,
             "the far arrival keeps its ETA"
         );
-        let cta = rdy_slot(&fca, &metas, &metered, 1, false);
+        let cta = rdy_slot(&fca, &metas, &metered, 1, false, 0);
         assert_eq!(
             cta,
             T0 + 1_000_000 + 360_000 + RELEASE_MARGIN_MS,
             "360 s (the slow arrival's gap) plus the margin behind the arrival"
         );
+    }
+
+    /// A repeat RDY on a flight that already holds a release. Releases are placed ahead of airborne
+    /// traffic, so the ladder pushes airborne A behind F's old release; the new slot must be
+    /// searched with that release taken out. MIT 20 at 300 kt is a 240 s gap, 255 s with the
+    /// margin: F's ETA (T0+1100 s) sits 100 s behind A's ETA (T0+1000 s), so F goes to
+    /// T0+1000+255 s. Searched against the ladder (A pushed to T0+1340 s) it would get T0+1595 s.
+    /// The far arrival keeps its ETA.
+    #[test]
+    fn a_repeat_rdy_is_not_spaced_behind_arrivals_its_own_release_pushed() {
+        const T0: i64 = 1_800_000_000_000;
+        let mut fca = rate_fca(vec![]);
+        fca.mode = "mit".into();
+        fca.mit = 20;
+        let metas = vec![
+            cand(T0 + 1_000_000, true, None),
+            cand(T0 + 1_100_000, false, Some(T0 + 1_060_000)),
+            cand(T0 + 5_000_000, true, None),
+        ];
+        let metered = fca::meter(&metas, &meter_config(&fca, 0), None);
+        assert_eq!(
+            metered[0].sched_ms,
+            T0 + 1_340_000,
+            "the scenario needs the ladder to push A behind F's old release"
+        );
+        assert_eq!(
+            metered[2].sched_ms,
+            T0 + 5_000_000,
+            "the far arrival keeps its ETA"
+        );
+        let cta = rdy_slot(&fca, &metas, &metered, 1, false, 0);
+        assert_eq!(cta, T0 + 1_000_000 + 240_000 + RELEASE_MARGIN_MS);
+    }
+
+    /// A Set beside an airborne flight inside the freeze horizon is spaced from its held STA, not
+    /// its ETA. Rate 30: 120 s plus the 15 s margin. H's ETA is T0+1000 s, 16.7 min out, and its
+    /// held STA T0+1200 s; the Set asks for T0+1100 s, 100 s ahead of the held STA, so it goes to
+    /// T0+1200+135 s. Spaced from H's ETA it would get T0+1135 s. The far arrival does not bound it.
+    #[test]
+    fn a_set_is_spaced_from_a_held_sta_inside_the_freeze_horizon() {
+        const T0: i64 = 1_800_000_000_000;
+        let fca = rate_fca(vec![]);
+        let metas = vec![
+            MeterInput {
+                held_ms: Some(T0 + 1_200_000),
+                ..cand(T0 + 1_000_000, true, None)
+            },
+            cand(T0 + 900_000, false, None),
+            cand(T0 + 5_000_000, true, None),
+        ];
+        let metered = fca::meter(&metas, &meter_config(&fca, T0), None);
+        assert_eq!(
+            metered[0].sched_ms,
+            T0 + 1_200_000,
+            "H crosses at its held STA"
+        );
+        let slot = super::set_slot(&fca, &metas, &metered, false, 1, T0 + 1_100_000, T0);
+        assert_eq!(slot, T0 + 1_200_000 + SEP_MS + RELEASE_MARGIN_MS);
     }
 
     /// `committed_crossings` selects exactly the pinned crossings, excluding the aircraft being

@@ -9,9 +9,10 @@ alter table flow.fca
 -- (`jobs::spawn_fca_hold_sync`) writes a row the first time it sees a flight inside the horizon
 -- (`on conflict do nothing`, so every replica keeps the first STA stored) and deletes it once the
 -- flight leaves the horizon by more than the margin, is released or leaves the feed; reads only read
--- it. Rows an hour past their STA are ignored and pruned on the FCA's next sync. An edit to a
--- metering field, a manual reorder and a delete clear the FCA's rows in the same statement, and the
--- pass deletes the rows of every FCA it does not meter (disabled, deleted, unpublished event FCA).
+-- it. Rows an hour past their STA are ignored, and deleted by the FCA's next sync that stores or
+-- drops a row. An edit to a metering field, a manual reorder and a delete clear the FCA's rows in
+-- the same statement, and the pass deletes the rows of every FCA it does not meter (disabled,
+-- deleted, unpublished event FCA).
 create table if not exists flow.fca_held_sta (
     fca_id   text not null references flow.fca(id) on delete cascade,
     callsign text not null,
