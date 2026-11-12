@@ -93,7 +93,8 @@ expect block "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
 expect block "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
 expect block "a comment inside a substitution"   "echo \$(echo x # it's)"
 # Lines that build `gh pr update-branch` (or its REST path) at run time, so no literal gh or update-branch
-# appears; each is unparseable (`$'..'`, or a `<<x` after `#`).
+# appears. Each blocks only because it is unparseable: `$'..'`, or a trailing `# <<x`. A decoder piped to
+# bash with no such suffix parses, and the gate allows it, as next's does.
 IFS= read -r L1 <<'EOF'
 g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
 EOF
@@ -118,10 +119,10 @@ EOF
 expect block "gh and update-branch from \$'..' parts" "$L1"
 expect block "the same after \$'\\'' (an escaped quote)" "$L2"
 expect block "gh pr update-branch from \$'\\x..'"  "$L3"
-expect block "printf octal escapes piped to bash" "$L4"
-expect block "reversed text piped through rev to bash" "$L5"
-expect block "base64 -d piped to bash"            "$L6"
-expect block "xxd -r hex piped to bash"           "$L7"
+expect block "unparseable (# <<x) line that decodes gh api update-branch via printf octal" "$L4"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via rev" "$L5"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via base64 -d" "$L6"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via xxd -r" "$L7"
 # A `#` right after `"$(`, quotes after it: the gate must still see the update-branch on the line.
 NL=$'\n'
 expect block "update-branch after a # right after \"\$(" "echo \"\$(#'${NL})\" ' ) \" # '; gh pr update-branch 202; echo '${NL}'"

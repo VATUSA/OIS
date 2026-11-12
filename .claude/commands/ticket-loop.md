@@ -55,7 +55,7 @@ Dispatch `ticket-worker` with the issue number, the learnings path and the opera
 - `plan-ready`: present the ACs and plan through AskUserQuestion (approve / change / abandon). Relay the answer, quoted, so the worker can write it into its `Operator decisions and rejected findings` record.
 - `needs-operator`: relay each question, and quote the operator's answer back verbatim. A worker that records a rejection without a quoted answer gets that finding re-judged by the reviewer.
 - `needs-dispatch`: run the requested agents (above).
-- `PORT_3000: request` (a desktop walk): grant port 3000 to one agent at a time, and re-grant only after the holder returns `PORT_3000: released`.
+- `needs-port` (`PORT_3000: request`, a desktop walk): grant port 3000 by SendMessage, without asking the operator, to one agent at a time; re-grant only after the holder returns `PORT_3000: released`.
 - `blocked`: present what it's blocked on and hold.
 
 Continue until the worker returns `STATUS: shipped`. Read it back yourself: the issue is in `Post build` and assigned to the operator (`gh issue view <n> --repo VATUSA/OIS --json projectItems,assignees`), its PR is open against `next`, mergeable and says `Closes #<n>` (`gh pr view <pr> --repo VATUSA/OIS --json state,mergeable,baseRefName,body,headRefOid`), the body carries the `## Acceptance criteria` section the operator confirmed, the PR carries the worker's evidence comment, and CI on the PR head has concluded with no red job on the branch's own defect (`gh api repos/VATUSA/OIS/commits/<headRefOid>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`). Anything missing, or red CI, goes back to the worker, not to review.
