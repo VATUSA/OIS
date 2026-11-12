@@ -438,9 +438,10 @@ mod tests {
             ),
             other => panic!("expected a connect timeout, got {other:?}"),
         }
+        // Both sides of 5 s: a connect timeout of 6 s would tie the 6 s guard above and pass it.
         assert!(
-            elapsed >= Duration::from_secs(5),
-            "failed after {elapsed:?}, before the 5 s connect timeout"
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_millis(5_500),
+            "failed after {elapsed:?}, not at the 5 s connect timeout"
         );
         drop(listener);
     }
