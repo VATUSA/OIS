@@ -23,7 +23,7 @@ use crate::auth::principal::Attribution;
 use crate::feed::airports::Airport;
 use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
 use crate::repos::flow as flow_repo;
-use crate::scope_test_support::{grant, seed_user, session_cookie, test_state};
+use crate::scope_test_support::{deny_scoped, grant, seed_user, session_cookie, test_state};
 use crate::state::AppState;
 
 /// The event the hidden FCAs and the published neighbour belong to (not #736's 7360).
@@ -396,9 +396,9 @@ async fn a_planner_elsewhere_gets_403_on_hidden_fcas(pool: PgPool, op: Op) {
     }
 }
 
-/// #854: a ZTL planner who also holds `flow.fca.update` at ZDC passes the `flow.fca.update` scope
-/// check on ZDC's hidden FCAs, and is refused by the `events.plan.update` scope check: `403`, and
-/// nothing changes. The same caller still operates ZDC's ordinary FCA.
+/// #854: a ZTL planner who also holds `flow.fca.update` at ZDC is refused ZDC's hidden FCAs by the
+/// `events.plan.update` scope check in `require_visible_event_fca`: `403`, and nothing changes. The
+/// same caller still operates ZDC's published event FCA and its ordinary FCA.
 async fn a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool: PgPool, op: Op) {
     let state = seed(&pool).await;
     let user = seed_user(&pool).await;
@@ -418,7 +418,42 @@ async fn a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool: PgPool,
             "{op:?} left {id} unchanged"
         );
     }
-    assert_operable(&pool, &state, op, ORDINARY, &cookie).await;
+    for id in LIVE {
+        assert_operable(&pool, &state, op, id, &cookie).await;
+    }
+}
+
+/// #854: a national planner operates ZDC's hidden FCAs, and a national planner denied
+/// `events.plan.update` at ZDC gets `403` on them with nothing changed (deny beats allow).
+async fn a_national_planner_operates_hidden_fcas_unless_denied_at_zdc(pool: PgPool, op: Op) {
+    let state = seed(&pool).await;
+    let denied = seed_user(&pool).await;
+    grant(&pool, &denied, "events.plan.update", None).await;
+    deny_scoped(&pool, &denied, "events.plan.update", Some("ZDC")).await;
+    grant(&pool, &denied, "flow.fca.update", None).await;
+    let denied = session_cookie(&pool, &denied).await;
+    for id in HIDDEN {
+        let before = snapshot(&pool, id).await;
+        assert_eq!(
+            call(&state, op, id, &denied).await.0,
+            StatusCode::FORBIDDEN,
+            "{op:?} on {id}"
+        );
+        assert_eq!(
+            snapshot(&pool, id).await,
+            before,
+            "{op:?} left {id} unchanged"
+        );
+    }
+
+    let national = seed_user(&pool).await;
+    for p in ["events.plan.update", "flow.fca.update"] {
+        grant(&pool, &national, p, None).await;
+    }
+    let national = session_cookie(&pool, &national).await;
+    for id in HIDDEN {
+        assert_operable(&pool, &state, op, id, &national).await;
+    }
 }
 
 /// One module per route, so a failing test names the route whose check broke.
@@ -460,6 +495,12 @@ macro_rules! route_tests {
             #[sqlx::test]
             async fn a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool: PgPool) {
                 super::a_ztl_planner_with_zdc_fca_grants_gets_403_on_hidden_fcas(pool, $op).await;
+            }
+
+            #[sqlx::test]
+            async fn a_national_planner_operates_hidden_fcas_unless_denied_at_zdc(pool: PgPool) {
+                super::a_national_planner_operates_hidden_fcas_unless_denied_at_zdc(pool, $op)
+                    .await;
             }
         }
     };

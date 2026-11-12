@@ -2,8 +2,9 @@
 //! /api/v1/flow/fcas/{id}` on an event FCA, check the caller's `events.plan.update` scope against the
 //! FCA's ARTCC, through the real router.
 //!
-//! Each route's refusal is its own `*_is_refused_outside_*` test, so deleting one route's scope
-//! call reds that route's test and no other route's.
+//! Each of the six event routes has its own `*_is_refused_outside_*` test, which goes red when that
+//! route's scope call is deleted. The plain `PUT` and `DELETE` share
+//! `the_plain_routes_refuse_an_event_fca_outside_the_planners_artcc`.
 //!
 //! The two gates answer differently: `RequirePermission` refuses a caller without the permission
 //! with 401 (`auth::middleware::ensure_permission`), the scope check refuses one holding it at
