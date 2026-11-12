@@ -46,7 +46,7 @@ Committing to the feature branch is NOT "shipping" — the push and PR are what 
 
 ## Step 4: Code review (against the committed HEAD)
 
-Run `/review-before-shipping` — follow all phases to completion. It reviews the current committed HEAD and, on passing, writes the **SHA-keyed** markers `.claude/markers/review-shipping/<HEAD-sha>` (checked by `pre-pr-gate.sh`) and `.claude/markers/code-review/<HEAD-sha>`. It covers the issue cross-check, the gates in one `just test` run (fmt, clippy, nextest, doc tests, lint, typecheck, vitest, the audits, client drift), the pre-commit checklist, and `/code-review`'s six lens reviews with their attestations and pitfall scan.
+Run `/review-before-shipping` — follow all phases to completion. It reviews the current committed HEAD and, on passing, writes the **SHA-keyed** markers `.claude/markers/review-shipping/<HEAD-sha>` (checked by `pre-pr-gate.sh`) and `.claude/markers/code-review/<HEAD-sha>`. It covers the issue cross-check, the gates in one `just test` run (fmt, clippy, nextest, doc tests, lint, typecheck, vitest, the audits, client drift), the pre-commit checklist, and `/code-review`'s lens reviews (the set the diff's tier needs) with their attestations and pitfall scan.
 
 **If the review applies a fix,** that fix is a new commit → HEAD moves → the markers are for the old SHA. Commit the fix, re-run the Step 3 diff-integrity check, and re-run `/review-before-shipping` so it stamps the new HEAD. Never copy a marker onto a new SHA, and never write one here: the marker is keyed to the commit it reviewed, and "never bypass tooling" applies.
 

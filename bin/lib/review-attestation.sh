@@ -13,9 +13,12 @@
 # own checkout (main's, when a hook runs it; REVIEW_LENSES_MAP overrides it for tests):
 #   | <file> | <heading text> | Checked | <file:line or reason> |
 # Status is Checked, N/A or Finding; the last cell must not be empty. A lens owning
-# file "-" (intent) needs at least one row. A lens owning "@ac" needs one
+# "@claims" needs at least one `| SCOPE/COMMENT/DOC/COPY | ... |` row. A lens owning "@ac" needs one
 #   | AC-COUNT | <n> | Checked | <issue number, fetch time> |
 # row and exactly n `| AC | ... |` rows, every one Checked: an unmet AC is a gap.
+#
+# A lens the commit's tier leaves out is not checked (bin/lib/review-tier.sh, from the paths the
+# commit changes against origin/next); a lens in the map that no tier names is always checked.
 #
 # Repeat rounds (/code-review Phase 3): `prior` prints the nearest commit at or before SHA
 # whose set is complete in this checkout, so each checkout's rounds are one caller's. A row
@@ -33,6 +36,12 @@
 # ==============================================================================
 
 ATTEST_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=review-tier.sh
+if ! . "$ATTEST_SELF_DIR/review-tier.sh" 2>/dev/null || ! type tier_lenses >/dev/null 2>&1; then
+    # Without the classifier every lens is required: Full, never none.
+    review_tier() { echo Full; }
+    tier_lenses() { echo "code ac tests security"; }
+fi
 
 # attest_rows FILE: "file<TAB>heading<TAB>status<TAB>evidence" per table row, cells trimmed.
 attest_rows() {
@@ -130,7 +139,7 @@ carried_copy_gap() {
 
 # check_attestation SHA [ROOT]: prints each gap; returns 0 when none.
 check_attestation() {
-    local sha="$1" root="${2:-}" map dir lens file rows heading out gaps=0 seen carried
+    local sha="$1" root="${2:-}" map dir lens file rows heading out gaps=0 seen carried tier required
 
     [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null)"
     if [ -z "$root" ] || [ -z "$sha" ]; then
@@ -145,11 +154,16 @@ check_attestation() {
         return 1
     fi
     dir="$root/.claude/markers/attest/$sha"
-
+    # A lens the tier leaves out is skipped; a lens no tier names is always required.
+    tier="$(review_tier "$sha" "$root")"
+    required="$(tier_lenses "$tier")"
     seen=""
     carried=""
     while IFS="$(printf '\t')" read -r lens file || [ -n "$lens" ]; do
         case "$lens" in ''|'#'*) continue ;; esac
+        case " $(tier_lenses Full) " in *" $lens "*)
+            case " $required " in *" $lens "*) ;; *) continue ;; esac ;;
+        esac
         if [ ! -f "$dir/$lens.md" ]; then
             case " $seen " in *" $lens "*) ;; *)
                 echo "GAP: no attestation for lens '$lens' ($dir/$lens.md)."
@@ -173,9 +187,9 @@ check_attestation() {
             gaps=$((gaps + 1))
             continue
         fi
-        if [ "$file" = "-" ]; then
-            if ! printf '%s\n' "$rows" | awk -F'\t' '($3 == "Checked" || $3 == "N/A" || $3 == "Finding") && $4 != "" { found = 1 } END { exit !found }'; then
-                echo "GAP: lens '$lens' has no row with a status and evidence."
+        if [ "$file" = "@claims" ]; then
+            if ! printf '%s\n' "$rows" | awk -F'\t' '$1 ~ /^(SCOPE|COMMENT|DOC|COPY)$/ && ($3 == "Checked" || $3 == "N/A" || $3 == "Finding") && $4 != "" { found = 1 } END { exit !found }'; then
+                echo "GAP: lens '$lens' has no SCOPE, COMMENT, DOC or COPY row with a status and evidence."
                 gaps=$((gaps + 1))
             fi
             continue
@@ -250,7 +264,7 @@ check_attestation_for_head() {
     if out="$(check_attestation "$sha")"; then
         return 0
     fi
-    echo "BLOCKED: the review lenses did not attest every rule heading for ${sha:0:8}."
+    echo "BLOCKED: the review lenses did not attest every rule heading for ${sha:0:8} (tier $(review_tier "$sha"))."
     printf '%s\n' "$out" | head -40
     total="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
     [ "$total" -le 40 ] || echo "... and $((total - 40)) more: bash bin/lib/review-attestation.sh check"
@@ -263,7 +277,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         check)
             sha="${2:-$(git rev-parse HEAD 2>/dev/null)}"
             if check_attestation "$sha"; then
-                echo "attestation complete for ${sha:0:8}"
+                echo "attestation complete for ${sha:0:8} (tier $(review_tier "$sha"): $(tier_lenses "$(review_tier "$sha")"))"
                 exit 0
             fi
             exit 1

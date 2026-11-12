@@ -88,6 +88,13 @@ expect block "two PR numbers, the first on next" "gh pr update-branch 101 202"
 expect block "GraphQL mutation"                  "gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
 expect block "unrecognized update-branch path"   "gh api -X PUT repos/x/pulls/101/update-branch/extra"
 expect block "unparseable line"                  "gh api -X PUT $A/101/update-branch \"unterminated"
+expect block "unparseable, token split by quotes" "gh api -X PUT $A/101/update-\"\"branch \"unterminated"
+expect block "unparseable, GraphQL token"        "gh api graphql -f query='mutation { updatePullRequestBranch } \"x"
+expect block "unparseable, gh with an expansion" "gh pr \$CMD 101 \"unterminated"
+echo "An unparseable line that names no update-branch passes (bash would refuse it too):"
+expect allow "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
+expect allow "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#\\(.number)\""
+expect allow "unclosed substitution, no gh"      "echo \$(echo x # it's)"
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1

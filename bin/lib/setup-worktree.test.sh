@@ -114,6 +114,22 @@ setup
 has "...and says the first build is cold" "has no target/ to seed from"
 mv "$WORK/target.away" "$MAIN/target"
 
+echo "A clone that never ran just setup gets core.hooksPath=.githooks:"
+git -C "$MAIN" config --unset core.hooksPath
+new_wt hooks
+setup
+[[ "$(git -C "$MAIN" config core.hooksPath)" == ".githooks" ]] && ok "core.hooksPath set to .githooks" \
+    || bad "core.hooksPath is '$(git -C "$MAIN" config core.hooksPath)'"
+has "...and says so" "core.hooksPath was unset; set it to .githooks"
+has "...so the health check sees the hooks" "git hooks installed (core.hooksPath=.githooks)"
+echo "A core.hooksPath already set to something else is left for the health check to report:"
+git -C "$MAIN" config core.hooksPath /dev/null
+new_wt otherhooks
+setup
+[[ "$(git -C "$MAIN" config core.hooksPath)" == "/dev/null" ]] && ok "core.hooksPath left at /dev/null" \
+    || bad "core.hooksPath overwritten to '$(git -C "$MAIN" config core.hooksPath)'"
+has "...and the health check fails on it" "git hooks not installed (core.hooksPath is '/dev/null'"
+
 echo ""
 echo "setup-worktree: $PASS passed, $FAIL failed"
 (( FAIL == 0 ))

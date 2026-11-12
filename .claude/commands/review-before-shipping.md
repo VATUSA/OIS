@@ -1,5 +1,5 @@
 ---
-description: Formal review of the committed HEAD before shipping — issue cross-check, one stamped just test run, pre-commit checklist, /code-review's six lenses, fixes, and the SHA-keyed review markers.
+description: Formal review of the committed HEAD before shipping — issue cross-check, one stamped just test run, pre-commit checklist, /code-review's lenses for the diff's tier, fixes, and the SHA-keyed review markers.
 ---
 
 You are performing a formal review before shipping. Follow these phases in order. All phases must pass before the review markers are created.
@@ -70,7 +70,7 @@ Fix any issues found.
 
 ## Phase 7: Code review (gating)
 
-**Commit all working changes and re-pin the reviewed SHA (Phase 0), then run `/code-review` to completion** — issue cross-check, the six fresh-eyes lens subagents with their attestations (`security-audit-agent` among them), the adversarial verification, the pitfall scan — and act on what it reports. Do not dispatch any lens a second time outside it. Its Phase 7 gates take this review's Phase 5 result for the same SHA; they never re-run the suite.
+**Commit all working changes and re-pin the reviewed SHA (Phase 0), then run `/code-review` to completion** — issue cross-check, the fresh-eyes lens subagents the diff's tier needs, with their attestations (`security-audit-agent` among them from Standard up), the adversarial verification, the pitfall scan — and act on what it reports. Do not dispatch any lens a second time outside it. Its Phase 7 gates take this review's Phase 5 result for the same SHA; they never re-run the suite.
 
 **This phase gates.** A **CHANGES REQUESTED** verdict from any lens — a CRITICAL or MAJOR finding, or a security G1–G4, in code this branch added or of `unknown` origin, other than one the operator rejected (`code-review.md` → Phase 3 "Operator decisions") or a VARIANCE one "Repeat rounds" lets through — or an incomplete attestation blocks the Phase 9 markers. Fix under the Phase 2 guardrail: auto-fix the safe security classes (an added `RequirePermission<P>` extractor, an ARTCC scope check through `permission_scope(...).allows(...)`, a bound sqlx parameter in place of formatted SQL, a query narrowed to the caller's own rows) and ask before anything user-visible. Re-run the relevant test, or write the missing reproduction so the fix is proven. Commit, re-pin and re-run this phase against the fixed commit, as a repeat round. Security G5–G7 do not block; a branch-introduced one is still fixed (Phase 2).
 
