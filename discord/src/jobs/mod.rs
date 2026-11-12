@@ -187,7 +187,8 @@ mod loop_tests {
     const LEASE: &str = "POST /api/v1/integration/jobs/lease";
     const POLL: Duration = Duration::from_millis(100);
     /// D72's 15 s request timeout, plus the poll, plus one second of slack: a hung call must have
-    /// failed and the loop leased again inside this. A literal, so a raised request timeout fails here.
+    /// failed and the loop leased again inside this. A literal, so a request timeout raised past
+    /// 16 s fails here.
     const NEXT_LEASE_WITHIN: Duration = Duration::from_millis(16_100);
 
     /// Reads one whole request, its `content-length` body included, and returns its request line.
