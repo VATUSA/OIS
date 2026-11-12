@@ -62,11 +62,10 @@ pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
 
 /// What a job type dispatches to.
 ///
-/// Split out of [`perform_job`] so the table can be asserted. `perform_job` needs a live `Http` and an
-/// `OisClient`, so it is unreachable from a test — which meant the one-line arm deciding whether a
-/// cancellation posts at all had no coverage: dropping `"tmi_cancel"` from it left every test green
-/// while cancels parked as `failed` (#436 review). Same reason `build_message` is split out in
-/// `jobs::tmi`.
+/// Split out of [`perform_job`] so every job type's arm can be asserted without a fake backend and a
+/// fake Discord. Before the split, the one-line arm deciding whether a cancellation posts at all had
+/// no coverage: dropping `"tmi_cancel"` from it left every test green while cancels parked as
+/// `failed` (#436 review). Same reason `build_message` is split out in `jobs::tmi`.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
     AceRequestPost,
@@ -191,9 +190,9 @@ mod loop_tests {
     /// 16 s fails here.
     const NEXT_LEASE_WITHIN: Duration = Duration::from_millis(16_100);
 
-    /// Reads one whole request, its `content-length` body included, and returns its request line.
-    /// The body is drained so that answering a POST never closes on unread bytes, which would reset
-    /// the connection under the client.
+    /// Reads one whole request, its `content-length` body included, and returns its request line,
+    /// followed by a space and the body when there is one. The body is drained so that answering a
+    /// POST never closes on unread bytes, which would reset the connection under the client.
     async fn read_request(stream: &mut TcpStream) -> String {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
@@ -221,7 +220,13 @@ mod loop_tests {
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
-        head.lines().next().unwrap_or_default().to_string()
+        let line = head.lines().next().unwrap_or_default();
+        let body = String::from_utf8_lossy(&buf[head_end..]);
+        if body.is_empty() {
+            line.to_string()
+        } else {
+            format!("{line} {body}")
+        }
     }
 
     async fn reply_json(stream: &mut TcpStream, body: &str) {
@@ -314,6 +319,10 @@ mod loop_tests {
             seen[1].starts_with("POST /api/v1/integration/jobs/j1/ack"),
             "the job was not acked, so the hung ack was never reached: {seen:?}"
         );
+        assert!(
+            seen[1].contains(r#""success":false"#),
+            "the ack was not a nack, so the failure arm was never reached: {seen:?}"
+        );
         let next = next.expect("no lease after the hung ack: the loop is stuck on it");
         assert!(next.is_some_and(|l| l.starts_with(LEASE)));
     }
@@ -360,6 +369,10 @@ mod loop_tests {
         assert!(
             seen[3].starts_with("POST /api/v1/integration/jobs/j1/ack"),
             "the job was not acked, so the hung ack was never reached: {seen:?}"
+        );
+        assert!(
+            seen[3].contains(r#""success":true"#),
+            "the ack was not a success, so the success arm was never reached: {seen:?}"
         );
         let next = next.expect("no lease after the hung success ack: the loop is stuck on it");
         assert!(next.is_some_and(|l| l.starts_with(LEASE)));
