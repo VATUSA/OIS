@@ -34,16 +34,16 @@ Before reading anything, record `git rev-parse HEAD` as the **reviewed SHA**. Ph
 
 ## Phase 3: Lens reviews and attestation
 
-First run `bash bin/lib/review-tier.sh <reviewed SHA>`. It prints the tier the diff reaches (`test-quality.md` → "Blast-radius test tiering", except that hooks, gates, `bin/` and the review commands and agents are Standard so the security lens reads them, and all backend source is Full because a path cannot tell whether it reaches scope or the contract) and the lenses that tier needs: Light `code ac`, Standard `code ac security`, Full `code ac tests security`. Any path it cannot place is Full; nobody declares the tier. Dispatch exactly those lenses as fresh subagents **in one message**, so they run in parallel. Give each the branch name, the reviewed SHA, its lens, the Phase 2 feature sets and the exact attestation path it writes, `<checkout root>/.claude/markers/attest/<reviewed SHA>/<lens>.md`, with both values written in literally:
+First run `bash bin/lib/review-tier.sh <reviewed SHA>`. It prints the tier the diff reaches (`test-quality.md` → "Blast-radius test tiering", except that hooks, gates, `bin/`, the review commands and agents and the two security rule files are Standard so the security lens reads them, and all backend and bot source is Full because a path cannot tell whether it reaches scope or the contract) and the lenses the commit needs: Light `code ac`, Standard `code ac security`, Full `code ac tests security`, plus `tests` in any tier when the diff touches a test file. Any path it cannot place is Full; nobody declares the tier. Dispatch exactly those lenses as fresh subagents **in one message**, so they run in parallel. Give each the branch name, the reviewed SHA, its lens, the Phase 2 feature sets and the exact attestation path it writes, `<checkout root>/.claude/markers/attest/<reviewed SHA>/<lens>.md`, with both values written in literally:
 
 | Subagent type | Prompt names the lens | Extra prompt content |
 |---|---|---|
 | `code-review-agent` | `code` | — |
 | `code-review-agent` | `tests` | — |
-| `code-review-agent` | `ac` | the issue number, and the Phase 1 requirement list verbatim with out-of-scope items marked; it fetches the AC section itself, so a stale list cannot reach its AC rows |
+| `code-review-agent` | `ac` | the issue number, and the Phase 1 requirement list verbatim with out-of-scope items marked; it fetches the AC section itself, so a stale list cannot reach its AC rows. The draft PR body and Moment 3 steps, when they exist |
 | `security-audit-agent` | (the `security` lens) | — |
 
-The lenses and the rule files each attests live in `.claude/review-lenses.tsv`, and the tiers in `bin/lib/review-tier.sh`; change them there, never in this table alone. `review-attestation.sh check` requires the tier's lenses and no others.
+The lenses and the rule files each attests live in `.claude/review-lenses.tsv`, and the tiers in `bin/lib/review-tier.sh`; change them there, never in this table alone. `review-attestation.sh check` requires the lenses `review-tier.sh` prints, plus any lens in the map that no tier names.
 
 **Repeat rounds.** A caller's first `/code-review` on a branch covers the whole diff. A caller is a checkout: `bash bin/lib/review-attestation.sh prior` prints `PRIOR_SHA`, the nearest commit at or before HEAD whose attestation set is complete in this checkout, and exits 1 when there is none. That is a first round, as is the round after a rebase or amend. On a later round give each lens `PRIOR_SHA` and its attestation directory. The lens reviews `git diff PRIOR_SHA..HEAD` in full (an `origin/next` merge included; on a dirty checkout `git diff PRIOR_SHA` plus the untracked files), re-checks each earlier finding, and carries each row the delta does not touch with evidence `Carried-from <PRIOR_SHA>: <its evidence>`. A new finding on a line unchanged since `PRIOR_SHA` is **VARIANCE**: reported, and blocking only when it is CRITICAL, a security G1–G4, or a MAJOR stated with a failure scenario for permission or scope integrity, ETA or metering correctness, member personal data or auth.
 
@@ -57,7 +57,7 @@ When every dispatched lens returns, run:
 bash bin/lib/review-attestation.sh check
 ```
 
-Anything but `attestation complete` means a lens skipped a rule heading, or lens `ac` found an AC unmet or a count short of the section. Re-dispatch that lens with the printed gaps; never write the rows yourself (a tests-only carry is the one exception). An unmet AC is built on the branch, or taken to the operator to drop or change in the section; never re-attested as met. Keep the tests lens's guard inventory and untouched-path tables for the report.
+Anything but `attestation complete` means a lens skipped a rule heading, or lens `ac` found an AC unmet, a count short of the section, or wrote no SCOPE, COMMENT, DOC or COPY claim row. Re-dispatch that lens with the printed gaps; never write the rows yourself (a tests-only carry is the one exception). An unmet AC is built on the branch, or taken to the operator to drop or change in the section; never re-attested as met. Keep the tests lens's guard inventory and untouched-path tables for the report, when the tier ran it.
 
 **The verdicts gate the marker.** A **CHANGES REQUESTED** from any lens (a CRITICAL or MAJOR, or a security G1–G4, that is neither DISMISSED nor a non-blocking VARIANCE ("Repeat rounds"), in code this branch added or of `unknown` origin) means Phase 9 does not stamp. Still write the Phase 8 report; stamp only once the findings are resolved and the review re-run against the fixed commit.
 

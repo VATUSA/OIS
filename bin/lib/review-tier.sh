@@ -3,32 +3,45 @@
 # Review tier: which lenses /code-review must run for a commit, decided from the paths it changes.
 #
 #   bash bin/lib/review-tier.sh [SHA]          # prints "<tier> <lens> <lens>..."
-#   . bin/lib/review-tier.sh; review_tier SHA ROOT; tier_lenses TIER
+#   . bin/lib/review-tier.sh; review_tier SHA ROOT; review_lenses SHA ROOT
 #
 # The tiers are test-quality.md's blast-radius tiers, judged on `git diff --name-only <base>...SHA`,
 # base = the merge base with origin/next (REVIEW_TIER_BASE overrides it for tests; a hook takes its
 # environment from the harness). The highest tier any path reaches wins:
 #   Light     code ac                  docs, guidance, test files
-#   Standard  code ac security         the bot, gates, review commands and agents, and tooling
-#   Full      code ac tests security   everything else, and whenever the tier cannot be read
+#   Standard  code ac security         gates, review commands and agents, tooling, the security rules
+#   Full      code ac tests security   everything else (the bot included), and whenever the tier cannot be read
+# Any tier adds lens tests when the diff changes a test file (is_test_path).
 # The builder never declares the tier: an unresolvable base, an empty diff or an unknown path is Full.
 # Backend source is Full: a path cannot tell whether a handler or repo change reaches scope or the contract.
 # Bash 3.2 and BSD/GNU safe.
 # ==============================================================================
 
+# test_file PATH: true for a test file outside a crate's source (Light, like docs).
+test_file() {
+    case "$1" in
+        *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
+        bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
+    esac
+    return 1
+}
+
+# is_test_path PATH: true for any test file, a `*_tests.rs` module included; puts lens tests in any tier.
+is_test_path() {
+    case "$1" in *_tests.rs) return 0 ;; esac
+    test_file "$1"
+}
+
 # tier_of_path PATH: prints 1 (Light), 2 (Standard) or 3 (Full).
 tier_of_path() {
-    case "$1" in
-        *.test.ts|*.test.tsx|tests/*|*/tests/*) echo 1; return ;;
-        bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) ;; *) echo 1; return ;; esac ;;
-    esac
+    if test_file "$1"; then echo 1; return; fi
     case "$1" in
         .claude/hooks/*|.claude/settings.json|.claude/review-lenses.tsv) echo 2 ;;
         .claude/commands/code-review.md|.claude/commands/review-before-shipping.md|.claude/commands/ship.md) echo 2 ;;
         .claude/agents/*review*|.claude/agents/security-audit*) echo 2 ;;
+        .claude/rules/secure-coding.md|.claude/rules/data-protection.md) echo 2 ;;
         .claude/*|CLAUDE.md|AGENTS.md|DESIGN.md|docs/*|docs-site/*) echo 1 ;;
         .githooks/*|bin/*|justfile) echo 2 ;;
-        discord/*) echo 2 ;;
         *) echo 3 ;;
     esac
 }
@@ -47,13 +60,18 @@ tier_lenses() {
     esac
 }
 
+# changed_paths SHA ROOT: SHA's changed paths against its base; fails when either cannot be read.
+changed_paths() {
+    local base
+    base="$(git -C "$2" merge-base "${REVIEW_TIER_BASE:-origin/next}" "$1" 2>/dev/null)" && [ -n "$base" ] \
+        && git -C "$2" diff --name-only --no-renames "$base" "$1" 2>/dev/null
+}
+
 # review_tier SHA [ROOT]: prints Light, Standard or Full for SHA's diff against its base.
 review_tier() {
-    local sha="$1" root="${2:-}" base names path top=0 tier
+    local sha="$1" root="${2:-}" names path top=0 tier
     [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null)"
-    base="$(git -C "$root" merge-base "${REVIEW_TIER_BASE:-origin/next}" "$sha" 2>/dev/null)"
-    if [ -z "$base" ] || ! names="$(git -C "$root" diff --name-only --no-renames "$base" "$sha" 2>/dev/null)" \
-            || [ -z "$names" ]; then
+    if ! names="$(changed_paths "$sha" "$root")" || [ -z "$names" ]; then
         echo Full
         return 0
     fi
@@ -67,8 +85,24 @@ EOF
     tier_name "$top"
 }
 
+# review_lenses SHA [ROOT]: the lenses SHA needs: its tier's, plus tests when it changes a test file.
+review_lenses() {
+    local sha="$1" root="${2:-}" lenses path
+    [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null)"
+    lenses="$(tier_lenses "$(review_tier "$sha" "$root")")"
+    case " $lenses " in *" tests "*) echo "$lenses"; return 0 ;; esac
+    while IFS= read -r path; do
+        if [ -n "$path" ] && is_test_path "$path"; then
+            echo "code ac tests${lenses#code ac}"
+            return 0
+        fi
+    done <<EOF
+$(changed_paths "$sha" "$root")
+EOF
+    echo "$lenses"
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     sha="${1:-$(git rev-parse HEAD 2>/dev/null)}"
-    tier="$(review_tier "$sha")"
-    echo "$tier $(tier_lenses "$tier")"
+    echo "$(review_tier "$sha") $(review_lenses "$sha")"
 fi

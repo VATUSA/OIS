@@ -380,7 +380,7 @@ got="$(cd "$TC" && REVIEW_LENSES_MAP="$WORK/carry.tsv" bash "$LIB" prior "$TH" 2
 echo "The commit's tier decides which lenses are required (bin/lib/review-tier.sh):"
 printf 'code\trules/a.md\ntests\trules/b.md\nsecurity\trules/b.md\nac\t@ac\nac\t@claims\nextra\trules/b.md\n' > "$WORK/lenses.tsv"
 TB="$(git -C "$REPO" rev-parse HEAD)"
-# tier_commit PATH: a commit on TB touching PATH; sets SHA and ATT, writes code and ac attestations only.
+# tier_commit PATH: a commit on TB touching PATH; sets SHA and ATT; writes the code, ac and extra attestations.
 tier_commit() {
     git -C "$REPO" checkout -q --detach "$TB"
     mkdir -p "$REPO/$(dirname "$1")" && printf 'x\n' >> "$REPO/$1"
@@ -402,10 +402,22 @@ mkdir -p "$WORK/notier" && cp "$LIB" "$WORK/notier/review-attestation.sh"
 (cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
 [[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "without review-tier.sh beside it, every lens is required (Full)" \
     || bad "missing classifier did not fail closed: $(head -2 "$WORK/out")"
+printf '# a classifier with no review_lenses\n' > "$WORK/notier/review-tier.sh"
+(cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
+[[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "a review-tier.sh that defines no review_lenses is Full" \
+    || bad "classifier without review_lenses did not fail closed: $(head -2 "$WORK/out")"
 rm "$ATT/extra.md"; tier_expect 1 "a lens no tier names is still required"
-tier_commit discord/src/jobs/tmi.rs
-tier_expect 1 "Standard (a bot job): security is required"
+tier_commit web/src/x.test.ts
+tier_expect 1 "Light with a test file: tests is required"
+grep -q "lens 'tests'" "$WORK/out" && ok "...and the gap names it" || bad "Light test-file gaps: $(cat "$WORK/out")"
+printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/tests.md"; tier_expect 0 "positive control: Light with a test file and tests attested passes"
+grep -q 'tier Light: code ac tests' "$WORK/out" && ok "...and check names the lenses" || bad "lenses not named: $(cat "$WORK/out")"
+tier_commit bin/pre-push
+tier_expect 1 "Standard (a gate script): security is required"
 grep -q "lens 'security'" "$WORK/out" && ! grep -q "lens 'tests'" "$WORK/out" && ok "...and tests is not" || bad "Standard gaps: $(cat "$WORK/out")"
+tier_commit discord/src/jobs/tmi.rs
+tier_expect 1 "Full (a bot job): tests is required"
+grep -q "lens 'tests'" "$WORK/out" && grep -q "lens 'security'" "$WORK/out" && ok "...and security too" || bad "bot gaps: $(cat "$WORK/out")"
 tier_commit backend/src/feed/predict.rs
 printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/security.md"
 tier_expect 1 "Full (the feed): tests is required"

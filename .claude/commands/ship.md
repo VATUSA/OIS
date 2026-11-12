@@ -65,7 +65,7 @@ Run `/review-before-shipping` — follow all phases to completion. It reviews th
 
 ## Step 6: Create PR
 
-PR creation is gated by `pre-pr-gate.sh`, which requires the `review-shipping` marker and a complete lens attestation for the PR's head commit, and `test-run-gate.sh`, which requires the tests marker. Write the body for a junior developer, with the before/after diagram `.claude/rules/engineering-prose.md` → "What a PR description must do" asks for, and put the tests lens's guard inventory in it. Create the PR against `next`:
+PR creation is gated by `pre-pr-gate.sh`, which requires the `review-shipping` marker and a complete lens attestation for the PR's head commit, and `test-run-gate.sh`, which requires the tests marker. Write the body for a junior developer, with the before/after diagram `.claude/rules/engineering-prose.md` → "What a PR description must do" asks for, and put the guard inventory in it (the tests lens's, or your own when the tier ran no tests lens). Create the PR against `next`:
 
 ```bash
 gh pr create --repo VATUSA/OIS --base next --title "type(scope): summary" --body-file <scratchpad>/pr.md
@@ -95,7 +95,7 @@ No attribution line of any kind; check the file with `! grep -qiE 'Drafted by|Ge
 
 OIS **has** CI (`.github/workflows/ci.yml`), and it runs checks `just test` can't (the cross-platform `desktop` matrix, any `windows-latest` job). Read the PR head's check-runs: `gh api repos/VATUSA/OIS/commits/<sha>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`. An empty list right after a push means CI hasn't started, not green. Report them as they stand, pending included; don't poll in a loop (the API budget is shared with the board). Under the ticket loop, `ticket-worker.md` → Phase D waits for them.
 
-**Under the ticket loop, post the worker's evidence comment on the PR straight after it opens, before the `Post build` move** (`ticket-worker.md` → "Review it as ticket-reviewer will"): the AC walk, the mutation table against the tests lens's guard inventory, the untouched paths, claims with `file:line`, and "Operator decisions and rejected findings". That section is the issue's decisions record (`code-review.md` → Phase 3 "Operator decisions"): copy `<git common dir>/review-decisions/<key>.md` into it, confirm the comment posted, then delete the file. From here the PR comment is the record. Outside the ticket loop there is no evidence comment and the file stays the record.
+**Under the ticket loop, post the worker's evidence comment on the PR straight after it opens, before the `Post build` move** (`ticket-worker.md` → "Review it as ticket-reviewer will"): the AC walk, the mutation table against the guard inventory (the tests lens's, or the worker's own when the tier ran no tests lens), the untouched paths, claims with `file:line`, and "Operator decisions and rejected findings". That section is the issue's decisions record (`code-review.md` → Phase 3 "Operator decisions"): copy `<git common dir>/review-decisions/<key>.md` into it, confirm the comment posted, then delete the file. From here the PR comment is the record. Outside the ticket loop there is no evidence comment and the file stays the record.
 
 ## Step 7: Moment 3 — verification comment and board move
 

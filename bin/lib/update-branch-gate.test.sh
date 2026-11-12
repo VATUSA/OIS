@@ -91,10 +91,33 @@ expect block "unparseable line"                  "gh api -X PUT $A/101/update-br
 expect block "unparseable, token split by quotes" "gh api -X PUT $A/101/update-\"\"branch \"unterminated"
 expect block "unparseable, GraphQL token"        "gh api graphql -f query='mutation { updatePullRequestBranch } \"x"
 expect block "unparseable, gh with an expansion" "gh pr \$CMD 101 \"unterminated"
-echo "An unparseable line that names no update-branch passes (bash would refuse it too):"
+expect block "unparseable, update_branch"        "gh api -X PUT $A/101/update_branch \"unterminated"
+expect block "unparseable, updatebranch"         "gh api -X PUT $A/101/updatebranch \"unterminated"
+expect block "unparseable, backslash in the word" "gh api -X PUT $A/101/update\\-branch \"unterminated"
+expect block "unparseable, backtick expansion"   "gh pr \`echo up\`date-br \"unterminated"
+expect block "unparseable, quotes split gh pr"   "g\"h\" p\"r\" \$X 5 \"unterminated"
+expect block "unparseable, quotes split gh api"  "g'h' a'pi' -X PUT \$P \"unterminated"
+# Unparseable lines that build `gh` itself out of ANSI-C quotes or escapes: no literal gh appears.
+IFS= read -r L1 <<'EOF'
+g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
+EOF
+IFS= read -r L2 <<'EOF'
+x=$'\''; g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
+EOF
+IFS= read -r L3 <<'EOF'
+$'\x67\x68' pr $'\x75pdate-branch' 5
+EOF
+IFS= read -r L4 <<'EOF'
+printf '\x67\x68' "unterminated
+EOF
+expect block "unparseable, gh built from \$'..'"  "$L1"
+expect block "unparseable, after an escaped quote" "$L2"
+expect block "unparseable, \\x escapes"           "$L3"
+expect block "unparseable, a \\x escape and no \$" "$L4"
+expect block "unparseable, a substitution and no gh" "echo \$(echo x # it's)"
+echo "An unparseable line that neither names update-branch nor expands anything passes:"
 expect allow "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
 expect allow "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#\\(.number)\""
-expect allow "unclosed substitution, no gh"      "echo \$(echo x # it's)"
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1

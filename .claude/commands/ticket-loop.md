@@ -17,7 +17,7 @@ Only through AskUserQuestion, never in prose. That includes status, blockers and
 
 Subagents cannot ask. They return an `OPERATOR_QUESTIONS` block. Relay each one through AskUserQuestion, then SendMessage the answer back to **the same agent**, quoting the question it answers. Silence, an interruption or an answer to something else is not approval: the decision stays open, so ask again. Never answer a subagent's question yourself, however obvious the answer looks.
 
-When a subagent returns `STATUS: needs-dispatch`, run every agent in its `DISPATCH` block as a fresh subagent, in parallel in one message, and SendMessage the reports back to the requester verbatim. For a `/code-review` lens, check the prompt carries only what `code-review.md` → Phase 3 lists for that lens (branch, reviewed SHA, lens, feature sets, attestation path, `PRIOR_SHA` on a repeat round, the decisions-record location, and for `ac` the issue number and the requirement list) and strip anything else: a summary of what was built or an opinion on it. The builder must not brief its own reviewers; their value is not sharing its context.
+When a subagent returns `STATUS: needs-dispatch`, run every agent in its `DISPATCH` block as a fresh subagent, in parallel in one message, and SendMessage the reports back to the requester verbatim. For a `/code-review` lens, check the prompt carries only what `code-review.md` → Phase 3 lists for that lens (branch, reviewed SHA, lens, feature sets, attestation path, `PRIOR_SHA` on a repeat round, the decisions-record location, and for `ac` the issue number, the requirement list, and the draft PR body and Moment 3 steps) and strip anything else: a summary of what was built or an opinion on it. The builder must not brief its own reviewers; their value is not sharing its context.
 
 ## 0. START
 
@@ -55,6 +55,7 @@ Dispatch `ticket-worker` with the issue number, the learnings path and the opera
 - `plan-ready`: present the ACs and plan through AskUserQuestion (approve / change / abandon). Relay the answer, quoted, so the worker can write it into its `Operator decisions and rejected findings` record.
 - `needs-operator`: relay each question, and quote the operator's answer back verbatim. A worker that records a rejection without a quoted answer gets that finding re-judged by the reviewer.
 - `needs-dispatch`: run the requested agents (above).
+- A request for port 3000 (a desktop walk): grant it to one agent at a time, the next only once the holder reports its stack stopped.
 - `blocked`: present what it's blocked on and hold.
 
 Continue until the worker returns `STATUS: shipped`. Read it back yourself: the issue is in `Post build` and assigned to the operator (`gh issue view <n> --repo VATUSA/OIS --json projectItems,assignees`), its PR is open against `next`, mergeable and says `Closes #<n>` (`gh pr view <pr> --repo VATUSA/OIS --json state,mergeable,baseRefName,body,headRefOid`), the body carries the `## Acceptance criteria` section the operator confirmed, the PR carries the worker's evidence comment, and CI on the PR head has concluded with no red job on the branch's own defect (`gh api repos/VATUSA/OIS/commits/<headRefOid>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`). Anything missing, or red CI, goes back to the worker, not to review.

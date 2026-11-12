@@ -278,6 +278,11 @@ points above, nothing more:
 - **The shared dev database may hold another branch's migrations** and refuse to boot your backend
   ("previously applied but is missing"). Boot against a throwaway database on a spare port
   (`database-postgres.md`), never by re-migrating or resetting the shared one.
+- **Stop only the PIDs your runner recorded** (`test-quality.md` → "Running the gate while other
+  worktrees are live"). A headless desktop walk starts gnome-keyring by absolute path, records its
+  PID, and never touches the user's session bus or keyring.
+- **Port 3000 is shared.** The desktop debug build reaches only `http://127.0.0.1:3000`, so a walk
+  that needs it asks the orchestrator, which serializes port-3000 walks.
 
 - **Creating the issue worktree is yours, through `/start`.** The branch prohibition protects
   the *primary checkout*, which stays on `next`. `/start` creates the worktree and `/ship` (or

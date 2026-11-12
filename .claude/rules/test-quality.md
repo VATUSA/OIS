@@ -161,11 +161,12 @@ cache and turbo's cache, and that produces failure shapes that look like real on
   assertion, and it lands on a different unrelated test each run. Re-run each named failure on its
   own: a flake does not survive isolation; a real failure repeats and sits in code you touched. Say
   in the PR which failures were flakes and that you re-ran them.
-- **Stop a process only by a PID you recorded, never by pattern or name.** `pkill -f
+- **Stop only a process you started, by the PID you recorded; never by pattern or name.** `pkill -f
   target/debug/ois-backend` stops every worktree's backend and the shell running it; a pattern on
   gnome-keyring's path killed the operator's keyring daemon, and gh then hung on every call. Record
-  the process's own PID (`exec` under `nice`, never the wrapper's) and confirm its cwd and port before
-  stopping it.
+  `$!` or a pidfile in your scratchpad, check with `ps -o comm= -p <pid>` that it is the process
+  itself and not a wrapper still running it (`just`, a subshell with more than one command; take
+  its child from `pgrep -P`), and confirm its cwd and port before stopping it.
 - **Limit a gate's load through the worktree's `.env`.** `bin/run-tests.sh` sources it, so
   `CARGO_BUILD_JOBS` and `NEXTEST_TEST_THREADS` there reach `just test`; renice the run after it
   starts. A `nice` or `VAR=` prefix on the command line is not a stamping form: no marker is written.

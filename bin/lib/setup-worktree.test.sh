@@ -129,6 +129,15 @@ setup
 [[ "$(git -C "$MAIN" config core.hooksPath)" == "/dev/null" ]] && ok "core.hooksPath left at /dev/null" \
     || bad "core.hooksPath overwritten to '$(git -C "$MAIN" config core.hooksPath)'"
 has "...and the health check fails on it" "git hooks not installed (core.hooksPath is '/dev/null'"
+echo "A shared config git cannot write warns and points at just setup:"
+git -C "$MAIN" config --unset core.hooksPath
+new_wt lockedhooks
+: > "$MAIN/.git/config.lock"
+setup
+rm -f "$MAIN/.git/config.lock"
+has "...warns" "could not set core.hooksPath; run just setup in"
+[[ -z "$(git -C "$MAIN" config core.hooksPath)" ]] && ok "...and core.hooksPath stays unset" \
+    || bad "core.hooksPath is '$(git -C "$MAIN" config core.hooksPath)'"
 
 echo ""
 echo "setup-worktree: $PASS passed, $FAIL failed"
