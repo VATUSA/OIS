@@ -130,7 +130,10 @@ is reused wherever it is needed.
   `just ci-full` runs, in one go. It stamps `.claude/markers/tests/<sha>` and its manifest line only
   for a green run on a clean, committed HEAD that did not move during the run. With arguments,
   `bin/run-tests.sh` passes them through to a targeted run and never stamps. Writing a marker
-  yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)").
+  yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)"). The stamping
+  call is exactly `just test` or `cd <dir> && just test`, backgrounded, with its output file read
+  afterwards; a redirect or a chained command makes the marker audit revoke the stamp
+  (`ticket-lifecycle.md` has the same rule for review stamps).
 - **A gate counts once per SHA, wherever it ran.** For the exact SHA under review, either of these
   is the full gate: a tests marker in this checkout, or green CI check-runs on that SHA, every
   check-run concluded `success` (the check-runs are the job list, never a copied one):
