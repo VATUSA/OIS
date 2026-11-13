@@ -259,8 +259,10 @@ feed, and after an edit that moves the line it can show the flight late or delay
 until then. A failed FCA is logged and reported to the job registry; the other FCAs still sync.
 A tick changes nothing until the replica has a feed snapshot and an airport table and has loaded
 winds and aircraft profiles once (`hold_inputs_ready`), so an empty board never reads as every
-held flight having left and no STA is stored on still air or default profiles. While a winds or
-profiles load has failed with nothing loaded yet, the tick returns `Err` to the job registry.
+held flight having left and no STA is stored on still air or default profiles. It checks winds
+before profiles and stops at the first one not loaded: that one's loader having failed makes the
+tick an `Err` to the job registry, otherwise the tick is a skip. A failed profile load while the
+first winds fetch is still running therefore reads as a skip until winds load.
 
 The traffic route, the flight advisory, IDST, `mark_release` and `clear_release` read the rows and
 never write them; a flight that entered the horizon since the last tick is re-metered by a read
