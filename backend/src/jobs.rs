@@ -578,9 +578,10 @@ pub(crate) async fn refresh_aircraft_profiles_once(
     profiles: &ArcSwap<ProfileTable>,
     loaded: &AtomicBool,
 ) -> Result<String, String> {
-    let table = aircraft_profiles_repo::load_all(pool)
-        .await
-        .map_err(|e| format!("{e:?}"))?;
+    let table = aircraft_profiles_repo::load_all(pool).await.map_err(|e| {
+        tracing::error!(error = %e, "aircraft profile load failed");
+        format!("{e:?}")
+    })?;
     profiles.store(Arc::new(table));
     loaded.store(true, Ordering::Relaxed);
     Ok("reloaded".to_string())

@@ -257,8 +257,10 @@ event FCA). A sync that commits while an edit's, reorder's or delete's own state
 rows its clear missed; each is only an earliest crossing until the flight leaves the horizon or the
 feed, and after an edit that moves the line it can show the flight late or delayed at the new line
 until then. A failed FCA is logged and reported to the job registry; the other FCAs still sync.
-A tick on a replica with no feed snapshot or airport table yet (just started) changes nothing, so
-an empty board never reads as every held flight having left.
+A tick changes nothing until the replica has a feed snapshot and an airport table and has loaded
+winds and aircraft profiles once (`hold_inputs_ready`), so an empty board never reads as every
+held flight having left and no STA is stored on still air or default profiles. While a winds or
+profiles load has failed with nothing loaded yet, the tick returns `Err` to the job registry.
 
 The traffic route, the flight advisory, IDST, `mark_release` and `clear_release` read the rows and
 never write them; a flight that entered the horizon since the last tick is re-metered by a read
