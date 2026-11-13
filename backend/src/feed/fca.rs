@@ -506,8 +506,9 @@ fn meter_manual(
 /// everything placed before it, starting at its held STA; one running late then crosses at the
 /// later of that slot and its ETA, which moves no release and no other held flight. Each unheld
 /// flight takes the earliest slot clear of every release, every held crossing, every unheld flight
-/// placed before it and, while a held flight runs late, the slot that flight held: the window a
-/// late flight leaves is not given to other traffic.
+/// placed before it and, while a held flight runs late, the slot that flight held, so automatic
+/// placement does not give the window a late flight leaves to other traffic. The reserved slot is
+/// not in the output, so RDY and Set, which space against the output, can still release into it.
 fn meter_auto(
     cands: &[MeterInput],
     sep: &[i64],

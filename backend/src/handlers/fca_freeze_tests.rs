@@ -373,9 +373,10 @@ async fn a_flight_held_beside_a_late_held_flight_keeps_its_sta_on_the_next_pass(
     let first = traffic(&state, &id).await;
     let eta_a = ms(&row(&first, "AIRA")["eta"]);
     let eta_b = ms(&row(&first, "AIRB")["eta"]);
+    // AIRB is stored at its ETA + 20 s and must still sit a full 30 s gap before AIRA's ETA.
     assert!(
-        eta_a - eta_b > 40_000,
-        "fixture: AIRB crosses more than a gap ahead of AIRA: {eta_b} vs {eta_a}"
+        eta_a - eta_b >= 50_000,
+        "fixture: AIRA crosses at least 50 s after AIRB: {eta_b} vs {eta_a}"
     );
     let sta_a = eta_b - 10_000;
     seed_held(&pool, &id, "AIRA", sta_a).await;

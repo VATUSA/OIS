@@ -233,7 +233,10 @@ for it. Its slot stays in `committed` beside its new time. Unheld flights are th
 `earliest_slot(anchor, sep, committed)`, clear of every release, every held flight's time, each
 late flight's reserved slot and the unheld flights placed before them. A flight that froze in the
 window a late flight left would otherwise be stored there and pushed a gap later on the next pass
-by that same slot. Sequence numbers follow the scheduled time.
+by that same slot. The reservation lives only in `committed`, not in `meter`'s output: RDY and Set
+(`rdy_slot`, `set_slot`) space a release against the metered times, so they see a late flight
+only at its ETA and can release into its old slot, which the next pass then pushes the held
+flights behind. Sequence numbers follow the scheduled time.
 
 **`earliest_slot`** (`feed/fca.rs`): from the start time, move past any committed crossing closer
 than `max(sep, that crossing's sep)`, and repeat until nothing moves.
