@@ -13,7 +13,7 @@ use crate::feed::trajectory::AircraftProfile;
 /// from moving the median, while still reaching the regional and business types the 0059 seed never
 /// covered. A type short of it on climb, cruise or descent is not profiled and keeps its whole
 /// current profile; the coverage report lists it with its wake class and engine family, and its
-/// flights still pool by engine family and wake class (#818).
+/// flights still pool by wake class, and by engine family when `feed::flow` lists one (#818).
 pub const MIN_FLIGHTS_PER_FIELD: usize = 20;
 
 /// The median of `v` (unsorted), or None when empty.
