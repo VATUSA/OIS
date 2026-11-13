@@ -33,6 +33,8 @@
 // pass: store live, prune 4 unmetered kinds     | the_pass_stores_for_live_fcas_and_prunes_every_unmetered_fca       | DONE
 // pass: one FCA failing does not stop the rest  | one_fcas_failed_sync_does_not_stop_the_pass                        | DONE
 // pass: the error names the failed step         | a_failed_release_read_is_reported_as_that_step                     | DONE
+// late held: slot behind a held gap kept       | a_late_held_flight_behind_a_held_neighbors_gap_crosses_at_its_slot | DONE
+// late held: slot reserved over two passes      | a_flight_held_beside_a_late_held_flight_keeps_its_sta_on_the_next_pass | DONE
 // hysteresis: held kept to +2 min, then dropped | a_held_flight_stays_frozen_up_to_two_minutes_past_the_horizon     | DONE
 // reorder: real change clears, re-held by ETA   | a_real_reorder_clears_the_holds_and_the_pass_re_holds_in_the_new_order | DONE
 // reorder: no-op save keeps; swap / auto clears | a_manual_order_save_that_changes_nothing_keeps_the_holds          | DONE
@@ -307,6 +309,111 @@ async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_no_
             ("AIRB".to_string(), eta_a + 60_000)
         ],
         "the read changed no hold"
+    );
+}
+
+/// An enabled corridor FCA at `rate` per hour with a 30 min horizon, and its id.
+async fn corridor_fca_at_rate(pool: &PgPool, rate: i32) -> String {
+    sqlx::query_scalar(
+        "insert into flow.fca (name, color, artcc, points, dir, mode, rate, mit, enabled, freeze_min) \
+         values ('FRZ', '#fff', 'ZDC', $1, 'any', 'rate', $2, 0, true, 30) returning id",
+    )
+    .bind(json!([[39.5, -75.6], [39.5, -74.0]]))
+    .bind(rate)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Through the traffic route, a held flight seconds late whose slot a held neighbor's gap pushed
+/// past its ETA crosses at that slot, unflagged, not at its ETA inside the neighbor's gap.
+#[sqlx::test]
+async fn a_late_held_flight_behind_a_held_neighbors_gap_crosses_at_its_slot(pool: PgPool) {
+    // Rate 60 (60 s). AIRB, about 50 s ahead of AIRA, is held on time 5 s after its ETA. AIRA is
+    // held 10 s after AIRB's STA, inside AIRB's gap, so its slot is AIRB's STA + 60 s. AIRA's ETA
+    // is past its held STA (late) but short of that slot: it crosses at the slot.
+    let state = state_with(pool.clone(), trailing_pair()).await;
+    let id = corridor_fca_at_rate(&pool, 60).await;
+    let first = traffic(&state, &id).await;
+    let eta_a = ms(&row(&first, "AIRA")["eta"]);
+    let eta_b = ms(&row(&first, "AIRB")["eta"]);
+    let sta_b = eta_b + 5_000;
+    let sta_a = sta_b + 10_000;
+    let slot_a = sta_b + 60_000;
+    assert!(
+        eta_a > sta_a + 5_000 && eta_a < slot_a - 5_000,
+        "fixture: AIRA's ETA {eta_a} sits between its held STA {sta_a} and its slot {slot_a}"
+    );
+    seed_held(&pool, &id, "AIRB", sta_b).await;
+    seed_held(&pool, &id, "AIRA", sta_a).await;
+
+    let rows = traffic(&state, &id).await;
+    let a = row(&rows, "AIRA");
+    let b = row(&rows, "AIRB");
+    assert_eq!(ms(&b["cross_time"]), sta_b, "AIRB keeps its STA");
+    assert_eq!(b["late_sec"], 0);
+    assert_eq!(
+        ms(&a["cross_time"]),
+        slot_a,
+        "AIRA keeps the slot it held, not its ETA in AIRB's gap"
+    );
+    assert!(a["late_sec"].as_i64().unwrap() > 0, "AIRA runs late: {a}");
+    assert_eq!(a["slot_conflict"], false);
+}
+
+/// Two passes of the hold pass: a flight that freezes while a held flight runs late is stored clear
+/// of the late flight's reserved slot, and the next pass and read serve that STA unchanged.
+#[sqlx::test]
+async fn a_flight_held_beside_a_late_held_flight_keeps_its_sta_on_the_next_pass(pool: PgPool) {
+    // Rate 120 (30 s). AIRA is held 10 s before AIRB's ETA, so AIRA runs late and crosses at its
+    // ETA, about 50 s after AIRB's. AIRB is not held yet; its ETA is inside the slot AIRA held,
+    // which stays reserved, so the pass stores AIRB at AIRA's held STA + 30 s.
+    let state = state_with(pool.clone(), trailing_pair()).await;
+    let id = corridor_fca_at_rate(&pool, 120).await;
+    let first = traffic(&state, &id).await;
+    let eta_a = ms(&row(&first, "AIRA")["eta"]);
+    let eta_b = ms(&row(&first, "AIRB")["eta"]);
+    assert!(
+        eta_a - eta_b > 40_000,
+        "fixture: AIRB crosses more than a gap ahead of AIRA: {eta_b} vs {eta_a}"
+    );
+    let sta_a = eta_b - 10_000;
+    seed_held(&pool, &id, "AIRA", sta_a).await;
+
+    sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![
+            ("AIRA".to_string(), sta_a),
+            ("AIRB".to_string(), sta_a + 30_000)
+        ],
+        "AIRB is stored clear of AIRA's reserved slot, not at its ETA"
+    );
+    sync_fca_holds_once(&state, Utc::now()).await.unwrap();
+    let rows = traffic(&state, &id).await;
+    let b = row(&rows, "AIRB");
+    assert_eq!(b["sta_frozen"], true);
+    assert_eq!(
+        ms(&b["cross_time"]),
+        sta_a + 30_000,
+        "the next pass and read serve AIRB's STA unchanged"
+    );
+    assert_eq!(b["late_sec"], 0);
+    assert_eq!(b["slot_conflict"], false);
+    let a = row(&rows, "AIRA");
+    assert_eq!(
+        ms(&a["cross_time"]),
+        ms(&a["eta"]),
+        "AIRA crosses at its ETA"
+    );
+    assert!(a["late_sec"].as_i64().unwrap() > 0);
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![
+            ("AIRA".to_string(), sta_a),
+            ("AIRB".to_string(), sta_a + 30_000)
+        ],
+        "the second pass changed no hold"
     );
 }
 

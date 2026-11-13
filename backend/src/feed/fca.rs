@@ -404,8 +404,9 @@ pub fn separation_ms(mode: &str, rate: i32, mit: i32, cross_speed: f64) -> i64 {
 ///
 /// **Auto:** releases at their anchor, then held flights in held-STA order, then other airborne,
 /// then ground. A held flight takes the earliest slot clear of everything placed before it; one
-/// running late crosses at the later of that slot and its ETA, moving no release or held flight.
-/// Every other flight takes the earliest slot clear of everything placed before it.
+/// running late crosses at the later of that slot and its ETA, moving no release or held flight,
+/// and its slot stays reserved. Every other flight takes the earliest slot clear of everything
+/// placed before it, a late held flight's reserved slot included.
 /// **Manual** (`order` = candidate indices): the controller's order, newcomers appended by ETA; each
 /// unreleased flight, a late held one included, goes behind every crossing ordered ahead of it.
 pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -> Vec<MeterOutput> {
@@ -503,8 +504,10 @@ fn meter_manual(
 /// Auto mode places by tier: releases at their anchor, then held flights in held-STA order, then
 /// other airborne, then ground, each by anchor. A held flight first takes the earliest slot clear of
 /// everything placed before it, starting at its held STA; one running late then crosses at the
-/// later of that slot and its ETA, which moves no release and no other held flight. Unheld flights
-/// take the earliest slot clear of every release and held crossing.
+/// later of that slot and its ETA, which moves no release and no other held flight. Each unheld
+/// flight takes the earliest slot clear of every release, every held crossing, every unheld flight
+/// placed before it and, while a held flight runs late, the slot that flight held: the window a
+/// late flight leaves is not given to other traffic.
 fn meter_auto(
     cands: &[MeterInput],
     sep: &[i64],
@@ -536,12 +539,14 @@ fn meter_auto(
     }
     // A late held flight's anchor is its ETA (never before its held STA), so this is the later of
     // its slot and its ETA. It is applied after every held flight is placed, so none moves for it.
+    // Its slot stays committed beside its new time: a flight placed into the window it left would
+    // be stored there, then pushed a gap later on the next pass by that same slot.
     for &i in &fixed_tiers {
-        if tier(i) == 1 {
-            sched[i] = sched[i].max(anchor[i]);
+        if tier(i) == 1 && anchor[i] > sched[i] {
+            sched[i] = anchor[i];
+            committed.push((sched[i], sep[i]));
         }
     }
-    committed = fixed_tiers.iter().map(|&i| (sched[i], sep[i])).collect();
     for &i in &rest {
         sched[i] = earliest_slot(anchor[i], sep[i], &committed);
         committed.push((sched[i], sep[i]));
@@ -1141,23 +1146,51 @@ mod tests {
     }
 
     #[test]
-    fn a_held_flight_exactly_at_its_sta_counts_as_on_time() {
-        // A's ETA is exactly its held STA, T0+20 min. B is held at T0+21 min, ETA T0+19 min, and
-        // the gap grew to 120 s. Held flights go in STA order: A keeps 20 with no lateness, B goes
-        // to 22.
+    fn a_flight_stored_in_a_late_held_flights_window_keeps_its_time_on_the_next_pass() {
+        // Rate 30 (120 s). A is held at T0+20 min but its ETA is T0+25 min, so it crosses at 25.
+        // B, not yet held, has ETA T0+20.5 min, inside the slot A held. A's slot stays reserved, so
+        // B is placed at T0+22 min, not in the window A left. On the next pass B is held there and
+        // keeps that time, on time and unflagged. Placing B at its ETA would store T0+20.5 min,
+        // which A's slot then pushes to T0+22 min on that next pass.
+        let a = MeterInput {
+            held_ms: Some(T0 + 20 * MIN),
+            ..mk(T0 + 25 * MIN, true, 400.0)
+        };
+        let b_eta = T0 + 20 * MIN + 30 * S;
+        let first = meter(&[a.clone(), mk(b_eta, true, 400.0)], &freeze_cfg(T0), None);
+        assert_eq!(first[0].sched_ms, T0 + 25 * MIN, "A crosses at its ETA");
+        assert_eq!(first[1].sched_ms, T0 + 22 * MIN, "B is clear of A's slot");
+        assert!(first[1].sta_frozen, "B's time is the STA the pass stores");
+        let next = meter(
+            &[
+                a,
+                MeterInput {
+                    held_ms: Some(first[1].sched_ms),
+                    ..mk(b_eta, true, 400.0)
+                },
+            ],
+            &freeze_cfg(T0),
+            None,
+        );
+        assert_eq!(next[0].sched_ms, T0 + 25 * MIN);
+        assert_eq!(next[1].sched_ms, T0 + 22 * MIN, "B keeps its stored STA");
+        assert_eq!(next[1].late_sec, 0);
+        assert!(!next[1].slot_conflict);
+    }
+
+    #[test]
+    fn a_ground_flight_is_spaced_clear_of_a_late_held_flights_reserved_slot() {
+        // A is held at T0+20 min and runs late to T0+25 min. G, on the ground with ETA T0+20 min,
+        // is spaced clear of both A's reserved slot and A's crossing: T0+22 min.
         let cands = vec![
             MeterInput {
                 held_ms: Some(T0 + 20 * MIN),
-                ..mk(T0 + 20 * MIN, true, 400.0)
+                ..mk(T0 + 25 * MIN, true, 400.0)
             },
-            MeterInput {
-                held_ms: Some(T0 + 21 * MIN),
-                ..mk(T0 + 19 * MIN, true, 400.0)
-            },
+            mk(T0 + 20 * MIN, false, 400.0),
         ];
         let out = meter(&cands, &freeze_cfg(T0), None);
-        assert_eq!(out[0].sched_ms, T0 + 20 * MIN);
-        assert_eq!(out[0].late_sec, 0);
+        assert_eq!(out[0].sched_ms, T0 + 25 * MIN);
         assert_eq!(out[1].sched_ms, T0 + 22 * MIN);
     }
 

@@ -5403,8 +5403,9 @@ export interface components {
              * @description An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
              *     its STA is stored. A background pass, every 15 s, stores its STA from the first pass that
              *     saw it there, for enabled FCAs only; from then `cross_time` keeps that STA while the ETA
-             *     moves, unless the flight runs late or a crossing placed ahead of it needs a larger gap (a
-             *     release, the manual order, or under MIT a held flight ahead whose gap grew) (#817).
+             *     moves, unless the flight runs late or a crossing placed ahead of it needs the gap (a
+             *     release, a held flight ahead that was itself pushed later, the manual order, or under MIT a
+             *     held flight ahead whose gap grew) (#817).
              */
             sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */

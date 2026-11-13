@@ -225,12 +225,15 @@ takeoff now. `freeze_min` 0 turns holding off.
 **Auto mode** (`meter_auto`). Flights sort by tier: releases by anchor; held flights by held STA;
 other airborne, then ground, by anchor. A release is placed at its anchor and never moved. A held
 flight is placed at `earliest_slot(held, sep, committed)`, so its slot moves later only when a
-release sits in its gap or the pair's gap grows (under MIT the gap follows each aircraft's
-predicted crossing speed). Once every held flight has its slot, one running late moves to
-`max(slot, eta)`: it crosses no earlier than the slot it had while on time, and no release or
-other held flight moves for it. Unheld flights are then placed at
-`earliest_slot(anchor, sep, committed)` against those final times, so they are spaced behind a
-late held flight. Sequence numbers follow the scheduled time.
+crossing placed before it needs the gap: a release in its gap, an earlier held flight pushed into
+its gap, or a pair's gap that grows (under MIT the gap follows each aircraft's predicted crossing
+speed). Once every held flight has its slot, one running late moves to `max(slot, eta)`: it
+crosses no earlier than the slot it had while on time, and no release or other held flight moves
+for it. Its slot stays in `committed` beside its new time. Unheld flights are then placed at
+`earliest_slot(anchor, sep, committed)`, clear of every release, every held flight's time, each
+late flight's reserved slot and the unheld flights placed before them. A flight that froze in the
+window a late flight left would otherwise be stored there and pushed a gap later on the next pass
+by that same slot. Sequence numbers follow the scheduled time.
 
 **`earliest_slot`** (`feed/fca.rs`): from the start time, move past any committed crossing closer
 than `max(sep, that crossing's sep)`, and repeat until nothing moves.
