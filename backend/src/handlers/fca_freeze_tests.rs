@@ -17,7 +17,7 @@
 // pass stores airborne, not ground              | the_pass_holds_an_airborne_flights_sta_and_not_a_ground_one        | DONE
 // read serves a held STA while ETA differs      | a_held_sta_is_served_on_the_next_read_while_the_eta_differs        | DONE
 // late held flight crosses at ETA               | a_late_held_flight_crosses_at_its_eta_and_shows_lateness           | DONE
-// late held flight in a gap: flagged, no move  | a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nobody | DONE
+// late held flight in a gap: flagged, no move  | a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_no_held_neighbor | DONE
 // freeze_min 0 stores nothing                   | freezing_off_stores_nothing                                        | DONE
 // stale row ignored by read, replaced by pass   | a_stale_held_row_is_ignored_by_the_read_then_replaced_by_the_pass  | DONE
 // retention constant pinned                     | the_retention_window_sits_between_the_fixtures                     | DONE
@@ -258,20 +258,22 @@ async fn a_late_held_flight_crosses_at_its_eta_and_shows_lateness(pool: PgPool) 
 }
 
 #[sqlx::test]
-async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nobody(pool: PgPool) {
-    // AIRB crosses first (about 50 s ahead) and is held on time at exactly AIRA's ETA. AIRA was held 60 s before its
-    // ETA, so it runs 60 s late: it crosses at its ETA, inside AIRB's gap, and is flagged. AIRB
-    // keeps its STA. Spacing AIRA clear of AIRB instead puts it a full gap behind.
+async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_no_held_neighbor(
+    pool: PgPool,
+) {
+    // AIRA was held 60 s before its ETA, so it runs 60 s late. AIRB, which crosses about 50 s
+    // ahead of AIRA, is held on time 120 s (the rate-30 gap) behind AIRA's held STA. AIRA crosses
+    // at its ETA, 60 s before AIRB's STA, inside AIRB's gap, and is flagged. AIRB keeps its STA.
     let state = state_with(pool.clone(), trailing_pair()).await;
     let id = corridor_fca(&pool, 30).await;
     let first = traffic(&state, &id).await;
     let eta_a = ms(&row(&first, "AIRA")["eta"]);
     assert!(
         ms(&row(&first, "AIRB")["eta"]) < eta_a - 5_000,
-        "AIRB crosses ahead, so a hold at AIRA's ETA keeps it on time: {} vs {eta_a}",
+        "AIRB crosses ahead, so a hold after AIRA's ETA keeps it on time: {} vs {eta_a}",
         ms(&row(&first, "AIRB")["eta"])
     );
-    seed_held(&pool, &id, "AIRB", eta_a).await;
+    seed_held(&pool, &id, "AIRB", eta_a + 60_000).await;
     seed_held(&pool, &id, "AIRA", eta_a - 60_000).await;
 
     let rows = traffic(&state, &id).await;
@@ -284,7 +286,7 @@ async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nob
     );
     assert_eq!(
         ms(&b["cross_time"]),
-        eta_a,
+        eta_a + 60_000,
         "the on-time neighbor keeps its STA"
     );
     assert_eq!(b["slot_conflict"], false);
@@ -301,7 +303,7 @@ async fn a_late_held_flight_inside_a_held_neighbors_gap_is_flagged_and_moves_nob
         held_rows(&pool, &id).await,
         vec![
             ("AIRA".to_string(), eta_a - 60_000),
-            ("AIRB".to_string(), eta_a)
+            ("AIRB".to_string(), eta_a + 60_000)
         ],
         "the read changed no hold"
     );
