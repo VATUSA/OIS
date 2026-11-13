@@ -175,6 +175,7 @@ describe("A failed background refetch keeps the aircraft profiles table (#824 AC
 // AC2 list: label                             | labels a family row "Jet family" and a turboprop row "Turboprop family"
 // AC2 list: name shown on a family row         | shows a family row's name beside its label
 // AC2 add: PUT kind family + key              | adds a family through Add family: PUTs kind family and the chosen key
+// AC2 add: saves the family shown on open     | adds the family Add family opens on when Save is pressed without changing it
 // AC2 add: no duplicate family offered        | offers only the engine families that have no row yet
 // AC2 add: hidden when all families exist     | hides Add family once every engine family has a row, and keeps Add type
 // AC2 edit: PUT with the row kind/key         | edits a family row: PUTs kind family and the row's key
@@ -268,6 +269,20 @@ describe("Engine-family rows on the aircraft profiles page (#818 AC2)", () => {
     expect(opts.params.path).toEqual({kind: "family", key: "turboprop"});
     expect(opts.body.desc_fpm).toBe(1500);
     expect(document.body.textContent).not.toContain("New engine family");
+  });
+
+  it("adds the family Add family opens on when Save is pressed without changing it", async () => {
+    put.mockResolvedValue({data: TURBOPROP, error: undefined, response: {status: 200}});
+    const {qc} = await mount([DEFAULT, JET, B738]);
+    await click(button(await mountActions(qc), "Add family"));
+
+    expect((fieldInput("Engine family") as HTMLSelectElement).value).toBe("turboprop");
+    expect(button(document, "Save").disabled).toBe(false);
+    await click(button(document, "Save"));
+    await settle();
+
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0][1].params.path).toEqual({kind: "family", key: "turboprop"});
   });
 
   it("adds a type through Add type: PUTs kind type and the typed key uppercased", async () => {
