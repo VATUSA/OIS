@@ -128,9 +128,10 @@ async fn put_family_refuses_a_caller_without_the_update_permission(pool: PgPool)
     );
 }
 
-/// Aircraft profiles are national reference data: the handler has no ARTCC check and
+/// Characterizes current behavior, not the intended contract: the handler has no ARTCC check and
 /// `RequirePermission` is scope-blind, so a facility-scoped holder writes a family row exactly as
-/// it writes a type or wake row today. #818 does not change who may write.
+/// it writes a type or wake row. #818 does not change who may write; #1038 decides whether a
+/// scoped holder should, and flips this test if not.
 #[sqlx::test]
 async fn put_family_by_a_zdc_scoped_holder_is_accepted_as_national_data(pool: PgPool) {
     let state = test_state(pool.clone(), HashMap::new());

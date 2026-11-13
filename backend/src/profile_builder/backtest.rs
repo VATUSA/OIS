@@ -1166,6 +1166,28 @@ mod family_backtest_tests {
     }
 
     #[test]
+    fn set_b_builds_a_profiled_type_on_the_family_row_set_a_resolves_it_to() {
+        let mut rows = vec![
+            row("default", "default", 1_800.0),
+            row("family", "jet", 2_100.0),
+        ];
+        rows[0].desc_ias_hi = 305.0;
+        rows[1].desc_ias_hi = 315.0;
+        let mut acc = Accumulator::default();
+        for _ in 0..20 {
+            acc.add_flight("B772", "", &measured(2_600.0));
+        }
+
+        let (a, b, changed) = profile_sets(&rows, &built(acc, jet));
+
+        assert_eq!(labels(changed), ["family:jet", "type:B772"]);
+        assert_eq!(a.resolve_label("B772", ""), "family:jet");
+        let p = b.resolve("B772", "");
+        assert_eq!(b.resolve_label("B772", ""), "type:B772");
+        assert_eq!((p.desc_fpm, p.desc_ias_hi), (2_600.0, 315.0));
+    }
+
+    #[test]
     fn set_b_builds_a_wake_row_on_set_a_wake_row_else_its_default() {
         let mut rows = vec![
             row("default", "default", 1_800.0),

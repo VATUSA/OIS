@@ -2232,6 +2232,9 @@ mod profile_table_family_tests {
         assert_eq!(lower.resolve_label("b772", "h"), "family:jet");
         assert_eq!(lower.resolve("b772", "h").desc_fpm, 2_222.0);
         assert_eq!(lower.resolve_label("at72", ""), "family:turboprop");
+        let wake_only = table(&["wake", "default"]);
+        assert_eq!(wake_only.resolve_label("QQQQ", "h"), "wake:H");
+        assert_eq!(wake_only.resolve("QQQQ", "h").desc_fpm, 3_333.0);
         let piston = ProfileTable::new(
             fpm(4_444.0),
             HashMap::new(),
