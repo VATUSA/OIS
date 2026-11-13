@@ -1352,8 +1352,8 @@ mod tests {
     }
 
     /// AC3 of #817: in every mode, no two crossings are closer than the pair's separation unless
-    /// one of them is a flagged release or a flagged held flight running late. Deterministic pseudo-random scenarios (an LCG), each mixing
-    /// airborne, ground, released and held flights.
+    /// one of them is a flagged release or a flagged held flight running late. Deterministic
+    /// pseudo-random scenarios (an LCG), each mixing airborne, ground, released and held flights.
     #[test]
     fn no_two_crossings_are_closer_than_the_gap_except_a_flagged_release_or_late_held_flight() {
         let mut seed: u64 = 0x817;

@@ -25,7 +25,7 @@ Once an FCA exists, OIS finds every aircraft whose **filed route** crosses the l
 
 The map draws the matched aircraft **tinted and numbered in crossing order**, and the FCA's row shows a live **count** of how many aircraft it's currently metering. When you need to override the computed order, you can **reorder** the sequence manually.
 
-Two aircraft are always spaced by the larger of the two gaps they need. Under MIT that is the gap of the slower one. Released aircraft keep their release time, and every other aircraft is spaced clear of them. If a release, or a frozen aircraft running late, ends up inside another aircraft's gap, its strip shows **IN GAP**, so you can re-release it or change the order.
+Two aircraft are always spaced by the larger of the two gaps they need. Under MIT that is the gap of the slower one. Released aircraft keep their release time, and every other aircraft is spaced clear of them except a frozen aircraft running late (below). If a release, or a frozen aircraft running late, ends up inside another aircraft's gap, its strip shows **IN GAP**, so you can re-release it or change the order.
 
 ### Freeze horizon
 
