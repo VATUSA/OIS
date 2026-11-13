@@ -631,7 +631,7 @@ async fn sync_held_stas_drops_only_the_named_callsigns_of_this_fca(pool: PgPool)
 }
 
 #[sqlx::test]
-async fn sync_held_stas_stores_nothing_for_a_read_that_raced_an_edit(pool: PgPool) {
+async fn sync_held_stas_stores_nothing_for_a_pass_that_raced_an_edit(pool: PgPool) {
     let id = corridor_fca(&pool, 30).await;
     let now = Utc::now();
     let metered_under = updated_at(&pool, &id).await;
@@ -858,7 +858,7 @@ async fn a_one_minute_horizon_does_not_freeze_a_flight_minutes_out(pool: PgPool)
     );
     assert_eq!(
         air["sta_frozen"], false,
-        "1 min is 60 000 ms, not 1 ms or 60 s per unit"
+        "a 1 min horizon does not freeze a flight 2 min out, as a larger unit would"
     );
     assert!(held_rows(&pool, &id).await.is_empty());
 }
@@ -1210,7 +1210,7 @@ async fn a_second_set_for_the_same_time_is_spaced_behind_the_first(pool: PgPool)
     assert_eq!(row(&rows, "GND2")["slot_conflict"], false);
 }
 
-/// AC3's one exception reaches the board: two releases 135 s apart are clear at rate 30, and once
+/// One of AC3's two exceptions reaches the board: two releases 135 s apart are clear at rate 30, and once
 /// the rate drops to 10 (a 360 s gap) the traffic route flags both, while the airborne flight
 /// crossing minutes out stays clear.
 #[sqlx::test]
@@ -1262,7 +1262,7 @@ async fn the_traffic_route_flags_a_release_left_inside_the_gap(pool: PgPool) {
     assert_eq!(
         row(&after, "AIR1")["slot_conflict"],
         false,
-        "an unreleased flight is never flagged"
+        "an unheld, unreleased flight is never flagged"
     );
 }
 
