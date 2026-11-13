@@ -3448,4 +3448,25 @@ mod aircraft_profiles_refresh_tests {
             "a successful load installs the DB table"
         );
     }
+
+    /// The spawned job sets the flag it was handed, not one of its own; the loop's first tick runs
+    /// at once.
+    #[sqlx::test]
+    async fn the_spawned_refresh_marks_the_flag_it_is_given(pool: PgPool) {
+        let profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_aircraft_profiles_refresh(
+            Arc::new(JobRegistry::new()),
+            pool,
+            profiles,
+            loaded.clone(),
+        );
+        let set = tokio::time::timeout(Duration::from_secs(10), async {
+            while !loaded.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(set.is_ok(), "the first run sets the given flag");
+    }
 }
