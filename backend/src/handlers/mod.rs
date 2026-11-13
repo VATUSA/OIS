@@ -56,6 +56,8 @@ mod sector_limits_tests;
 #[cfg(test)]
 mod actor_ratchet_tests;
 #[cfg(test)]
+mod audit_write_tests;
+#[cfg(test)]
 mod auth_annotation_tests;
 #[cfg(test)]
 mod flow_event_fca_visibility_tests;

@@ -219,3 +219,98 @@ pub(crate) async fn send_json(
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
 }
+
+/// Records every `tracing` event a future emits, so a test can assert on a log line.
+///
+/// `#[sqlx::test]` runs a current-thread runtime and `send` drives the production router in-task,
+/// so a subscriber attached to the request future with `WithSubscriber` sees the handler's and the
+/// middleware's events and reqlog's per-request line (`reqlog.rs`'s
+/// `the_middleware_actually_obeys_the_rule` is the precedent). [`log_capture::saw_the_request`] is
+/// the positive control that capture was live.
+pub(crate) mod log_capture {
+    use std::collections::BTreeMap;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// One event emitted while the future ran.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Captured {
+        pub(crate) level: tracing::Level,
+        pub(crate) target: String,
+        /// The formatted message.
+        pub(crate) message: String,
+        /// Every other field: string values unquoted, `%` values in their Display form.
+        pub(crate) fields: BTreeMap<String, String>,
+    }
+
+    struct Recorder(Arc<Mutex<Vec<Captured>>>);
+
+    #[derive(Default)]
+    struct Visitor {
+        message: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for Visitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = value.to_owned();
+            } else {
+                self.fields
+                    .insert(field.name().to_owned(), value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            } else {
+                self.fields
+                    .insert(field.name().to_owned(), format!("{value:?}"));
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = Visitor::default();
+            event.record(&mut visitor);
+            let metadata = event.metadata();
+            self.0
+                .lock()
+                .expect("the recorder's mutex is only held for a push")
+                .push(Captured {
+                    level: *metadata.level(),
+                    target: metadata.target().to_owned(),
+                    message: visitor.message,
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    /// Runs `future` under a recording subscriber; returns its output and every event it emitted.
+    pub(crate) async fn capturing<F: Future>(future: F) -> (F::Output, Vec<Captured>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Recorder(Arc::clone(&events)));
+        let output = future.with_subscriber(subscriber).await;
+        let captured = events
+            .lock()
+            .expect("the recorder's mutex is only held for a push")
+            .clone();
+        (output, captured)
+    }
+
+    /// Positive control: reqlog's per-request INFO line, proving the capture saw the request.
+    pub(crate) fn saw_the_request(events: &[Captured]) -> bool {
+        events
+            .iter()
+            .any(|e| e.level == tracing::Level::INFO && e.target == "ois_backend::reqlog")
+    }
+}
