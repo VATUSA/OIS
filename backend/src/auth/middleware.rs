@@ -89,7 +89,7 @@ fn parse_ws_protocol_token(header: Option<&http::HeaderValue>) -> Option<String>
 }
 
 /// The kind of presented credential whose lookup failed, for the log line; never the token (#922).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum CredentialKind {
     SessionCookie,
     DesktopSession,

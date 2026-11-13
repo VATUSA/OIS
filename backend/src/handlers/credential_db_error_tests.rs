@@ -24,6 +24,7 @@
 //! AC1+D70 cookie on a public route              | a_session_cookie_on_a_public_route_whose_lookup_fails_answers_503
 //! AC1 api key last_used_at write fails         | an_api_key_whose_last_used_write_fails_answers_503_and_logs_the_kind
 //! AC1 SA last_used_at write fails              | a_service_account_whose_last_used_write_fails_answers_503_and_logs_the_kind
+//! AC1 valid cookie beside a failing bearer      | a_valid_cookie_beside_a_failing_api_key_lookup_answers_503
 //! AC2 session: revoked, expired, unknown        | a_dead_session_cookie_is_anonymous_and_logs_no_error
 //! AC2 desktop: revoked, expired, unknown        | a_dead_desktop_bearer_is_anonymous_and_logs_no_error
 //! AC2 api key: revoked, expired, disabled, unkn.| a_dead_api_key_is_anonymous_and_logs_no_error
@@ -294,6 +295,55 @@ async fn an_api_key_whose_lookup_fails_answers_503_and_logs_the_kind(pool: PgPoo
     for event in &captured {
         assert!(!event.text().contains(&token), "token logged: {event:#?}");
     }
+}
+
+// AC1: a valid cookie does not carry a request whose bearer lookup fails; on `next` the request ran
+// as the cookie user.
+#[sqlx::test]
+async fn a_valid_cookie_beside_a_failing_api_key_lookup_answers_503(pool: PgPool) {
+    let (events, _guard) = record();
+    let state = test_state(pool.clone(), Default::default());
+    let user = seed_user(&pool).await;
+    grant(&pool, &user, "system.jobs.read", None).await;
+    let cookie = session_cookie(&pool, &user).await;
+    let (_key_id, bearer) = api_key(&pool, "system.jobs.read").await;
+
+    let (status, body) = call_with(
+        &state,
+        http::Method::GET,
+        "/api/v1/admin/jobs",
+        &[&cookie, &bearer],
+        None,
+    )
+    .await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    drain(&events);
+
+    sqlx::query("alter table access.api_keys rename to api_keys_t922")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, body) = call_with(
+        &state,
+        http::Method::GET,
+        "/api/v1/admin/jobs",
+        &[&cookie, &bearer],
+        None,
+    )
+    .await;
+    let captured = drain(&events);
+
+    assert_eq!(status, http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body, service_unavailable());
+    let errors = backend_errors(&captured);
+    assert_eq!(errors.len(), 1, "exactly one ERROR: {captured:#?}");
+    assert_eq!(
+        errors[0].fields.get("credential").map(String::as_str),
+        Some("api_key"),
+        "{:#?}",
+        errors[0]
+    );
 }
 
 // AC1, AC3, AC5 (service-account resolver): an `ois_sa_` token whose lookup fails is 503.
