@@ -213,7 +213,8 @@ impl ErrorStats {
     }
 }
 
-/// One scored flight: its type, whether set B profiles that type, and its error under each set.
+/// One scored flight: its type, whether set B times it on a tier set B changed, and its error under
+/// each set.
 pub struct Scored {
     pub ty: String,
     pub in_b: bool,

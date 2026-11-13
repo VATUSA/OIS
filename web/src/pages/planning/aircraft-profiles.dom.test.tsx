@@ -270,6 +270,27 @@ describe("Engine-family rows on the aircraft profiles page (#818 AC2)", () => {
     expect(document.body.textContent).not.toContain("New engine family");
   });
 
+  it("adds a type through Add type: PUTs kind type and the typed key uppercased", async () => {
+    put.mockResolvedValue({data: {...B738, key: "B38M"}, error: undefined, response: {status: 200}});
+    const {qc} = await mount([DEFAULT, B738]);
+    const actions = await mountActions(qc);
+
+    await click(button(actions, "Add type"));
+    expect(document.body.textContent).toContain("New aircraft type");
+    expect(document.body.textContent).not.toContain("Engine family");
+    await typeInto(fieldInput("ICAO type"), "b");
+    expect(button(document, "Save").disabled).toBe(true);
+    await typeInto(fieldInput("ICAO type"), "b38m");
+    expect(button(document, "Save").disabled).toBe(false);
+    await click(button(document, "Save"));
+    await settle();
+
+    expect(put).toHaveBeenCalledTimes(1);
+    const [path, opts] = put.mock.calls[0];
+    expect(path).toBe("/api/v1/flow/aircraft-profiles/{kind}/{key}");
+    expect(opts.params.path).toEqual({kind: "type", key: "B38M"});
+  });
+
   it("offers only the engine families that have no row yet", async () => {
     const options = () => [...(fieldInput("Engine family") as HTMLSelectElement).options].map((o) => o.value);
 
@@ -299,6 +320,7 @@ describe("Engine-family rows on the aircraft profiles page (#818 AC2)", () => {
     await mount([DEFAULT, JET, B738]);
 
     await click(button(section("Engine families"), "Edit"));
+    expect(document.body.textContent).toContain("Edit profile");
     await typeInto(fieldInput("Descent rate (fpm)"), "2456");
     await click(button(document, "Save"));
 

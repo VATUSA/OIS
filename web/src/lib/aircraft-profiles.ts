@@ -117,7 +117,8 @@ export function parseDescent(
   };
 }
 
-/** The engine families a `family` profile may be keyed by (the backend refuses any other key). */
+/** The engine families a `family` profile may be keyed by: `feed::flow::ENGINE_FAMILIES`, whose
+ * keys the backend accepts and no other. */
 export const ENGINE_FAMILIES = ["jet", "turboprop", "piston"] as const;
 
 /** `jet` → `Jet`. */
