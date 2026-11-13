@@ -591,7 +591,10 @@ pub async fn list_held_stas(
     .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
     .fetch_all(pool)
     .await
-    .map_err(|_| ApiError::Internal)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "held STA list failed");
+        ApiError::Internal
+    })?;
     let mut held: HashMap<String, HashMap<String, i64>> = HashMap::new();
     for (fca_id, callsign, sta) in rows {
         held.entry(fca_id).or_default().insert(callsign, sta);

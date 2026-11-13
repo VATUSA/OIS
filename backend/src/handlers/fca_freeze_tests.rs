@@ -32,6 +32,7 @@
 // GET /traffic anon + signed in writes nothing  | a_traffic_read_signed_out_or_in_writes_no_held_row                 | DONE
 // pass: store live, prune 4 unmetered kinds     | the_pass_stores_for_live_fcas_and_prunes_every_unmetered_fca       | DONE
 // pass: one FCA failing does not stop the rest  | one_fcas_failed_sync_does_not_stop_the_pass                        | DONE
+// pass: the error names the failed step         | a_failed_release_read_is_reported_as_that_step                     | DONE
 // hysteresis: held kept to +2 min, then dropped | a_held_flight_stays_frozen_up_to_two_minutes_past_the_horizon     | DONE
 // reorder: real change clears, re-held by ETA   | a_real_reorder_clears_the_holds_and_the_pass_re_holds_in_the_new_order | DONE
 // reorder: no-op save keeps; swap / auto clears | a_manual_order_save_that_changes_nothing_keeps_the_holds          | DONE
@@ -1610,7 +1611,10 @@ async fn one_fcas_failed_sync_does_not_stop_the_pass(pool: PgPool) {
     let result = sync_fca_holds_once(&state, pass_now()).await;
 
     let err = result.expect_err("the failed FCA is reported");
-    assert!(err.contains(&bad), "the error names the failed FCA: {err}");
+    assert!(
+        err.contains(&format!("{bad} (store holds)")),
+        "the error names the failed FCA and its step: {err}"
+    );
     assert!(!err.contains(&good), "and only it: {err}");
     assert!(held_rows(&pool, &bad).await.is_empty());
     assert_eq!(
@@ -1622,6 +1626,29 @@ async fn one_fcas_failed_sync_does_not_stop_the_pass(pool: PgPool) {
         held_rows(&pool, &off).await.is_empty(),
         "the prune still ran"
     );
+}
+
+/// The pass's error names the step an FCA failed at, so a release read that fails is not
+/// reported as a failed store.
+#[sqlx::test]
+async fn a_failed_release_read_is_reported_as_that_step(pool: PgPool) {
+    let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
+    let id = corridor_fca(&pool, 30).await;
+    sqlx::query("alter table flow.fca_release rename to fca_release_hidden")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = sync_fca_holds_once(&state, pass_now())
+        .await
+        .expect_err("the release read fails");
+
+    assert!(
+        err.contains(&format!("{id} (load releases)")),
+        "the error names the FCA and the step: {err}"
+    );
+    assert!(!err.contains("store holds"), "{err}");
+    assert!(held_rows(&pool, &id).await.is_empty(), "nothing stored");
 }
 
 #[sqlx::test]

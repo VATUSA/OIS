@@ -2308,6 +2308,7 @@ async fn meter_fca(
     let runways = state.runways.clone();
     let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let flight_exclusions = state.flight_exclusions.load_full();
+    let fca_id = fca.id.clone();
     tokio::task::spawn_blocking(move || {
         let (flights, mut metas) = build_candidates(
             &fca,
@@ -2330,7 +2331,10 @@ async fn meter_fca(
         finalize(&fca, flights, &metas, now.timestamp_millis())
     })
     .await
-    .map_err(|_| ApiError::Internal)
+    .map_err(|e| {
+        tracing::error!(fca_id, error = %e, "FCA metering task failed");
+        ApiError::Internal
+    })
 }
 
 /// One tick of the held-STA pass (`jobs::spawn_fca_hold_sync`, #817): meter every enabled live FCA
@@ -2339,7 +2343,7 @@ async fn meter_fca(
 /// meter. It is the only writer of `flow.fca_held_sta` besides the edit, reorder and delete
 /// clears. It lives here, not in a repo or `feed/`, because it reuses this module's candidate
 /// building and metering, which every FCA read also runs. Every FCA is attempted; the `Err`
-/// names the ones that failed.
+/// names each one that failed and the step it failed at.
 ///
 /// Until this replica has loaded what the ETAs are built from ([`hold_inputs_ready`]) the tick
 /// changes nothing: an empty board would read as every held flight having left, and an STA metered
@@ -2357,7 +2361,7 @@ pub(crate) async fn sync_fca_holds_once(
     let fcas: Vec<FcaBody> = flow_repo::list_fcas(pool)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "held STA pass: list FCAs failed");
+            tracing::error!(step = "list FCAs", error = %e, "held STA pass failed");
             "list FCAs failed".to_string()
         })?
         .into_iter()
@@ -2367,7 +2371,7 @@ pub(crate) async fn sync_fca_holds_once(
     let mut held_by_fca = flow_repo::list_held_stas(pool, &fca_ids, now)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "held STA pass: list held STAs failed");
+            tracing::error!(step = "list held STAs", error = %e, "held STA pass failed");
             "list held STAs failed".to_string()
         })?;
     let mut failed: Vec<String> = Vec::new();
@@ -2375,19 +2379,25 @@ pub(crate) async fn sync_fca_holds_once(
         let (fca_id, updated_at) = (fca.id.clone(), fca.updated_at);
         let held = held_by_fca.remove(&fca_id).unwrap_or_default();
         let synced = async {
-            let releases = load_releases(pool, &fca_id).await?;
-            let flights = meter_fca(state, fca, releases, held.clone(), now, false).await?;
+            let releases = load_releases(pool, &fca_id)
+                .await
+                .map_err(|e| ("load releases", e))?;
+            let flights = meter_fca(state, fca, releases, held.clone(), now, false)
+                .await
+                .map_err(|e| ("meter", e))?;
             let (store, drop) = held_changes(&flights, &held);
             let sync = flow_repo::HeldStaSync {
                 store: &store,
                 drop: &drop,
             };
-            flow_repo::sync_held_stas(pool, &fca_id, updated_at, &sync, now).await
+            flow_repo::sync_held_stas(pool, &fca_id, updated_at, &sync, now)
+                .await
+                .map_err(|e| ("store holds", e))
         }
         .await;
-        if let Err(e) = synced {
-            tracing::error!(fca_id, error = %e, "held STA pass: FCA not synced");
-            failed.push(fca_id);
+        if let Err((step, e)) = synced {
+            tracing::error!(fca_id, step, error = %e, "held STA pass: FCA not synced");
+            failed.push(format!("{fca_id} ({step})"));
         }
     }
     if flow_repo::prune_unmetered_held_stas(pool).await.is_err() {
