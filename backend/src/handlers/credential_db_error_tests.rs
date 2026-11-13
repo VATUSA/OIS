@@ -5,8 +5,8 @@
 //!
 //! Every test goes through the real router (`resolve_current_user` → reqlog → rate limit → audit →
 //! handler). The fault is DDL inside the test's own `#[sqlx::test]` database: a renamed resolver
-//! table, or a `before update` trigger that raises on the `last_used_at` bookkeeping write. The
-//! valid-credential control runs before the fault, in the same test.
+//! table, or a `before update` trigger that raises on the `last_used_at` bookkeeping write. In each
+//! 503 test, a valid-credential control runs before the fault.
 //!
 //! Events are captured with a thread-default subscriber: `#[sqlx::test]` runs a current-thread
 //! runtime, so the oneshot router and the websocket test's spawned server tasks all emit on this
@@ -568,7 +568,8 @@ async fn an_api_key_whose_last_used_write_fails_answers_503_and_logs_the_kind(po
         .unwrap();
     sqlx::query(
         "create function public.t922_refuse() returns trigger language plpgsql as \
-         $$ begin raise exception 't922 injected last_used_at fault'; end $$",
+         $$ begin raise exception 't922 injected last_used_at fault' \
+         using detail = 't922-detail-sentinel'; end $$",
     )
     .execute(&pool)
     .await
@@ -580,6 +581,8 @@ async fn an_api_key_whose_last_used_write_fails_answers_503_and_logs_the_kind(po
     .execute(&pool)
     .await
     .unwrap();
+    // The fault setup's own statements carry the sentinel; only the request's events count.
+    drain(&events);
 
     let (status, body) = call_with(
         &state,
@@ -607,8 +610,14 @@ async fn an_api_key_whose_last_used_write_fails_answers_503_and_logs_the_kind(po
         "the update, not the lookup, failed: {:#?}",
         errors[0]
     );
+    // The error is logged by `Display`: a Postgres error's `Debug` carries its `detail`, which on
+    // this table can hold the row's `secret_hash` and `last_used_ip`.
     for event in &captured {
         assert!(!event.text().contains(&token), "token logged: {event:#?}");
+        assert!(
+            !event.text().contains("t922-detail-sentinel"),
+            "error detail logged: {event:#?}"
+        );
     }
 }
 
