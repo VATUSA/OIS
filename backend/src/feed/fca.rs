@@ -904,6 +904,42 @@ mod tests {
         assert_eq!(past[1].sched_ms, T0 + 1220 * S, "H is spaced behind it");
     }
 
+    /// A late ground release never crosses before its issued time. Rate 30, a 120 s gap. R is
+    /// released for T0+1000 s with wheels-up T0+300 s; at T0+400 s it is 100 s late, but its ETE
+    /// has shrunk to 500 s (ETA T0+1500 s), so a takeoff now would cross at T0+900 s. R stays at
+    /// T0+1000 s. Held H keeps T0+1200 s, and unheld U (ETA T0+1050 s) is spaced clear of R and H
+    /// at T0+1320 s; placed at a takeoff now, R would leave U at its ETA.
+    #[test]
+    fn a_late_ground_release_whose_ete_shrank_keeps_its_issued_time() {
+        let release = MeterInput {
+            frozen_ms: Some(T0 + 1000 * S),
+            wheels_up_ms: Some(T0 + 300 * S),
+            ground_allowance_ms: 10 * MIN,
+            ..mk(T0 + 1500 * S, false, 400.0)
+        };
+        let held = MeterInput {
+            held_ms: Some(T0 + 1200 * S),
+            ..mk(T0 + 1150 * S, true, 400.0)
+        };
+        let unheld = mk(T0 + 1050 * S, true, 400.0);
+        let out = meter(&[release, held, unheld], &freeze_cfg(T0 + 400 * S), None);
+        assert_eq!(
+            (out[0].sched_ms, out[0].late_sec),
+            (T0 + 1000 * S, 100),
+            "late, but no earlier than its issued time"
+        );
+        assert_eq!(
+            out[1].sched_ms,
+            T0 + 1200 * S,
+            "the held neighbor does not move"
+        );
+        assert_eq!(
+            out[2].sched_ms,
+            T0 + 1320 * S,
+            "U is spaced clear of R and H"
+        );
+    }
+
     /// Rate 30 (120 s) at the default freeze horizon, measured from `now_ms`.
     fn freeze_cfg(now_ms: i64) -> MeterConfig<'static> {
         MeterConfig {
@@ -1144,6 +1180,42 @@ mod tests {
             "the held STA holds in manual mode"
         );
         assert!(out[1].sta_frozen);
+    }
+
+    #[test]
+    fn manual_order_chains_an_on_time_held_flight_behind_a_late_one_ordered_ahead_of_it() {
+        // Rate 30 (120 s), manual order [L, H, N]. L is held at T0+20 min but its ETA is T0+21 min;
+        // H is held at T0+20.5 min and on time; N is unheld with ETA T0+40 min. The controller's order
+        // wins: L crosses at T0+21 min, H goes 120 s behind it to T0+23 min, and neither is flagged.
+        // Auto's late-held rule would keep H's slot at T0+22 min and flag L inside H's gap.
+        let cands = vec![
+            MeterInput {
+                held_ms: Some(T0 + 20 * MIN),
+                ..mk(T0 + 21 * MIN, true, 400.0)
+            },
+            MeterInput {
+                held_ms: Some(T0 + 20 * MIN + 30 * S),
+                ..mk(T0 + 20 * MIN + 30 * S, true, 400.0)
+            },
+            mk(T0 + 40 * MIN, true, 400.0),
+        ];
+        let out = meter(&cands, &freeze_cfg(T0), Some(&[0, 1, 2]));
+        assert_eq!(
+            (
+                out[0].sched_ms,
+                out[0].late_sec,
+                out[0].slot_conflict,
+                out[0].seq
+            ),
+            (T0 + 21 * MIN, 60, false, 1),
+            "L crosses at its ETA, first, unflagged"
+        );
+        assert_eq!(
+            (out[1].sched_ms, out[1].slot_conflict, out[1].seq),
+            (T0 + 23 * MIN, false, 2),
+            "H chains behind L"
+        );
+        assert_eq!(out[2].sched_ms, T0 + 40 * MIN, "N keeps its ETA");
     }
 
     #[test]
