@@ -19,8 +19,8 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   cookie, a desktop `ois_dsk_` token, an `ois_pat_` API key or an `ois_sa_` service-account token whose
   lookup fails on the database (recording the key's or account's last use included) answers `503`. It
   used to be treated as anonymous: `401` on a protected route, the signed-out response on a public one.
-  A `503` here is not a sign-out: keep the token and retry. An unknown, revoked or expired token is
-  still `401`, and a request with no token is unchanged.
+  A `503` here is not a sign-out: keep the token and retry. An unknown, revoked, expired or disabled
+  token is still anonymous (`401` on a protected route), and a request with no token is unchanged.
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,
