@@ -259,6 +259,42 @@ async fn a_successful_audit_insert_logs_no_error(pool: PgPool) {
     let rows = audit_rows(&pool).await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].0.is_some(), "the actor resolved");
+    assert_eq!(
+        (rows[0].1.as_str(), rows[0].2.as_deref()),
+        ("flow.sector-limits", Some("010"))
+    );
+}
+
+/// `record_audit`, which the access editor and the VATUSA reconciler propagate with `?`, still
+/// fails its caller when the insert fails.
+#[sqlx::test]
+async fn record_audit_still_returns_the_failure_to_its_caller(pool: PgPool) {
+    refuse_inserts(&pool, "access.audit_logs", "audit insert refused by test").await;
+    let entry = || crate::repos::audit::AuditEntry {
+        actor_id: None,
+        action: "update".into(),
+        resource_type: "flow.sector-limits".into(),
+        resource_id: Some("010".into()),
+        artcc_id: None,
+        reason: None,
+        before_state: None,
+        after_state: None,
+        ip_address: None,
+    };
+
+    let result = crate::repos::audit::record_audit(&pool, entry()).await;
+
+    assert!(
+        matches!(result, Err(crate::errors::ApiError::Internal)),
+        "{result:?}"
+    );
+    sqlx::query("drop trigger test_refuse on access.audit_logs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::repos::audit::record_audit(&pool, entry())
+        .await
+        .expect("positive control: the same entry records once the trigger is gone");
 }
 
 // ---- AC 2: audit_key's failed insert, every key action ----------------------------------------------
