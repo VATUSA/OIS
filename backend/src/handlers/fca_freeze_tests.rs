@@ -390,6 +390,41 @@ fn the_retention_window_sits_between_the_fixtures() {
     );
 }
 
+/// A row exactly `HELD_STA_RETAIN_MS` past its STA is still held by the read and kept by the sync's
+/// stale prune; one millisecond older is neither.
+#[sqlx::test]
+async fn a_held_row_at_the_retention_edge_is_kept_and_one_ms_older_is_not(pool: PgPool) {
+    let id = corridor_fca(&pool, 30).await;
+    let now = Utc::now();
+    let edge = now.timestamp_millis() - flow_repo::HELD_STA_RETAIN_MS;
+    seed_held(&pool, &id, "EDGE", edge).await;
+    seed_held(&pool, &id, "PAST", edge - 1).await;
+
+    let listed = flow_repo::list_held_stas(&pool, std::slice::from_ref(&id), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed[&id],
+        HashMap::from([("EDGE".to_string(), edge)]),
+        "the read holds the edge row only"
+    );
+
+    let store = [("NEW1".to_string(), now.timestamp_millis() + 600_000)];
+    let sync = flow_repo::HeldStaSync {
+        store: &store,
+        drop: &[],
+    };
+    let at = updated_at(&pool, &id).await;
+    flow_repo::sync_held_stas(&pool, &id, at, &sync, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        held_rows(&pool, &id).await,
+        vec![("EDGE".to_string(), edge), ("NEW1".to_string(), store[0].1)],
+        "the sync prunes the older row and keeps the edge row"
+    );
+}
+
 async fn updated_at(pool: &PgPool, fca_id: &str) -> chrono::DateTime<Utc> {
     flow_repo::get_fca(pool, fca_id)
         .await
