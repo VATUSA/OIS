@@ -687,6 +687,17 @@ async fn the_pass_fails_while_a_failed_loader_has_left_its_input_empty(pool: PgP
     );
 }
 
+/// A replica running without a database has no holds to keep, so the pass succeeds as a no-op
+/// instead of failing every tick in the job registry.
+#[tokio::test]
+async fn without_a_database_the_pass_succeeds_and_does_nothing() {
+    let state = crate::state::AppState::without_db();
+    assert_eq!(
+        sync_fca_holds_once(&state, Utc::now()).await,
+        Ok("no database")
+    );
+}
+
 #[sqlx::test]
 async fn a_one_minute_horizon_does_not_freeze_a_flight_minutes_out(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1")]).await;
