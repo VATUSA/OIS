@@ -65,7 +65,7 @@ new_repo all-pass
 suite bin/lib/c.test.sh "$(rec c)"; suite bin/lib/a.test.sh "$(rec a)"; suite bin/lib/b.test.sh "$(rec b)"
 invoke
 if [[ $RC -eq 0 && "$(ran)" == "a b c" ]] && has "PASS bin/lib/a.test.sh" && has "PASS bin/lib/b.test.sh" \
-    && has "PASS bin/lib/c.test.sh" && has "shell suites: 4 passed, 0 failed"; then
+    && has "PASS bin/lib/c.test.sh" && has "shell suites: 3 passed, 0 failed"; then
     ok "every suite passes: exit 0, each named PASS, run in glob order"
 else bad "all pass: rc=$RC ran='$(ran)': $OUTPUT"; fi
 
