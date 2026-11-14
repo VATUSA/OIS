@@ -129,3 +129,38 @@ fn a_zero_pool_size_logs_one_error_naming_the_variable() {
     let (_, unset) = boot(&[]);
     assert!(!unset.contains(" ERROR "), "{unset}");
 }
+
+/// `rate_limit_per_min` reads the variable it is named and logs a bad value (#923). `PATH` is set in
+/// every test process and is never a number, so this needs no `set_var`.
+#[test]
+fn a_rate_limit_read_from_a_set_malformed_variable_logs_one_error_and_keeps_its_default() {
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    assert!(std::env::var("PATH").is_ok_and(|path| path.parse::<u32>().is_err()));
+    let capture = Capture::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let limit = tracing::subscriber::with_default(subscriber, || {
+        ois_backend::config::rate_limit_per_min("PATH", 37)
+    });
+    assert_eq!(limit.get(), 37);
+    let logged = String::from_utf8(capture.0.lock().expect("capture lock").clone()).unwrap();
+    let lines: Vec<&str> = logged.lines().collect();
+    assert_eq!(lines.len(), 1, "{logged}");
+    assert!(
+        lines[0].contains("ERROR") && lines[0].contains("variable=\"PATH\""),
+        "{logged}"
+    );
+}
