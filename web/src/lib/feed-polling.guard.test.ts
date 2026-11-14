@@ -37,9 +37,9 @@ function body(file: string, hook: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
-// The whole interval line, anchored, so the call is tied to the live branch and passed `live`: a
-// swapped ternary, a polling replay branch, `pollUnlessLive(15_000, false)` or `… || 15_000` all
-// poll on top of the tick (#952).
+// The whole interval line, anchored, so the call is tied to the live branch and passed `live`.
+// `pollUnlessLive(15_000, false)` and `… || 15_000` poll on top of the tick; a swapped ternary stops
+// the live fallback poll, and a polling replay branch polls a `hist-*` key no tick refetches (#952).
 const LIVE_ONLY = [/^refetchInterval: pollUnlessLive\([\d_]+, live\),$/];
 const MODE_AWARE = [
   // useQuery: the live branch of an `at == null` ternary; the replay branch is `false`.
