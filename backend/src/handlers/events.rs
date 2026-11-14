@@ -3920,7 +3920,8 @@ mod lifecycle_failure_tests {
             .unwrap()
     }
 
-    /// The status of the TMI the package's one item points at, or `None` when its `live_ref` is null.
+    /// `(restriction, status)` of the TMI the package's one item points at, or `None` when its
+    /// `live_ref` is null.
     async fn live_tmi(pool: &PgPool, pkg: &str) -> Option<(String, String)> {
         sqlx::query_as(
             "select t.restriction, t.status from events.tmi_package_item i \
@@ -4193,39 +4194,72 @@ mod lifecycle_failure_tests {
     }
 
     /// AC1: rebuilding the armer failing counts on the activate side and on the archive side's
-    /// attribution. `find_current_user_by_actor` joins `access.v_user_primary_role`.
+    /// attribution, and the loop moves on to the next package on both sides.
+    ///
+    /// `find_current_user_by_actor` left-joins `access.v_user_primary_role`; the replacement view
+    /// raises a division by zero for `bad_user`'s row only, so only that user's lookups fail. The
+    /// divisor is not a constant, or the planner would fold it and fail every lookup.
     #[sqlx::test]
-    async fn a_failed_armer_lookup_counts_on_both_sides(pool: PgPool) {
-        let user = seed(&pool).await;
-        let due = package(&pool, DUE, "Plan", &user, "20 MIT").await;
-        arm(
-            &pool,
-            &due,
-            &Attribution::for_user_id(&pool, &user).await.unwrap(),
-        )
-        .await;
-        let ended = package(&pool, ENDED, "Plan", &user, "30 MIT").await;
-        activate_as(&pool, &ended, &user).await;
+    async fn a_failed_armer_lookup_fails_only_that_package_on_both_sides(pool: PgPool) {
+        let good_user = seed(&pool).await;
+        let bad_user = crate::scope_test_support::seed_user(&pool).await;
+        let as_good = Attribution::for_user_id(&pool, &good_user).await.unwrap();
+        let as_bad = Attribution::for_user_id(&pool, &bad_user).await.unwrap();
+        let bad_due = package(&pool, DUE, "Plan", &bad_user, "40 MIT").await;
+        let good_due = package(&pool, DUE, "Plan", &good_user, "20 MIT").await;
+        arm(&pool, &bad_due, &as_bad).await;
+        arm(&pool, &good_due, &as_good).await;
+        let good_ended = package(&pool, ENDED, "Plan", &good_user, "30 MIT").await;
+        let bad_ended = package(&pool, ENDED, "Plan", &bad_user, "50 MIT").await;
+        // An updated row moves to the end of the unordered listing, so activate `bad_ended` last.
+        activate_as(&pool, &good_ended, &good_user).await;
+        activate_as(&pool, &bad_ended, &bad_user).await;
         end_the_event(&pool).await;
-        assert_eq!(due_ids(&pool).await, vec![due.clone()]);
-        assert_eq!(ended_ids(&pool).await, vec![ended.clone()]);
-        sqlx::query("alter view access.v_user_primary_role rename to v_user_primary_role_gone")
-            .execute(&pool)
-            .await
-            .unwrap();
+        assert_eq!(
+            due_ids(&pool).await,
+            vec![bad_due.clone(), good_due.clone()]
+        );
+        assert_eq!(
+            ended_ids(&pool).await,
+            vec![bad_ended.clone(), good_ended.clone()]
+        );
+        sqlx::raw_sql(&format!(
+            "alter view access.v_user_primary_role rename to v_user_primary_role_real; \
+             create view access.v_user_primary_role as \
+             select u.id as user_id, \
+                    case when u.id = '{bad_user}' \
+                         then (1 / (length(u.id) - length(u.id)))::text end as primary_role \
+             from identity.users u;"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            Principal::from_actor(&pool, as_bad.actor_id.as_deref().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            Principal::from_actor(&pool, as_good.actor_id.as_deref().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         let (result, log) = capturing_pass(&pool).await;
-        assert_eq!(result, Err("0 activated, 0 archived, 2 failed".to_string()));
+        assert_eq!(result, Err("1 activated, 1 archived, 2 failed".to_string()));
         for (message, pkg) in [
-            ("auto-activate: cannot load the armer", &due),
-            ("auto-archive: cannot attribute the package", &ended),
+            ("auto-activate: cannot load the armer", &bad_due),
+            ("auto-archive: cannot attribute the package", &bad_ended),
         ] {
             let failure = line(&log, message);
             assert!(failure.contains(&format!("package_id={pkg}")), "{failure}");
             assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
         }
-        assert_eq!(status(&pool, &due).await, "draft");
-        assert_eq!(status(&pool, &ended).await, "activated");
+        assert_eq!(status(&pool, &bad_due).await, "draft");
+        assert_eq!(status(&pool, &good_due).await, "activated");
+        assert_eq!(status(&pool, &bad_ended).await, "activated");
+        assert_eq!(status(&pool, &good_ended).await, "archived");
     }
 
     /// A `MakeWriter` that keeps everything the fmt layer writes.
@@ -4281,6 +4315,7 @@ mod lifecycle_failure_tests {
         let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
         arm(&pool, &bad, &by).await;
         arm(&pool, &good, &by).await;
+        assert_eq!(due_ids(&pool).await, vec![bad.clone(), good.clone()]);
         fail_tmi_insert(&pool).await;
 
         let (result, log) = capturing_pass(&pool).await;
