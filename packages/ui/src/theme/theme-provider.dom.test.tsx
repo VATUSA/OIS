@@ -1,23 +1,29 @@
 // @vitest-environment jsdom
 import {act} from "react";
 import {createRoot} from "react-dom/client";
-import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
+import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 
 import {ThemeProvider, useTheme} from "./theme-provider";
 
 /**
  * ThemeProvider mounts above the app's ErrorBoundary, so a storage read that throws would leave a
- * blank page (#947). Every case mounts with defaultTheme="dark" so the fallback is distinguishable
- * from the built-in "system" default, which resolves to "light" under the matchMedia stub below.
+ * blank page (#947). Each fallback case mounts with defaultTheme="dark" so the fallback is
+ * distinguishable from the built-in "system" default, which resolves to "light" under the matchMedia
+ * stub below; the per-entry test picks a default that differs from the stored value.
  */
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
 }
+const originalMatchMedia = window.matchMedia;
 beforeAll(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   // ThemeProvider reads the OS color scheme, and jsdom has no `matchMedia`.
   window.matchMedia ??= ((query: string) =>
     ({matches: false, media: query, addEventListener() {}, removeEventListener() {}}) as unknown as MediaQueryList);
+});
+afterAll(() => {
+  window.matchMedia = originalMatchMedia;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
 });
 
 let root: ReturnType<typeof createRoot> | undefined;
@@ -100,6 +106,21 @@ describe("ThemeProvider storage guards", () => {
       host?.remove();
       host = undefined;
     }
+  });
+
+  it("persists the chosen theme to localStorage for the next mount", () => {
+    mount();
+    expect(current?.theme).toBe("dark");
+
+    act(() => current!.setTheme("light"));
+
+    expect(localStorage.getItem("ois-theme")).toBe("light");
+    act(() => root?.unmount());
+    root = undefined;
+    host?.remove();
+    host = undefined;
+    mount();
+    expect(current?.theme).toBe("light");
   });
 
   it("switches theme when setItem throws, without throwing", () => {
