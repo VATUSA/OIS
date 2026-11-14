@@ -1770,8 +1770,9 @@ pub struct SectorDemandBody {
 }
 
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
-/// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
-/// token, or empty). See migration 0059 and `feed::trajectory`.
+/// trajectory / ETA model. Keyed by `kind` (`type` / `family` / `wake` / `default`) + `key` (ICAO
+/// type, engine family `jet` / `turboprop` / `piston`, wake token, or empty). See migrations 0059
+/// and 0134 and `feed::trajectory`.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AircraftProfileBody {
     pub kind: String,
@@ -2660,7 +2661,8 @@ pub struct FcaFlight {
 /// ETA, the speeds/wind used, and any filed-route tokens that failed to resolve (issue #37).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FcaFlightDebug {
-    /// The resolved aircraft performance profile: "type:C172", "wake:H", or "default".
+    /// The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
+    /// "default".
     pub profile: String,
     /// Cruise TAS (kt) used for the ETA, after the profile cap.
     pub cruise_tas: i64,

@@ -3378,6 +3378,59 @@ mod project_traffic_tests {
             .fold(0.0, f64::max);
         assert!(most > 2.0, "the projections part by at most {most} nm");
     }
+
+    /// #818: `project_traffic` resolves each pilot's profile through the table it is given. A B772
+    /// (a jet in `ENGINE_REF`, no type row) climbing to FL350 is projected higher on a jet family row
+    /// that climbs faster; a QQQQ (no engine family) is projected the same.
+    #[test]
+    fn a_jet_with_no_type_row_is_projected_on_its_family_row() {
+        let typed = |cs: &str, ty: &str| {
+            let mut p = airborne_pilot();
+            p.callsign = cs.into();
+            p.flight_plan.as_mut().unwrap().aircraft_short = ty.into();
+            p
+        };
+        let data = VatsimData {
+            pilots: vec![typed("JET1", "B772"), typed("CTL1", "QQQQ")],
+            ..Default::default()
+        };
+        let jet = ProfileTable::new(
+            crate::feed::trajectory::AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([(
+                "jet".to_string(),
+                crate::feed::trajectory::AircraftProfile {
+                    climb_fpm_hi: 3_000.0,
+                    ..crate::feed::trajectory::AircraftProfile::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        let alt = |table: &ProfileTable, cs: &str| {
+            project_traffic(
+                &data,
+                &NavData::load(),
+                &airports(),
+                table,
+                &Winds::default(),
+                &HashMap::new(),
+                180,
+            )
+            .into_iter()
+            .find(|a| a.callsign == cs)
+            .expect(cs)
+            .alt
+        };
+        assert!(
+            alt(&jet, "JET1") > alt(&ProfileTable::default(), "JET1"),
+            "the faster-climbing jet family row must project it higher"
+        );
+        assert_eq!(
+            alt(&jet, "CTL1"),
+            alt(&ProfileTable::default(), "CTL1"),
+            "control"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4056,6 +4109,48 @@ mod prefile_fix_predictions_tests {
         );
         let (end, end_still) = (shear.last().unwrap(), still.last().unwrap());
         assert!((end.groundspeed_kt - end_still.groundspeed_kt).abs() <= 1);
+    }
+
+    /// #818: `fix_predictions` (here through `prefile_fix_predictions`) resolves the profile from
+    /// `state.aircraft_profiles`. A B772 (a jet in `ENGINE_REF`, no type row) reaches the arrival
+    /// field sooner on a jet family row that climbs and descends faster; a QQQQ (no engine family)
+    /// does not move.
+    #[tokio::test]
+    async fn a_jet_with_no_type_row_is_timed_on_its_family_row() {
+        let (st, nav, ap) = (state(), NavData::load(), airports());
+        let typed = |ty: &str| FlightPlan {
+            aircraft_short: ty.into(),
+            ..plan("KJFK", "KDCA", "RBV WHITE SIE")
+        };
+        let arrival = |ty: &str| {
+            prefile_fix_predictions(&st, &nav, &ap, &typed(ty), now())
+                .last()
+                .expect("the resolved route yields fixes")
+                .eta
+        };
+        let (jet_before, ctl_before) = (arrival("B772"), arrival("QQQQ"));
+        st.aircraft_profiles.store(std::sync::Arc::new(
+            crate::feed::trajectory::ProfileTable::new(
+                AircraftProfile::default(),
+                HashMap::new(),
+                HashMap::from([(
+                    "jet".to_string(),
+                    AircraftProfile {
+                        desc_fpm: 3_000.0,
+                        climb_fpm_lo: 3_500.0,
+                        climb_fpm_hi: 3_000.0,
+                        ..AircraftProfile::default()
+                    },
+                )]),
+                HashMap::new(),
+            ),
+        ));
+
+        assert!(
+            arrival("B772") < jet_before,
+            "the jet family row must land it sooner"
+        );
+        assert_eq!(arrival("QQQQ"), ctl_before, "control: no engine family");
     }
 }
 
@@ -6855,5 +6950,175 @@ mod fca_traffic_visibility_tests {
             StatusCode::OK,
             "any signed-in caller reads a deleted FCA (historical replay)"
         );
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#818)
+//
+// Requirement                                    | Test
+// -----------------------------------------------|---------------------------------------------------------------
+// AC1 family tier reaches FCA metering (resolve) | a_family_row_changes_the_metered_eta_of_a_jet_with_no_type_row
+// AC1 family tier reaches the debug label        | the_fca_debug_profile_label_names_the_family_tier
+#[cfg(test)]
+mod family_profile_wiring_tests {
+    //! `build_candidates` resolves each candidate's profile through the `ProfileTable` it is given
+    //! (#818): one airborne pilot at FL350 and one parked at KJFK, both B772 (a jet in
+    //! `ENGINE_REF`, no type row here) direct KJFK→KDCA, a 20 MIT gate in the descent, and a
+    //! QQQQ control (in no engine family) beside them.
+    use std::collections::HashMap;
+
+    use chrono::{DateTime, Utc};
+
+    use super::{ExclusionSet, ReleaseMap, build_candidates};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::{
+        airspace::Boundaries,
+        nav::NavData,
+        runway_db::RunwayDb,
+        trajectory::{AircraftProfile, ProfileTable},
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+    use crate::models::FcaBody;
+
+    fn gate() -> FcaBody {
+        FcaBody {
+            id: "t".into(),
+            name: "t".into(),
+            color: "#fff".into(),
+            artcc: "ZDC".into(),
+            points: sqlx::types::Json(vec![[38.5, -76.75], [39.5, -76.75]]),
+            dests: vec![],
+            origins: vec![],
+            fixes: vec![],
+            scope: vec![],
+            min_fl: None,
+            max_fl: None,
+            dir: "any".into(),
+            mode: "mit".into(),
+            rate: 0,
+            mit: 20,
+            enabled: true,
+            manual_order: vec![],
+            manual_seq: false,
+            updated_at: Utc::now(),
+            updated_by: None,
+            event_id: None,
+            event_status: None,
+            auto_publish: false,
+        }
+    }
+
+    fn pilot(callsign: &str, ty: &str, airborne: bool) -> Pilot {
+        let (lat, lon, alt, gs) = if airborne {
+            (40.5, -74.2, 35_000, 440)
+        } else {
+            (40.64, -73.78, 13, 0)
+        };
+        Pilot {
+            callsign: callsign.into(),
+            latitude: lat,
+            longitude: lon,
+            altitude: alt,
+            groundspeed: gs,
+            heading: 220,
+            flight_plan: Some(FlightPlan {
+                departure: "KJFK".into(),
+                arrival: "KDCA".into(),
+                altitude: "35000".into(),
+                cruise_tas: "440".into(),
+                aircraft: ty.into(),
+                aircraft_short: ty.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn with_jet_family() -> ProfileTable {
+        ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([(
+                "jet".to_string(),
+                AircraftProfile {
+                    desc_fpm: 3_000.0,
+                    climb_fpm_hi: 3_000.0,
+                    ..AircraftProfile::default()
+                },
+            )]),
+            HashMap::new(),
+        )
+    }
+
+    /// Callsign → (eta_ms, debug profile label) under `table`, at a fixed instant.
+    fn run(table: &ProfileTable, debug: bool) -> HashMap<String, (i64, Option<String>)> {
+        let data = VatsimData {
+            pilots: vec![
+                pilot("AAL1", "B772", true),
+                pilot("AAL2", "B772", false),
+                pilot("QQQ1", "QQQQ", true),
+            ],
+            ..Default::default()
+        };
+        let airports: AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let (flights, metas) = build_candidates(
+            &gate(),
+            &data,
+            &airports,
+            &NavData::load(),
+            &Boundaries::default(),
+            &Winds::default(),
+            table,
+            &ReleaseMap::new(),
+            &HashMap::new(),
+            &RunwayDb::default(),
+            &HashMap::new(),
+            &ExclusionSet::new(),
+            &Default::default(),
+            DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+            debug,
+        );
+        assert_eq!(flights.len(), 3, "every pilot crosses the gate");
+        flights
+            .iter()
+            .zip(&metas)
+            .map(|(f, m)| {
+                let label = f.debug.as_ref().map(|d| d.profile.clone());
+                (f.callsign.clone(), (m.eta_ms, label))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_family_row_changes_the_metered_eta_of_a_jet_with_no_type_row() {
+        let without = run(&ProfileTable::default(), false);
+        let with = run(&with_jet_family(), false);
+        for cs in ["AAL1", "AAL2"] {
+            assert!(
+                with[cs].0 < without[cs].0,
+                "{cs}: the faster jet family row must land it earlier ({} vs {})",
+                with[cs].0,
+                without[cs].0
+            );
+        }
+        assert_eq!(
+            with["QQQ1"].0, without["QQQ1"].0,
+            "control: no engine family"
+        );
+    }
+
+    #[test]
+    fn the_fca_debug_profile_label_names_the_family_tier() {
+        let with = run(&with_jet_family(), true);
+        let without = run(&ProfileTable::default(), true);
+        for cs in ["AAL1", "AAL2"] {
+            assert_eq!(with[cs].1.as_deref(), Some("family:jet"), "{cs}");
+            assert_eq!(without[cs].1.as_deref(), Some("default"), "{cs}");
+        }
+        assert_eq!(with["QQQ1"].1.as_deref(), Some("default"));
     }
 }

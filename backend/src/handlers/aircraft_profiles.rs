@@ -18,13 +18,15 @@ use crate::{
         require_permission::RequirePermission,
     },
     errors::ApiError,
+    feed::flow::ENGINE_FAMILIES,
     models::{AircraftProfileBody, UpsertAircraftProfileRequest},
     repos::aircraft_profiles as profiles_repo,
     state::AppState,
 };
 
 /// Normalize `(kind, key)` from the URL to the stored form, rejecting bad combinations. The global
-/// default is addressed as `default/default` and stored with an empty key.
+/// default is addressed as `default/default` and stored with an empty key; a family key is one of
+/// [`ENGINE_FAMILIES`], the values `feed::flow::engine_family` returns, stored lowercase.
 fn normalize(kind: &str, key: &str) -> Result<(String, String), ApiError> {
     match kind {
         "default" => Ok(("default".to_string(), String::new())),
@@ -32,6 +34,13 @@ fn normalize(kind: &str, key: &str) -> Result<(String, String), ApiError> {
             let k = key.to_ascii_uppercase();
             matches!(k.as_str(), "L" | "M" | "H" | "J")
                 .then_some(("wake".to_string(), k))
+                .ok_or(ApiError::BadRequest)
+        }
+        "family" => {
+            let k = key.to_ascii_lowercase();
+            ENGINE_FAMILIES
+                .contains(&k.as_str())
+                .then_some(("family".to_string(), k))
                 .ok_or(ApiError::BadRequest)
         }
         "type" => {

@@ -402,7 +402,7 @@ database named by `DATABASE_URL` and writes nothing to it:
 RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- build \
     --from 2026-09-20 --to 2026-10-11 --out /tmp/aircraft_profiles.json --report coverage.md
 
-# Score: the stored catalog (set A) against it with the measured types applied (set B).
+# Score: the stored catalog (set A) against it with the measured rows applied (set B).
 RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- backtest \
     --from 2026-09-20 --to 2026-10-11 --profiles /tmp/aircraft_profiles.json --report backtest.md
 ```
@@ -422,10 +422,15 @@ RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder 
   across flights. A field counts as measured at 20 flights (`MIN_FLIGHTS_PER_FIELD`); a type is
   profiled when climb, cruise and descent each have a measured field (`climb_fpm_lo` or
   `climb_fpm_hi`, `cruise_tas`, `desc_fpm`). Types below that are listed in
-  the coverage report with their wake class and engine family. The same data gives the same bytes.
+  the coverage report with their wake class and engine family. The file also pools the training
+  flights of every type the engine reference lists by engine family (`families`, from
+  `feed::flow::engine_family`), and every flight that carries a wake class by that class (`wakes`;
+  `aircraft_faa` carries only H and J), under the same threshold and the same profiled rule (#818). The same data
+  gives the same bytes.
   The file is a measurement to review, not committed data.
 - **Backtest** (`profile_builder::backtest`). Each held-out flight is replayed from its first fix
   1,000 ft above its take-off roll, on the plan revision in force then, through
   `predict::arrival_eta` and, for the top of descent, `predict::arrival_route` +
   `predict::eta_along_route`: the code every arrival ETA runs. Errors are predicted minus
-  observed, at the top of descent and at touchdown.
+  observed, at the top of descent and at touchdown. Set B lays each profiled type, family and wake
+  row over set A; the report's second table holds the flights set B times on one of those rows.
