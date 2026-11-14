@@ -62,11 +62,10 @@ pub(crate) async fn job_loop(api: OisClient, http: Arc<Http>, poll: Duration) {
 
 /// What a job type dispatches to.
 ///
-/// Split out of [`perform_job`] so the table can be asserted. `perform_job` needs a live `Http` and an
-/// `OisClient`, so it is unreachable from a test — which meant the one-line arm deciding whether a
-/// cancellation posts at all had no coverage: dropping `"tmi_cancel"` from it left every test green
-/// while cancels parked as `failed` (#436 review). Same reason `build_message` is split out in
-/// `jobs::tmi`.
+/// Split out of [`perform_job`] so every job type's arm can be asserted without a fake backend and a
+/// fake Discord. Before the split, the one-line arm deciding whether a cancellation posts at all had
+/// no coverage: dropping `"tmi_cancel"` from it left every test green while cancels parked as
+/// `failed` (#436 review). Same reason `build_message` is split out in `jobs::tmi`.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
     AceRequestPost,
@@ -168,5 +167,214 @@ mod route_tests {
         ] {
             assert_eq!(route(job_type), expected, "{job_type}");
         }
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ois_client::OisClient;
+    use serenity::all::Http;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    use super::job_loop;
+
+    const LEASE: &str = "POST /api/v1/integration/jobs/lease";
+    const POLL: Duration = Duration::from_millis(100);
+    /// D72's 15 s request timeout, plus the poll, plus one second of slack: a hung call must have
+    /// failed and the loop leased again inside this. A literal, so a request timeout raised past
+    /// 16 s fails here.
+    const NEXT_LEASE_WITHIN: Duration = Duration::from_millis(16_100);
+
+    /// Reads one whole request, its `content-length` body included, and returns its request line,
+    /// followed by a space and the body when there is one. The body is drained so that answering a
+    /// POST never closes on unread bytes, which would reset the connection under the client.
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return String::new(),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let body_len = head
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        while buf.len() < head_end + body_len {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let line = head.lines().next().unwrap_or_default();
+        let body = String::from_utf8_lossy(&buf[head_end..]);
+        if body.is_empty() {
+            line.to_string()
+        } else {
+            format!("{line} {body}")
+        }
+    }
+
+    async fn reply_json(stream: &mut TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    /// A fake backend, which also stands in for Discord's REST API when an `Http` is pointed at it.
+    /// It reports every request line on the channel. The first lease is answered with `first_lease`
+    /// or, when that is `None`, held open with no reply; every ack is held open; every later lease,
+    /// and any other request, is answered with an empty JSON array.
+    async fn fake_backend(
+        first_lease: Option<&'static str>,
+    ) -> (String, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            let mut leases = 0;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let line = read_request(&mut stream).await;
+                let is_lease = line.starts_with(LEASE);
+                let is_ack = line.contains("/ack");
+                // A send fails only once the test has stopped listening.
+                let _ = tx.send(line);
+                if is_lease {
+                    leases += 1;
+                    match (leases, first_lease) {
+                        (1, None) => held.push(stream),
+                        (1, Some(body)) => reply_json(&mut stream, body).await,
+                        _ => reply_json(&mut stream, "[]").await,
+                    }
+                } else if is_ack {
+                    held.push(stream);
+                } else {
+                    reply_json(&mut stream, "[]").await;
+                }
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// AC 4(a) (#930): the first lease's connection never answers. The loop must give up on it and
+    /// lease again. The clock is real, for the reason in `ois-client`'s timeout tests.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_a_lease_hangs() {
+        let (base, mut requests) = fake_backend(None).await;
+        let api = OisClient::new(base, "t").unwrap();
+        let worker = tokio::spawn(job_loop(api, Arc::new(Http::new("")), POLL));
+
+        let first = tokio::time::timeout(Duration::from_secs(5), requests.recv()).await;
+        assert!(
+            first.ok().flatten().is_some_and(|l| l.starts_with(LEASE)),
+            "the loop never leased"
+        );
+        let second = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        let second = second.expect("no second lease: the loop is stuck on the hung one");
+        assert!(second.is_some_and(|l| l.starts_with(LEASE)));
+    }
+
+    /// AC 4(b) (#930), the nack arm: the lease hands out one job of an unknown type, which `perform_job` fails
+    /// without touching Discord, so the loop nacks it. That ack's connection never answers. The loop
+    /// must give up on the ack and lease again.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_an_ack_hangs() {
+        let one_job = r#"[{"id":"j1","job_type":"no_such_type","payload":{},"subject_type":null,"subject_id":null,"attempt_count":1}]"#;
+        let (base, mut requests) = fake_backend(Some(one_job)).await;
+        let api = OisClient::new(base, "t").unwrap();
+        let worker = tokio::spawn(job_loop(api, Arc::new(Http::new("")), POLL));
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_secs(5), requests.recv()).await {
+                Ok(Some(line)) => seen.push(line),
+                _ => break,
+            }
+        }
+        let next = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        assert_eq!(seen.len(), 2, "expected a lease then an ack, got {seen:?}");
+        assert!(seen[0].starts_with(LEASE), "{seen:?}");
+        assert!(
+            seen[1].starts_with("POST /api/v1/integration/jobs/j1/ack"),
+            "the job was not acked, so the hung ack was never reached: {seen:?}"
+        );
+        assert!(
+            seen[1].contains(r#""success":false"#),
+            "the ack was not a nack, so the failure arm was never reached: {seen:?}"
+        );
+        let next = next.expect("no lease after the hung ack: the loop is stuck on it");
+        assert!(next.is_some_and(|l| l.starts_with(LEASE)));
+    }
+
+    /// AC 4(b) (#930), the success arm: a `guild_snapshot` job, with Discord's REST API pointed at
+    /// the fake (`HttpBuilder::proxy`). The fake lists no guilds and accepts the snapshot push, so the
+    /// job succeeds and the loop acks it as a success. That ack's connection never answers. The loop
+    /// must give up on the ack and lease again.
+    #[tokio::test]
+    async fn job_loop_leases_again_after_a_success_ack_hangs() {
+        let one_job = r#"[{"id":"j1","job_type":"guild_snapshot","payload":{},"subject_type":null,"subject_id":null,"attempt_count":1}]"#;
+        let (base, mut requests) = fake_backend(Some(one_job)).await;
+        let api = OisClient::new(base.clone(), "t").unwrap();
+        let discord = serenity::http::HttpBuilder::new("")
+            .proxy(base)
+            .ratelimiter_disabled(true)
+            .build();
+        let worker = tokio::spawn(job_loop(api, Arc::new(discord), POLL));
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            match tokio::time::timeout(Duration::from_secs(5), requests.recv()).await {
+                Ok(Some(line)) => seen.push(line),
+                _ => break,
+            }
+        }
+        let next = tokio::time::timeout(NEXT_LEASE_WITHIN, requests.recv()).await;
+        worker.abort();
+
+        assert_eq!(
+            seen.len(),
+            4,
+            "expected lease, guilds, snapshot, ack: {seen:?}"
+        );
+        assert!(seen[0].starts_with(LEASE), "{seen:?}");
+        assert!(
+            seen[1].starts_with("GET /api/v10/users/@me/guilds"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[2].starts_with("POST /api/v1/integration/discord/guilds/snapshot"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[3].starts_with("POST /api/v1/integration/jobs/j1/ack"),
+            "the job was not acked, so the hung ack was never reached: {seen:?}"
+        );
+        assert!(
+            seen[3].contains(r#""success":true"#),
+            "the ack was not a success, so the success arm was never reached: {seen:?}"
+        );
+        let next = next.expect("no lease after the hung success ack: the loop is stuck on it");
+        assert!(next.is_some_and(|l| l.starts_with(LEASE)));
     }
 }

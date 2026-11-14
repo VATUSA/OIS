@@ -4,9 +4,19 @@
 //! and (b) call back into the API as a service account when a user interacts with a
 //! message (e.g. claims an ACE request).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+/// How long the bot waits for a TCP connection to the backend before the call fails.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The whole-call deadline: connect, send, and read the response body. Without it one backend
+/// connection that stops answering parks `job_loop` on a lease or an ack until the bot restarts
+/// (#930).
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -147,12 +157,17 @@ pub struct OisClient {
 }
 
 impl OisClient {
-    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        Self {
+    /// Fails only if reqwest cannot build its client (its TLS backend did not initialize).
+    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self, ClientError> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
+        Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token: token.into(),
-            http: reqwest::Client::new(),
-        }
+            http,
+        })
     }
 
     pub fn base_url(&self) -> &str {
@@ -357,7 +372,79 @@ fn ack_query(consumer: &str) -> [(&'static str, &str); 1] {
 
 #[cfg(test)]
 mod tests {
-    use super::{AckBody, ack_query, lease_query};
+    use std::time::{Duration, Instant};
+
+    use super::{AckBody, ClientError, OisClient, ack_query, lease_query};
+
+    /// AC 2 and AC 3 (#930): a backend that accepts the connection and never answers. The bounds are
+    /// D72's 15 s written as literals, so a request timeout outside [15 s, 15.5 s) fails here.
+    ///
+    /// The outer `tokio::time::timeout` is what turns a missing request timeout into a failed test
+    /// rather than a stalled one. The clock is real: a paused clock auto-advances past the timers
+    /// while the local connect is still in flight.
+    #[tokio::test]
+    async fn a_lease_against_a_server_that_never_replies_errors_within_the_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept and hold every connection without writing a byte.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let api = OisClient::new(format!("http://{addr}"), "t").unwrap();
+
+        let started = Instant::now();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(16), api.lease_jobs("discord", 10)).await;
+        let elapsed = started.elapsed();
+
+        let result = outcome.expect("lease_jobs hung past 15 s + 1 s: no request timeout");
+        match result {
+            Err(ClientError::Http(e)) => assert!(e.is_timeout(), "not a timeout: {e}"),
+            other => panic!("expected a timeout error, got {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_secs(15) && elapsed < Duration::from_millis(15_500),
+            "failed after {elapsed:?}, not at the 15 s request timeout"
+        );
+    }
+
+    /// AC 5 (#930): a connect that never completes. A listener with a backlog of 0 queues one
+    /// connection; with that slot taken and nobody accepting, Linux drops the next SYN, so the
+    /// client's connect hangs. Linux-only for that reason. The 15 s request timeout would also end
+    /// it, so the 6 s bound is what proves the 5 s connect timeout fired.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_connect_that_never_completes_errors_within_the_connect_timeout() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(0).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _fills_the_queue = std::net::TcpStream::connect(addr).unwrap();
+        let api = OisClient::new(format!("http://{addr}"), "t").unwrap();
+
+        let started = Instant::now();
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(6), api.lease_jobs("discord", 10)).await;
+        let elapsed = started.elapsed();
+
+        let result = outcome.expect("connect hung past 5 s + 1 s: no connect timeout");
+        match result {
+            Err(ClientError::Http(e)) => assert!(
+                e.is_connect() && e.is_timeout(),
+                "not a connect timeout: {e:?}"
+            ),
+            other => panic!("expected a connect timeout, got {other:?}"),
+        }
+        // Both sides of 5 s: the 6 s guard alone passes any connect timeout under 6 s.
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_millis(5_500),
+            "failed after {elapsed:?}, not at the 5 s connect timeout"
+        );
+        drop(listener);
+    }
 
     /// Pinned against `AckQuery` in `backend/src/handlers/integration.rs`, which requires `consumer`.
     #[test]

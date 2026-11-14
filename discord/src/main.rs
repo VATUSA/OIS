@@ -42,7 +42,13 @@ async fn main() {
         }
     };
 
-    let api = OisClient::new(config.api_base.clone(), config.api_token.clone());
+    let api = match OisClient::new(config.api_base.clone(), config.api_token.clone()) {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build the OIS API client");
+            std::process::exit(1);
+        }
+    };
 
     // No privileged intents needed — component interactions arrive regardless.
     let mut client = match serenity::Client::builder(&config.discord_token, GatewayIntents::empty())
