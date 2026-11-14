@@ -68,7 +68,7 @@ git update-ref refs/remotes/origin/next HEAD && git checkout -qb feat/1/reviewed
 printf 'x\n' > app.rs && git add app.rs && git commit -qm app
 SHA="$(git rev-parse HEAD)"
 git remote add origin git@github.com:VATUSA/OIS.git
-printf 'code\trules/a.md\nintent\t-\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\nac\t@claims\n' > "$WORK/lenses.tsv"
 gate_in_repo() {
     python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$PR" \
         | (cd "$REPO" && REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$GATE" >/dev/null 2>&1)
@@ -78,16 +78,16 @@ stamp_marker() { python3 -I "$ROOT/bin/lib/marker_manifest.py" stamp "$@"; }
 mkdir -p "$MARKERS/review-shipping" && : > "$MARKERS/review-shipping/$SHA"
 mkdir -p "$MARKERS/attest/$SHA"
 printf '| rules/a.md | Alpha | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/code.md"
-printf '| AC | 1 | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/intent.md"
+printf '| SCOPE | app.rs | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/ac.md"
 gate_in_repo; got=$?; [[ $got == 2 ]] && ok "a hand-written marker with no manifest line is gated" || bad "hand-written marker (want 2, got $got)"
 rm -rf "$MARKERS/attest/$SHA" "$MARKERS/review-shipping/$SHA"
 stamp_marker "$REPO" review-shipping "$SHA"
 gate_in_repo; got=$?; [[ $got == 2 ]] && ok "marker without attestation is gated" || bad "marker without attestation (want 2, got $got)"
 mkdir -p "$MARKERS/attest/$SHA"
 printf '| rules/a.md | Alpha | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/code.md"
-printf '| AC | 1 | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/intent.md"
+printf '| SCOPE | app.rs | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/ac.md"
 gate_in_repo; got=$?; [[ $got == 0 ]] && ok "marker with complete attestation passes" || bad "complete attestation (want 0, got $got)"
-rm "$MARKERS/attest/$SHA/intent.md"
+rm "$MARKERS/attest/$SHA/ac.md"
 gate_in_repo; got=$?; [[ $got == 2 ]] && ok "one lens missing is gated" || bad "one lens missing (want 2, got $got)"
 
 # The session cwd is often another checkout (the next repo, or the last worktree entered), so a leading
@@ -96,7 +96,7 @@ gate_from_outside() {
     python3 -c 'import json,sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$1" \
         | (cd "$WORK" && GIT_CEILING_DIRECTORIES="$WORK" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$GATE" >/dev/null 2>&1)
 }
-printf '| AC | 1 | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/intent.md"
+printf '| SCOPE | app.rs | Checked | app.rs:1 |\n' > "$MARKERS/attest/$SHA/ac.md"
 gate_from_outside "cd $REPO && $PR"; got=$?
 [[ $got == 0 ]] && ok "cd into a reviewed checkout is checked there" || bad "cd into reviewed checkout (want 0, got $got)"
 gate_from_outside "cd \"$REPO\" && $PR"; got=$?
@@ -179,7 +179,7 @@ for form in "-H feat/2/unreviewed" "-dH feat/2/unreviewed" "-Hfeat/2/unreviewed"
     if [[ $got == 2 && "$MSG" == *"($UNREVIEWED_SHORT)"* ]]; then ok "$form is checked as feat/2/unreviewed"; else bad "$form (want 2 naming $UNREVIEWED_SHORT, got $got: $MSG)"; fi
 done
 echo "A failed attestation on a branch with no lens map says to merge next:"
-mv "$MARKERS/attest/$SHA/intent.md" "$WORK/intent.md"
+mv "$MARKERS/attest/$SHA/ac.md" "$WORK/ac.md"
 gate_msg "$PR"
 if [[ $got == 2 && "$MSG" == *"git merge origin/next"* ]]; then ok "no lens map: says to merge origin/next"; else bad "no lens map (want 2 and the merge hint, got $got: $MSG)"; fi
 git checkout -q -b feat/5/with-map feat/1/reviewed && printf 'code\trules/a.md\n' > .claude/review-lenses.tsv \
@@ -189,7 +189,7 @@ stamp_marker "$REPO" review-shipping "$MAPPED"
 gate_msg "$PR"
 if [[ $got == 2 && "$MSG" == *"did not attest"* && "$MSG" != *"git merge origin/next"* ]]; then ok "with a lens map: no merge hint"; else bad "with a lens map (want 2, the attestation block and no merge hint, got $got: $MSG)"; fi
 git checkout -q feat/1/reviewed
-mv "$WORK/intent.md" "$MARKERS/attest/$SHA/intent.md"
+mv "$WORK/ac.md" "$MARKERS/attest/$SHA/ac.md"
 gate_msg "$PR --head 'feat/1/reviewed;x'"
 if [[ $got == 2 && "$MSG" == *"is not a branch name"* ]]; then ok "a --head that is not a branch name is refused as such"; else bad "--head 'feat/1/reviewed;x' (got $got: $MSG)"; fi
 

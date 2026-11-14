@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIB="$ROOT/bin/lib/review-attestation.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/review-attestation-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+# The host's git config (commit signing, hooks) stays out of the scratch repository.
+export HOME="$WORK" GIT_CONFIG_NOSYSTEM=1
 
 PASS=0
 FAIL=0
@@ -26,7 +28,7 @@ cd "$REPO" || exit 1
 git init -q .
 git config user.email t@example.com
 git config user.name t
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 cat > rules/a.md <<'EOF'
 # Title is not a lens heading
 ## Alpha — with a dash
@@ -57,13 +59,15 @@ write_complete() {
 | rules/a.md | Beta `code` and \Throwable | N/A | no cache writes in the diff |
 EOF
     printf '| rules/b.md | Gamma | Finding | MAJOR web/src/foo.test.ts:9 |\n' > "$ATT/tests.md"
-    printf '| Scope | App\\Banner | Finding | MAJOR no AC asks for it |\n' > "$ATT/intent.md"
     cat > "$ATT/ac.md" <<'EOF'
 | AC-COUNT | 2 | Checked | #1 fetched 2026-10-08T10:00Z |
 | AC | 1. Admin sees the banner | Checked | web/src/pages/banner.tsx:4 |
 | AC | 2. Banner hides after its end date | Checked | web/src/pages/banner.test.tsx:30 |
+| SCOPE | App\Banner | Finding | MAJOR no AC asks for it |
 EOF
 }
+# claims_fixture [ROWS...]: ac.md keeps its AC rows and holds exactly these claim rows.
+claims_fixture() { write_complete; grep -v '^| SCOPE ' "$ATT/ac.md" > "$WORK/t"; printf '%s\n' "$@" >> "$WORK/t"; mv "$WORK/t" "$ATT/ac.md"; }
 
 # expect WANT(0 complete | 1 gaps) NAME
 expect() {
@@ -74,7 +78,7 @@ expect() {
 }
 
 echo "Complete:"
-write_complete; expect 0 "every heading attested; fenced (backtick, tilde, indented) and h1 lines ignored; an intent row may be a Finding"
+write_complete; expect 0 "every heading attested; fenced (backtick, tilde, indented) and h1 lines ignored; a claim row may be a Finding"
 
 echo "Carried rows (a repeat round):"
 # carried EVIDENCE: the Alpha row's evidence replaced.
@@ -94,26 +98,26 @@ carried 'Carried-from 0123ab: backend/src/foo.rs:12'
 expect 1 "a carried row naming fewer than seven hex characters"
 carried 'Carried-from earlier: backend/src/foo.rs:12'
 expect 1 "a carried row whose commit is not hex"
-write_complete; printf '| Scope | 1 | Checked | Carried-from 0123abc: |\n' > "$ATT/intent.md"
-expect 1 "an intent row carried with no evidence"
-write_complete; printf '| Scope | 1 | Checked | Carried-from 0123abc: AC 2 |\n' > "$ATT/intent.md"
-expect 0 "an intent row carried with its evidence"
+claims_fixture '| SCOPE | 1 | Checked | Carried-from 0123abc: |'
+expect 1 "a claim row carried with no evidence"
+claims_fixture '| SCOPE | 1 | Checked | Carried-from 0123abc: AC 2 |'
+expect 0 "a claim row carried with its evidence"
 
-printf 'code\trules/a.md\r\ntests\trules/b.md\r\nintent\t-\r\nac\t@ac\r\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\r\ntests\trules/b.md\r\nac\t@ac\r\nac\t@claims\r\n' > "$WORK/lenses.tsv"
 write_complete; expect 0 "a CRLF lens map (a Windows checkout under core.autocrlf) reads as LF"
 rm "$ATT/tests.md"; expect 1 "...and a CRLF map still reports a missing attestation"
 
-printf '# a comment line\n\ncode\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf '# a comment line\n\ncode\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 write_complete; expect 0 "comment and blank lines in the lens map are skipped"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 
 printf '## \n## Gamma \t\n' > rules/b.md && git commit -qam bare && SHA="$(git rev-parse HEAD)" && ATT="$REPO/.claude/markers/attest/$SHA"
 write_complete; expect 0 "a bare heading line asks for no row"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
-write_complete; rm "$ATT/intent.md"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
+write_complete; rm "$ATT/ac.md"
 (cd "$REPO" && REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$LIB" check "$SHA" >"$WORK/out" 2>&1)
-[ "$(grep -c "lens 'intent'" "$WORK/out")" = 1 ] && ok "a lens listed twice reports its missing file once" || bad "duplicate lens gaps: $(grep -c "lens 'intent'" "$WORK/out")"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+[ "$(grep -c "lens 'ac'" "$WORK/out")" = 1 ] && ok "a lens listed twice reports its missing file once" || bad "duplicate lens gaps: $(grep -c "lens 'ac'" "$WORK/out")"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 
 printf '    ```\n## Epsilon\n' >> rules/b.md && git commit -qam epsilon && SHA="$(git rev-parse HEAD)" && ATT="$REPO/.claude/markers/attest/$SHA"
 write_complete; expect 1 "a fence marker indented four spaces is not a fence, so the heading after it is still required"
@@ -135,37 +139,41 @@ write_complete; sed 's/| N\/A |/| Skipped |/' "$ATT/code.md" > "$WORK/t" && mv "
 expect 1 "unknown status"
 write_complete; sed 's/| backend\/src\/foo.rs:12 |/|  |/' "$ATT/code.md" > "$WORK/t" && mv "$WORK/t" "$ATT/code.md"
 expect 1 "empty evidence"
-write_complete; printf '| Comment | x | Checked | y |\n' > "$ATT/intent.md"
-expect 0 "intent lens needs any one row, not an AC row"
-write_complete; : > "$ATT/intent.md"
-expect 1 "intent lens with no rows"
-write_complete; printf '| Scope | 1 | Bogus | x.rs:1 |\n' > "$ATT/intent.md"
-expect 1 "intent row with an unknown status"
-write_complete; printf '| Scope | 1 | Checked | x.rs:1\n' > "$ATT/intent.md"
+claims_fixture '| COMMENT | x | Checked | y |'
+expect 0 "@claims needs any one claim row"
+claims_fixture
+expect 1 "@claims with only AC rows: an AC row is not a claim row"
+claims_fixture '| Scope | 1 | Checked | x.rs:1 |'
+expect 1 "a claim row's kind is upper case"
+claims_fixture '| COPY | web/src/x.tsx | Checked | x.tsx:3 |'
+expect 0 "a COPY row is a claim row"
+claims_fixture '| SCOPE | 1 | Bogus | x.rs:1 |'
+expect 1 "claim row with an unknown status"
+claims_fixture '| SCOPE | 1 | Checked | x.rs:1'
 expect 1 "a row missing its closing pipe is not a row"
-write_complete; printf '| Doc | docs/x.md | N/A | no claim changed |\n' > "$ATT/intent.md"
-expect 0 "intent row with status N/A"
+claims_fixture '| DOC | docs/x.md | N/A | no claim changed |'
+expect 0 "claim row with status N/A"
 write_complete; sed 's/^| rules\/a.md | Beta/note | rules\/a.md | Beta/' "$ATT/code.md" > "$WORK/t" && mv "$WORK/t" "$ATT/code.md"
 grep -q '^note | rules/a.md | Beta' "$ATT/code.md" || bad "prose-row fixture not written"
 expect 1 "a pipe-bearing prose line is not a table row"
-write_complete; printf '| Scope | 1 | Checked |  |\n' > "$ATT/intent.md"
-expect 1 "intent row with empty evidence"
+claims_fixture '| SCOPE | 1 | Checked |  |'
+expect 1 "claim row with empty evidence"
 write_complete; sed 's/| rules\/a.md | Beta `code` and \\Throwable | N\/A | no cache writes in the diff |/| rules\/a.md | Beta `code` and \\Throwable | N\/A |/' "$ATT/code.md" > "$WORK/t" && mv "$WORK/t" "$ATT/code.md"
 grep -q 'Throwable | N/A |$' "$ATT/code.md" || bad "three-cell fixture not written"
 expect 1 "a three-cell row does not inherit the previous row's evidence"
-printf 'code\trules/a.md\ncode\trules/missing.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ncode\trules/missing.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 write_complete; expect 1 "an owned file missing at the commit"
-printf 'code\trules/a.md\ncode\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ncode\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 write_complete; expect 1 "a lens-map line with no file column"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 write_complete; sed 's/Alpha — with a dash/Alpha - with a dash/' "$ATT/code.md" > "$WORK/t" && mv "$WORK/t" "$ATT/code.md"
 expect 1 "heading text paraphrased"
 write_complete; sed 's/rules\/a.md | Alpha/rules\/b.md | Alpha/' "$ATT/code.md" > "$WORK/t" && mv "$WORK/t" "$ATT/code.md"
 expect 1 "heading attested against the wrong file"
 
 echo "Acceptance-criteria lens (@ac):"
-# ac_fixture COUNT-ROW [AC-ROWS...]: replace ac.md with exactly these rows.
-ac_fixture() { write_complete; printf '%s\n' "$@" > "$ATT/ac.md"; }
+# ac_fixture COUNT-ROW [AC-ROWS...]: ac.md holds exactly these rows plus one claim row.
+ac_fixture() { write_complete; printf '%s\n' "$@" '| SCOPE | App | Checked | AC 1 |' > "$ATT/ac.md"; }
 C2='| AC-COUNT | 2 | Checked | #1 fetched 2026-10-08T10:00Z |'
 A1='| AC | 1. Admin sees the banner | Checked | banner.tsx:4 |'
 A2='| AC | 2. Banner hides after its end date | Checked | banner.test.tsx:30 |'
@@ -205,11 +213,11 @@ write_complete; rm "$ATT/ac.md"
 expect 1 "the ac lens's file missing"
 
 echo "Lens map without a final newline:"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims' > "$WORK/lenses.tsv"
 write_complete; expect 0 "complete with a newline-less map"
 rm "$ATT/ac.md"
 expect 1 "the last lens is still required"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 
 echo "Reads the reviewed commit, not the working tree:"
 write_complete; printf '## Delta\n' >> rules/b.md
@@ -222,12 +230,12 @@ write_complete; expect 1 "a committed new heading is required"
 echo "The checker's own lens map wins over the branch's:"
 LAYOUT="$WORK/layout"
 mkdir -p "$LAYOUT/bin/lib" "$LAYOUT/.claude" "$REPO/.claude"
-cp "$LIB" "$LAYOUT/bin/lib/review-attestation.sh"
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$LAYOUT/.claude/review-lenses.tsv"
+cp "$LIB" "$ROOT/bin/lib/review-tier.sh" "$LAYOUT/bin/lib/"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$LAYOUT/.claude/review-lenses.tsv"
 printf 'code\trules/a.md\n' > "$REPO/.claude/review-lenses.tsv"
-write_complete; rm "$ATT/intent.md"
+write_complete; rm "$ATT/ac.md"
 (cd "$REPO" && bash "$LAYOUT/bin/lib/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
-if [[ $? == 1 ]] && grep -q "lens 'intent'" "$WORK/out"; then ok "a lens the branch's map drops is still required"; else bad "branch map dropped a lens: $(head -2 "$WORK/out")"; fi
+if [[ $? == 1 ]] && grep -q "lens 'ac'" "$WORK/out"; then ok "a lens the branch's map drops is still required"; else bad "branch map dropped a lens: $(head -2 "$WORK/out")"; fi
 rm "$REPO/.claude/review-lenses.tsv"
 
 echo "More than 40 gaps says how many were left out:"
@@ -245,7 +253,7 @@ SHA="$(git -C "$REPO" rev-parse HEAD)"; ATT="$REPO/.claude/markers/attest/$SHA"
 mkdir -p "$ATT" && printf '| x | y | Checked | z |\n' > "$ATT/code.md"
 (cd "$REPO" && REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash -c '. "$1"; check_attestation_for_head' _ "$LIB" >"$WORK/out" 2>&1)
 if grep -q 'H39' "$WORK/out" && ! grep -q 'more:' "$WORK/out"; then ok "exactly 40 gaps are all shown, with no count line"; else bad "40-gap boundary: $(tail -2 "$WORK/out")"; fi
-printf 'code\trules/a.md\ntests\trules/b.md\nintent\t-\nac\t@ac\n' > "$WORK/lenses.tsv"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
 
 echo "prior (a repeat round's baseline):"
 PR="$WORK/prior"
@@ -365,9 +373,69 @@ carry_set "$TH" "$TP"; printf '| rules/a.md | Alpha | Checked | written by hand 
 expect_carry 1 "a copy whose rows differ from the prior attestation" "$TH" "rows differ"
 carry_set "$TH" "$TP"; printf '| rules/a.md | Alpha | Checked | backend/src/foo.rs:1 |\n' > "$TC/.claude/markers/attest/$TH/code.md"
 expect_carry 0 "positive control: the same commit with a lens-written file passes without a carry line" "$TH"
+mkdir -p "$WORK/nocarry" && cp "$LIB" "$WORK/nocarry/review-attestation.sh"
+carry_set "$TH" "$TP"
+(cd "$TC" && REVIEW_LENSES_MAP="$WORK/carry.tsv" bash "$WORK/nocarry/review-attestation.sh" check "$TH" >"$WORK/out" 2>"$WORK/err")
+rc=$?
+[[ $rc == 1 ]] && grep -qF "not tests-only: " "$WORK/out" && ! [[ -s "$WORK/err" ]] \
+    && ok "without review-tier.sh beside it, a tests-only carry is refused, and quietly" \
+    || bad "carry without the classifier (rc=$rc): $(head -2 "$WORK/out") / stderr: $(head -2 "$WORK/err")"
 carry_set "$TH" "$TP"
 got="$(cd "$TC" && REVIEW_LENSES_MAP="$WORK/carry.tsv" bash "$LIB" prior "$TH" 2>/dev/null)"
 [[ "$got" == "$TH" ]] && ok "a set holding a valid carry is a baseline for the next round" || bad "prior over a carried set: '${got:0:8}'"
+
+echo "The commit's tier decides which lenses are required (bin/lib/review-tier.sh):"
+printf 'code\trules/a.md\ntests\trules/b.md\nsecurity\trules/b.md\nac\t@ac\nac\t@claims\nextra\trules/b.md\n' > "$WORK/lenses.tsv"
+TB="$(git -C "$REPO" rev-parse HEAD)"
+# tier_commit PATH: a commit on TB touching PATH; sets SHA and ATT; writes the code, ac and extra attestations.
+tier_commit() {
+    git -C "$REPO" checkout -q --detach "$TB"
+    mkdir -p "$REPO/$(dirname "$1")" && printf 'x\n' >> "$REPO/$1"
+    git -C "$REPO" add -- "$1" && git -C "$REPO" commit -qm tier
+    SHA="$(git -C "$REPO" rev-parse HEAD)"; ATT="$REPO/.claude/markers/attest/$SHA"
+    write_complete; rm "$ATT/tests.md"
+    printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/extra.md"
+}
+# tier_expect WANT NAME
+tier_expect() {
+    (cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$LIB" check "$SHA" >"$WORK/out" 2>&1)
+    local got=$?
+    if [[ "$got" == "$1" ]]; then ok "$2"; else bad "$2 (want $1, got $got): $(head -3 "$WORK/out")"; fi
+}
+tier_commit docs/x.md
+tier_expect 0 "Light (docs only): code and ac complete the set; tests and security are not asked for"
+grep -q 'tier Light: code ac' "$WORK/out" && ok "...and check names the tier" || bad "tier not named: $(cat "$WORK/out")"
+mkdir -p "$WORK/notier" && cp "$LIB" "$WORK/notier/review-attestation.sh"
+(cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
+[[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "without review-tier.sh beside it, every lens is required (Full)" \
+    || bad "missing classifier did not fail closed: $(head -2 "$WORK/out")"
+# Defines review_tier and tier_lenses but not review_lenses: the probe must ask for review_lenses.
+printf '%s\n' 'review_tier() { echo Light; }' \
+    'tier_lenses() { case "$1" in Full) echo "code ac tests security" ;; *) echo "code ac" ;; esac; }' \
+    > "$WORK/notier/review-tier.sh"
+(cd "$REPO" && REVIEW_TIER_BASE="$TB" REVIEW_LENSES_MAP="$WORK/lenses.tsv" bash "$WORK/notier/review-attestation.sh" check "$SHA" >"$WORK/out" 2>&1)
+[[ $? == 1 ]] && grep -q "lens 'tests'" "$WORK/out" && ok "a review-tier.sh that defines no review_lenses is Full" \
+    || bad "classifier without review_lenses did not fail closed: $(head -2 "$WORK/out")"
+rm "$ATT/extra.md"; tier_expect 1 "a lens no tier names is still required"
+tier_commit web/src/x.test.ts
+tier_expect 1 "Light with a test file: tests is required"
+grep -q "lens 'tests'" "$WORK/out" && ok "...and the gap names it" || bad "Light test-file gaps: $(cat "$WORK/out")"
+printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/tests.md"; tier_expect 0 "positive control: Light with a test file and tests attested passes"
+grep -q 'tier Light: code ac tests' "$WORK/out" && ok "...and check names the lenses" || bad "lenses not named: $(cat "$WORK/out")"
+tier_commit bin/pre-push
+tier_expect 1 "Standard (a gate script): security is required"
+grep -q "lens 'security'" "$WORK/out" && ! grep -q "lens 'tests'" "$WORK/out" && ok "...and tests is not" || bad "Standard gaps: $(cat "$WORK/out")"
+tier_commit discord/src/jobs/tmi.rs
+tier_expect 1 "Full (a bot job): tests is required"
+grep -q "lens 'tests'" "$WORK/out" && grep -q "lens 'security'" "$WORK/out" && ok "...and security too" || bad "bot gaps: $(cat "$WORK/out")"
+tier_commit backend/src/feed/predict.rs
+printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/security.md"
+tier_expect 1 "Full (the feed): tests is required"
+grep -q "lens 'tests'" "$WORK/out" && ok "...and the gap names it" || bad "Full gaps: $(cat "$WORK/out")"
+printf '| rules/b.md | %s | Checked | x.rs:1 |\n' Gamma Delta > "$ATT/tests.md"; tier_expect 0 "positive control: Full with every lens attested passes"
+git -C "$REPO" checkout -q --detach "$TB"
+printf 'code\trules/a.md\ntests\trules/b.md\nac\t@ac\nac\t@claims\n' > "$WORK/lenses.tsv"
+SHA="$TB"; ATT="$REPO/.claude/markers/attest/$SHA"
 
 echo "Fails closed:"
 write_complete

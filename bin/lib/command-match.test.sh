@@ -228,6 +228,7 @@ gated "runner with --session-command=" "su me --session-command='gh pr create'"
 gated "runner with --session-command sep" "runuser -u me --session-command 'gh pr create'"
 gated "hash comment inside a substitution" "echo \"\$(echo a # )
 gh pr create)\""
+gated "a # right after \"\$( with quotes after it" "echo \"\$(#'${NL})\" ' ) \" # '; $T; echo '${NL}'"
 gated "case inside a substitution" "echo \"\$(case x in x) gh pr create;; esac)\""
 gated "git -C then config alias"               "git -C /tmp/r config alias.ship '!gh pr create' && git -C /tmp/r ship"
 expect 1 "attached --message= cat block is data" "git commit --message=\"\$(cat <<'W'

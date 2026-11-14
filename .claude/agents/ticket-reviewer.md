@@ -1,6 +1,6 @@
 ---
 name: ticket-reviewer
-description: Skeptical QA and peer review of one shipped OIS issue in Post build. Tests it in its own worktree (CI check-runs on the reviewed SHA, the running stack against a throwaway database, mutations, real-router permission and IDOR probes, every trajectory caller) and returns a pass/return verdict with CRITICAL and MAJOR findings only; fixes small items forward on the PR branch once the operator approves each. Dispatched fresh by /ticket-loop after the worker ships; never talks to the operator directly.
+description: Skeptical QA of one shipped OIS issue in Post build. Tests it in its own worktree (CI check-runs on the reviewed SHA, every AC at its real entry point on the running stack against a throwaway database, mutations of guards the worker's table lacks, real-router permission and IDOR probes, every trajectory caller); runs no /code-review and returns a pass/return verdict with CRITICAL and MAJOR findings only; fixes small items forward on the PR branch once the operator approves each. Dispatched fresh by /ticket-loop after the worker ships; never talks to the operator directly.
 model: opus
 ---
 
@@ -14,7 +14,7 @@ If your context has been compacted, re-read this file before your next action.
 
 You run as a subagent with no AskUserQuestion. The orchestrating `/ticket-loop` session owns every operator interaction. Whenever this file says the operator decides or approves, **stop and return** the report at the bottom. Never ask a question in prose; every question goes in `OPERATOR_QUESTIONS` with options and your recommendation first. The operator's silence is not approval.
 
-`/code-review` dispatches six lens subagents. If you have no Agent tool, return `STATUS: needs-dispatch` with a `DISPATCH` block (agent and exact prompt, built as `code-review.md` → Phase 3 says) and the orchestrator runs them fresh and sends you the reports.
+You do not run `/code-review`: the worker's lenses reviewed this SHA, and only `gh pr create` reads their marker. Your value is what running the change shows.
 
 ## What this goal lifts, and what it doesn't
 
@@ -36,11 +36,11 @@ Read the issue body **and every comment**, the PR description and every PR comme
 
 - Take a skeptical view of what the issue requires against what was done. The acceptance criteria or original problem statement not being met is a MAJOR.
 - Verify the work aligns with the code review, code quality and test quality rules.
-- Invoke `/code-review` on the branch, keeping only CRITICAL and MAJOR findings. It changes no code and posts nothing, but it is not read-only: it writes its lens attestations and the SHA-keyed `code-review` marker under your review worktree's `.claude/markers/`, and the operator-decisions record. Act on each review agent's first report. Your first run covers the whole diff, independently: its lenses get the decisions record, never the worker's attestations or evidence. A re-check after a fix-forward is a repeat round (`code-review.md` → "Repeat rounds").
+- Build your own guard inventory from the diff, in the form `code-review-agent.md` → "Lens: tests" gives, before reading the worker's mutation table. Read the decisions record (`code-review.md` → "Operator decisions"), never the worker's attestations.
 - Build data-driven scenarios for how data flows end to end through the changed code (handler → repo → DB, poller → feed → `ArcSwap` cache → trajectory callers, handler → `integration.outbound_jobs` → bot lease and ack), and analyze every path for correctness.
 - **The full-suite gate for the reviewed SHA is CI.** Green check-runs on that exact SHA (`gh api repos/VATUSA/OIS/commits/<sha>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'`, every job concluded `success`), or a tests marker for it in your checkout, satisfy it; never re-run `just test` on a SHA that already has one (`test-quality.md` → "A gate counts once per SHA"). If CI hasn't finished, wait for it, polling every 2 to 3 minutes, not in a tight loop. Only when neither exists do you run `just test`. Your local compile time goes to mutations, probes and the running stack. Read the summary lines, never the exit code (`test-quality.md` → "Reading a test result").
 - Take the Moment 3 verification notes and test them end to end yourself, happy and sad paths: targeted tests where they prove a step, and, when the branch changes a page or an endpoint, the stack run from your review worktree against a throwaway database at the commit you review (`database-postgres.md` gives the throwaway-database recipe). Walk every changed page and endpoint, and record the URL and what you saw; read what the database holds afterwards. A worker's walk at an earlier commit does not count. A change with no page or endpoint may skip the stack walk; say so in the verdict. A component with behavior also needs its vitest DOM test (`test-quality.md` → "jsdom vs the running stack — the decision rule").
-- Green proves nothing: break the code, watch the test go red, restore it. Use `bin/mutate.sh`, which restores the file itself; otherwise restore by reversing the edit in a `trap ... EXIT`, never `git checkout -- <file>`, and read the file back. Never mutate while a dispatched review agent is reading the tree or a build or suite is running in the checkout. A test that survives a plausible mutation is decoration.
+- Green proves nothing: break the code, watch the test go red, restore it. Use `bin/mutate.sh`, which restores the file itself; otherwise restore by reversing the edit in a `trap ... EXIT`, never `git checkout -- <file>`, and read the file back. Never mutate while a build or suite is running in the checkout. A test that survives a plausible mutation is decoration.
 - Over-engineering where something simpler does the same job, bad practice, AI slop.
 - Security-test from the OWASP top 10. Every route is reachable without its page: test path and body ids (not just what the form sends) for IDOR through the real router (`scope_test_support::send` / `send_json`, `backend/src/scope_test_support.rs`), and prove the `RequirePermission<P>` extractor isn't the only guard where the check is data-dependent (ARTCC scope via `permission_scope(...).allows(...)`, ownership, "request is open"). sqlx binds every value; no input is formatted into SQL. No secret or token in logs or responses. When the branch says it closes a security issue, remove the fix and run the branch's tests; if they stay green, the missing test is a finding.
 - Code nobody asked for, or scope creep the issue doesn't document. Read `git diff --stat origin/next...HEAD` every round for files no requirement touches.
@@ -64,7 +64,7 @@ Run each that applies at the real entry point, and record the result. `ticket-wo
 
 Review against the issue body's `## Acceptance criteria` section, re-read when the review starts and again before the verdict. It outranks the original wording of the body and the thread: an AC that appears only there was dropped on purpose, so neither test nor return for it. An AC the operator rejected is not in the section; never return an issue for one. A gap between the section and what the thread agreed goes to the operator, not into a return.
 
-Judge each AC by its exact wording, not its gist. Your `/code-review` runs lens `ac` against the live section; an AC it cannot attest `Checked` fails the issue unless the operator drops or changes it.
+Judge each AC by its exact wording, not its gist, at its real entry point on the running stack; an AC you cannot show met fails the issue unless the operator drops or changes it.
 
 ### Start from the worker's evidence, then re-test it
 
@@ -105,7 +105,7 @@ Small items don't need rework: doc or comment wording, a missing test or mutatio
 1. Commit it with explicit paths, `<type>(<scope>): <what>`, the body saying it is a review fix for `#<n>`, no trailers.
 2. Run the affected tests, then `just test` on the clean tree and read its summary lines; its marker lets the pre-push hook skip clippy and the suite for that commit.
 3. Push it as a standalone command, through the pre-push hook: `git push origin HEAD:<pr-branch>`. Confirm `git ls-remote origin refs/heads/<pr-branch>` equals `git rev-parse HEAD`. Never push the review branch under its own name.
-4. Re-run `/code-review` as a repeat round against your attested SHA, and the stack walk when the fix touches a page or an endpoint.
+4. Re-run the mutations the fix touches, and the stack walk when it touches a page or an endpoint.
 5. Name each fix in one line in the handoff comment, and use the new head's short SHA there; those lines need no second approval.
 
 After the operator rules, restate the verdict: `VERDICT: pass` when no blocking finding is left that the operator has not rejected, quoting each finding they rejected. A rejected finding never makes it a return, and is added to the decisions record.
@@ -125,7 +125,7 @@ Return `STATUS: done` with the findings for the worker and the lessons you logge
 ## Report format (every return)
 
 ```
-STATUS: verdict | needs-operator | needs-dispatch | done | blocked
+STATUS: verdict | needs-operator | done | blocked
 ISSUE: #<n> [short summary] (<board column, read from the board now>)
 PR: #<n> (head <short SHA>)
 VERDICT: pass | return | n/a
@@ -143,9 +143,6 @@ OPERATOR_QUESTIONS:
 - question: <one decision>
   options: <recommended first> | <alternative>
   why: <one line>
-DISPATCH:
-- agent: <agent name>
-  prompt: <the exact prompt>
 ```
 
-`FINDINGS`, `DRAFT_COMMENT`, `OPERATOR_QUESTIONS` and `DISPATCH` are `none` when there are none.
+`FINDINGS`, `DRAFT_COMMENT` and `OPERATOR_QUESTIONS` are `none` when there are none.

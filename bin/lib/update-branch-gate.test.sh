@@ -88,6 +88,51 @@ expect block "two PR numbers, the first on next" "gh pr update-branch 101 202"
 expect block "GraphQL mutation"                  "gh api graphql -f query='mutation { updatePullRequestBranch(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
 expect block "unrecognized update-branch path"   "gh api -X PUT repos/x/pulls/101/update-branch/extra"
 expect block "unparseable line"                  "gh api -X PUT $A/101/update-branch \"unterminated"
+echo "Any line the gate cannot parse blocks, whether or not gh or update-branch appears in it:"
+expect block "unclosed quote, no gh"             "sed -n 's/#.*//p a.txt"
+expect block "unclosed quote, gh read"           "gh pr list --json number --jq '.[] | \"#.number\""
+expect block "a comment inside a substitution"   "echo \$(echo x # it's)"
+# Lines that build `gh pr update-branch` (or its REST path) at run time, so no literal gh or update-branch
+# appears. Each blocks only because it is unparseable: `$'..'`, or a trailing `# <<x`. A decoder piped to
+# bash with no such suffix parses, and the gate allows it, as next's does.
+IFS= read -r L1 <<'EOF'
+g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
+EOF
+IFS= read -r L2 <<'EOF'
+x=$'\''; g$'h' api -X PUT repos/o/r/pulls/1/update-bra$'nch'
+EOF
+IFS= read -r L3 <<'EOF'
+$'\x67\x68' pr $'\x75pdate-branch' 5
+EOF
+IFS= read -r L4 <<'EOF'
+printf '\147\150 api -X PUT repos/o/r/pulls/1/upd\141te-br\141nch' | bash # <<x
+EOF
+IFS= read -r L5 <<'EOF'
+echo 5 hcnarb-etadpu rp hg | rev | bash # <<x
+EOF
+IFS= read -r L6 <<'EOF'
+echo Z2ggcHIgdXBkYXRlLWJyYW5jaCA1 | base64 -d | bash # <<x
+EOF
+IFS= read -r L7 <<'EOF'
+echo 6768207072207570646174652d6272616e63682035 | xxd -r -p | bash # <<x
+EOF
+expect block "gh and update-branch from \$'..' parts" "$L1"
+expect block "the same after \$'\\'' (an escaped quote)" "$L2"
+expect block "gh pr update-branch from \$'\\x..'"  "$L3"
+expect block "unparseable (# <<x) line that decodes gh api update-branch via printf octal" "$L4"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via rev" "$L5"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via base64 -d" "$L6"
+expect block "unparseable (# <<x) line that decodes gh pr update-branch via xxd -r" "$L7"
+# A `#` right after `"$(`, quotes after it: the gate must still see the update-branch on the line.
+NL=$'\n'
+expect block "update-branch after a # right after \"\$(" "echo \"\$(#'${NL})\" ' ) \" # '; gh pr update-branch 202; echo '${NL}'"
+
+echo "A # inside quotes is text, so these parse and pass:"
+expect allow "sed with # delimiters"             "sed -n 's#a#b#p' file"
+expect allow "sed with ' #' in its script"       "sed -n 's/ #.*//p' f"
+expect allow "grep for ' # ' in single quotes"   "grep -n 'x # y' f"
+expect allow "grep for \" # \" in double quotes" "grep -n \"x # y\" f"
+expect allow "jq with \"#\""                     "jq -r '.[] | \"PR # \\(.number)\"' f"
 
 echo "Refused before GitHub is asked (a lookup answering next cannot rescue it):"
 export STUB_ALWAYS_NEXT=1

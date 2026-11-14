@@ -43,7 +43,7 @@ ROOT="$(git rev-parse --show-toplevel)" && cd "$ROOT" || exit 1
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { echo "run-tests: no tests marker written (working tree was not clean at start)."; exit 0; }
 python3 -I bin/lib/marker_manifest.py stamp "$ROOT" tests "$(git rev-parse HEAD)"
 STUB
-cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/review-attestation.sh" "$REPO/bin/lib/"
+cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/review-attestation.sh" "$ROOT/bin/lib/review-tier.sh" "$REPO/bin/lib/"
 printf 'code\trules/a.md\n' > "$REPO/.claude/review-lenses.tsv"
 printf '## Alpha\n' > "$REPO/rules/a.md"
 printf '.claude/markers/\n__pycache__/\n' > "$REPO/.gitignore"
