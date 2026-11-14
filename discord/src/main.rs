@@ -7,7 +7,8 @@
 //!      as a service account; the backend resolves the Discord user to the linked OIS account.
 //!
 //! Config (env / `.env`): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN` (an `ois_sa_…`
-//! service-account token holding the BOT role), optional `OIS_POLL_SECS` (default 5).
+//! service-account token holding the BOT role), optional `OIS_POLL_SECS` (default 5 when unset or
+//! blank; any other value that is not a whole number of seconds above 0 fails startup).
 
 mod config;
 mod discord;
