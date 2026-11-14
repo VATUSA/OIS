@@ -43,6 +43,7 @@ describe("feed-derived hooks poll only without ticks (#648)", () => {
     expect(fn).toContain("const live = useRealtimeLive();");
     const intervals = fn.match(/refetchInterval:[^\n]*/g) ?? [];
     expect(intervals.length, "one interval").toBe(1);
-    expect(intervals[0]).toContain("pollUnlessLive(");
+    // Pins the argument too: `pollUnlessLive(15_000, false)` would poll on top of the tick (#952).
+    expect(intervals[0]).toMatch(/pollUnlessLive\([\d_]+, live\)/);
   });
 });
