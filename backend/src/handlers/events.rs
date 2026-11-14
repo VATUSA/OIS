@@ -4070,6 +4070,13 @@ mod lifecycle_failure_tests {
             topics(&mut rx),
             vec![topic::PROGRAM, topic::TMI, topic::GROUND_STOP]
         );
+
+        // AC4 on the archive arm: the same package fails again on the next pass, logged.
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 0 archived, 1 failed".to_string()));
+        let failure = line(&log, "auto-archive package failed");
+        assert!(failure.contains(&format!("package_id={bad}")), "{failure}");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
     }
 
     /// D68: a due package whose armer's credential no longer works counts as a failure.
@@ -4109,10 +4116,10 @@ mod lifecycle_failure_tests {
         .await;
         assert_eq!(due_ids(&pool).await, vec![bad.clone(), good.clone()]);
 
-        assert_eq!(
-            pass(&pool).await,
-            Err("1 activated, 0 archived, 1 failed".to_string())
-        );
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("1 activated, 0 archived, 1 failed".to_string()));
+        let skipped = line(&log, "the armer's credential no longer works");
+        assert!(skipped.contains(&format!("package_id={bad}")), "{skipped}");
         assert_eq!(status(&pool, &good).await, "activated");
         assert_eq!(
             tmi_status(&pool, "20 MIT").await.as_deref(),
@@ -4137,10 +4144,10 @@ mod lifecycle_failure_tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            pass(&pool).await,
-            Err("0 activated, 1 archived, 1 failed".to_string())
-        );
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 1 archived, 1 failed".to_string()));
+        let failure = line(&log, "auto-due package query failed");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
         assert_eq!(status(&pool, &ended).await, "archived");
         assert_eq!(
             tmi_status(&pool, "20 MIT").await.as_deref(),
@@ -4172,10 +4179,15 @@ mod lifecycle_failure_tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            pass(&pool).await,
-            Err("0 activated, 0 archived, 2 failed".to_string())
-        );
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 0 archived, 2 failed".to_string()));
+        for message in [
+            "auto-due package query failed",
+            "ended-package query failed",
+        ] {
+            let failure = line(&log, message);
+            assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        }
         assert_eq!(status(&pool, &due).await, "draft");
         assert_eq!(status(&pool, &ended).await, "activated");
     }
@@ -4202,10 +4214,16 @@ mod lifecycle_failure_tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            pass(&pool).await,
-            Err("0 activated, 0 archived, 2 failed".to_string())
-        );
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 0 archived, 2 failed".to_string()));
+        for (message, pkg) in [
+            ("auto-activate: cannot load the armer", &due),
+            ("auto-archive: cannot attribute the package", &ended),
+        ] {
+            let failure = line(&log, message);
+            assert!(failure.contains(&format!("package_id={pkg}")), "{failure}");
+            assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        }
         assert_eq!(status(&pool, &due).await, "draft");
         assert_eq!(status(&pool, &ended).await, "activated");
     }
@@ -4228,18 +4246,9 @@ mod lifecycle_failure_tests {
         }
     }
 
-    /// AC4: the failure arm logs the error's `Display` beside `package_id`.
-    #[sqlx::test]
-    async fn a_failed_activation_logs_the_errors_display_and_package(pool: PgPool) {
+    /// Run the pass with every WARN line it logs captured, as plain text.
+    async fn capturing_pass(pool: &PgPool) -> (Result<String, String>, String) {
         use tracing::instrument::WithSubscriber;
-
-        let user = seed(&pool).await;
-        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
-        let bad = package(&pool, DUE, "Plan", &user, "BOOM").await;
-        let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
-        arm(&pool, &bad, &by).await;
-        arm(&pool, &good, &by).await;
-        fail_tmi_insert(&pool).await;
 
         let buffer = Buffer::default();
         let writer = buffer.clone();
@@ -4248,25 +4257,38 @@ mod lifecycle_failure_tests {
             .with_max_level(tracing::Level::WARN)
             .with_writer(move || writer.clone())
             .finish();
-        let result = pass(&pool).with_subscriber(subscriber).await;
+        let result = pass(pool).with_subscriber(subscriber).await;
+        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        (result, log)
+    }
+
+    /// The one captured line carrying `message`; panics unless exactly one does.
+    fn line<'a>(log: &'a str, message: &str) -> &'a str {
+        let hits: Vec<&str> = log.lines().filter(|l| l.contains(message)).collect();
+        assert_eq!(hits.len(), 1, "one `{message}` line expected in:\n{log}");
+        hits[0]
+    }
+
+    /// `ApiError::Internal`'s `Display`; its `Debug` would print `Internal`.
+    const INTERNAL_DISPLAY: &str = "error=internal server error";
+
+    /// AC4: the failure arm logs the error's `Display` beside `package_id`.
+    #[sqlx::test]
+    async fn a_failed_activation_logs_the_errors_display_and_package(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let bad = package(&pool, DUE, "Plan", &user, "BOOM").await;
+        let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &bad, &by).await;
+        arm(&pool, &good, &by).await;
+        fail_tmi_insert(&pool).await;
+
+        let (result, log) = capturing_pass(&pool).await;
 
         assert_eq!(result, Err("1 activated, 0 archived, 1 failed".to_string()));
-        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-        let failures: Vec<&str> = log
-            .lines()
-            .filter(|l| l.contains("auto-activate package failed"))
-            .collect();
-        assert_eq!(failures.len(), 1, "{log}");
-        assert!(
-            failures[0].contains(&format!("package_id={bad}")),
-            "{}",
-            failures[0]
-        );
-        assert!(
-            failures[0].contains("error=internal server error"),
-            "the Display, not the Debug (`Internal`): {}",
-            failures[0]
-        );
+        let failure = line(&log, "auto-activate package failed");
+        assert!(failure.contains(&format!("package_id={bad}")), "{failure}");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
         assert!(
             !log.contains(&good),
             "the good package logs no failure: {log}"
