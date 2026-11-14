@@ -3471,25 +3471,6 @@ mod vatusa_reset_run_prune_tests {
         assert_eq!(ids(&pool).await, sorted(vec![fresh, running]));
     }
 
-    #[sqlx::test]
-    async fn a_running_run_started_past_the_retention_is_never_deleted(pool: PgPool) {
-        let running = running_run(&pool, RUNNING_STARTED_AGE_DAYS).await;
-        let fresh = finished_run(&pool, "failed", FRESH_FINISHED_AGE_DAYS).await;
-
-        let outcome = vatusa_reset_run_prune_once(&pool, Utc::now()).await;
-
-        assert_eq!(outcome, Ok("0 deleted".to_string()));
-        assert_eq!(ids(&pool).await, sorted(vec![running.clone(), fresh]));
-        let (status, finished): (String, bool) = sqlx::query_as(
-            "select status, finished_at is not null from access.vatusa_reset_runs where id = $1",
-        )
-        .bind(&running)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!((status.as_str(), finished), ("running", false));
-    }
-
     /// "Older than" the retention: a run finished exactly `AUDIT_RETAIN_DAYS` before `now` stays.
     #[sqlx::test]
     async fn a_run_finished_exactly_at_the_cutoff_is_kept(pool: PgPool) {
@@ -3513,7 +3494,7 @@ mod vatusa_reset_run_prune_tests {
 
     /// A delete that fails is an `Err`, which `run_interval` records as a failed run.
     #[sqlx::test]
-    async fn a_failed_delete_is_reported_to_the_job_registry(pool: PgPool) {
+    async fn a_failed_delete_returns_err(pool: PgPool) {
         // Positive control: the same pass succeeds while the table exists.
         assert_eq!(
             vatusa_reset_run_prune_once(&pool, Utc::now()).await,
