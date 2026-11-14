@@ -1111,7 +1111,8 @@ struct CaptureTally {
 ///
 /// Every event is attempted; a failed open, close, unfrozen-event query or snapshot is counted and
 /// the run reports `Err` with the counts once both halves finish, so the job registry records it as
-/// failed (#917). A declined snapshot is not a failure.
+/// failed (#917). A declined snapshot is not a failure. A failed schedule query fails the run at
+/// once, before either half.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let rows = stats_repo::list_capture_schedule(pool)
         .await
@@ -2383,9 +2384,14 @@ mod capture_scheduler_tests {
     // in the same pass that must still succeed. Distinct airports keep one event's legs out of the
     // other's breakdown. Every failure trigger is created after seeding, so it refuses only the
     // pass's own writes.
+    //
+    // X2 is event 803 at KLGA, a second event whose step fails. Neither loop orders its rows, so a
+    // pass that stopped at its first failure could still reach Y; it cannot also reach the second
+    // failure, and "2 failed" holds only when every event was attempted, in any row order.
 
     const X: i64 = 801;
     const Y: i64 = 802;
+    const X2: i64 = 803;
 
     /// An event inside its capture window right now (started 30 min ago, ends in 30 min, ±30 min
     /// padding) with no capture yet, so the pass's open arm fires for it. Its end is in the future, so
@@ -2417,13 +2423,13 @@ mod capture_scheduler_tests {
         .unwrap();
     }
 
-    /// A `before <op>` row trigger on `table` that, for rows of event 801, runs `action`: `raise
+    /// A `before <op>` row trigger on `table` that, for rows of events 801 and 803, runs `action`: `raise
     /// exception …` to fail the statement, or `return null` to skip the row. `table` and `op` are
     /// test constants, never input.
     async fn trigger_on_x(pool: &PgPool, table: &str, op: &str, action: &str) {
         sqlx::raw_sql(&format!(
             "create function t917() returns trigger language plpgsql as $$ \
-             begin if new.event_id = 801 then {action}; end if; return new; end $$; \
+             begin if new.event_id in (801, 803) then {action}; end if; return new; end $$; \
              create trigger t917 before {op} on {table} for each row execute function t917();"
         ))
         .execute(pool)
@@ -2456,13 +2462,15 @@ mod capture_scheduler_tests {
     async fn a_failed_open_fails_the_pass_and_the_other_event_still_opens(pool: PgPool) {
         in_window(&pool, X, "KJFK").await;
         in_window(&pool, Y, "KBOS").await;
+        in_window(&pool, X2, "KLGA").await;
         fail_x(&pool, "stats.capture", "insert").await;
 
         assert_eq!(
             capture_scheduler_once(&pool).await,
-            Err("1 opened, 0 saved, 0 frozen, 1 failed".to_string())
+            Err("1 opened, 0 saved, 0 frozen, 2 failed".to_string())
         );
         assert_eq!(captures(&pool, X).await, vec![], "X's open was refused");
+        assert_eq!(captures(&pool, X2).await, vec![], "X2's open was refused");
         assert_eq!(
             captures(&pool, Y).await,
             vec![("open".to_string(), None)],
@@ -2474,14 +2482,16 @@ mod capture_scheduler_tests {
     async fn a_failed_close_fails_the_pass_and_the_other_event_still_closes(pool: PgPool) {
         seed(&pool, X, "KJFK", "cap-x", "open").await;
         seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        seed(&pool, X2, "KLGA", "cap-x2", "open").await;
         leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
         fail_x(&pool, "stats.capture", "update").await;
 
         assert_eq!(
             capture_scheduler_once(&pool).await,
-            Err("0 opened, 1 saved, 1 frozen, 1 failed".to_string())
+            Err("0 opened, 1 saved, 1 frozen, 2 failed".to_string())
         );
         assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(captures(&pool, X2).await, vec![("open".to_string(), None)]);
         assert_eq!(
             captures(&pool, Y).await,
             vec![("saved".to_string(), Some(at(14, 30)))]
@@ -2558,6 +2568,10 @@ mod capture_scheduler_tests {
 
     #[sqlx::test]
     async fn a_failed_freeze_query_fails_the_pass_and_the_close_still_saves(pool: PgPool) {
+        // X is finished and due a freeze; the failed query keeps it unfrozen. Y closes in the same
+        // pass.
+        seed(&pool, X, "KJFK", "cap-x", "saved").await;
+        leg(&pool, "KJFK", "departure", 1, at(13, 0)).await;
         seed(&pool, Y, "KBOS", "cap-y", "open").await;
         leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
         sqlx::query("alter table stats.event_movements rename to event_movements_gone")
@@ -2574,6 +2588,12 @@ mod capture_scheduler_tests {
             vec![("saved".to_string(), Some(at(14, 30)))],
             "the close ran before the freeze query and stands"
         );
+        sqlx::query("alter table stats.event_movements_gone rename to event_movements")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(frozen_movements(&pool, X).await, None, "X was not frozen");
+        assert_eq!(frozen_movements(&pool, Y).await, None, "nor was Y");
     }
 
     #[sqlx::test]
@@ -2582,13 +2602,15 @@ mod capture_scheduler_tests {
     ) {
         seed(&pool, X, "KJFK", "cap-x", "saved").await;
         seed(&pool, Y, "KBOS", "cap-y", "saved").await;
+        seed(&pool, X2, "KLGA", "cap-x2", "saved").await;
         leg(&pool, "KJFK", "departure", 1, at(13, 0)).await;
         leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        leg(&pool, "KLGA", "departure", 3, at(13, 0)).await;
         fail_x(&pool, "stats.event_movements", "insert").await;
 
         assert_eq!(
             capture_scheduler_once(&pool).await,
-            Err("0 opened, 0 saved, 1 frozen, 1 failed".to_string())
+            Err("0 opened, 0 saved, 1 frozen, 2 failed".to_string())
         );
         assert_eq!(frozen_movements(&pool, Y).await, Some(1), "Y froze");
         assert_eq!(
@@ -2596,14 +2618,15 @@ mod capture_scheduler_tests {
             None,
             "X's write rolled back"
         );
-        let unfrozen: Vec<i64> =
+        let mut unfrozen: Vec<i64> =
             stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
                 .await
                 .unwrap()
                 .into_iter()
                 .map(|e| e.event_id)
                 .collect();
-        assert_eq!(unfrozen, vec![X], "the next tick retries X only");
+        unfrozen.sort_unstable();
+        assert_eq!(unfrozen, vec![X, X2], "the next tick retries X and X2 only");
     }
 
     /// AC 5: the fixture of `an_event_with_no_surviving_legs_is_not_frozen_at_zero`, through the
