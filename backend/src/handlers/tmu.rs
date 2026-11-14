@@ -222,8 +222,8 @@ pub async fn create_tmi(
 /// `publish_tmi` resolves unscoped while `activate_package` passes the event's facility, so
 /// `resolve_scoped_id` can answer with a different guild for the same logical name (#436 review,
 /// #884). The posted channel wins even if the mapping has moved since. The fallback covers a TMI with
-/// no publish job (never published, or published before jobs recorded one); `None` means "don't
-/// post".
+/// no publish job (never published, published while no NTML channel was mapped, or published before
+/// jobs recorded one); `None` means "don't post".
 async fn ntml_channel_for_tmi(
     pool: &sqlx::PgPool,
     tmi_id: &str,
@@ -1079,6 +1079,87 @@ mod tests {
         let jobs = publish_jobs(&pool, "tmi-8").await;
         assert_eq!(jobs.len(), 2, "{jobs:?}");
         assert_eq!(jobs[1].0, "CH-OLD");
+        assert!(
+            jobs[1].1.contains("JFK arrivals via CAMRN 25MIT"),
+            "{}",
+            jobs[1].1
+        );
+    }
+
+    /// #884 AC1 end to end: the publish job comes from a real package activation for a ZNY event,
+    /// not a seeded row, and the edit of the TMI it created still lands in ZNY's channel.
+    #[sqlx::test]
+    async fn an_edit_of_an_activated_package_tmi_stays_in_the_events_guild(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values (884, 'Package edit', now(), now() + interval '3 hours', 'ZNY')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let planner = scope_test_support::seed_user(&pool).await;
+        scope_test_support::grant(&pool, &planner, "events.plan.update", None).await;
+        let cookie = scope_test_support::session_cookie(&pool, &planner).await;
+        let state = scope_test_support::test_state(pool.clone(), Default::default());
+        let post = |uri: String, body: Option<serde_json::Value>| {
+            let (state, cookie) = (state.clone(), cookie.clone());
+            async move {
+                scope_test_support::send(&state, http::Method::POST, &uri, &cookie, body).await
+            }
+        };
+
+        assert_eq!(
+            post(
+                "/api/v1/events/884/packages".into(),
+                Some(json!({ "name": "Plan" }))
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        let pkg: String =
+            sqlx::query_scalar("select id from events.tmi_package where event_id = 884")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let now = chrono::Utc::now();
+        let item = json!({ "kind": "restriction", "payload": {
+            "requesting": "N90", "providing": "ZNY", "restriction": "JFK arrivals via CAMRN 20MIT",
+            "start_time": now, "stop_time": now + chrono::Duration::hours(2),
+        }});
+        assert_eq!(
+            post(
+                format!("/api/v1/events/884/packages/{pkg}/items"),
+                Some(item)
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            post(format!("/api/v1/events/884/packages/{pkg}/activate"), None).await,
+            http::StatusCode::OK
+        );
+        let tmi: String = sqlx::query_scalar(
+            "select subject_id from integration.outbound_jobs where job_type = 'tmi_publish'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            publish_jobs(&pool, &tmi).await[0].0,
+            "CH-ZNY",
+            "activation posted to the event's guild"
+        );
+
+        assert_eq!(
+            edit_through_the_router(&pool, &tmi).await,
+            http::StatusCode::OK
+        );
+
+        let jobs = publish_jobs(&pool, &tmi).await;
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        assert_eq!(jobs[1].0, "CH-ZNY");
         assert!(
             jobs[1].1.contains("JFK arrivals via CAMRN 25MIT"),
             "{}",
