@@ -249,7 +249,7 @@ fn altitude_matches(
 /// same gate the shared-route writes use. An empty `artcc` normalises to none, so an FCA with no ARTCC is
 /// writable only nationally, like a global route. Before this, the FCA's `artcc` was only a sidebar
 /// filter: any holder could create, edit, reorder or delete another facility's FCA.
-async fn require_fca_write_scope(
+pub(crate) async fn require_fca_write_scope(
     state: &AppState,
     principal: &Principal,
     permission: &str,
@@ -289,6 +289,22 @@ async fn require_event_fca_planner(
     }
 }
 
+/// An event FCA belongs to its event's plan, so a plain-route write to one also needs
+/// `events.plan.update` at the FCA's ARTCC, the rule the `/events/{id}/fcas` routes apply (#854).
+/// `flow.fca.*` at the ARTCC plus a planner grant elsewhere is not enough. An ordinary FCA is
+/// unaffected.
+async fn require_event_fca_plan_scope(
+    state: &AppState,
+    principal: &Principal,
+    fca: &FcaBody,
+    artccs: &[&str],
+) -> Result<(), ApiError> {
+    if fca.event_id.is_none() {
+        return Ok(());
+    }
+    require_fca_write_scope(state, principal, "events.plan.update", artccs).await
+}
+
 /// Whether the caller plans events: holds `events.plan.update` at any scope. The one planner test
 /// [`require_event_fca_planner`] (`PUT`/`DELETE`, #736) and [`require_visible_event_fca`] (the live
 /// operations, #746) share, so the two paths agree on who may act on an unpublished event FCA.
@@ -306,20 +322,20 @@ async fn is_event_planner(state: &AppState, principal: &Principal) -> Result<boo
 /// unlike `PUT`/`DELETE` this does not refuse it.
 ///
 /// Runs before the ARTCC scope check, so a non-planner elsewhere gets the `404` a missing id gets
-/// rather than a `403` that confirms the FCA exists. A planner passes on to the scope check, as on
-/// `PUT`/`DELETE`.
+/// rather than a `403` that confirms the FCA exists. A planner then needs `events.plan.update` at the
+/// FCA's ARTCC (`403` otherwise), the rule `PUT`/`DELETE` apply to an event FCA (#854).
 async fn require_visible_event_fca(
     state: &AppState,
     principal: &Principal,
     fca: &FcaBody,
 ) -> Result<(), ApiError> {
-    if fca.event_id.is_none()
-        || fca.event_status.as_deref() == Some("published")
-        || is_event_planner(state, principal).await?
-    {
+    if fca.event_id.is_none() || fca.event_status.as_deref() == Some("published") {
         return Ok(());
     }
-    Err(ApiError::NotFound)
+    if !is_event_planner(state, principal).await? {
+        return Err(ApiError::NotFound);
+    }
+    require_fca_write_scope(state, principal, "events.plan.update", &[&fca.artcc]).await
 }
 
 /// Every FCA write runs this, the event-FCA ones included (#698): they used to repeat only the name and
@@ -408,6 +424,13 @@ pub async fn update_fca(
         &[&existing.artcc, &payload.artcc],
     )
     .await?;
+    require_event_fca_plan_scope(
+        &state,
+        &principal,
+        &existing,
+        &[&existing.artcc, &payload.artcc],
+    )
+    .await?;
     if !flow_repo::update_fca(pool, &id, &payload, &by).await? {
         return Err(ApiError::NotFound);
     }
@@ -440,6 +463,7 @@ pub async fn delete_fca(
         .ok_or(ApiError::NotFound)?;
     require_event_fca_planner(&state, &principal, &existing).await?;
     require_fca_write_scope(&state, &principal, "flow.fca.delete", &[&existing.artcc]).await?;
+    require_event_fca_plan_scope(&state, &principal, &existing, &[&existing.artcc]).await?;
     if flow_repo::delete_fca(pool, &id).await? {
         state.publish(crate::realtime::topic::FCA);
         Ok(StatusCode::NO_CONTENT)
