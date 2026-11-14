@@ -1,7 +1,8 @@
 //! VATUSA/OIS#913: a failed audit write or actor lookup is logged, and the request it records still
-//! succeeds. Every test goes through the real router, so the bearer and session middleware, the
-//! handler and the audit middleware (`audit.rs`) all run; the database failure is injected with a
-//! trigger that raises, which only a `#[sqlx::test]` database can carry.
+//! succeeds. Every request test goes through the real router, so the bearer and session middleware,
+//! the handler and the audit middleware (`audit.rs`) all run; one repo-level test pins
+//! `record_audit` for its `?` callers. The database failure is injected with a trigger that raises,
+//! which only a `#[sqlx::test]` database can carry.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -26,6 +27,10 @@ const KEY_CREATE: &str = "api_keys.key.create";
 /// `update` on `flow.sector-limits`, resource `010`.
 const LIMIT_URI: &str = "/api/v1/flow/sector-limits/ZDC/010";
 const AUDIT_TARGET: &str = "ois_backend::repos::audit";
+/// The `error` field `refuse_inserts(.., "audit insert refused by test")` produces: sqlx's Display of
+/// a database error. Its Debug form also contains the message, so only the whole string tells them
+/// apart.
+const REFUSED_DISPLAY: &str = "error returned from database: audit insert refused by test";
 
 /// ZDC owns sector 010, so `LIMIT_URI` reaches the write.
 fn state(pool: PgPool) -> AppState {
@@ -220,10 +225,9 @@ async fn a_failed_audit_insert_is_logged_and_the_write_still_answers_200(pool: P
     assert_eq!(error.fields["action"], "update");
     assert_eq!(error.fields["resource_type"], "flow.sector-limits");
     assert_eq!(error.fields["resource_id"], "010");
-    assert!(
-        error.fields["error"].contains("audit insert refused by test"),
-        "the database error's Display is logged: {:?}",
-        error.fields
+    assert_eq!(
+        error.fields["error"], REFUSED_DISPLAY,
+        "the database error's Display is logged, not its Debug"
     );
     assert!(
         audit_rows(&pool).await.is_empty(),
@@ -263,6 +267,33 @@ async fn a_successful_audit_insert_logs_no_error(pool: PgPool) {
         (rows[0].1.as_str(), rows[0].2.as_deref()),
         ("flow.sector-limits", Some("010"))
     );
+}
+
+/// A write the middleware audits with no path parameter has no resource id; its failed insert logs
+/// the field blank rather than dropping it.
+#[sqlx::test]
+async fn a_failed_insert_with_no_resource_id_logs_it_blank(pool: PgPool) {
+    let state = state(pool.clone());
+    let (_, cookie) = user_with(&pool, "auth.profile.read").await;
+    refuse_inserts(&pool, "access.audit_logs", "audit insert refused by test").await;
+
+    let ((status, body), events) = capturing(request(
+        &state,
+        Method::POST,
+        "/api/v1/dashboards",
+        &cookie,
+        Some(json!({ "name": "audit test board" })),
+    ))
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(saw_the_request(&events), "capture was live: {events:?}");
+    let errors = audit_events(&events, tracing::Level::ERROR);
+    assert_eq!(errors.len(), 1, "{events:?}");
+    assert_eq!(errors[0].fields["action"], "create");
+    assert_eq!(errors[0].fields["resource_type"], "dashboards");
+    assert_eq!(errors[0].fields["resource_id"], "");
+    assert_eq!(errors[0].fields["error"], REFUSED_DISPLAY);
 }
 
 /// `record_audit`, which the access editor and the VATUSA reconciler propagate with `?`, still
@@ -355,11 +386,7 @@ async fn every_api_key_action_succeeds_and_logs_its_failed_audit_insert(pool: Pg
     let logged: Vec<(&str, &str, &str)> = audit_events(&events, tracing::Level::ERROR)
         .iter()
         .map(|e| {
-            assert!(
-                e.fields["error"].contains("audit insert refused by test"),
-                "{:?}",
-                e.fields
-            );
+            assert_eq!(e.fields["error"], REFUSED_DISPLAY, "{:?}", e.fields);
             (
                 e.fields["action"].as_str(),
                 e.fields["resource_type"].as_str(),
@@ -379,6 +406,46 @@ async fn every_api_key_action_succeeds_and_logs_its_failed_audit_insert(pool: Pg
     assert!(
         audit_rows(&pool).await.is_empty(),
         "every insert really failed"
+    );
+}
+
+/// The positive side of AC 2: a key action on a healthy database logs nothing and records its row
+/// against the acting user's audit actor.
+#[sqlx::test]
+async fn an_api_key_action_records_its_row_with_the_users_actor(pool: PgPool) {
+    let state = state(pool.clone());
+    let (user, cookie) = user_with(&pool, KEY_CREATE).await;
+
+    let ((status, body), events) = capturing(request(
+        &state,
+        Method::POST,
+        "/api/v1/api-keys",
+        &cookie,
+        Some(json!({ "name": "audit test key", "permissions": [] })),
+    ))
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["key"]["id"].as_str().expect("the created key's id");
+    assert!(saw_the_request(&events), "capture was live: {events:?}");
+    assert!(
+        audit_events(&events, tracing::Level::ERROR).is_empty(),
+        "{events:?}"
+    );
+    assert!(
+        audit_events(&events, tracing::Level::WARN).is_empty(),
+        "{events:?}"
+    );
+    let actor: String = sqlx::query_scalar(
+        "select id from access.actors where actor_type = 'user' and user_id = $1",
+    )
+    .bind(&user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit_rows(&pool).await,
+        [(Some(actor), "API_KEY".to_owned(), Some(id.to_owned()))]
     );
 }
 
