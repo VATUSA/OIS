@@ -1451,6 +1451,39 @@ pub(crate) async fn diagnostics_report_prune_once(
     .await
 }
 
+/// Delete finished VATUSA access-reset runs past [`AUDIT_RETAIN_DAYS`] (#941). A run's `result`
+/// holds the CID and display name of every member it reset, and its `reason` is free text; the audit
+/// log holds the same facts and keeps them as long, so the two horizons agree. A run still `running`
+/// is never deleted.
+///
+/// The deleted runs are unrecoverable: no copy is kept, and their GET answers 404 afterwards.
+pub fn spawn_vatusa_reset_run_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "vatusa_reset_run_prune",
+        "Delete finished VATUSA access-reset runs past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { vatusa_reset_run_prune_once(&pool, Utc::now()).await }
+        },
+    ));
+}
+
+/// One pass of [`spawn_vatusa_reset_run_prune`] as of `now`, so a test can place the cutoff.
+pub(crate) async fn vatusa_reset_run_prune_once(
+    pool: &PgPool,
+    now: chrono::DateTime<Utc>,
+) -> Result<String, String> {
+    crate::repos::access_reset::prune_finished_runs(
+        pool,
+        now - chrono::Duration::days(AUDIT_RETAIN_DAYS),
+    )
+    .await
+    .map(|n| format!("{n} deleted"))
+    .map_err(|_| "prune failed".to_string())
+}
+
 /// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).
 ///
 /// Its own job rather than a pass inside the stats compaction, following `spawn_audit_log_prune`'s
@@ -3354,6 +3387,128 @@ mod winds_refresh_tests {
         assert_eq!(
             record_winds_run(None, &winds, loaded.clone(), now).await,
             loaded
+        );
+    }
+}
+
+#[cfg(test)]
+mod vatusa_reset_run_prune_tests {
+    use chrono::Utc;
+    use sqlx::PgPool;
+
+    use super::{AUDIT_RETAIN_DAYS, vatusa_reset_run_prune_once};
+
+    // Absolute ages in days, never `AUDIT_RETAIN_DAYS ± 1`: a fixture built from the constant moves
+    // with it and stays green whatever the retention is (see `departure_runway_prune_tests`).
+    const FRESH_FINISHED_AGE_DAYS: i32 = 179;
+    const STALE_FINISHED_AGE_DAYS: i32 = 181;
+    /// Past the cutoff on `started_at` too, so a pass keyed on the wrong column deletes it.
+    const RUNNING_STARTED_AGE_DAYS: i32 = 400;
+
+    /// Insert a finished run (`status` succeeded or failed) that started and finished `days` ago.
+    async fn finished_run(pool: &PgPool, status: &str, days: i32) -> String {
+        sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, status, started_at, finished_at, result) \
+             values ('test', $1, now() - make_interval(days => $2::int), \
+                     now() - make_interval(days => $2::int), '{}'::jsonb) returning id",
+        )
+        .bind(status)
+        .bind(days)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Insert a run still `running`, started `days` ago.
+    async fn running_run(pool: &PgPool, days: i32) -> String {
+        sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, started_at) \
+             values ('test', now() - make_interval(days => $1::int)) returning id",
+        )
+        .bind(days)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn ids(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select id from access.vatusa_reset_runs order by id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    /// Guards the constant: the fixed ages only straddle the horizon while it sits between them.
+    #[test]
+    fn the_fixed_ages_straddle_the_audit_retention() {
+        assert!(
+            i64::from(FRESH_FINISHED_AGE_DAYS) < AUDIT_RETAIN_DAYS
+                && AUDIT_RETAIN_DAYS < i64::from(STALE_FINISHED_AGE_DAYS)
+                && STALE_FINISHED_AGE_DAYS < RUNNING_STARTED_AGE_DAYS,
+            "retention is {AUDIT_RETAIN_DAYS} d, which no longer sits between \
+             {FRESH_FINISHED_AGE_DAYS} d and {STALE_FINISHED_AGE_DAYS} d (running row at \
+             {RUNNING_STARTED_AGE_DAYS} d) — update both the constant and these ages"
+        );
+    }
+
+    /// The pass, not the repo function: the repo takes its cutoff as a parameter, so testing it alone
+    /// proves nothing about the constant the job applies.
+    #[sqlx::test]
+    async fn the_pass_deletes_only_runs_finished_past_the_retention(pool: PgPool) {
+        finished_run(&pool, "succeeded", STALE_FINISHED_AGE_DAYS).await;
+        finished_run(&pool, "failed", STALE_FINISHED_AGE_DAYS).await;
+        let fresh = finished_run(&pool, "succeeded", FRESH_FINISHED_AGE_DAYS).await;
+        let running = running_run(&pool, RUNNING_STARTED_AGE_DAYS).await;
+
+        let outcome = vatusa_reset_run_prune_once(&pool, Utc::now()).await;
+
+        assert_eq!(outcome, Ok("2 deleted".to_string()));
+        assert_eq!(ids(&pool).await, sorted(vec![fresh, running]));
+    }
+
+    /// "Older than" the retention: a run finished exactly `AUDIT_RETAIN_DAYS` before `now` stays.
+    #[sqlx::test]
+    async fn a_run_finished_exactly_at_the_cutoff_is_kept(pool: PgPool) {
+        // Postgres keeps microseconds; a nanosecond `now` would put the stored row before the cutoff.
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6);
+        let at_cutoff = now - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+        let id: String = sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, status, started_at, finished_at) \
+             values ('test', 'succeeded', $1, $1) returning id",
+        )
+        .bind(at_cutoff)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let outcome = vatusa_reset_run_prune_once(&pool, now).await;
+
+        assert_eq!(outcome, Ok("0 deleted".to_string()));
+        assert_eq!(ids(&pool).await, vec![id]);
+    }
+
+    /// A delete that fails is an `Err`, which `run_interval` records as a failed run.
+    #[sqlx::test]
+    async fn a_failed_delete_returns_err(pool: PgPool) {
+        // Positive control: the same pass succeeds while the table exists.
+        assert_eq!(
+            vatusa_reset_run_prune_once(&pool, Utc::now()).await,
+            Ok("0 deleted".to_string())
+        );
+        // This test's own database (`#[sqlx::test]`), so the delete itself is what fails.
+        sqlx::query("drop table access.vatusa_reset_runs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vatusa_reset_run_prune_once(&pool, Utc::now()).await,
+            Err("prune failed".to_string())
         );
     }
 }
