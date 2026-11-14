@@ -37,7 +37,6 @@ pub mod sector_limits;
 mod sector_limits_tests;
 pub mod service_accounts;
 pub mod stats;
-pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod vatusa;

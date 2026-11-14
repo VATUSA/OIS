@@ -27,11 +27,10 @@ use crate::{
     auth::{permissions::FlowSectorsRead, principal::Actor, require_permission::RequirePermission},
     errors::ApiError,
     feed::{
-        neighbors,
+        neighbors, predict,
         sector_consolidations::row_limit,
         sector_limits::{DEFAULT_LIMIT, SectorLimits, level},
         sector_load::{BIN_MIN, SectorLoad},
-        sector_tracks::AIRBORNE_GS_KT,
         sectors::{APPROACH_TIER, SectorTable},
         vatsim::VatsimData,
     },
@@ -106,7 +105,7 @@ fn grounded_callsigns(data: &VatsimData, excluded: &HashSet<String>) -> Vec<Stri
     let pilots = data
         .pilots
         .iter()
-        .filter(|p| p.groundspeed < AIRBORNE_GS_KT && p.flight_plan.is_some())
+        .filter(|p| !predict::is_airborne(p.groundspeed) && p.flight_plan.is_some())
         .map(|p| &p.callsign);
     let prefiles = data
         .prefiles

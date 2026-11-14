@@ -4,6 +4,7 @@ import {Button, DropdownMenu, DropdownMenuContent, DropdownMenuTrigger} from "@o
 
 import {bucketByTime, fitHorizontal, placeSlots} from "./layout";
 import {type DelayLevel, delayLabel, tickMarks, type TguiColumn, type TguiItem} from "./tgui";
+import {PROPOSED_TITLE} from "@/components/proposed-time";
 
 /**
  * The TGUI arrival ladder (VATUSA/OIS#557): one column per stream, each a vertical time axis with
@@ -53,7 +54,7 @@ interface RailItem {
 
 function tagWidth(item: TguiItem, rail: Rail): number {
   const label = rail === "sta" ? (delayLabel(item.delayMin)?.text.length ?? 0) + 1 : 0;
-  return 14 + (item.callsign.length + label) * CH + (item.committed ? 12 : 0);
+  return 14 + (item.callsign.length + label + (item.proposed ? 2 : 0)) * CH + (item.committed ? 12 : 0);
 }
 
 function Tag({ item, rail }: { item: TguiItem; rail: Rail }) {
@@ -69,6 +70,14 @@ function Tag({ item, rail }: { item: TguiItem; rail: Rail }) {
     >
       {item.committed && <Lock className="size-2.5 text-ink-3" aria-label="committed" />}
       <span className="font-semibold">{item.callsign}</span>
+      {item.proposed && (
+        <span title={PROPOSED_TITLE}>
+          <span aria-hidden="true" className="font-semibold text-flight-proposed">
+            P
+          </span>
+          <span className="sr-only"> proposed</span>
+        </span>
+      )}
       {delay && (
         <span data-delay={delay.level} className={LEVEL_CLASS[delay.level]}>
           {delay.text}

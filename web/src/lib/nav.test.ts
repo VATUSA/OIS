@@ -72,7 +72,6 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/historical/dashboard": ["stats.data.read"],
   "/admin/historical/replay": ["stats.data.read"],
   "/admin/historical/delays": ["stats.data.read"],
-  "/admin/historical/taxi": ["stats.data.read"],
   "/admin/access": ["access.users.read"],
   "/admin/groups": ["access.groups.read"],
   "/admin/audit": ["audit.logs.read"],

@@ -94,7 +94,6 @@ export default defineConfig({
           { text: "Statistics & replay", link: "/historical/overview" },
           { text: "Replay", link: "/historical/replay" },
           { text: "Data & retention", link: "/historical/retention" },
-          { text: "Taxi & pushback insights", link: "/historical/taxi-insights" },
           { text: "Delays", link: "/historical/delays" },
         ],
       },

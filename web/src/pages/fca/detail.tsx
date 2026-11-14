@@ -17,6 +17,7 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 import {Ladder} from "@/pages/fca/ladder";
 import {can} from "@/lib/platform";
 import {openPopout, popoutSpecs} from "@/lib/popout";
@@ -105,9 +106,11 @@ function Strip({
           )}
         </span>
         <span className="text-right font-mono leading-tight">
-          <span className={delayed ? "text-ink" : toneText[st.tone]}>
-            {hhmmZulu(f.cross_time)}
-          </span>
+          <ProposedTime
+            className={delayed ? "text-ink" : toneText[st.tone]}
+            iso={f.cross_time}
+            proposed={f.wheels_up_proposed}
+          />
           <span
             className={`block text-xs ${delayed ? "text-danger" : "text-success"}`}
           >
@@ -186,17 +189,6 @@ function Strip({
           {f.debug.unresolved.length > 0 && (
             <div className="text-danger">
               unresolved: {f.debug.unresolved.join(" ")}
-            </div>
-          )}
-          {f.debug.taxi_estimate && (
-            <div>
-              push {f.debug.taxi_estimate.pushback_sec}s ({f.debug.taxi_estimate.pushback_tier}, n=
-              {f.debug.taxi_estimate.pushback_samples}) · start-up {f.debug.taxi_estimate.startup_sec}s (
-              {f.debug.taxi_estimate.startup_tier}, n={f.debug.taxi_estimate.startup_samples}) · taxi{" "}
-              {f.debug.taxi_estimate.taxi_sec}s (
-              {f.debug.taxi_estimate.taxi_tier}, n={f.debug.taxi_estimate.taxi_samples})
-              {f.debug.taxi_estimate.gate && ` · gate ${f.debug.taxi_estimate.gate}`}
-              {f.debug.taxi_estimate.runway && ` · rwy ${f.debug.taxi_estimate.runway}`}
             </div>
           )}
         </div>

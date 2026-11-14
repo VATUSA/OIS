@@ -3,6 +3,7 @@ import type {PickingInfo} from "@deck.gl/core";
 import {RATINGS, onlineFor} from "@/lib/atc-format";
 import {DELAY_THRESHOLD_SEC, fmtDelaySec} from "@/lib/fca";
 import {hhmmZulu} from "@/lib/time";
+import {PROPOSED_TITLE} from "@/components/proposed-time";
 import {ATC_COLORS} from "./colors";
 import {objectUnder} from "./pick";
 import type {NormAircraft} from "./types";
@@ -52,7 +53,10 @@ function meteringHtml(f: MatchedFlight): string {
   const delay = delayed
     ? `<span style="color:var(--danger)">+${fmtDelaySec(f.delay_sec)}</span>`
     : `<span style="color:var(--success)">on time</span>`;
-  return `<div style="font-family:'JetBrains Mono',ui-monospace,monospace">#${f.seq} · STA ${hhmmZulu(f.cross_time)} · ETA ${hhmmZulu(f.eta)} · ${delay}</div>`;
+  const proposed = f.wheels_up_proposed
+    ? ` · <span style="color:var(--flight-proposed)" title="${esc(PROPOSED_TITLE)}">proposed</span>`
+    : "";
+  return `<div style="font-family:'JetBrains Mono',ui-monospace,monospace">#${f.seq} · STA ${hhmmZulu(f.cross_time)} · ETA ${hhmmZulu(f.eta)} · ${delay}${proposed}</div>`;
 }
 
 /**

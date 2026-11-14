@@ -535,32 +535,86 @@ pub async fn list_releases(
     .map_err(|_| ApiError::Internal)
 }
 
-/// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy
-/// engine's proposed population (#721): the **latest** of its issued CFR, its releases in live FCAs (enabled,
-/// not deleted) and its slot in a published GDP. The latest is the binding constraint — a flight held for
-/// a later release can't satisfy an earlier one — and it is the flight advisory's rule too
-/// (`handlers::flow::flight_advisory`, `edcts.max()`). The departures list uses it too (#732).
+/// The locked wheels-up (epoch ms) of each of `callsigns` that holds one: the **latest** of its issued
+/// CFR, its releases in live FCAs (enabled, not deleted, and not a planned or archived event FCA) and its
+/// slot in a published GDP. The latest is the binding constraint — a flight held for a later release
+/// can't satisfy an earlier one — and it is the flight advisory's rule too
+/// (`handlers::flow::flight_advisory`, `edcts.max()`). Sector occupancy (#721), the departures list
+/// (#732) and every surface that times a flight through `TimingTables::live` (#814) read it, public
+/// routes among them, so a hidden event FCA's release stays hidden here as it does in `list_fcas`.
 pub async fn locked_wheels_up(
     pool: &PgPool,
     callsigns: &[String],
 ) -> Result<HashMap<String, i64>, ApiError> {
+    locks(pool, callsigns, Except::default()).await
+}
+
+/// [`locked_wheels_up`] without the slots of `airport`'s own published GDPs: the GDP draft ranks a
+/// flight from every other lock it holds, but not from the slot that program gave it, or a revise or
+/// compress could never move it earlier (#814).
+pub async fn locked_wheels_up_outside_gdps_at(
+    pool: &PgPool,
+    callsigns: &[String],
+    airport: &str,
+) -> Result<HashMap<String, i64>, ApiError> {
+    let except = Except {
+        gdp_airport: Some(airport),
+        ..Except::default()
+    };
+    locks(pool, callsigns, except).await
+}
+
+/// `callsign`'s locked wheels-up from everything but its release on `fca_id`: the time RDY and SET
+/// on that FCA may not release it before (#814). A release it already holds there does not floor
+/// the new one.
+pub async fn locked_wheels_up_elsewhere(
+    pool: &PgPool,
+    callsign: &str,
+    fca_id: &str,
+) -> Result<Option<i64>, ApiError> {
+    let asked = [callsign.to_string()];
+    let except = Except {
+        fca: Some(fca_id),
+        ..Except::default()
+    };
+    Ok(locks(pool, &asked, except).await?.remove(callsign))
+}
+
+/// What a lock read leaves out: the releases on one FCA, the slots of one airport's GDPs.
+#[derive(Default, Clone, Copy)]
+struct Except<'a> {
+    fca: Option<&'a str>,
+    gdp_airport: Option<&'a str>,
+}
+
+/// [`locked_wheels_up`], leaving out what `except` names.
+async fn locks(
+    pool: &PgPool,
+    callsigns: &[String],
+    except: Except<'_>,
+) -> Result<HashMap<String, i64>, ApiError> {
     if callsigns.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query_as::<_, (String, i64)>(
+    // `NOT_HIDDEN_EVENT` is a trusted code constant; every value is bound.
+    let rows = sqlx::query_as::<_, (String, i64)>(&format!(
         "select callsign, max(t)::bigint from ( \
              select callsign, (extract(epoch from wheels_up) * 1000)::bigint as t \
              from tmu.issued_cfrs where callsign = any($1) \
              union all \
              select r.callsign, r.edct_ms from flow.fca_release r join flow.fca f on f.id = r.fca_id \
-             where f.enabled and f.deleted_at is null and r.callsign = any($1) \
+             where f.enabled and f.deleted_at is null and {NOT_HIDDEN_EVENT} \
+               and r.callsign = any($1) and r.fca_id is distinct from $2 \
              union all \
              select s.callsign, (extract(epoch from s.edct) * 1000)::bigint \
              from tmu.gdp_slot s join tmu.gdp g on g.id = s.gdp_id \
              where g.status = 'published' and s.edct is not null and s.callsign = any($1) \
-         ) locked group by callsign",
-    )
+               and upper(g.airport) is distinct from upper($3::text) \
+         ) locked group by callsign"
+    ))
     .bind(callsigns)
+    .bind(except.fca)
+    .bind(except.gdp_airport)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -753,7 +807,7 @@ mod locked_wheels_up_tests {
     use chrono::{DateTime, TimeZone, Utc};
     use sqlx::PgPool;
 
-    use super::locked_wheels_up;
+    use super::{locked_wheels_up, locked_wheels_up_elsewhere, locked_wheels_up_outside_gdps_at};
 
     fn at(h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 5, h, m, 0).unwrap()
@@ -870,5 +924,111 @@ mod locked_wheels_up_tests {
         assert!(!locked.contains_key("NONE"), "nothing locked");
         assert!(!locked.contains_key("UNASKED"), "not asked for");
         assert!(locked_wheels_up(&pool, &[]).await.unwrap().is_empty());
+    }
+
+    /// #814 (#845's predicate): a release on a planned or archived event FCA locks nothing, as
+    /// `list_fcas` hides that FCA; one on a published event FCA does. Every timing surface, public
+    /// routes among them, reads this map.
+    #[sqlx::test]
+    async fn a_hidden_event_fcas_release_locks_nothing(pool: PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (7461, 'E', now(), now() + interval '2 hours')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (status, callsign) in [
+            ("planned", "PLAN"),
+            ("archived", "ARCH"),
+            ("published", "PUB"),
+        ] {
+            let id: String = sqlx::query_scalar(
+                "insert into flow.fca (enabled, event_id, event_status) values (true, 7461, $1) \
+                 returning id",
+            )
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            release(&pool, &id, callsign, at(15, 0)).await;
+        }
+        let asked: Vec<String> = ["PLAN", "ARCH", "PUB"].map(String::from).into();
+        let locked = locked_wheels_up(&pool, &asked).await.unwrap();
+        assert_eq!(
+            locked.get("PUB").copied(),
+            Some(at(15, 0).timestamp_millis()),
+            "positive control: a published event FCA's release locks"
+        );
+        assert!(
+            !locked.contains_key("PLAN"),
+            "a planned event FCA is hidden"
+        );
+        assert!(
+            !locked.contains_key("ARCH"),
+            "an archived event FCA is hidden"
+        );
+    }
+
+    /// #814: the floor RDY and SET on one FCA respect leaves out that FCA's own release and keeps
+    /// every other lock: another FCA's release, a CFR and a published GDP slot, the latest winning.
+    #[sqlx::test]
+    async fn the_lock_elsewhere_leaves_out_only_this_fcas_release(pool: PgPool) {
+        let (here, there) = (fca(&pool, true, false).await, fca(&pool, true, false).await);
+        release(&pool, &here, "OWN", at(17, 0)).await;
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "OWN", &here)
+                .await
+                .unwrap(),
+            None,
+            "its own release here floors nothing"
+        );
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "OWN", &there)
+                .await
+                .unwrap(),
+            Some(at(17, 0).timestamp_millis()),
+            "positive control: the same release does floor another FCA"
+        );
+        release(&pool, &here, "MIX", at(18, 0)).await;
+        release(&pool, &there, "MIX", at(15, 0)).await;
+        cfr(&pool, "MIX", at(15, 30)).await;
+        gdp_slot(&pool, "published", "MIX", at(16, 0)).await;
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "MIX", &here)
+                .await
+                .unwrap(),
+            Some(at(16, 0).timestamp_millis()),
+            "the latest of the other FCA's release, the CFR and the GDP slot; not 18:00 here"
+        );
+    }
+
+    /// #814 decision 31: the GDP draft's lock read leaves out only the asking airport's own GDP
+    /// slots. The same slot locks for any other airport's read, and a CFR still locks.
+    #[sqlx::test]
+    async fn the_gdp_draft_leaves_out_only_its_own_airports_slots(pool: PgPool) {
+        gdp_slot(&pool, "published", "OWN", at(16, 0)).await;
+        gdp_slot(&pool, "published", "BOTH", at(16, 0)).await;
+        cfr(&pool, "BOTH", at(15, 0)).await;
+        let asked: Vec<String> = ["OWN", "BOTH"].map(String::from).into();
+        let here = locked_wheels_up_outside_gdps_at(&pool, &asked, "kjfk")
+            .await
+            .unwrap();
+        assert!(
+            !here.contains_key("OWN"),
+            "its own airport's slot: {here:?}"
+        );
+        assert_eq!(
+            here.get("BOTH").copied(),
+            Some(at(15, 0).timestamp_millis())
+        );
+        let elsewhere = locked_wheels_up_outside_gdps_at(&pool, &asked, "KBOS")
+            .await
+            .unwrap();
+        assert_eq!(
+            elsewhere.get("OWN").copied(),
+            Some(at(16, 0).timestamp_millis()),
+            "positive control: another airport's read keeps it"
+        );
     }
 }

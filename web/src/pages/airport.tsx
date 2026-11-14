@@ -17,10 +17,11 @@ import {
 import {Clock, Filter, Lock, PictureInPicture2, Plane, PlaneLanding, PlaneTakeoff} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
-import type {LadderFilters} from "@/features/dashboard/types";
+import {activeLadderFilters, ladderStatuses, type LadderFilters} from "@/features/dashboard/types";
 import {type Flow, type FlowFlight, useAirportFlow} from "@/lib/feed";
 import {toneOf} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 import {can} from "@/lib/platform";
 import {openPopout, popoutSpecs} from "@/lib/popout";
 import {DeparturesView} from "@/pages/departures";
@@ -85,14 +86,13 @@ function delayClass(min: number): string {
 
 /** Share of inbound traffic by state, as one thin segmented meter. */
 function StatusMeter({ flow }: { flow: Flow }) {
-  const total = Math.max(flow.airborne + flow.ground + flow.proposed, 1);
+  const total = Math.max(flow.airborne + flow.ground, 1);
   const seg = (n: number, cls: string) =>
     n > 0 ? <div className={cls} style={{ width: `${(n / total) * 100}%` }} /> : null;
   return (
     <div className="flex h-1.5 overflow-hidden rounded-full bg-chip" aria-hidden="true">
       {seg(flow.airborne, "bg-flight-airborne")}
       {seg(flow.ground, "bg-flight-ground")}
-      {seg(flow.proposed, "bg-flight-proposed")}
     </div>
   );
 }
@@ -149,7 +149,7 @@ export function SummaryView({ flow }: { flow: Flow }) {
   const arrived = flow.flights.filter((f) => f.status === "arrived").length;
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
         <MetricCard
           className="col-span-2 md:col-span-3 xl:col-span-1"
           label="Inbound total"
@@ -159,7 +159,6 @@ export function SummaryView({ flow }: { flow: Flow }) {
         />
         <MetricCard label="Airborne" value={flow.airborne} tone="airborne" />
         <MetricCard label="Ground" value={flow.ground} tone="ground" />
-        <MetricCard label="Proposed" value={flow.proposed} tone="proposed" />
         <MetricCard label="Arrived" value={arrived} tone="arrived" />
       </div>
 
@@ -225,7 +224,7 @@ function CfrCell({ f, now }: { f: FlowFlight; now: number }) {
     );
   }
   return (
-    <span className="text-ink-3" title="Proposed wheels-up — auto-slotted, not yet issued">
+    <span className="text-ink-3" title="Metered wheels-up — auto-slotted, not yet issued">
       {hhmmZulu(f.cfr)}
     </span>
   );
@@ -286,7 +285,13 @@ function aircraftColumns(tokens: Record<string, string>, now: number): DataColum
       mono: true,
       align: "right",
       sortDescFirst: false,
-      cell: (c) => <span className="text-ink-2">{hhmmZulu(c.row.original.eta)}</span>,
+      cell: (c) => (
+        <ProposedTime
+          className="text-ink-2"
+          iso={c.row.original.eta}
+          proposed={c.row.original.wheels_up_proposed}
+        />
+      ),
     },
     {
       id: "sta",
@@ -344,7 +349,7 @@ export function AircraftView({ flow }: { flow: Flow }) {
       {flow.flights.some((f) => f.cfr_issued) && (
         <p className="flex items-center gap-1.5 text-xs text-ink-3">
           <Lock className="size-3" /> issued CFR — a locked wheels-up given to the pilot; faint times are
-          proposed slots.
+          metered slots, not yet issued.
         </p>
       )}
     </div>
@@ -356,7 +361,8 @@ export function AircraftView({ flow }: { flow: Flow }) {
 /** True if a flight passes the ladder's include-filters (each empty list = no constraint). */
 function passesLadderFilters(f: FlowFlight, filters: LadderFilters | undefined): boolean {
   if (!filters) return true;
-  if (filters.statuses?.length && !filters.statuses.includes(f.status)) return false;
+  const statuses = ladderStatuses(filters);
+  if (statuses.length && !statuses.includes(f.status)) return false;
   if (filters.gates?.length) {
     const g = summaryGateName(f.gate);
     if (!g || !filters.gates.includes(g)) return false;
@@ -374,7 +380,8 @@ const LADDER_CH = 7.5; // ≈ px per monospace char at text-xs
  * text (callsign + "HHMMz" time + optional gate). */
 function measureTagWidth(f: FlowFlight): number {
   const gate = f.gate ? String(f.gate) : "";
-  const chars = f.callsign.length + 5 /* HHMMz */ + gate.length;
+  // HHMMz, plus " P" when the time is proposed (#814).
+  const chars = f.callsign.length + 5 + (f.wheels_up_proposed ? 2 : 0) + gate.length;
   const gaps = (gate ? 3 : 2) * 8; // gap-2 between the dot and the mono spans
   return 12 /* connector tick */ + 24 /* pill padding + border */ + 6 /* dot */ + gaps + chars * LADDER_CH;
 }
@@ -430,6 +437,7 @@ export function airportTguiColumns(
       staTime: time,
       delayMin: f.sta ? f.delay_min : null,
       committed: f.cfr_issued,
+      proposed: f.wheels_up_proposed,
       wake: f.category ?? null,
     });
   }
@@ -470,9 +478,7 @@ export function LadderView({
   // Despite the name, this is "is any filter category active" — not literally "no match" (that's
   // only true once it's also combined with an empty `items`). Drives both the empty-state message
   // below and the header's filter indicator (see #96), since both need the same "filtered?" check.
-  const noMatch =
-    filters &&
-    (filters.gates?.length || filters.statuses?.length || filters.origins?.length || filters.types?.length);
+  const noMatch = activeLadderFilters(filters) > 0;
 
   return (
     <Card className="p-4">
@@ -541,11 +547,11 @@ export function LadderView({
         connectorColor={colorOf}
         renderTag={(f) => (
           <span
-            className={`flex items-center gap-2 rounded-xs border border-line bg-panel-2 py-1 pl-2 pr-2.5 text-xs ${f.status === "proposed" ? "opacity-75" : ""}`}
+            className="flex items-center gap-2 rounded-xs border border-line bg-panel-2 py-1 pl-2 pr-2.5 text-xs"
           >
             <span className="size-1.5 shrink-0 rounded-full" style={{ background: colorOf(f) }} />
             <span className="font-mono font-semibold">{f.callsign}</span>
-            <span className="font-mono text-ink-2">{hhmmZulu(timeOf(f))}</span>
+            <ProposedTime className="font-mono text-ink-2" iso={timeOf(f)} proposed={f.wheels_up_proposed} />
             {f.gate && <span className="font-mono text-ink-3">{f.gate}</span>}
           </span>
         )}

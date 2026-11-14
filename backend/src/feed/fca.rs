@@ -142,7 +142,7 @@ fn remaining_anchors(anchors: &[NamedAnchor], lat: f64, lon: f64, hdg: f64) -> V
 /// This is index-based, not a distance/epsilon match on the aircraft's coordinates — a real gate or
 /// ramp position is essentially never the airport's exact reference point, so a naive "prepend
 /// always" would still add a spurious extra point at the route's start and inflate
-/// `predict::arrival_eta`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
+/// `predict::trajectory`'s "the nav engine resolved real waypoints" signal (`path.len() > 2`) for
 /// ordinary pre-departure traffic on an otherwise-unresolved route.
 fn forward_route_from_position(anchors: &[NamedAnchor], lat: f64, lon: f64) -> Vec<NamedAnchor> {
     if anchors.len() < 2 {
@@ -223,7 +223,7 @@ pub fn route_path(
     if anchors.len() < 2 {
         return None;
     }
-    let path = if gs >= 50 {
+    let path = if super::predict::is_airborne(gs) {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
         forward_route_from_position(&anchors, lat, lon)
@@ -257,7 +257,7 @@ pub fn route_path_named(
     if anchors.len() < 2 {
         return None;
     }
-    let path = if gs >= 50 {
+    let path = if super::predict::is_airborne(gs) {
         remaining_anchors(&anchors, lat, lon, hdg as f64)
     } else {
         forward_route_from_position(&anchors, lat, lon)
@@ -329,10 +329,10 @@ pub struct MeterInput {
     pub cross_speed: f64,
     /// A frozen (issued-CFR) metered crossing time; pins this aircraft like an airborne one.
     pub frozen_ms: Option<i64>,
-    /// The ground allowance (pushback + start-up + taxi) inside `eta_ms`, millis; 0 when airborne.
-    /// Metering ignores it. The release math needs it: a release is a wheels-up time, so it backs
-    /// out only the airborne part of the ETA (#815).
-    pub ground_allowance_ms: i64,
+    /// The wheels-up `eta_ms` is timed from, epoch millis; now when airborne. Metering ignores it.
+    /// The release math needs it: a release is a wheels-up time, so it backs out only the airborne
+    /// ETE, `eta_ms − wheels_up_ms` (#815).
+    pub wheels_up_ms: i64,
 }
 
 pub struct MeterOutput {
@@ -550,10 +550,10 @@ fn angle_diff(a: f64, b: f64) -> f64 {
 
 /// Position and heading `target_nm` along `path` (a `[lat, lon]` polyline from its start), for
 /// #226's forward prediction scrubber — the geometric counterpart to
-/// `predict::project_along_route`'s along-route distance. Clamps to the last point (with that
-/// leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must have
-/// at least 2 points — the caller (only ever fed an already-resolved [`route_path`]) guarantees
-/// this.
+/// `predict::Trajectory::progress_after`'s along-route distance. Clamps to the last point (with
+/// that leg's bearing) once `target_nm` reaches or exceeds the polyline's total length. `path` must
+/// have at least 2 points. An airborne trajectory always has one; a ground trajectory on the
+/// nominal leg has none, which `sector_tracks` checks before calling this.
 pub(crate) fn point_and_heading_at(path: &[[f64; 2]], target_nm: f64) -> ([f64; 2], f64) {
     let mut acc = 0.0;
     for w in path.windows(2) {
@@ -649,7 +649,7 @@ mod tests {
         // onto the *arrival* end for this reversed KIAD->KJFK route (the same fixture the other
         // tests use, direction swapped), collapsing the route to one point and losing a real future
         // crossing entirely. With the caller now passing the real departure airport's coordinates
-        // (`handlers::flow::prefile_position`), it must still resolve correctly here too.
+        // (as `predict::trajectory` does for a prefile), it must still resolve correctly here too.
         let nav = NavData::default();
         let ap = airports();
         let fca = [[41.0, -75.7], [38.0, -75.7]];
@@ -770,7 +770,7 @@ mod tests {
         // full untrimmed filed route from departure. Reusing `forward_route_from_position` (shared
         // with `route_path`) is what makes that hold; a version that fell back to the bare anchor
         // list here would report RBV as still ahead and its total distance would diverge from
-        // `route_path`'s (`path_len_nm`) — the exact number `predict::arrival_eta` times the real
+        // `route_path`'s (`path_len_nm`) — the exact number `predict::trajectory` times the real
         // ETA against.
         let nav = NavData::load();
         let ap = HashMap::from([
@@ -897,14 +897,14 @@ mod tests {
                     airborne: true,
                     cross_speed: gs,
                     frozen_ms: None,
-                    ground_allowance_ms: 0,
+                    wheels_up_ms: 0,
                 },
                 MeterInput {
                     eta_ms: 0, // same ETA → the follower is spaced by exactly one gap
                     airborne: false,
                     cross_speed: gs,
                     frozen_ms: None,
-                    ground_allowance_ms: 0,
+                    wheels_up_ms: 0,
                 },
             ]
         };
@@ -940,21 +940,21 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 60_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 200_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -975,14 +975,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000,
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -1006,14 +1006,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 90_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: Some(100_000),
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None);
@@ -1032,21 +1032,21 @@ mod tests {
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000, // within the 120s separation of #0
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 400_000, // well clear
                 airborne: true,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, None); // 120s separation
@@ -1077,21 +1077,21 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 30_000,
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 40_000,
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: Some(50_000),
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         // rate 30 → 120s separation.
@@ -1117,7 +1117,7 @@ mod tests {
             airborne: true,
             cross_speed: 400.0,
             frozen_ms: None,
-            ground_allowance_ms: 0,
+            wheels_up_ms: 0,
         };
         // Natural ETAs: A=200 B=400 C=600 D=900 (all airborne).
         let cands = vec![mk(200_000), mk(400_000), mk(600_000), mk(900_000)];
@@ -1148,7 +1148,7 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             })
             .collect::<Vec<_>>();
         let out = meter(&cands, "rate", 30, 15, Some(&[2, 1, 0]));
@@ -1170,14 +1170,14 @@ mod tests {
                 airborne: false,
                 cross_speed: 400.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
             MeterInput {
                 eta_ms: 50_000, // airborne, earlier
                 airborne: true,
                 cross_speed: 450.0,
                 frozen_ms: None,
-                ground_allowance_ms: 0,
+                wheels_up_ms: 0,
             },
         ];
         let out = meter(&cands, "rate", 30, 15, Some(&[0, 1]));

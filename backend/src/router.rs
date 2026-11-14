@@ -18,7 +18,7 @@ use crate::{
         docs, events, facilities, facility_documents, facility_map, feed, flight_exclusions, flow,
         gdp, health, integration, jobs as jobs_handler, metrics as metrics_handler, preferences,
         public, runway, sector_consolidations, sector_demand, sector_limits, service_accounts,
-        stats, taxi_insights, tmu, users, webhooks,
+        stats, tmu, users, webhooks,
     },
     openapi::ApiDoc,
     rate_limit::{self, RateLimits},
@@ -505,14 +505,6 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         .route(
             "/api/v1/stats/hist/ground-stops",
             get(stats::hist_ground_stops),
-        )
-        .route(
-            "/api/v1/stats/taxi/observations",
-            get(taxi_insights::list_taxi_observations),
-        )
-        .route(
-            "/api/v1/stats/taxi/estimates",
-            get(taxi_insights::list_taxi_estimates),
         )
         // Flow constrained areas (FCAs) + live map traffic
         .route(

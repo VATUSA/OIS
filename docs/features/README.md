@@ -21,7 +21,6 @@ surface, and its Discord touchpoints.
 | [aadc.md](aadc.md)                               | flow                 | built |
 | [fca.md](fca.md)                                 | flow                 | built: FCA logic audit (#838); data model, permissions and API are in flow.md |
 | [winds.md](winds.md)                             | flow                 | built: winds aloft (NOAA RAP) and the #836 review with measured error; API is in flow.md |
-| [taxi-insights.md](taxi-insights.md)             | stats, flow          | built |
 | [dashboard-boards.md](dashboard-boards.md)       | identity             | built |
 | [map-atc-display.md](map-atc-display.md)         | flow (map rendering) | built (rendering pipeline — the overlay has no data model, permissions, API or Discord of its own; sector data is in monitor.md) |
 | [monitor.md](monitor.md)                         | flow                 | built: sector demand on Operations → Sector Monitor (#720); dataset gaps #727 |

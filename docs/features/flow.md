@@ -8,8 +8,7 @@
 > what exists in code. Rate programs, ground stops, GDPs, and CFRs live in the `tmu`
 > domain — see [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md). Two more `flow`-domain
 > features exist and aren't detailed below: **airport surface data** (gates/ramp
-> areas/taxiways, `flow.surface_data.update` — feeds the taxi/pushback model, see
-> [taxi-insights.md](taxi-insights.md)) and **aircraft performance profiles**
+> areas/taxiways, `flow.surface_data.update`) and **aircraft performance profiles**
 > (`flow.aircraft_profiles.{read,update}` — climb/cruise/descent speeds per type,
 > feeding the shared trajectory/ETA model this whole domain's metering runs on). The
 > **arrival demand chart (AADC)** — a bucketed forward-demand view built on this same
@@ -247,9 +246,11 @@ releases for FCA crossings (a native port of vatflow's idst view).
   (#585). The console shows it as "RLSD 1412z · via vTBFM".
 - **EDCTs** — for a released flight, `edct` is the frozen wheels-up from
   `flow.fca_release`. For an unreleased flight it is an **advisory** EDCT: the wheels-up
-  that would hit the metered crossing, the metered CTA less the airborne ETE (the ground
-  allowance excluded), the same value RDY stores (#815), so the controller can preview a
-  release before issuing it.
+  that would hit the metered crossing from the flight's locked wheels-up (a CFR, a GDP EDCT or
+  another FCA's release), else its proposed wheels-up (its filed departure time plus 10 min,
+  #814): the metered CTA less the airborne ETE (#815), so the controller can
+  preview a release before issuing it. RDY means ready at the runway now, so the release it stores
+  can be earlier than this preview.
 - Unscheduled flights sort by metered crossing (soonest first); released by frozen EDCT.
 
 ## FCA releases in the departures view
@@ -338,7 +339,9 @@ different machine, so it gets `409 held_by_other_machine` on those releases; a p
   The ready time is a runway time: the release takes the first slot at or after ready plus the
   airborne ETE that keeps its spacing (in manual mode, behind the flight ordered ahead of it), so
   its `edct` can be later than
-  `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: the metered slot.
+  `ready` but never earlier (#816). Omit `ready` (or send empty) for RDY: ready at the runway now,
+  so the first slot at or after now plus the airborne ETE (#814). Either way the search for a ground
+  flight starts no earlier than a CFR, GDP slot or other FCA release it holds.
 - **CFR ready time** (`IssueCfrRequest.ready_time`): an RFC 3339 instant, e.g.
   `"2026-10-03T14:15:00Z"`. No rollover rule is needed.
 - **Responses**: every time is RFC 3339 UTC (`cross_time`, `edct`, `wheels_up`). Storage in epoch
@@ -390,6 +393,53 @@ the departures view) is computed **live** per request against the current snapsh
 `flow` schema stores config and frozen releases, not traffic history. Persisted network
 history lives in the separate `stats` domain.
 
+## The ETA model and its callers
+
+Every surface that times a flight calls one function, `feed::predict::trajectory` (#813). It takes
+a connected pilot or a prefile, plus a released wheels-up when the flight holds one (a prefile
+with none is not timed, #814), and decides
+every input the model reads once: the route and its padding, the filed altitude and cruise speed,
+whether the flight is airborne and when it is wheels-up. `feed/predict.rs` documents each value;
+[`docs/architecture/prediction.md`](../architecture/prediction.md) is the model's design. The callers read times, speeds and positions off the `Trajectory` it returns:
+
+| Caller | Surface |
+| --- | --- |
+| `feed::flow::compute` (through `time_flow_flight`) | Airport flow and demand (`handlers/feed.rs` `flow_from_data`, the demand ranking), GDP inbounds (`handlers/gdp.rs` `live_inbounds`), the departures view. Connected pilots only (#814) |
+| `feed::flow::ready_time_slot` (through `compute`) | A CFR issued with a ready time (`handlers/feed.rs` `issue_cfr`) |
+| `feed::runway::collect_arrivals` | Runway ETE |
+| `feed::sector_tracks::project_tracks` (through `Ctx::track`) | Sector occupancy and demand |
+| `handlers::flow::build_candidates` | FCA metering and traffic, IDST, the flight advisory, RDY/SET and clear |
+| `handlers::flow::project_traffic` | The map's projected traffic |
+| `handlers::flow::fix_predictions` | The per-fix table for a pilot, and for a prefile that holds a lock (`aircraft_route`) |
+
+The historical replay (`/stats/hist/flow`, `/stats/hist/departures`, `/stats/hist/runway`) runs
+the same functions against a reconstructed snapshot and the winds at that instant. It holds none of
+today's releases, CFRs or GDP slots, so every ground flight in a replay is timed from its proposed
+wheels-up, its metering holds no issued CFR and the departures list shows none (#814).
+
+Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
+groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), floored at 120 kt as FCA
+metering floors its crossing speed. A flight already inside 40 nm reads its own descent schedule
+40 nm out (its type's profile, filed cruise altitude and speed, the wind along its remaining route), not
+its speed where it is now. Airport-flow MIT is set per
+arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is no
+fix to read a speed at. When a flight would land ahead of a slot already assigned on its gate, the
+gap is sized at the slot holder's speed, since the holder trails it.
+
+The FCA badge counts (`fca_counts`) and the flight advisory's crossing pre-filter need the path
+only, so they read it through `predict::flight_path`, the path the trajectory is timed along,
+great-circle fallback included.
+
+`only_the_entry_point_times_a_flight` (`feed/predict.rs`) fails when non-test code outside
+`feed/predict.rs`, `feed/trajectory.rs` and the offline profile backtest
+(`profile_builder/backtest.rs`, below) calls the model directly. To re-derive the caller list:
+
+```bash
+git grep -n 'predict::trajectory(' -- backend/src ':!*_tests.rs'
+```
+
+and keep the hits outside `#[cfg(test)]` modules.
+
 ## Measuring aircraft profiles *(#828)*
 
 The `flow.aircraft_profile` rows are hand-written. `aircraft-profile-builder` measures what each
@@ -427,5 +477,6 @@ RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder 
 - **Backtest** (`profile_builder::backtest`). Each held-out flight is replayed from its first fix
   1,000 ft above its take-off roll, on the plan revision in force then, through
   `predict::arrival_eta` and, for the top of descent, `predict::arrival_route` +
-  `predict::eta_along_route`: the code every arrival ETA runs. Errors are predicted minus
+  `predict::eta_along_route`, the model's own functions; the live surfaces reach the same model
+  through `predict::trajectory`. Errors are predicted minus
   observed, at the top of descent and at touchdown.

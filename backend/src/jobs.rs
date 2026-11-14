@@ -197,11 +197,6 @@ const XPLANE_GATE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// hammer the upstream (mwgg/Airports on GitHub raw).
 const AIRPORTS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How often to reload taxi observation samples from the DB (#164 sub-issue E). Observations
-/// accrue continuously and slowly from live traffic — no write path needs an instant force-reload
-/// the way admin-edited gates do, so a slow poll is enough.
-const TAXI_ESTIMATE_SAMPLES_INTERVAL: Duration = Duration::from_secs(10 * 60);
-
 /// Fetch the latest NASR data once and hot-swap it in when it changes — but never for an older
 /// cycle than the one loaded, so a failed fetch's bundle fallback can't replace good live data.
 /// `Ok(true)`/`Ok(false)` (updated / already current) only for a **healthy** refresh: the live FAA
@@ -762,7 +757,7 @@ pub fn spawn_sector_consolidations_refresh(
 }
 
 /// Keep the airport surface gate cache current for the DB-less feed subsystem
-/// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
+/// (`departure_runway_derive_once`'s gate matching): load every gate from the DB at startup and
 /// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.
 pub fn spawn_airport_gates_refresh(
     reg: Arc<JobRegistry>,
@@ -901,37 +896,6 @@ pub fn spawn_faa_surface_seed(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
-/// Keep the learned taxi-observation sample cache current for the DB-less feed subsystem
-/// (`feed::flow::resolve_ground_allowance_sec`, #164 sub-issue E): load every observation from the
-/// DB, group by airport, and hot-swap it in, then reload periodically. Fails safe — a failed load
-/// keeps the current map.
-pub fn spawn_taxi_estimate_samples_refresh(
-    reg: Arc<JobRegistry>,
-    pool: PgPool,
-    samples: Arc<
-        ArcSwap<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>>,
-    >,
-) {
-    tokio::spawn(run_interval(
-        reg,
-        "taxi_estimate_samples_refresh",
-        "Reload taxi observation samples from the DB",
-        TAXI_ESTIMATE_SAMPLES_INTERVAL,
-        move || {
-            let (pool, samples) = (pool.clone(), samples.clone());
-            async move {
-                match stats_repo::load_all_taxi_samples(&pool).await {
-                    Ok(by_airport) => {
-                        samples.store(Arc::new(by_airport));
-                        Ok("reloaded".to_string())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
-        },
-    ));
-}
-
 /// Age the stats position time-series through the weekly `COMPACTION_TIERS` ladder — full fidelity
 /// for a week, then progressively coarser, forever (nothing is hard-deleted past the ladder
 /// anymore). Rows inside an open/saved `stats.capture` window are skipped at every tier (retained
@@ -1003,10 +967,6 @@ async fn stats_compaction_once(
     passes.push((
         "flight-legs",
         stats_repo::prune_flight_legs(pool, legs_before).await,
-    ));
-    passes.push((
-        "taxi-observations",
-        stats_repo::prune_taxi_observations(pool, legs_before).await,
     ));
 
     for (label, res) in passes {

@@ -8,7 +8,7 @@ number — modeled on SIMTRAFFIC's AADC.
 Arrivals over the next 4 hours are bucketed into **15, 30, or 60-minute** bars (pick the bucket
 width from the toggle). Each bar is stacked by a **dimension** you choose:
 
-- **Status** — airborne, on the ground, or proposed (not yet airborne).
+- **Status** — airborne or on the ground. Prefiles are not counted.
 - **Aircraft category** — wake/weight class.
 - **Carrier** — the busiest operators in the window; everything else folds into **OTHER** so the
   chart stays readable at a busy international field.
