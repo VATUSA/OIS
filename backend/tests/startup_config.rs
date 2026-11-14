@@ -1,8 +1,9 @@
-//! Boots the real `ois-backend` binary to prove `run()` checks `TRUSTED_PROXY_HOPS` before it builds
-//! `AppState` (#923). A unit test cannot reach `run()`, and `set_var` would race every other test, so
-//! each case runs the binary with its own environment.
+//! Startup config tests (#923). The boot cases run the real `ois-backend` binary to prove `run()`
+//! checks `TRUSTED_PROXY_HOPS` before it builds `AppState`: a unit test cannot reach `run()`, and
+//! `set_var` would race every other test, so each boot gets its own environment. The last case runs
+//! in-process, capturing the log of `config::rate_limit_per_min` read from `PATH`.
 //!
-//! `DATABASE_URL` is blank in every case, so a boot that gets past the check stops at the pool's URL
+//! `DATABASE_URL` is blank in every boot, so a boot that gets past the check stops at the pool's URL
 //! parse with "relative URL without a base" before it connects anywhere or starts a poller. Each boot
 //! runs in a fresh temp dir. `dotenvy` also reads a `.env` in any parent directory, so `boot` refuses
 //! to run when one exists there.
