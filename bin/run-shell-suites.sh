@@ -9,8 +9,8 @@
 # Suites are found by glob, never by a list, so a new suite is gated the moment it
 # lands. A suite that cannot run on this host says `SKIP <reason>` and exits 0 from a
 # check of its own; this runner reads only the exit code. Each suite's output goes to
-# a log that is printed only when the suite fails, then a summary names every
-# failing suite. No suite found is a failure: a glob that stopped matching must not
+# a log that is printed only when the suite fails; a passing suite prints just its
+# SKIP lines, so a skipped case shows in the run. A summary names every failing suite. No suite found is a failure: a glob that stopped matching must not
 # read as a clean run.
 #
 # Serial on purpose: file-lock and flock-run assert timing windows that a parallel
@@ -50,6 +50,7 @@ for suite in "${SUITES[@]}"; do
     rc=$?
     if [[ $rc -eq 0 ]]; then
         echo "PASS $suite"
+        sed -nE 's/^[[:space:]]*(SKIP.*)$/    \1/p' "$LOG"
         PASSED=$((PASSED + 1))
     else
         echo "FAIL $suite (exit $rc)"

@@ -181,12 +181,18 @@ OUTPUT="$(cd "$REPO" && timeout 60 bash "$HOME_RUNNER" 2>&1)"; RC=$?
     && ok "a runner from another repo's bin/ runs the current repo's suites only" \
     || bad "cwd repo: rc=$RC ran='$(ran)': $OUTPUT"
 
-echo "SKIP comes only from inside a suite:"
+echo "Skips come only from inside a suite:"
 new_repo skip-0
 suite bin/lib/a.test.sh "$(rec a)"; suite bin/lib/b.test.sh 'echo "SKIP no zip here"; exit 0'
 invoke
 [[ $RC -eq 0 ]] && has "PASS bin/lib/b.test.sh" && has "shell suites: 2 passed, 0 failed" \
     && ok "a suite printing SKIP and exiting 0 passes" || bad "skip 0: rc=$RC: $OUTPUT"
+new_repo skip-shown
+suite bin/lib/a.test.sh 'echo "  PASS: case one"; echo "  SKIP: no fcntl here"; echo "  PASS: SKIP mid-line"; exit 0'
+invoke
+[[ $RC -eq 0 ]] && has "PASS bin/lib/a.test.sh" && has "    SKIP: no fcntl here" \
+    && [[ "$OUTPUT" != *"case one"* && "$OUTPUT" != *"mid-line"* ]] \
+    && ok "a passing suite's SKIP lines are printed, and none of its other output" || bad "skip shown: rc=$RC: $OUTPUT"
 new_repo skip-1
 suite bin/lib/a.test.sh 'echo "SKIP no zip here"; exit 1'
 invoke
