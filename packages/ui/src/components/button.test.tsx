@@ -10,7 +10,7 @@ import {Button, buttonVariants} from "./button";
 /** Whitespace-split class tokens, so `border-line-soft` or `hover:border-line` never pass for `border-line`. */
 const tokens = (classes: string) => classes.split(/\s+/).filter(Boolean);
 
-/** The body of the first `selector {` block, matched brace for brace. */
+/** The first `selector {` block, from the selector up to its closing brace, matched brace for brace. */
 function block(css: string, selector: string): string {
   const start = css.indexOf(`${selector} {`);
   expect(start, `${selector} block in globals.css`).toBeGreaterThan(-1);
