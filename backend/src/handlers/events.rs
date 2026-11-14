@@ -4130,6 +4130,56 @@ mod lifecycle_failure_tests {
         assert_eq!(tmi_status(&pool, "30 MIT").await, None);
     }
 
+    /// AC1: a lost activation race is not a failure. Another replica (here a second connection)
+    /// flips the package to `activated` after this pass listed it; the pass blocks on the row in
+    /// `mark_package_activated`, updates nothing once the other commits, and rolls back.
+    #[sqlx::test]
+    async fn a_package_activated_elsewhere_mid_pass_is_not_a_failure(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let pkg = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &pkg, &by).await;
+        assert_eq!(due_ids(&pool).await, vec![pkg.clone()]);
+
+        let mut other = pool.begin().await.unwrap();
+        sqlx::query("update events.tmi_package set status = 'activated' where id = $1")
+            .bind(&pkg)
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let pool = pool.clone();
+            async move { capturing_pass(&pool).await }
+        });
+        // Wait until the pass is blocked on the row this transaction holds.
+        let mut waiting = 0;
+        for _ in 0..200 {
+            waiting = sqlx::query_scalar::<_, i64>(
+                "select count(*) from pg_stat_activity \
+                 where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(waiting, 1, "the pass never reached the status fence");
+        other.commit().await.unwrap();
+
+        let (result, log) = task.await.unwrap();
+        assert_eq!(result, Ok("no changes".to_string()));
+        assert!(!log.contains("auto-activate package failed"), "{log}");
+        assert_eq!(status(&pool, &pkg).await, "activated");
+        assert_eq!(
+            tmi_status(&pool, "20 MIT").await,
+            None,
+            "the losing attempt rolled its TMI back"
+        );
+    }
+
     /// AC1: the auto-due listing fails and the archive half still runs. Only `auto_due_packages`
     /// reads `auto_publish` on this pass's path.
     #[sqlx::test]
