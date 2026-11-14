@@ -37,13 +37,30 @@ function body(file: string, hook: string): string {
   return src.slice(start, next === -1 ? undefined : next);
 }
 
+// The whole interval line, anchored, so the call is tied to the live branch and passed `live`: a
+// swapped ternary, a polling replay branch, `pollUnlessLive(15_000, false)` or `… || 15_000` all
+// poll on top of the tick (#952).
+const LIVE_ONLY = [/^refetchInterval: pollUnlessLive\([\d_]+, live\),$/];
+const MODE_AWARE = [
+  // useQuery: the live branch of an `at == null` ternary; the replay branch is `false`.
+  /^refetchInterval: at == null \? pollUnlessLive\([\d_]+, live\) : false,$/,
+  // useQueries: the live branch's options object, on the `? {` line of the `at == null` ternary.
+  /^\? \{ .*, refetchInterval: pollUnlessLive\([\d_]+, live\) \}$/,
+];
+
 describe("feed-derived hooks poll only without ticks (#648)", () => {
   it.each(HOOKS)("%s %s", (file, hook) => {
     const fn = body(file, hook);
     expect(fn).toContain("const live = useRealtimeLive();");
-    const intervals = fn.match(/refetchInterval:[^\n]*/g) ?? [];
+    const intervals = fn
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.includes("refetchInterval:"));
     expect(intervals.length, "one interval").toBe(1);
-    // Pins the argument too: `pollUnlessLive(15_000, false)` would poll on top of the tick (#952).
-    expect(intervals[0]).toMatch(/pollUnlessLive\([\d_]+, live\)/);
+    const shapes = fn.includes("at == null") ? MODE_AWARE : LIVE_ONLY;
+    expect(
+      shapes.some((shape) => shape.test(intervals[0])),
+      intervals[0],
+    ).toBe(true);
   });
 });
