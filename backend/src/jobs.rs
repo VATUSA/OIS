@@ -1174,8 +1174,8 @@ async fn run_capture_windows(
                 }
             }
             // Past the window with an open capture → close + save it. Zero rows updated means the
-            // capture was no longer open (another replica's pass, a stop or a discard got there
-            // first): neither a save nor a failure.
+            // capture was no longer open (another replica's pass or a discard got there first):
+            // neither a save nor a failure.
             (false, Some(_)) if now > window_end => {
                 match stats_repo::close_open_event_captures(pool, r.event_id, window_end).await {
                     Ok(0) => {}
@@ -2562,7 +2562,7 @@ mod capture_scheduler_tests {
                 && e.fields
                     .get("error")
                     .is_some_and(|v| v.contains("injected #917 failure"))),
-            "the stats repo logs the database cause before the close WARN: {seen:#?}"
+            "the stats repo logs the database cause beside the close WARN: {seen:#?}"
         );
     }
 
