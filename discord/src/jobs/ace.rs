@@ -86,23 +86,6 @@ mod tests {
         })
     }
 
-    /// `allowed_mentions` is present with an empty `parse` and no user or role ids, which is what
-    /// makes every mention in the message inert.
-    fn assert_mentions_inert(json: &Value) {
-        let mentions = json
-            .get("allowed_mentions")
-            .expect("allowed_mentions must be set, or Discord parses by default");
-        let parse = mentions.get("parse").and_then(Value::as_array);
-        assert_eq!(parse.map(Vec::len), Some(0), "got {mentions:?}");
-        for key in ["users", "roles"] {
-            let listed = mentions
-                .get(key)
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            assert_eq!(listed, 0, "{key} listed in {mentions:?}");
-        }
-    }
-
     fn embeds_text(json: &Value) -> String {
         json.get("embeds").map(Value::to_string).unwrap_or_default()
     }
@@ -112,7 +95,19 @@ mod tests {
         let json = serde_json::to_value(build_request_message(&payload_with_mentions(), "req-1"))
             .expect("serialize");
 
-        assert_mentions_inert(&json);
+        let mentions = json
+            .get("allowed_mentions")
+            .expect("allowed_mentions must be set, or Discord parses by default");
+        // An empty `parse` and no user or role ids make every mention in the message inert.
+        let parse = mentions.get("parse").and_then(Value::as_array);
+        assert_eq!(parse.map(Vec::len), Some(0), "got {mentions:?}");
+        for key in ["users", "roles"] {
+            let listed = mentions
+                .get(key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            assert_eq!(listed, 0, "{key} listed in {mentions:?}");
+        }
         // The message really carries the caller's mentions, or the assertion above is vacuous.
         let embeds = embeds_text(&json);
         assert!(
@@ -131,7 +126,19 @@ mod tests {
             let edit = build_claim_edit(&payload_with_mentions(), claims_count, filled, "req-1");
             let json = serde_json::to_value(edit).expect("serialize");
 
-            assert_mentions_inert(&json);
+            let mentions = json
+                .get("allowed_mentions")
+                .expect("allowed_mentions must be set, or Discord parses by default");
+            // An empty `parse` and no user or role ids make every mention in the message inert.
+            let parse = mentions.get("parse").and_then(Value::as_array);
+            assert_eq!(parse.map(Vec::len), Some(0), "got {mentions:?}");
+            for key in ["users", "roles"] {
+                let listed = mentions
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                assert_eq!(listed, 0, "{key} listed in {mentions:?}");
+            }
             let embeds = embeds_text(&json);
             assert!(
                 embeds.contains("@everyone <@&123> <@456>"),

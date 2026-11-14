@@ -69,8 +69,8 @@ pub(crate) async fn send_claim_dm(http: &Arc<Http>, p: &Value) -> Result<Option<
 
 /// The claim confirmation or reminder DM. Split out from [`send_claim_dm`] so its payload can be
 /// asserted without a live Discord connection. `content` carries the caller's `event_title`, so an
-/// explicit empty `allowed_mentions` keeps any mention in it inert, as on every other outbound post
-/// (#933).
+/// explicit empty `allowed_mentions` keeps any mention in it inert, as the TMI and advisory posts
+/// do (#933).
 fn build_claim_dm(content: String) -> CreateMessage {
     CreateMessage::new()
         .content(content)
