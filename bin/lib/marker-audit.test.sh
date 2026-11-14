@@ -57,7 +57,7 @@ git -C "$REPO" worktree add -q -b feat/1/x "$WT"
 mkdir -p "$WORK/bin"
 printf '#!/bin/bash\n[[ "$*" == test ]] && exec bash bin/run-tests.sh\nexit 1\n' > "$WORK/bin/just"
 chmod +x "$WORK/bin/just"
-# macOS tar and zip carry extended attributes as ._ files, which would leave the scratch tree unclean.
+# macOS tar carries extended attributes as ._ files, which would leave the scratch tree unclean.
 export COPYFILE_DISABLE=1
 export PATH="$WORK/bin:$PATH"
 
@@ -140,7 +140,7 @@ echo "A marker and its manifest line written by any other route are undone:"
 forge_tree; (cd "$SRC" && tar -cf "$WORK/mk.tar" .claude)
 call "tar -xf $WORK/mk.tar"; undone "tar -x carrying the marker and its line"
 forge_tree; call "python3 -m tarfile -e $WORK/mk.tar ."; undone "python -m tarfile -e"
-forge_tree; (cd "$SRC" && rm -f "$WORK/mk.zip" && zip -qr "$WORK/mk.zip" .claude); call "python3 -m zipfile -e $WORK/mk.zip ."
+forge_tree; (cd "$SRC" && rm -f "$WORK/mk.zip" && python3 -m zipfile -c "$WORK/mk.zip" .claude); call "python3 -m zipfile -e $WORK/mk.zip ."
 undone "python -m zipfile -e"
 forge_tree; call "scp -rq $SRC/.claude $REPO/"; undone "scp -r"
 forge_tree; printf '.claude/markers/tests/%s\n.claude/markers/manifest\n' "$SHA" > "$WORK/list"

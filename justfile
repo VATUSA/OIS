@@ -119,8 +119,8 @@ dev: up
 check-migrations:
     .github/scripts/check-migration-versions.sh
 
-# Not what CI runs: it skips clippy, doc tests, pnpm test, the audits and the client-drift check,
-# which `just test` and `just ci-full` add.
+# Not what CI runs: it skips clippy, doc tests, pnpm test, the audits, the client-drift check and
+# the shell suites, which `just test` and `just ci-full` add.
 # Fast local validation (a subset of CI; see test)
 ci: check-migrations fmt-check check test-rust
     pnpm lint && pnpm typecheck

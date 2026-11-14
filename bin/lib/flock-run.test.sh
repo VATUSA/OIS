@@ -21,6 +21,8 @@
 # drives flock-run.pl directly against a lockfile in the temp dir.
 # ==============================================================================
 set -uo pipefail
+# Section 7 needs real locks: with-lock.sh skips the lock when CI or OIS_NO_LOCK is set.
+unset CI OIS_NO_LOCK
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN="perl $DIR/flock-run.pl"
