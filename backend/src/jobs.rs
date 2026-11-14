@@ -1174,8 +1174,8 @@ async fn run_capture_windows(
                 }
             }
             // Past the window with an open capture → close + save it. Zero rows updated means the
-            // capture was no longer open (another replica's pass closed it first): neither a save
-            // nor a failure.
+            // capture was no longer open (another replica's pass, a stop or a discard got there
+            // first): neither a save nor a failure.
             (false, Some(_)) if now > window_end => {
                 match stats_repo::close_open_event_captures(pool, r.event_id, window_end).await {
                     Ok(0) => {}
@@ -2189,8 +2189,10 @@ mod capture_scheduler_tests {
     /// a hard-coded date would silently drift out of both — first out of the retention window, and
     /// eventually the test would be asserting nothing at all.
     fn at(hour: u32, minute: u32) -> DateTime<Utc> {
-        (Utc::now() - chrono::Duration::days(1))
-            .date_naive()
+        // Yesterday, fixed once per test process: nextest runs each test in its own process, so a
+        // test that straddles 00:00 UTC still seeds and asserts against the same day.
+        static DAY: std::sync::OnceLock<chrono::NaiveDate> = std::sync::OnceLock::new();
+        DAY.get_or_init(|| (Utc::now() - chrono::Duration::days(1)).date_naive())
             .and_hms_opt(hour, minute, 0)
             .expect("a valid time of day")
             .and_utc()
@@ -2385,9 +2387,10 @@ mod capture_scheduler_tests {
     // other's breakdown. Every failure trigger is created after seeding, so it refuses only the
     // pass's own writes.
     //
-    // X2 is event 803 at KLGA, a second event whose step fails. Neither loop orders its rows, so a
-    // pass that stopped at its first failure could still reach Y; it cannot also reach the second
-    // failure, and "2 failed" holds only when every event was attempted, in any row order.
+    // X2 is event 803 at KLGA, a second event whose step fails. The schedule query has no `order by`,
+    // and the unfrozen-event query orders by `end_time`, which every seeded event shares, so neither
+    // loop's order is fixed. A pass that stopped at its first failure could still reach Y; it cannot
+    // also reach the second failure, so "2 failed" holds only when every event was attempted.
 
     const X: i64 = 801;
     const Y: i64 = 802;
@@ -2465,9 +2468,18 @@ mod capture_scheduler_tests {
         in_window(&pool, X2, "KLGA").await;
         fail_x(&pool, "stats.capture", "insert").await;
 
+        let (result, seen) = recorded(capture_scheduler_once(&pool)).await;
         assert_eq!(
-            capture_scheduler_once(&pool).await,
+            result,
             Err("1 opened, 0 saved, 0 frozen, 2 failed".to_string())
+        );
+        assert_eq!(
+            warn_events(&seen, "stats: open capture failed"),
+            vec![
+                ("801".to_string(), "internal server error".to_string()),
+                ("803".to_string(), "internal server error".to_string()),
+            ],
+            "each failed open logs a WARN with its event and the error"
         );
         assert_eq!(captures(&pool, X).await, vec![], "X's open was refused");
         assert_eq!(captures(&pool, X2).await, vec![], "X2's open was refused");
@@ -2544,6 +2556,14 @@ mod capture_scheduler_tests {
                     && e.fields.get("event").map(String::as_str) == Some("802")),
             "positive control: the recorder saw Y's save in the same pass"
         );
+        assert!(
+            seen.iter().any(|e| e.level == tracing::Level::WARN
+                && e.message == "stats db error"
+                && e.fields
+                    .get("error")
+                    .is_some_and(|v| v.contains("injected #917 failure"))),
+            "the stats repo logs the database cause before the close WARN: {seen:#?}"
+        );
     }
 
     #[sqlx::test]
@@ -2579,9 +2599,22 @@ mod capture_scheduler_tests {
             .await
             .unwrap();
 
+        let (result, seen) = recorded(capture_scheduler_once(&pool)).await;
         assert_eq!(
-            capture_scheduler_once(&pool).await,
+            result,
             Err("0 opened, 1 saved, 0 frozen, 1 failed".to_string())
+        );
+        let query_warns: Vec<_> = seen
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN && e.message == "stats: unfrozen-event query failed"
+            })
+            .map(|e| e.fields.get("error").cloned())
+            .collect();
+        assert_eq!(
+            query_warns,
+            vec![Some("internal server error".to_string())],
+            "the failed query logs one WARN with the error"
         );
         assert_eq!(
             captures(&pool, Y).await,
@@ -2616,7 +2649,7 @@ mod capture_scheduler_tests {
         assert_eq!(
             frozen_movements(&pool, X).await,
             None,
-            "X's write rolled back"
+            "X has no frozen row"
         );
         let mut unfrozen: Vec<i64> =
             stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
@@ -2715,9 +2748,13 @@ mod capture_scheduler_tests {
             .await
             .unwrap();
 
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: airports unreadable".to_string()));
         assert_eq!(
-            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
-            Err("event 800: airports unreadable".to_string())
+            warn_events(&seen, "stats: snapshot skipped, airports unreadable"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
         );
         assert_eq!(frozen_movements(&pool, EVENT).await, None);
     }
@@ -2731,9 +2768,13 @@ mod capture_scheduler_tests {
             .await
             .unwrap();
 
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: breakdown failed".to_string()));
         assert_eq!(
-            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
-            Err("event 800: breakdown failed".to_string())
+            warn_events(&seen, "stats: snapshot breakdown failed"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
         );
         assert_eq!(frozen_movements(&pool, EVENT).await, None);
     }
@@ -2752,11 +2793,42 @@ mod capture_scheduler_tests {
         .await
         .unwrap();
 
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: snapshot write failed".to_string()));
         assert_eq!(
-            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
-            Err("event 800: snapshot write failed".to_string())
+            warn_events(&seen, "stats: snapshot write failed"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
         );
         assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    /// Run `fut` with a [`Recorder`] installed, returning its output and every event it logged.
+    async fn recorded<F: std::future::Future>(fut: F) -> (F::Output, Vec<Captured>) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = fut
+            .with_subscriber(tracing_subscriber::registry().with(Recorder(seen.clone())))
+            .await;
+        let events = std::mem::take(&mut *seen.lock().unwrap());
+        (out, events)
+    }
+
+    /// The `(event, error)` fields of every WARN logged with `message`, sorted.
+    fn warn_events(seen: &[Captured], message: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = seen
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.message == message)
+            .map(|e| {
+                let field = |k: &str| e.fields.get(k).cloned().unwrap_or_default();
+                (field("event"), field("error"))
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// One tracing event captured during a pass.
