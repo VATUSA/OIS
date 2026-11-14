@@ -427,9 +427,13 @@ call "just test"
 pre toolu_open "just test"
 if [[ "$(ls "$LEDGER" | sort | tr '\n' ' ')" == "ledger.json lock " ]]; then ok "accepted and pending lines, grants and an open snapshot are one file beside the lock"
 else bad "ledger files: $(ls "$LEDGER" | tr '\n' ' ')"; fi
+# fd 9 keeps the old file allocated: a call writes the ledger twice (gate, then audit), and ext4
+# hands the inode the first rename freed to the second write's new file.
+exec 9<"$LEDGER/ledger.json"
 BEFORE="$(inode "$LEDGER/ledger.json")"
 call "ls"
 if [[ "$(inode "$LEDGER/ledger.json")" != "$BEFORE" ]]; then ok "each write replaces the ledger with a new file by a rename, never in place"; else bad "the ledger was rewritten in place"; fi
+exec 9<&-
 printf '{"seal": "", "state": {"accepted": {}, "grants": [], "snapshots": {}}}' > "$LEDGER/ledger.json.tmp"
 call "ls"
 if [[ -z "$OUT" ]] && vouched "$REPO" tests "$SHA" && passes tests; then ok "a write killed before its rename is not tampering: the last whole state stands"
