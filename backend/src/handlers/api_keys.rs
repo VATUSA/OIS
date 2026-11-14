@@ -98,11 +98,12 @@ async fn audit_key(
     before: Option<Value>,
     after: Option<Value>,
 ) {
-    let actor_id = audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name)
-        .await
-        .ok()
-        .flatten();
-    let _ = audit_repo::record_audit(
+    let actor_id = audit_repo::actor_id_or_warn(
+        audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name).await,
+        "user",
+        &user.id,
+    );
+    audit_repo::record_audit_best_effort(
         pool,
         audit_repo::AuditEntry {
             actor_id,
