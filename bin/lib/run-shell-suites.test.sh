@@ -195,7 +195,7 @@ invoke
 
 echo "CI's shell-tests job:"
 # The job's block, from its key to the next job key at the same indent. A source scan: the
-# workflow only runs on GitHub, and the red run on the PR (#909 AC4) is the behavioral proof.
+# workflow only runs on GitHub, and the red run on the PR (#909) is the behavioral proof.
 JOB="$(awk '/^  shell-tests:$/ {on=1; print; next} on && /^  [A-Za-z0-9_-]+:$/ {exit} on' "$ROOT/.github/workflows/ci.yml")"
 if [[ -z "$JOB" ]]; then
     bad "ci.yml has no shell-tests job"
