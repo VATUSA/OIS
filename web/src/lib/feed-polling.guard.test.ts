@@ -21,6 +21,12 @@ const HOOKS: [file: string, hook: string][] = [
   ["idst.ts", "useIdst"],
   ["departures.ts", "useDepartures"],
   ["departures.ts", "useMultiDepartures"],
+  // The dashboard's mode-aware hooks: only the live branch polls; the replay branch carries no
+  // interval (#952).
+  ["historical.ts", "useModeAirportFlow"],
+  ["historical.ts", "useModeDepartures"],
+  ["historical.ts", "useModeTaxi"],
+  ["historical.ts", "useModeTraffic"],
 ];
 
 function body(file: string, hook: string): string {

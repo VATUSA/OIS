@@ -10,6 +10,7 @@ import {keepPreviousData, useQueries, useQuery} from "@tanstack/react-query";
 import {ois} from "./api";
 import {fetchDepartures, fetchHistDepartures} from "./departures";
 import {fetchFlow, fetchHistFlow} from "./feed";
+import {pollUnlessLive, useRealtimeLive} from "./realtime";
 import {fetchHistTaxi, fetchTaxi} from "./taxi";
 
 async function fetchLiveTraffic() {
@@ -31,12 +32,13 @@ export async function fetchHistTraffic(at: number) {
 // flash, no layout collapse. Combined with `staleTime: Infinity`, a second pass over the window is
 // served entirely from cache and plays back instantly.
 
-/** Arrival flow per airport — live (poll) or reconstructed at `at`. */
+/** Arrival flow per airport — live (polls only without feed ticks) or reconstructed at `at`. */
 export function useModeAirportFlow(icaos: string[], at: number | null) {
+  const live = useRealtimeLive();
   return useQueries({
     queries: icaos.map((icao) =>
       at == null
-        ? { queryKey: ["flow", icao], queryFn: () => fetchFlow(icao), refetchInterval: 20_000 }
+        ? { queryKey: ["flow", icao], queryFn: () => fetchFlow(icao), refetchInterval: pollUnlessLive(20_000, live) }
         : {
             queryKey: ["hist-flow", icao, at],
             queryFn: () => fetchHistFlow(icao, at),
@@ -47,12 +49,13 @@ export function useModeAirportFlow(icaos: string[], at: number | null) {
   });
 }
 
-/** Pending departures per field — live (poll) or reconstructed at `at`. */
+/** Pending departures per field — live (polls only without feed ticks) or reconstructed at `at`. */
 export function useModeDepartures(fields: string[], at: number | null) {
+  const live = useRealtimeLive();
   return useQueries({
     queries: fields.map((dep) =>
       at == null
-        ? { queryKey: ["departures", dep], queryFn: () => fetchDepartures(dep), refetchInterval: 60_000 }
+        ? { queryKey: ["departures", dep], queryFn: () => fetchDepartures(dep), refetchInterval: pollUnlessLive(60_000, live) }
         : {
             queryKey: ["hist-departures", dep, at],
             queryFn: () => fetchHistDepartures(dep, at),
@@ -63,12 +66,13 @@ export function useModeDepartures(fields: string[], at: number | null) {
   });
 }
 
-/** Taxi monitor per airport — live (poll) or replayed at `at`. */
+/** Taxi monitor per airport — live (polls only without feed ticks) or replayed at `at`. */
 export function useModeTaxi(icaos: string[], at: number | null) {
+  const live = useRealtimeLive();
   return useQueries({
     queries: icaos.map((icao) =>
       at == null
-        ? { queryKey: ["taxi", icao], queryFn: () => fetchTaxi(icao), refetchInterval: 15_000 }
+        ? { queryKey: ["taxi", icao], queryFn: () => fetchTaxi(icao), refetchInterval: pollUnlessLive(15_000, live) }
         : {
             queryKey: ["hist-taxi", icao, at],
             queryFn: () => fetchHistTaxi(icao, at),
@@ -79,12 +83,13 @@ export function useModeTaxi(icaos: string[], at: number | null) {
   });
 }
 
-/** Map traffic — live (poll) or reconstructed at `at`. */
+/** Map traffic — live (polls only without feed ticks) or reconstructed at `at`. */
 export function useModeTraffic(at: number | null) {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: at == null ? ["flow-traffic"] : ["hist-traffic", at],
     queryFn: () => (at == null ? fetchLiveTraffic() : fetchHistTraffic(at)),
-    refetchInterval: at == null ? 15_000 : false,
+    refetchInterval: at == null ? pollUnlessLive(15_000, live) : false,
     staleTime: at == null ? 0 : Infinity,
     placeholderData: at == null ? undefined : keepPreviousData,
   });
