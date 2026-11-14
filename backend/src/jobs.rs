@@ -1654,92 +1654,127 @@ pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events
     ));
 }
 
+/// What one event-TMI-package lifecycle pass did, counted across both halves.
+#[derive(Default)]
+struct PackageLifecycleTally {
+    activated: u32,
+    archived: u32,
+    failed: u32,
+}
+
 /// One event-TMI-package lifecycle pass: auto-activate draft+auto packages entering the pre-event
 /// window and auto-archive activated ones whose event ended; nudges clients when anything changed.
+///
+/// Every package is attempted; a failed activation, archive or listing query is counted and the
+/// run reports `Err` once both halves finish, so the job registry records it as failed (#916).
 pub(crate) async fn event_package_lifecycle_once(
     pool: &PgPool,
     events: &Events,
 ) -> Result<String, String> {
-    let mut changed = 0u32;
+    let mut tally = PackageLifecycleTally::default();
+    auto_activate_due_packages(pool, &mut tally).await;
+    auto_archive_ended_packages(pool, &mut tally).await;
 
-    // Auto-activate: draft + auto packages entering the 30-min pre-event window.
-    match events_repo::auto_due_packages(pool).await {
-        Ok(due) => {
-            for (package_id, event_id, actor) in due {
-                // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a
-                // disabled service account issues nothing, as its request would be refused.
-                let principal = match Principal::from_actor(pool, &actor).await {
-                    Ok(Some(principal)) => principal,
-                    Ok(None) => {
-                        tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::warn!(%package_id, "auto-activate: cannot load the armer");
-                        continue;
-                    }
-                };
-                match crate::handlers::events::activate_package(
-                    pool,
-                    event_id,
-                    &package_id,
-                    &principal,
-                )
-                .await
-                {
-                    Ok(()) => changed += 1,
-                    Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
-                }
-            }
-        }
-        Err(_) => tracing::warn!("auto-due package query failed"),
-    }
-
-    // Auto-archive: activated packages whose event has ended.
-    match events_repo::ended_activated_packages(pool).await {
-        Ok(ended) => {
-            for (package_id, _event_id, actor) in ended {
-                // Archiving only cancels what the package issued, so it runs even if the activator's
-                // credential has since been revoked — otherwise its TMIs would outlive the event. It is
-                // attributed to that actor either way.
-                let by = match Principal::from_actor(pool, &actor).await {
-                    Ok(Some(principal)) => principal.attribution_in(pool).await,
-                    Ok(None) => Ok(Attribution {
-                        user_id: None,
-                        actor_id: Some(actor.clone()),
-                    }),
-                    Err(e) => Err(e),
-                };
-                let by = match by {
-                    Ok(by) => by,
-                    Err(e) => {
-                        tracing::warn!(
-                            package_id,
-                            "auto-archive: cannot attribute the package: {e:?}"
-                        );
-                        continue;
-                    }
-                };
-                match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
-                    Ok(()) => changed += 1,
-                    Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
-                }
-            }
-        }
-        Err(_) => tracing::warn!("ended-package query failed"),
-    }
-
+    let changed = tally.activated + tally.archived;
     if changed > 0 {
         for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
             events.publish(t);
         }
         tracing::info!(changed, "event package lifecycle pass");
     }
+    let PackageLifecycleTally {
+        activated,
+        archived,
+        failed,
+    } = tally;
+    if failed > 0 {
+        return Err(format!(
+            "{activated} activated, {archived} archived, {failed} failed"
+        ));
+    }
     Ok(if changed > 0 {
         format!("{changed} changed")
     } else {
         "no changes".to_string()
     })
+}
+
+/// Auto-activate: draft + auto packages entering the 30-min pre-event window.
+async fn auto_activate_due_packages(pool: &PgPool, tally: &mut PackageLifecycleTally) {
+    let due = match events_repo::auto_due_packages(pool).await {
+        Ok(due) => due,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-due package query failed");
+            tally.failed += 1;
+            return;
+        }
+    };
+    for (package_id, event_id, actor) in due {
+        // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a disabled
+        // service account issues nothing, as its request would be refused.
+        let principal = match Principal::from_actor(pool, &actor).await {
+            Ok(Some(principal)) => principal,
+            Ok(None) => {
+                tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
+                tally.failed += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-activate: cannot load the armer");
+                tally.failed += 1;
+                continue;
+            }
+        };
+        match crate::handlers::events::activate_package(pool, event_id, &package_id, &principal)
+            .await
+        {
+            Ok(()) => tally.activated += 1,
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-activate package failed");
+                tally.failed += 1;
+            }
+        }
+    }
+}
+
+/// Auto-archive: activated packages whose event has ended.
+async fn auto_archive_ended_packages(pool: &PgPool, tally: &mut PackageLifecycleTally) {
+    let ended = match events_repo::ended_activated_packages(pool).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            tracing::warn!(error = %e, "ended-package query failed");
+            tally.failed += 1;
+            return;
+        }
+    };
+    for (package_id, _event_id, actor) in ended {
+        // Archiving only cancels what the package issued, so it runs even if the activator's
+        // credential has since been revoked — otherwise its TMIs would outlive the event. It is
+        // attributed to that actor either way.
+        let by = match Principal::from_actor(pool, &actor).await {
+            Ok(Some(principal)) => principal.attribution_in(pool).await,
+            Ok(None) => Ok(Attribution {
+                user_id: None,
+                actor_id: Some(actor.clone()),
+            }),
+            Err(e) => Err(e),
+        };
+        let by = match by {
+            Ok(by) => by,
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-archive: cannot attribute the package");
+                tally.failed += 1;
+                continue;
+            }
+        };
+        match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
+            Ok(()) => tally.archived += 1,
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-archive package failed");
+                tally.failed += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
