@@ -68,7 +68,7 @@ async fn collector(pool: PgPool, feed: FeedState, airspace: Arc<Boundaries>) {
             }
             tracing::info!(reloaded = pilots.len(), "stats: restored active flights");
         }
-        Err(_) => tracing::warn!("stats: could not reload active flights"),
+        Err(e) => tracing::warn!(error = %e, "stats: could not reload active flights"),
     }
 
     let mut last_source = String::new();
@@ -87,7 +87,7 @@ async fn collector(pool: PgPool, feed: FeedState, airspace: Arc<Boundaries>) {
         {
             Ok(Some(src)) => last_source = src,
             Ok(None) => {}
-            Err(_) => tracing::warn!("stats: collection tick failed"),
+            Err(e) => tracing::warn!(error = %e, "stats: collection tick failed"),
         }
     }
 }
@@ -256,11 +256,16 @@ async fn tick(
         .filter(|(sid, a)| a.last_seen < cutoff && !seen_pilots.contains(sid))
         .map(|(sid, _)| *sid)
         .collect();
+    // A session whose close fails stays in its map, so the next tick retries the close.
     for sid in gone_pilots {
-        if let Err(e) = close_flight(pool, sid).await {
-            tracing::warn!(sid, error = ?e, "stats: failed to close flight");
+        match close_flight(pool, sid).await {
+            Ok(()) => {
+                pilots.remove(&sid);
+            }
+            Err(e) => {
+                tracing::warn!(sid, error = %e, "stats: failed to close flight; retrying next tick")
+            }
         }
-        pilots.remove(&sid);
     }
 
     let gone_controllers: Vec<i64> = controllers
@@ -269,8 +274,16 @@ async fn tick(
         .map(|(sid, _)| *sid)
         .collect();
     for sid in gone_controllers {
-        let _ = repo::close_controller(pool, sid).await;
-        controllers.remove(&sid);
+        match repo::close_controller(pool, sid).await {
+            Ok(()) => {
+                controllers.remove(&sid);
+            }
+            Err(e) => tracing::warn!(
+                sid,
+                error = %e,
+                "stats: failed to close controller session; retrying next tick"
+            ),
+        }
     }
 
     tracing::debug!(
@@ -513,5 +526,278 @@ mod tests {
 
         assert!(is_us_controller("HNL_02_CTR", &iata, &airports));
         assert!(is_us_controller("HCF_CTR", &iata, &airports));
+    }
+
+    /// Every event emitted while a tick ran.
+    mod capture {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug, Clone)]
+        pub(super) struct Captured {
+            pub(super) level: tracing::Level,
+            pub(super) message: String,
+            /// Every other field, string values unquoted and `%`-formatted values as their Display.
+            pub(super) fields: BTreeMap<String, String>,
+        }
+
+        pub(super) struct Recorder(pub(super) Arc<Mutex<Vec<Captured>>>);
+
+        #[derive(Default)]
+        struct Visitor {
+            message: String,
+            fields: BTreeMap<String, String>,
+        }
+
+        impl tracing::field::Visit for Visitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = value.to_owned();
+                } else {
+                    self.fields
+                        .insert(field.name().to_owned(), value.to_owned());
+                }
+            }
+
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                } else {
+                    self.fields
+                        .insert(field.name().to_owned(), format!("{value:?}"));
+                }
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut visitor = Visitor::default();
+                event.record(&mut visitor);
+                self.0
+                    .lock()
+                    .expect("the recorder's mutex is only held for a push")
+                    .push(Captured {
+                        level: *event.metadata().level(),
+                        message: visitor.message,
+                        fields: visitor.fields,
+                    });
+            }
+        }
+    }
+
+    /// `tick` over an empty feed published at `source_timestamp`, with every event it emitted.
+    async fn tick_capturing(
+        pool: &PgPool,
+        source_timestamp: &str,
+        last_source: &str,
+        pilots: &mut HashMap<i64, Active>,
+        controllers: &mut HashMap<i64, Active>,
+    ) -> (Result<Option<String>, ApiError>, Vec<capture::Captured>) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let feed = crate::feed::new_state();
+        feed.write().await.snapshot = Some(Arc::new(crate::feed::Snapshot {
+            fetched_at: parse_ts(source_timestamp).expect("the test passes an RFC 3339 instant"),
+            source_timestamp: source_timestamp.to_owned(),
+            data: crate::feed::vatsim::VatsimData::default(),
+        }));
+        let airspace = Boundaries::default();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::registry().with(capture::Recorder(Arc::clone(&events)));
+        let result = tick(pool, &feed, &airspace, pilots, controllers, last_source)
+            .with_subscriber(subscriber)
+            .await;
+        let captured = events
+            .lock()
+            .expect("the recorder's mutex is only held for a push")
+            .clone();
+        (result, captured)
+    }
+
+    fn gone(last_seen: &str) -> Active {
+        Active {
+            last_seen: parse_ts(last_seen).expect("the test passes an RFC 3339 instant"),
+            last_updated: String::new(),
+            revision_id: None,
+        }
+    }
+
+    fn events_starting<'a>(
+        events: &'a [capture::Captured],
+        prefix: &str,
+    ) -> Vec<&'a capture::Captured> {
+        events
+            .iter()
+            .filter(|e| e.message.starts_with(prefix))
+            .collect()
+    }
+
+    /// Make every update of `table` matching `condition` raise. `table` and `condition` are test
+    /// constants, never input.
+    async fn raise_on_update(pool: &PgPool, table: &str, condition: &str) {
+        sqlx::raw_sql(&format!(
+            "create function t937_boom() returns trigger language plpgsql as $$ \
+             begin if {condition} then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t937_boom before update on {table} \
+             for each row execute function t937_boom();"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn stop_raising(pool: &PgPool, table: &str) {
+        sqlx::raw_sql(&format!(
+            "drop trigger t937_boom on {table}; drop function t937_boom();"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    async fn a_failed_controller_close_is_kept_and_retried_next_tick(pool: PgPool) {
+        let sid: i64 = 937_001;
+        sqlx::query(
+            "insert into stats.controller_session
+                 (session_id, cid, callsign, logon_time, first_seen, last_seen)
+             values ($1, 1300001, 'ZBW_CTR', '2026-01-01T10:00:00Z',
+                     '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z')",
+        )
+        .bind(sid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let duration = || {
+            sqlx::query_scalar::<_, Option<i32>>(
+                "select duration_s from stats.controller_session where session_id = $1",
+            )
+            .bind(sid)
+            .fetch_one(&pool)
+        };
+        assert_eq!(
+            duration().await.unwrap(),
+            None,
+            "the row exists, not yet closed"
+        );
+
+        let mut pilots = HashMap::new();
+        let mut controllers = HashMap::from([(sid, gone("2026-01-01T11:00:00Z"))]);
+        raise_on_update(&pool, "stats.controller_session", "true").await;
+
+        let t1 = "2026-01-01T11:10:00Z";
+        let (result, events) = tick_capturing(&pool, t1, "", &mut pilots, &mut controllers).await;
+        assert_eq!(result.unwrap().as_deref(), Some(t1));
+        assert!(
+            controllers.contains_key(&sid),
+            "a failed close keeps the session"
+        );
+        assert_eq!(duration().await.unwrap(), None);
+        let warns = events_starting(&events, "stats: failed to close controller session");
+        assert_eq!(warns.len(), 1, "{events:?}");
+        assert_eq!(warns[0].level, tracing::Level::WARN);
+        assert_eq!(
+            warns[0].fields.get("sid").map(String::as_str),
+            Some("937001")
+        );
+        assert_eq!(
+            warns[0].fields.get("error").map(String::as_str),
+            Some("internal server error"),
+            "the error's Display, not its Debug"
+        );
+        // Positive control: the injected exception reached the close and the recorder saw it.
+        assert!(
+            events.iter().any(|e| e.message == "stats db error"
+                && e.fields
+                    .get("error")
+                    .is_some_and(|v| v.contains("injected"))),
+            "{events:?}"
+        );
+
+        stop_raising(&pool, "stats.controller_session").await;
+        let t2 = "2026-01-01T11:10:15Z";
+        let (result, events) = tick_capturing(&pool, t2, t1, &mut pilots, &mut controllers).await;
+        assert_eq!(result.unwrap().as_deref(), Some(t2));
+        assert_eq!(duration().await.unwrap(), Some(3600), "11:00 - 10:00");
+        assert!(
+            !controllers.contains_key(&sid),
+            "a closed session leaves the map"
+        );
+        assert!(
+            events_starting(&events, "stats: failed to close").is_empty(),
+            "{events:?}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_flight_close_is_kept_and_retried_next_tick(pool: PgPool) {
+        let sid: i64 = 937_002;
+        sqlx::query(
+            "insert into stats.flight
+                 (session_id, cid, callsign, logon_time, first_seen, last_seen, status)
+             values ($1, 1300002, 'AAL937', '2026-01-01T10:00:00Z',
+                     '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z', 'active')",
+        )
+        .bind(sid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let status = || {
+            sqlx::query_scalar::<_, String>("select status from stats.flight where session_id = $1")
+                .bind(sid)
+                .fetch_one(&pool)
+        };
+        assert_eq!(
+            status().await.unwrap(),
+            "active",
+            "the row exists, not yet closed"
+        );
+
+        let mut pilots = HashMap::from([(sid, gone("2026-01-01T11:00:00Z"))]);
+        let mut controllers = HashMap::new();
+        raise_on_update(&pool, "stats.flight", "new.status = 'completed'").await;
+
+        let t1 = "2026-01-01T11:10:00Z";
+        let (result, events) = tick_capturing(&pool, t1, "", &mut pilots, &mut controllers).await;
+        assert_eq!(result.unwrap().as_deref(), Some(t1));
+        assert!(pilots.contains_key(&sid), "a failed close keeps the flight");
+        assert_eq!(status().await.unwrap(), "active");
+        let warns = events_starting(&events, "stats: failed to close flight");
+        assert_eq!(warns.len(), 1, "{events:?}");
+        assert_eq!(warns[0].level, tracing::Level::WARN);
+        assert_eq!(
+            warns[0].fields.get("sid").map(String::as_str),
+            Some("937002")
+        );
+        assert_eq!(
+            warns[0].fields.get("error").map(String::as_str),
+            Some("internal server error"),
+            "the error's Display, not its Debug"
+        );
+        // Positive control: the injected exception reached the close and the recorder saw it.
+        assert!(
+            events.iter().any(|e| e.message == "stats db error"
+                && e.fields
+                    .get("error")
+                    .is_some_and(|v| v.contains("injected"))),
+            "{events:?}"
+        );
+
+        stop_raising(&pool, "stats.flight").await;
+        let t2 = "2026-01-01T11:10:15Z";
+        let (result, events) = tick_capturing(&pool, t2, t1, &mut pilots, &mut controllers).await;
+        assert_eq!(result.unwrap().as_deref(), Some(t2));
+        assert_eq!(status().await.unwrap(), "completed");
+        assert!(!pilots.contains_key(&sid), "a closed flight leaves the map");
+        assert!(
+            events_starting(&events, "stats: failed to close").is_empty(),
+            "{events:?}"
+        );
     }
 }
