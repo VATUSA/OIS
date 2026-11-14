@@ -3179,6 +3179,11 @@ async fn lifecycle_pass(pool: &PgPool) {
         .unwrap();
 }
 
+/// One pass that is expected to refuse a package, returning what the job registry records.
+async fn refused_pass(pool: &PgPool) -> Result<String, String> {
+    crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None)).await
+}
+
 /// The package handlers' half of AC1: a service account arms auto-publish, and the lifecycle job —
 /// which used to act only as a person — publishes the advisory **as the machine**, then archives it as
 /// the machine when the event ends.
@@ -3233,7 +3238,11 @@ async fn a_disabled_machine_publishes_nothing(pool: PgPool) {
         .await
         .unwrap();
 
-    lifecycle_pass(&pool).await;
+    assert_eq!(
+        refused_pass(&pool).await,
+        Err("0 activated, 0 archived, 1 failed".to_string()),
+        "a refused package fails the run"
+    );
     assert_eq!(package_status(&pool, &pkg).await, "draft");
     assert_eq!(issued_advisory(&pool).await, None);
 }
@@ -3275,7 +3284,11 @@ async fn a_keys_armed_package_is_held_to_the_keys_scope(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    lifecycle_pass(&pool).await;
+    assert_eq!(
+        refused_pass(&pool).await,
+        Err("0 activated, 0 archived, 1 failed".to_string()),
+        "a refused package fails the run"
+    );
     assert_eq!(
         package_status(&pool, &pkg).await,
         "draft",
