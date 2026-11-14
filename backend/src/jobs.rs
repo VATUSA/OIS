@@ -1045,75 +1045,106 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
 /// without this an event's numbers would quietly fall to zero a month after it ran. Taken over the
 /// event's own window, matching what the stats endpoint reports.
 ///
-/// Best-effort: a failure here costs the frozen copy, not the capture lifecycle the scheduler is
-/// actually responsible for, and the endpoint still computes from legs until they age out. So it logs
-/// and returns rather than propagating. The next tick retries, since the missing row is exactly what
-/// makes the event match again.
-///
-/// Returns whether a row was actually written, so the pass's summary — which the admin Jobs page
-/// shows as `last_detail` — counts freezes rather than attempts.
+/// `Ok(true)` when a row was written, so the pass's summary counts freezes rather than attempts.
+/// `Ok(false)` is a decline: the event has no airports, or nothing moved. `Err` is a failure (the
+/// airports, the breakdown or the write), which the pass counts so the run is recorded as failed
+/// (#917). The next tick retries either way, since the missing row is what makes the event match.
 async fn snapshot_event_movements(
     pool: &PgPool,
     event_id: i64,
     start_time: chrono::DateTime<Utc>,
     end_time: chrono::DateTime<Utc>,
-) -> bool {
+) -> Result<bool, String> {
     let icaos: Vec<String> = match events_repo::list_airport_rates(pool, event_id).await {
         Ok(rates) => rates.into_iter().map(|r| r.icao).collect(),
-        Err(_) => {
-            tracing::warn!(
-                event = event_id,
-                "stats: snapshot skipped, airports unreadable"
-            );
-            return false;
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot skipped, airports unreadable");
+            return Err(format!("event {event_id}: airports unreadable"));
         }
     };
     if icaos.is_empty() {
-        return false;
+        return Ok(false);
     }
 
-    match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
-        Ok(rows) => {
-            // Never freeze an all-zero breakdown. For an event whose legs have already been pruned
-            // the recomputed movements are zero for that reason alone, and freezing them would make
-            // an artifact of retention permanent — the row is what makes the freeze pass stop
-            // matching the event, so no later pass could do better. Leaving it unfrozen costs nothing: the read
-            // path computes the same zero, and keeps the option open (#433 review).
-            if rows.iter().all(|r| r.arrivals + r.departures == 0) {
-                tracing::debug!(
-                    event = event_id,
-                    "stats: no observed movements to freeze, left to compute"
-                );
-                return false;
-            }
-            match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows)
-                .await
-            {
-                Ok(n) => {
-                    tracing::info!(event = event_id, airports = n, "stats: froze movements");
-                    true
-                }
-                Err(_) => {
-                    tracing::warn!(event = event_id, "stats: snapshot write failed");
-                    false
-                }
-            }
+    let rows = match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot breakdown failed");
+            return Err(format!("event {event_id}: breakdown failed"));
         }
-        Err(_) => {
-            tracing::warn!(event = event_id, "stats: snapshot breakdown failed");
-            false
+    };
+    // Never freeze an all-zero breakdown. For an event whose legs have already been pruned the
+    // recomputed movements are zero for that reason alone, and freezing them would make an artifact
+    // of retention permanent: the row is what makes the freeze pass stop matching the event, so no
+    // later pass could do better. Leaving it unfrozen costs nothing: the read path computes the same
+    // zero, and keeps the option open (#433 review).
+    if rows.iter().all(|r| r.arrivals + r.departures == 0) {
+        tracing::debug!(
+            event = event_id,
+            "stats: no observed movements to freeze, left to compute"
+        );
+        return Ok(false);
+    }
+    match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows).await {
+        Ok(n) => {
+            tracing::info!(event = event_id, airports = n, "stats: froze movements");
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot write failed");
+            Err(format!("event {event_id}: snapshot write failed"))
         }
     }
 }
 
-/// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
-/// captures whose window has ended. Idempotent. Returns a summary of what changed.
+/// What one capture-scheduler pass did, counted across the window loop and the freeze pass.
+#[derive(Default)]
+struct CaptureTally {
+    opened: u32,
+    saved: u32,
+    frozen: u32,
+    failed: u32,
+}
+
+/// One capture-scheduler pass: open a capture for each event now inside its window, close+save
+/// captures whose window has ended, and freeze finished events' movements. Idempotent.
+///
+/// Every event is attempted; a failed open, close, unfrozen-event query or snapshot is counted and
+/// the run reports `Err` with the counts once both halves finish, so the job registry records it as
+/// failed (#917). A declined snapshot is not a failure.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let rows = stats_repo::list_capture_schedule(pool)
         .await
         .map_err(|_| "capture schedule query failed".to_string())?;
-    let now = Utc::now();
-    let (mut opened, mut saved) = (0u32, 0u32);
+    let mut tally = CaptureTally::default();
+    run_capture_windows(pool, rows, Utc::now(), &mut tally).await;
+    freeze_finished_events(pool, &mut tally).await;
+
+    let CaptureTally {
+        opened,
+        saved,
+        frozen,
+        failed,
+    } = tally;
+    if failed > 0 {
+        return Err(format!(
+            "{opened} opened, {saved} saved, {frozen} frozen, {failed} failed"
+        ));
+    }
+    Ok(if opened == 0 && saved == 0 && frozen == 0 {
+        "no changes".to_string()
+    } else {
+        format!("{opened} opened, {saved} saved, {frozen} frozen")
+    })
+}
+
+/// Open a capture for each event inside its window, and close+save each whose window has passed.
+async fn run_capture_windows(
+    pool: &PgPool,
+    rows: Vec<stats_repo::ScheduleRow>,
+    now: chrono::DateTime<Utc>,
+    tally: &mut CaptureTally,
+) {
     for r in rows {
         let window_start = r.start_time - chrono::Duration::minutes(r.pre_minutes as i64);
         let window_end = r.end_time + chrono::Duration::minutes(r.post_minutes as i64);
@@ -1133,56 +1164,66 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
                 {
                     Ok(id) => {
                         tracing::info!(event = r.event_id, capture = %id, "stats: opened event capture");
-                        opened += 1;
+                        tally.opened += 1;
                     }
-                    Err(_) => tracing::warn!(event = r.event_id, "stats: open capture failed"),
+                    Err(e) => {
+                        tracing::warn!(event = r.event_id, error = %e, "stats: open capture failed");
+                        tally.failed += 1;
+                    }
                 }
             }
-            // Past the window with an open capture → close + save it.
+            // Past the window with an open capture → close + save it. Zero rows updated means the
+            // capture was no longer open (another replica's pass closed it first): neither a save
+            // nor a failure.
             (false, Some(_)) if now > window_end => {
-                if let Ok(n) =
-                    stats_repo::close_open_event_captures(pool, r.event_id, window_end).await
-                    && n > 0
-                {
-                    tracing::info!(event = r.event_id, "stats: saved event capture");
-                    saved += 1;
+                match stats_repo::close_open_event_captures(pool, r.event_id, window_end).await {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        tracing::info!(event = r.event_id, "stats: saved event capture");
+                        tally.saved += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(event = r.event_id, error = %e, "stats: close capture failed");
+                        tally.failed += 1;
+                    }
                 }
             }
             _ => {}
         }
     }
-    // Freeze the movements of every finished event that isn't frozen yet (#433 review).
-    //
-    // This is deliberately one pass rather than a snapshot on the close transition plus a separate
-    // backfill. The close arm only fires for an event with an *open* capture, so on its own it could
-    // never reach anything that closed before `stats.event_movements` existed — those events kept
-    // computing from `stats.flight_leg` and fell to zero as their legs crossed
-    // DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
-    // with one query, and it runs in the same invocation as the close above, so a capture that
-    // closes on this tick is still frozen on this tick. A call in the close arm as well was
-    // redundant: deleting it left every test green, because this pass had already done the work.
-    //
-    // Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
-    // legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
-    // the query is bounded to the same retention horizon so it does not re-ask about them every
-    // minute for the life of the deployment.
-    let mut frozen = 0u32;
-    match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
-        Ok(unfrozen) => {
-            for e in unfrozen {
-                if snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
-                    frozen += 1;
-                }
-            }
-        }
-        Err(_) => tracing::warn!("stats: unfrozen-event query failed"),
-    }
+}
 
-    Ok(if opened == 0 && saved == 0 && frozen == 0 {
-        "no changes".to_string()
-    } else {
-        format!("{opened} opened, {saved} saved, {frozen} frozen")
-    })
+/// Freeze the movements of every finished event that isn't frozen yet (#433 review).
+///
+/// This is deliberately one pass rather than a snapshot on the close transition plus a separate
+/// backfill. The close arm only fires for an event with an *open* capture, so on its own it could
+/// never reach anything that closed before `stats.event_movements` existed — those events kept
+/// computing from `stats.flight_leg` and fell to zero as their legs crossed
+/// DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
+/// with one query, and it runs in the same invocation as the close, so a capture that closes on
+/// this tick is still frozen on this tick.
+///
+/// Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
+/// legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
+/// the query is bounded to the same retention horizon so it does not re-ask about them every
+/// minute for the life of the deployment.
+async fn freeze_finished_events(pool: &PgPool, tally: &mut CaptureTally) {
+    let unfrozen =
+        match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
+            Ok(unfrozen) => unfrozen,
+            Err(e) => {
+                tracing::warn!(error = %e, "stats: unfrozen-event query failed");
+                tally.failed += 1;
+                return;
+            }
+        };
+    for e in unfrozen {
+        match snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
+            Ok(true) => tally.frozen += 1,
+            Ok(false) => {}
+            Err(_) => tally.failed += 1,
+        }
+    }
 }
 
 /// How often to check for ACE claims crossing a reminder threshold.
@@ -2154,20 +2195,29 @@ mod capture_scheduler_tests {
             .and_utc()
     }
 
-    /// An event that ran 12:00–14:00 with the default ±30 min capture padding, so its capture window
-    /// is 11:30–14:30. Both are in the past, so one scheduler pass closes the capture.
-    async fn seed(pool: &PgPool, capture_status: &str) {
+    /// An event that ran 12:00–14:00 at `icao` with the default ±30 min capture padding, so its
+    /// capture window is 11:30–14:30. Both are in the past, so one scheduler pass closes an `open`
+    /// capture; a `saved` one goes straight to the freeze query. `capture_id` keys `stats.capture`, so
+    /// two events seeded in one test need two ids.
+    async fn seed(
+        pool: &PgPool,
+        event_id: i64,
+        icao: &str,
+        capture_id: &str,
+        capture_status: &str,
+    ) {
         sqlx::query(
             "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', $2, $3)",
         )
-        .bind(EVENT)
+        .bind(event_id)
         .bind(at(12, 0))
         .bind(at(14, 0))
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, 'KJFK')")
-            .bind(EVENT)
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, $2)")
+            .bind(event_id)
+            .bind(icao)
             .execute(pool)
             .await
             .unwrap();
@@ -2175,15 +2225,16 @@ mod capture_scheduler_tests {
             "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
              values ($1, true, 30, 30)",
         )
-        .bind(EVENT)
+        .bind(event_id)
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "insert into stats.capture (id, event_id, label, start_time, end_time, status) \
-             values ('cap-sched', $1, 'Test', $2, $3, $4)",
+             values ($1, $2, 'Test', $3, $4, $5)",
         )
-        .bind(EVENT)
+        .bind(capture_id)
+        .bind(event_id)
         .bind(at(11, 30))
         .bind((capture_status == "saved").then(|| at(14, 30)))
         .bind(capture_status)
@@ -2192,13 +2243,14 @@ mod capture_scheduler_tests {
         .unwrap();
     }
 
-    async fn leg(pool: &PgPool, kind: &str, cid: i32, end: DateTime<Utc>) {
+    async fn leg(pool: &PgPool, airport: &str, kind: &str, cid: i32, end: DateTime<Utc>) {
         sqlx::query(
             "insert into stats.flight_leg \
              (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
-             values ($1, 'KJFK', $2, $3, $4, $5, 600)",
+             values ($1, $2, $3, $4, $5, $6, 600)",
         )
         .bind(kind)
+        .bind(airport)
         .bind(format!("TEST{cid}"))
         .bind(cid)
         .bind(end - chrono::Duration::minutes(10))
@@ -2210,9 +2262,9 @@ mod capture_scheduler_tests {
 
     /// Seed one leg inside the event and one inside the padding on either side of it.
     async fn three_legs(pool: &PgPool) {
-        leg(pool, "departure", 1, at(11, 45)).await; // padding, before the event
-        leg(pool, "departure", 2, at(13, 0)).await; // inside the event
-        leg(pool, "arrival", 3, at(14, 15)).await; // padding, after the event
+        leg(pool, "KJFK", "departure", 1, at(11, 45)).await; // padding, before the event
+        leg(pool, "KJFK", "departure", 2, at(13, 0)).await; // inside the event
+        leg(pool, "KJFK", "arrival", 3, at(14, 15)).await; // padding, after the event
     }
 
     /// A capture that closes on this tick is frozen on this tick, over the **event's** window rather
@@ -2225,7 +2277,7 @@ mod capture_scheduler_tests {
     /// one that serves every event past leg retention (#433 review).
     #[sqlx::test]
     async fn the_scheduler_freezes_over_the_events_window_not_the_padded_capture(pool: PgPool) {
-        seed(&pool, "open").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "open").await;
         three_legs(&pool).await;
 
         capture_scheduler_once(&pool).await.unwrap();
@@ -2252,7 +2304,7 @@ mod capture_scheduler_tests {
     /// state every event on the board was in before this shipped (#433 review).
     #[sqlx::test]
     async fn an_event_that_closed_before_the_table_existed_is_still_frozen(pool: PgPool) {
-        seed(&pool, "saved").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
         three_legs(&pool).await;
         assert!(
             stats_repo::event_movements_snapshot(&pool, EVENT)
@@ -2286,7 +2338,7 @@ mod capture_scheduler_tests {
     /// matching — so it is deliberately left unfrozen (#433 review).
     #[sqlx::test]
     async fn an_event_with_no_surviving_legs_is_not_frozen_at_zero(pool: PgPool) {
-        seed(&pool, "saved").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
         // The shape of a pruned event: the connections are still there (`stats.flight` is never
         // pruned) so the breakdown is *not* empty — it is a row of zero movements beside a real pilot
         // count, which is exactly what the page renders as "Movements 0 / Pilots 1".
@@ -2310,9 +2362,10 @@ mod capture_scheduler_tests {
             (0, 0, 1)
         );
 
-        assert!(
-            !snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
-            "it reports that it froze nothing, so the job summary stays honest"
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Ok(false),
+            "a decline, not a failure: it froze nothing, so the job summary stays honest"
         );
         assert!(
             stats_repo::event_movements_snapshot(&pool, EVENT)
@@ -2322,6 +2375,421 @@ mod capture_scheduler_tests {
             "a zero-movement breakdown must not be frozen — freezing it would make the artifact \
              permanent, since the row is what stops the backfill matching"
         );
+    }
+
+    // ---- a failed sub-step fails the pass; a decline does not (#917) ----------------------------
+    //
+    // X is event 801 at KJFK, the event whose step is made to fail; Y is event 802 at KBOS, the event
+    // in the same pass that must still succeed. Distinct airports keep one event's legs out of the
+    // other's breakdown. Every failure trigger is created after seeding, so it refuses only the
+    // pass's own writes.
+
+    const X: i64 = 801;
+    const Y: i64 = 802;
+
+    /// An event inside its capture window right now (started 30 min ago, ends in 30 min, ±30 min
+    /// padding) with no capture yet, so the pass's open arm fires for it. Its end is in the future, so
+    /// the freeze query never lists it.
+    async fn in_window(pool: &PgPool, event_id: i64, icao: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Live', $2, $3)",
+        )
+        .bind(event_id)
+        .bind(now - chrono::Duration::minutes(30))
+        .bind(now + chrono::Duration::minutes(30))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, $2)")
+            .bind(event_id)
+            .bind(icao)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
+             values ($1, true, 30, 30)",
+        )
+        .bind(event_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A `before <op>` row trigger on `table` that, for rows of event 801, runs `action`: `raise
+    /// exception …` to fail the statement, or `return null` to skip the row. `table` and `op` are
+    /// test constants, never input.
+    async fn trigger_on_x(pool: &PgPool, table: &str, op: &str, action: &str) {
+        sqlx::raw_sql(&format!(
+            "create function t917() returns trigger language plpgsql as $$ \
+             begin if new.event_id = 801 then {action}; end if; return new; end $$; \
+             create trigger t917 before {op} on {table} for each row execute function t917();"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn fail_x(pool: &PgPool, table: &str, op: &str) {
+        trigger_on_x(pool, table, op, "raise exception 'injected #917 failure'").await;
+    }
+
+    async fn captures(pool: &PgPool, event_id: i64) -> Vec<(String, Option<DateTime<Utc>>)> {
+        sqlx::query_as(
+            "select status, end_time from stats.capture where event_id = $1 order by start_time",
+        )
+        .bind(event_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn frozen_movements(pool: &PgPool, event_id: i64) -> Option<i64> {
+        stats_repo::event_movements_snapshot(pool, event_id)
+            .await
+            .unwrap()
+            .map(|s| s.rows.iter().map(|r| r.arrivals + r.departures).sum())
+    }
+
+    #[sqlx::test]
+    async fn a_failed_open_fails_the_pass_and_the_other_event_still_opens(pool: PgPool) {
+        in_window(&pool, X, "KJFK").await;
+        in_window(&pool, Y, "KBOS").await;
+        fail_x(&pool, "stats.capture", "insert").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("1 opened, 0 saved, 0 frozen, 1 failed".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![], "X's open was refused");
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("open".to_string(), None)],
+            "Y opened in the same pass"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_close_fails_the_pass_and_the_other_event_still_closes(pool: PgPool) {
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        fail_x(&pool, "stats.capture", "update").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("0 opened, 1 saved, 1 frozen, 1 failed".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1), "Y froze");
+        assert_eq!(
+            frozen_movements(&pool, X).await,
+            None,
+            "an open capture keeps X out of the freeze"
+        );
+    }
+
+    /// AC 3: the failed close logs a WARN carrying the event id and the error's Display. The cause
+    /// itself is on the stats repo's `stats db error` line just before it.
+    #[sqlx::test]
+    async fn a_failed_close_logs_a_warn_with_the_event_and_the_error(pool: PgPool) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        fail_x(&pool, "stats.capture", "update").await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Recorder(seen.clone()));
+        let result = capture_scheduler_once(&pool)
+            .with_subscriber(subscriber)
+            .await;
+        assert!(result.is_err());
+
+        let seen = seen.lock().unwrap();
+        let closes: Vec<_> = seen
+            .iter()
+            .filter(|e| e.message == "stats: close capture failed")
+            .collect();
+        assert_eq!(closes.len(), 1, "one close failed: {seen:#?}");
+        assert_eq!(closes[0].level, tracing::Level::WARN);
+        assert_eq!(
+            closes[0].fields.get("event").map(String::as_str),
+            Some("801")
+        );
+        assert_eq!(
+            closes[0].fields.get("error").map(String::as_str),
+            Some("internal server error"),
+            "the ApiError's Display"
+        );
+        assert!(
+            seen.iter()
+                .any(|e| e.message == "stats: saved event capture"
+                    && e.fields.get("event").map(String::as_str) == Some("802")),
+            "positive control: the recorder saw Y's save in the same pass"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_close_that_matches_no_row_is_neither_a_failure_nor_a_save(pool: PgPool) {
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        // Skipping X's row leaves the update succeeding with zero rows, the shape of another
+        // replica having closed it first.
+        trigger_on_x(&pool, "stats.capture", "update", "return null").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("0 opened, 1 saved, 1 frozen".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_freeze_query_fails_the_pass_and_the_close_still_saves(pool: PgPool) {
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        sqlx::query("alter table stats.event_movements rename to event_movements_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("0 opened, 1 saved, 0 frozen, 1 failed".to_string())
+        );
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))],
+            "the close ran before the freeze query and stands"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_snapshot_write_fails_the_pass_and_the_other_event_still_freezes(
+        pool: PgPool,
+    ) {
+        seed(&pool, X, "KJFK", "cap-x", "saved").await;
+        seed(&pool, Y, "KBOS", "cap-y", "saved").await;
+        leg(&pool, "KJFK", "departure", 1, at(13, 0)).await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        fail_x(&pool, "stats.event_movements", "insert").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("0 opened, 0 saved, 1 frozen, 1 failed".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1), "Y froze");
+        assert_eq!(
+            frozen_movements(&pool, X).await,
+            None,
+            "X's write rolled back"
+        );
+        let unfrozen: Vec<i64> =
+            stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event_id)
+                .collect();
+        assert_eq!(unfrozen, vec![X], "the next tick retries X only");
+    }
+
+    /// AC 5: the fixture of `an_event_with_no_surviving_legs_is_not_frozen_at_zero`, through the
+    /// pass. A decline is not a failure.
+    #[sqlx::test]
+    async fn an_all_zero_event_is_declined_and_the_pass_succeeds(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        sqlx::query(
+            "insert into stats.flight \
+             (session_id, cid, callsign, logon_time, first_seen, last_seen, status, departure, arrival) \
+             values (1, 1001, 'TEST1', $1, $1, $2, 'active', 'KJFK', 'KBOS')",
+        )
+        .bind(at(12, 10))
+        .bind(at(13, 40))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("no changes".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn an_event_with_no_airports_is_declined_and_the_pass_succeeds(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("delete from events.airport_rate where event_id = $1")
+            .bind(EVENT)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("no changes".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    /// Positive control for the failure tests: the same shapes with nothing injected keep the
+    /// existing Ok summary.
+    #[sqlx::test]
+    async fn a_clean_pass_reports_the_existing_summary(pool: PgPool) {
+        in_window(&pool, X, "KJFK").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("1 opened, 1 saved, 1 frozen".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1));
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_declines_an_event_with_no_airports(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("delete from events.airport_rate where event_id = $1")
+            .bind(EVENT)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Ok(false)
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_airports_are_unreadable(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("alter table events.airport_rate rename to airport_rate_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Err("event 800: airports unreadable".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_breakdown_query_fails(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("alter table stats.flight_leg rename to flight_leg_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Err("event 800: breakdown failed".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_write_fails(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::raw_sql(
+            "create function t917() returns trigger language plpgsql as $$ \
+             begin raise exception 'injected #917 failure'; end $$; \
+             create trigger t917 before insert on stats.event_movements \
+             for each row execute function t917();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Err("event 800: snapshot write failed".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    /// One tracing event captured during a pass.
+    #[derive(Debug)]
+    struct Captured {
+        level: tracing::Level,
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    /// Records every event into a shared vector, so a test can assert what a pass logged.
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<Captured>>>);
+
+    #[derive(Default)]
+    struct Visitor {
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for Visitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record(field, value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record(field, format!("{value:?}"));
+        }
+    }
+
+    impl Visitor {
+        fn record(&mut self, field: &tracing::field::Field, value: String) {
+            if field.name() == "message" {
+                self.message = value;
+            } else {
+                self.fields.insert(field.name().to_owned(), value);
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = Visitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("the recorder's mutex is only held for a push")
+                .push(Captured {
+                    level: *event.metadata().level(),
+                    message: visitor.message,
+                    fields: visitor.fields,
+                });
+        }
     }
 }
 
