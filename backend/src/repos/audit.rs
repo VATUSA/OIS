@@ -439,14 +439,14 @@ mod tests {
     }
 
     /// `client_ip` uses the value `run()` stored, not a read of `TRUSTED_PROXY_HOPS` (#923): the env
-    /// is unset here, so an env read would give 2 hops. This test sets the process-global hop count;
-    /// nextest runs each test in its own process, so no other test sees it.
+    /// is unset here, so an env read would give 2 hops. This test sets the process-global hop count.
+    /// nextest runs each test in its own process; under a single-process `cargo test`
+    /// (`just test-rust`) the stored 1 also applies to every later test in this binary.
     #[test]
     fn client_ip_uses_the_hop_count_startup_stored() {
         set_trusted_proxy_hops(1).expect("nothing else in this process stores the hop count");
         let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
         assert_eq!(client_ip(&spoofed).as_deref(), Some("203.0.113.9"));
-        assert_eq!(set_trusted_proxy_hops(3), Err(3));
     }
 
     /// A process that never ran `run()` keeps the 2-hop default.

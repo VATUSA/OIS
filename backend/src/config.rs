@@ -199,13 +199,16 @@ pub fn rate_limit_per_min(name: &str, default: u32) -> NonZeroU32 {
     nonzero_u32_or_default(name, raw_env(name), default)
 }
 
-/// The database pool's `max_connections` (`DATABASE_MAX_CONNECTIONS`, default 20). Unset or blank is
-/// the default; zero or malformed is the default and logs an ERROR.
+/// The database pool's `max_connections` when `DATABASE_MAX_CONNECTIONS` is unset.
+pub const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 20;
+
+/// The database pool's `max_connections` (`DATABASE_MAX_CONNECTIONS`). Unset or blank is
+/// `DEFAULT_DATABASE_MAX_CONNECTIONS`; zero or malformed is the default and logs an ERROR.
 pub fn database_max_connections() -> u32 {
     nonzero_u32_or_default(
         "DATABASE_MAX_CONNECTIONS",
         raw_env("DATABASE_MAX_CONNECTIONS"),
-        20,
+        DEFAULT_DATABASE_MAX_CONNECTIONS,
     )
     .get()
 }
@@ -218,9 +221,9 @@ pub const DEFAULT_TRUSTED_PROXY_HOPS: usize = 2;
 /// came from the client and can be forged (#588).
 ///
 /// Absent or blank is `DEFAULT_TRUSTED_PROXY_HOPS`. A deployment behind a single proxy (the compose
-/// stack behind one Caddy/nginx) must set 1, or every caller is keyed on the proxy's address. Zero or
-/// a value that is not a whole number is an `Err`: startup refuses it (#923), since falling back to 2
-/// behind one proxy would take the client IP from the part of the header the client wrote.
+/// stack behind one Caddy/nginx) must set 1: at 2, callers there can forge their IP. Zero or a value
+/// that is not a whole number is an `Err` and startup refuses it (#923): falling back to 2 behind one
+/// proxy, or reading 0 hops, takes the client IP from the part of the header the client wrote.
 pub fn parse_trusted_proxy_hops(raw: Option<String>) -> Result<usize, String> {
     let Some(value) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(DEFAULT_TRUSTED_PROXY_HOPS);
@@ -319,8 +322,9 @@ fn normalize_origin(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_TRUSTED_PROXY_HOPS, nonzero_u32_or_default, normalize_origin, parse_nonzero_u32,
-        parse_server_admin_cids, parse_trusted_proxy_hops, raw_from, server_admin_cids_from,
+        DEFAULT_DATABASE_MAX_CONNECTIONS, DEFAULT_TRUSTED_PROXY_HOPS, nonzero_u32_or_default,
+        normalize_origin, parse_nonzero_u32, parse_server_admin_cids, parse_trusted_proxy_hops,
+        raw_from, server_admin_cids_from,
     };
     use std::num::NonZeroU32;
     use std::sync::{Arc, Mutex};
@@ -448,7 +452,7 @@ mod tests {
         }
     }
 
-    /// Zero would key every caller on the address of the proxy nearest the backend.
+    /// Zero would take the client IP from the leftmost, client-written entry.
     #[test]
     fn trusted_proxy_hops_refuses_zero_naming_the_variable() {
         assert_eq!(
@@ -473,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_u32_absent_or_blank_is_unset_for_every_variable() {
+    fn nonzero_u32_absent_or_blank_is_unset() {
         for name in NONZERO_VARIABLES {
             for raw in [None, some(""), some("   ")] {
                 assert_eq!(
@@ -486,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_u32_parses_a_positive_value_for_every_variable() {
+    fn nonzero_u32_parses_a_positive_value() {
         for name in NONZERO_VARIABLES {
             for (raw, value) in [
                 ("1", 1),
@@ -504,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn nonzero_u32_refuses_zero_or_malformed_naming_every_variable() {
+    fn nonzero_u32_refuses_zero_or_malformed_naming_the_variable() {
         for name in NONZERO_VARIABLES {
             for raw in ["0", "abc", "-5", "300/", "1.5", "4294967296"] {
                 assert_eq!(
@@ -594,5 +598,19 @@ mod tests {
             assert_eq!(value.map(NonZeroU32::get), Some(450), "{name}");
             assert!(lines.is_empty(), "{name}: {lines:?}");
         }
+    }
+
+    #[test]
+    fn the_database_pool_defaults_to_twenty_connections() {
+        assert_eq!(DEFAULT_DATABASE_MAX_CONNECTIONS, 20);
+    }
+
+    /// A zero default is never passed today; the wrapper still never returns zero.
+    #[test]
+    fn a_zero_default_is_raised_to_one() {
+        assert_eq!(
+            nonzero_u32_or_default("RATE_LIMIT_USER_PER_MIN", None, 0).get(),
+            1
+        );
     }
 }

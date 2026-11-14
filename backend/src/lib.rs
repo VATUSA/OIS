@@ -278,6 +278,28 @@ mod tests {
         );
     }
 
+    /// Startup checks `TRUSTED_PROXY_HOPS` and stores it for `client_ip` before building state (#923).
+    /// `tests/startup_config.rs` boots the binary to prove the refusal; the store is pinned here
+    /// because seeing its effect needs a serving backend. Comments stripped, as above.
+    #[test]
+    fn startup_stores_the_checked_proxy_hop_count_before_building_state() {
+        let code: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code.find("pub async fn run()").unwrap();
+        let run = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        let check = run
+            .find("let hops = config::trusted_proxy_hops()")
+            .expect("run() reads the hop count");
+        let store = run
+            .find("repos::audit::set_trusted_proxy_hops(hops)")
+            .expect("run() stores the checked hop count");
+        let state = run.find("state::AppState::from_env()").unwrap();
+        assert!(check < store && store < state);
+    }
+
     /// Every version claimed by more than one migration file, with the files that claim it.
     ///
     /// The version is the prefix before the first `_`, which is how sqlx reads a
