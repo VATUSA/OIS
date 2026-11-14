@@ -71,9 +71,10 @@ describe("SendDiagnosticsButton", () => {
 
     const call = invoke.mock.calls.find(([command]) => command === "send_diagnostics");
     expect(call).toBeDefined();
-    const args = call![1] as {apiBase: string; note: string; context: Record<string, unknown>};
+    const args = call![1] as {note: string; context: Record<string, unknown>};
     expect(args.note).toBe("map went white");
-    expect(args.apiBase).toBeTruthy();
+    // #924: the shell owns the API origin, so the webview names no destination for the upload.
+    expect(Object.keys(args).sort()).toEqual(["context", "note"]);
     expect(args.context.window_label).toBe("popout-fca-1");
     expect(args.context.route).toBe(window.location.pathname);
     expect(args.context.capabilities).toMatchObject({diagnostics: true});

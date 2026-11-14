@@ -22,6 +22,8 @@ use std::{
 
 use uuid::Uuid;
 
+use crate::api_origin::{Build, THIS_BUILD};
+
 /// Keychain coordinates. The service name is the app's bundle identifier so the entry is
 /// identifiable in Keychain Access / Credential Manager.
 const KEYCHAIN_SERVICE: &str = "net.vatusa.ois";
@@ -349,10 +351,17 @@ pub fn delete_token(app: tauri::AppHandle) -> Result<(), String> {
 /// we are ready to catch it. Resolves once the OAuth callback redirects back with `?code=…`; the
 /// caller exchanges that for the real token.
 ///
-/// `api_base` is passed in rather than duplicated here — the frontend already resolves it
-/// (`web/src/lib/api.ts`), and having one source avoids the two disagreeing.
+/// The webview names no origin: the sign-in URL is built on this build's API origin
+/// ([`api_origin`](crate::api_origin)), checked before the port is bound or the browser opened (#924).
 #[tauri::command]
-pub async fn begin_login(api_base: String) -> Result<String, String> {
+pub async fn begin_login() -> Result<String, String> {
+    // Binds this sign-in attempt to this process. The loopback port is reachable by anything
+    // on the machine — and by any page the user is browsing, via a no-cors GET — so without a
+    // nonce the listener would accept a code injected by someone else, exchange it, and store
+    // *their* session in this user's keychain. RFC 8252 §8.1.
+    let nonce = new_nonce();
+    let url = login_url(&THIS_BUILD, &nonce)?;
+
     tauri::async_runtime::spawn_blocking(move || {
         // Claim the flow before binding: any attempt already waiting sees a newer generation on its
         // next poll and releases the port, which is what makes the bind below succeed.
@@ -363,18 +372,6 @@ pub async fn begin_login(api_base: String) -> Result<String, String> {
             .set_nonblocking(true)
             .map_err(|e| format!("could not configure the sign-in listener: {e}"))?;
 
-        // Binds this sign-in attempt to this process. The loopback port is reachable by anything
-        // on the machine — and by any page the user is browsing, via a no-cors GET — so without a
-        // nonce the listener would accept a code injected by someone else, exchange it, and store
-        // *their* session in this user's keychain. RFC 8252 §8.1.
-        let nonce = new_nonce();
-
-        let url = format!(
-            "{}/api/v1/auth/vatsim/login?desktop=true&desktop_state={}&return_to={}",
-            api_base.trim_end_matches('/'),
-            urlencode(&nonce),
-            urlencode(LOOPBACK_REDIRECT)
-        );
         open::that(&url).map_err(|e| format!("could not open your browser: {e}"))?;
 
         wait_for_code(&listener, &nonce, || {
@@ -383,6 +380,16 @@ pub async fn begin_login(api_base: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("sign-in task failed: {e}"))?
+}
+
+/// The VATSIM sign-in URL on `build`'s API origin, or the refusal when that origin is not allowed.
+fn login_url(build: &Build, nonce: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/api/v1/auth/vatsim/login?desktop=true&desktop_state={}&return_to={}",
+        build.api_origin()?,
+        urlencode(nonce),
+        urlencode(LOOPBACK_REDIRECT)
+    ))
 }
 
 /// Accepts loopback connections until one carries a `code` **matching this attempt's nonce**, or
@@ -811,6 +818,103 @@ mod tests {
         let addr = probe.local_addr().expect("read the spare port").to_string();
         drop(probe);
         addr
+    }
+
+    // #924: begin_login builds its URL on this build's API origin only.
+
+    #[test]
+    fn login_url_refuses_a_build_whose_origin_is_not_allowed() {
+        let refused = [
+            Build {
+                pinned: None,
+                debug: false,
+            },
+            Build {
+                pinned: Some("http://evil.test"),
+                debug: false,
+            },
+            Build {
+                pinned: Some("https://ois.example.org/api"),
+                debug: false,
+            },
+            Build {
+                pinned: Some("http://127.0.0.1:3000"),
+                debug: false,
+            },
+        ];
+        for build in &refused {
+            let result = login_url(build, "nonce-1");
+            assert!(
+                result.as_ref().is_err_and(|m| !m.is_empty()),
+                "{:?}: {result:?}",
+                build.pinned
+            );
+        }
+        assert!(
+            login_url(&refused[1], "nonce-1")
+                .unwrap_err()
+                .contains("http://evil.test")
+        );
+    }
+
+    #[test]
+    fn login_url_starts_with_the_pinned_origin_and_the_login_path() {
+        let build = Build {
+            pinned: Some("https://ois.example.org/"),
+            debug: false,
+        };
+        let url = login_url(&build, "nonce-1").unwrap();
+        assert_eq!(
+            url,
+            "https://ois.example.org/api/v1/auth/vatsim/login?desktop=true&desktop_state=nonce-1\
+             &return_to=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"
+        );
+    }
+
+    #[test]
+    fn login_url_uses_the_dev_origin_in_a_debug_build_with_no_pin() {
+        let url = login_url(
+            &Build {
+                pinned: None,
+                debug: true,
+            },
+            "n",
+        )
+        .unwrap();
+        assert!(
+            url.starts_with("http://127.0.0.1:3000/api/v1/auth/vatsim/login?"),
+            "{url}"
+        );
+    }
+
+    /// The check sits at the top of `begin_login` (#924 AC5). The command binds port 8765, opens a
+    /// browser and reads `THIS_BUILD`, which differs between the local gate and CI, so its wiring is
+    /// pinned by its source rather than by calling it.
+    #[test]
+    fn begin_login_resolves_its_url_through_login_url_before_any_effect() {
+        let source = include_str!("auth.rs");
+        let source = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let start = source
+            .find("pub async fn begin_login() ->")
+            .expect("begin_login takes no origin");
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let check = body
+            .find("login_url(&THIS_BUILD, &nonce)?")
+            .expect("begin_login calls login_url");
+        for effect in [
+            "LOGIN_GENERATION.fetch_add",
+            "bind_with_takeover(",
+            "open::that(&url)",
+        ] {
+            let at = body
+                .find(effect)
+                .unwrap_or_else(|| panic!("{effect} in begin_login"));
+            assert!(check < at, "the origin check must come before {effect}");
+        }
+        assert!(
+            !body.contains("/api/v1/"),
+            "begin_login builds no URL of its own"
+        );
     }
 
     #[test]
