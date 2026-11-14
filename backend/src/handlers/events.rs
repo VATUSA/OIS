@@ -1337,16 +1337,25 @@ pub(crate) async fn activate_package(
                 // Activation goes live: create then publish so the restriction is active.
                 let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, &by).await?;
                 let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &by).await?;
-                if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
-                    let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
-                    integration_repo::enqueue_job(
-                        &mut tx,
-                        "tmi_publish",
-                        &job,
-                        Some("tmi"),
-                        Some(tmi.id.as_str()),
-                    )
-                    .await?;
+                // `None` only when the publish matched no draft; the row was created as one just above.
+                if let Some(tmi) = tmi {
+                    if let Some(channel_id) = &tmu_channel {
+                        let job = crate::handlers::tmu::tmi_publish_job(channel_id, &tmi);
+                        integration_repo::enqueue_job(
+                            &mut tx,
+                            "tmi_publish",
+                            &job,
+                            Some("tmi"),
+                            Some(tmi.id.as_str()),
+                        )
+                        .await?;
+                    } else {
+                        crate::handlers::tmu::skipped_post(
+                            crate::handlers::tmu::NTML_CHANNEL,
+                            "publish",
+                            &tmi.id,
+                        );
+                    }
                 }
                 tmi_id
             }
@@ -1394,6 +1403,12 @@ pub(crate) async fn activate_package(
                         Some(adv.id.as_str()),
                     )
                     .await?;
+                } else {
+                    crate::handlers::tmu::skipped_advisory_post(
+                        crate::handlers::tmu::ADV_CHANNEL,
+                        "publish",
+                        &adv.id,
+                    );
                 }
                 adv_id
             }
@@ -3798,5 +3813,343 @@ mod deactivation_correction_tests {
         .unwrap();
 
         assert!(corrections(&pool).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod unmapped_channel_tests {
+    //! Activating an event package with a Discord channel unmapped logs the same skip WARN a direct
+    //! publish logs (`handlers::tmu::skipped_post` / `skipped_advisory_post`), once per item, and
+    //! still activates with nothing enqueued (#883). Both callers of `activate_package` are driven: the
+    //! Activate route and the auto-publish pass.
+    //!
+    //! The expected messages are literals copied from the direct-publish WARN text, not rebuilt from
+    //! the helpers, so a reworded or swapped helper goes red here.
+
+    use std::collections::{BTreeSet, HashMap};
+
+    use axum::http;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::log_capture::{Captured, capturing, saw_the_request, skip_warnings};
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+    use crate::state::AppState;
+
+    const EVENT: i64 = 883;
+    const NTML: &str = "900000000000000883";
+    const ADV: &str = "900000000000000884";
+    const NTML_SKIP: &str = "tmu: no Discord channel mapped for `tmu-ntml`; TMI publish not posted";
+    const ADV_SKIP: &str =
+        "tmu: no Discord channel mapped for `tmu-advisories`; advisory publish not posted";
+
+    struct Fixture {
+        state: AppState,
+        cookie: String,
+        pkg: String,
+    }
+
+    /// A ZDC event and a ZDC-scoped planner holding a draft package with two restrictions and two
+    /// advisories. `start` places the event relative to now (the auto-publish window is 30 minutes).
+    async fn seed(pool: &PgPool, start: Duration) -> Fixture {
+        let user = seed_user(pool).await;
+        for permission in ["events.plan.update", "tmu.adv.create", "tmu.adv.publish"] {
+            grant(pool, &user, permission, Some("ZDC")).await;
+        }
+        let cookie = session_cookie(pool, &user).await;
+        let now = Utc::now();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Unmapped Test', $2, $3, 'ZDC')",
+        )
+        .bind(EVENT)
+        .bind(now + start)
+        .bind(now + Duration::hours(2))
+        .execute(pool)
+        .await
+        .unwrap();
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, &user).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        for mit in ["20 MIT", "30 MIT"] {
+            let item = json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": mit,
+                "start_time": now, "stop_time": now + Duration::hours(2),
+            });
+            let canonical = normalize_item("restriction", item).unwrap();
+            events_repo::add_package_item(pool, &pkg, "restriction", &canonical)
+                .await
+                .unwrap();
+        }
+        for body in ["vATCSCC ADVZY ONE", "vATCSCC ADVZY TWO"] {
+            let item = json!({
+                "facility": "ZDC", "kind": "reroute", "body": body,
+                "valid_from": now, "valid_to": now + Duration::hours(2),
+            });
+            let canonical = normalize_item("advisory", item).unwrap();
+            events_repo::add_package_item(pool, &pkg, "advisory", &canonical)
+                .await
+                .unwrap();
+        }
+        Fixture {
+            state: test_state(pool.clone(), HashMap::new()),
+            cookie,
+            pkg,
+        }
+    }
+
+    /// One guild mapping each named logical channel to its id.
+    async fn map(pool: &PgPool, channels: &[(&str, &str)]) {
+        let config: String = sqlx::query_scalar(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        for (name, channel) in channels {
+            sqlx::query(
+                "insert into integration.discord_channels (config_id, name, channel_id) \
+                 values ($1, $2, $3)",
+            )
+            .bind(&config)
+            .bind(name)
+            .bind(channel)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn activate(f: &Fixture) -> (http::StatusCode, Vec<Captured>) {
+        capturing(send(
+            &f.state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{}/activate", f.pkg),
+            &f.cookie,
+            None,
+        ))
+        .await
+    }
+
+    async fn status(pool: &PgPool, pkg: &str) -> String {
+        sqlx::query_scalar("select status from events.tmi_package where id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn ids(pool: &PgPool, sql: &str) -> BTreeSet<String> {
+        sqlx::query_scalar::<_, String>(sql)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    async fn published_tmis(pool: &PgPool) -> BTreeSet<String> {
+        ids(pool, "select id from tmu.tmis where status = 'published'").await
+    }
+
+    async fn published_advisories(pool: &PgPool) -> BTreeSet<String> {
+        ids(
+            pool,
+            "select id from tmu.advisories where status = 'published'",
+        )
+        .await
+    }
+
+    /// `(channel_id, subject id in the payload, subject_id column)` for each job of `job_type`.
+    async fn jobs(pool: &PgPool, job_type: &str, id_key: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "select payload->>'channel_id', payload->>$2, subject_id \
+             from integration.outbound_jobs where job_type = $1",
+        )
+        .bind(job_type)
+        .bind(id_key)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn job_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from integration.outbound_jobs")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The `field` values of the WARNs whose message is exactly `message` on logical `channel`.
+    fn skipped(events: &[Captured], message: &str, channel: &str, field: &str) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e.message == message)
+            .map(|e| {
+                assert_eq!(e.level, tracing::Level::WARN, "{e:?}");
+                // The direct-publish helper's target, so an inlined copy of the `warn!` fails.
+                assert_eq!(e.target, "ois_backend::handlers::tmu", "{e:?}");
+                assert_eq!(e.fields.get("channel").map(String::as_str), Some(channel));
+                e.fields
+                    .get(field)
+                    .cloned()
+                    .expect("the skip names its subject")
+            })
+            .collect()
+    }
+
+    /// Exactly one WARN per item, naming each live item once.
+    fn assert_one_per_item(warned: Vec<String>, live: &BTreeSet<String>, what: &str) {
+        assert_eq!(
+            warned.len(),
+            live.len(),
+            "one {what} skip per item: {warned:?}"
+        );
+        let warned: BTreeSet<String> = warned.into_iter().collect();
+        assert_eq!(&warned, live, "each live {what} is named once");
+    }
+
+    #[sqlx::test]
+    async fn activating_with_nothing_mapped_warns_once_per_item_and_enqueues_nothing(pool: PgPool) {
+        let f = seed(&pool, Duration::zero()).await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        let tmis = published_tmis(&pool).await;
+        let advisories = published_advisories(&pool).await;
+        assert_eq!(
+            (tmis.len(), advisories.len()),
+            (2, 2),
+            "every item went live"
+        );
+        assert_eq!(
+            job_count(&pool).await,
+            0,
+            "nothing is mapped, so nothing is queued"
+        );
+        assert_one_per_item(skipped(&events, NTML_SKIP, "tmu-ntml", "tmi"), &tmis, "TMI");
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &advisories,
+            "advisory",
+        );
+    }
+
+    #[sqlx::test]
+    async fn activating_with_both_channels_mapped_warns_nothing_and_enqueues_each_item(
+        pool: PgPool,
+    ) {
+        let f = seed(&pool, Duration::zero()).await;
+        map(
+            &pool,
+            &[
+                (crate::handlers::tmu::NTML_CHANNEL, NTML),
+                (crate::handlers::tmu::ADV_CHANNEL, ADV),
+            ],
+        )
+        .await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert!(
+            skip_warnings(&events).is_empty(),
+            "a mapped activation posts, so it must not report a skip: {events:?}"
+        );
+        let tmi_jobs = jobs(&pool, "tmi_publish", "tmi_id").await;
+        assert_eq!(tmi_jobs.len(), 2, "{tmi_jobs:?}");
+        for (channel, id, subject) in &tmi_jobs {
+            assert_eq!(channel, NTML);
+            assert_eq!(id, subject);
+        }
+        let queued: BTreeSet<String> = tmi_jobs.into_iter().map(|j| j.1).collect();
+        assert_eq!(queued, published_tmis(&pool).await);
+        let adv_jobs = jobs(&pool, "adv_publish", "advisory_id").await;
+        assert_eq!(adv_jobs.len(), 2, "{adv_jobs:?}");
+        for (channel, id, subject) in &adv_jobs {
+            assert_eq!(channel, ADV);
+            assert_eq!(id, subject);
+        }
+        let queued: BTreeSet<String> = adv_jobs.into_iter().map(|j| j.1).collect();
+        assert_eq!(queued, published_advisories(&pool).await);
+    }
+
+    /// Each `else` follows its own channel: with only NTML mapped, only the advisories warn.
+    #[sqlx::test]
+    async fn activating_with_only_ntml_mapped_warns_only_for_advisories(pool: PgPool) {
+        let f = seed(&pool, Duration::zero()).await;
+        map(&pool, &[(crate::handlers::tmu::NTML_CHANNEL, NTML)]).await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert!(
+            skipped(&events, NTML_SKIP, "tmu-ntml", "tmi").is_empty(),
+            "the NTML channel is mapped: {events:?}"
+        );
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &published_advisories(&pool).await,
+            "advisory",
+        );
+        let tmi_jobs = jobs(&pool, "tmi_publish", "tmi_id").await;
+        assert_eq!(tmi_jobs.len(), 2, "{tmi_jobs:?}");
+        assert!(tmi_jobs.iter().all(|(channel, ..)| channel == NTML));
+        assert!(jobs(&pool, "adv_publish", "advisory_id").await.is_empty());
+    }
+
+    /// The auto-publish job is the other caller of `activate_package`.
+    #[sqlx::test]
+    async fn auto_publish_with_nothing_mapped_warns_once_per_item(pool: PgPool) {
+        let f = seed(&pool, Duration::minutes(10)).await;
+        let armed = send(
+            &f.state,
+            http::Method::PUT,
+            &format!("/api/v1/events/{EVENT}/packages/{}/auto", f.pkg),
+            &f.cookie,
+            Some(json!({ "auto_publish": true })),
+        )
+        .await;
+        assert_eq!(armed, http::StatusCode::OK);
+
+        let (pass, events) = capturing(crate::jobs::event_package_lifecycle_once(
+            &pool,
+            &crate::realtime::Events::new(None),
+        ))
+        .await;
+
+        assert!(pass.is_ok(), "{pass:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message == "auto-activate package failed"),
+            "{events:?}"
+        );
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert_eq!(job_count(&pool).await, 0);
+        assert_one_per_item(
+            skipped(&events, NTML_SKIP, "tmu-ntml", "tmi"),
+            &published_tmis(&pool).await,
+            "TMI",
+        );
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &published_advisories(&pool).await,
+            "advisory",
+        );
     }
 }
