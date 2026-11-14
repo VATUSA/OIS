@@ -691,6 +691,7 @@ export function toUpsert(fca: Fca): UpsertFca {
     mode: fca.mode,
     rate: fca.rate,
     mit: fca.mit,
+    freeze_min: fca.freeze_min,
     enabled: fca.enabled,
   };
 }

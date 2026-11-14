@@ -36,6 +36,7 @@ use crate::repos::sector_consolidations as sector_consolidations_repo;
 use crate::repos::sector_limits as sector_limits_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
+use crate::state::AppState;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -61,6 +62,10 @@ const SERVER_ADMIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often the held-STA pass meters every enabled FCA (#817). VATSIM publishes every 15 s, so a
+/// flight entering the freeze horizon is held within one feed update; until then reads re-meter it.
+const FCA_HOLD_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -141,7 +146,7 @@ const NAV_REFRESH_JOB: &str = "nav_refresh";
 
 /// How often to refresh winds aloft: RAP publishes a new cycle every hour.
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const WINDS_REFRESH_JOB: &str = "winds_refresh";
+pub(crate) const WINDS_REFRESH_JOB: &str = "winds_refresh";
 /// The most one RAP fetch may take before the pass gives up on it: every candidate file it falls
 /// through (up to 8), each an index and 30 range reads.
 const RAP_FETCH_BUDGET: Duration = Duration::from_secs(120);
@@ -563,6 +568,25 @@ pub fn spawn_winds_refresh(
     });
 }
 
+/// The registry name of the aircraft-profiles refresh; the held-STA pass reads its outcome.
+pub(crate) const AIRCRAFT_PROFILES_REFRESH_JOB: &str = "aircraft_profiles_refresh";
+
+/// One aircraft-profiles load: install the DB catalog and mark the table loaded (the held-STA pass
+/// waits on it, #817). A failed load keeps the current table and leaves the flag as it was.
+pub(crate) async fn refresh_aircraft_profiles_once(
+    pool: &PgPool,
+    profiles: &ArcSwap<ProfileTable>,
+    loaded: &AtomicBool,
+) -> Result<String, String> {
+    let table = aircraft_profiles_repo::load_all(pool).await.map_err(|e| {
+        tracing::error!(error = %e, "aircraft profile load failed");
+        format!("{e:?}")
+    })?;
+    profiles.store(Arc::new(table));
+    loaded.store(true, Ordering::Relaxed);
+    Ok("reloaded".to_string())
+}
+
 /// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
 /// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
 /// current table (initially the legacy default).
@@ -570,23 +594,16 @@ pub fn spawn_aircraft_profiles_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
     profiles: Arc<ArcSwap<ProfileTable>>,
+    loaded: Arc<AtomicBool>,
 ) {
     tokio::spawn(run_interval(
         reg,
-        "aircraft_profiles_refresh",
+        AIRCRAFT_PROFILES_REFRESH_JOB,
         "Reload aircraft performance profiles from the DB",
         AIRCRAFT_PROFILES_INTERVAL,
         move || {
-            let (pool, profiles) = (pool.clone(), profiles.clone());
-            async move {
-                match aircraft_profiles_repo::load_all(&pool).await {
-                    Ok(table) => {
-                        profiles.store(Arc::new(table));
-                        Ok("reloaded".to_string())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
+            let (pool, profiles, loaded) = (pool.clone(), profiles.clone(), loaded.clone());
+            async move { refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await }
         },
     ));
 }
@@ -1632,6 +1649,26 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
                     }
                     Err(_) => Err("lifecycle pass failed".to_string()),
                 }
+            }
+        },
+    ));
+}
+
+/// Store and drop each enabled FCA's freeze-horizon STAs, and delete the holds of FCAs nothing
+/// meters (#817). The only background writer of `flow.fca_held_sta`; every read only reads it. Runs
+/// on every replica: the first STA stored wins (`on conflict do nothing`).
+pub fn spawn_fca_hold_sync(reg: Arc<JobRegistry>, state: AppState) {
+    tokio::spawn(run_interval(
+        reg,
+        "fca_hold_sync",
+        "Hold FCA crossing times inside the freeze horizon",
+        FCA_HOLD_SYNC_INTERVAL,
+        move || {
+            let state = state.clone();
+            async move {
+                crate::handlers::flow::sync_fca_holds_once(&state, chrono::Utc::now())
+                    .await
+                    .map(str::to_string)
             }
         },
     ));
@@ -2822,6 +2859,26 @@ mod registration_tests {
         );
     }
 
+    /// #817: the held-STA pass reads `AppState::aircraft_profiles_loaded`, so the profile refresh
+    /// must be handed that flag and not one of its own.
+    #[test]
+    fn the_profile_refresh_sets_the_states_own_loaded_flag() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_aircraft_profiles_refresh")
+                .is_some_and(|args| args.contains("state.aircraft_profiles_loaded.clone()"))
+        };
+        assert!(
+            wired(LIB_RS),
+            "lib.rs must pass state.aircraft_profiles_loaded"
+        );
+        let detached = "jobs::spawn_aircraft_profiles_refresh(reg, pool, state.aircraft_profiles.clone(), \
+                        Arc::new(AtomicBool::new(false)));";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a flag of the job's own"
+        );
+    }
+
     /// The seed triggers `airspace_sectors_refresh` by name in the registry it is given, and Admin →
     /// Jobs reads `state.jobs`; a registry of its own would make both silently miss it (#821).
     #[test]
@@ -3355,5 +3412,62 @@ mod winds_refresh_tests {
             record_winds_run(None, &winds, loaded.clone(), now).await,
             loaded
         );
+    }
+}
+
+#[cfg(test)]
+mod aircraft_profiles_refresh_tests {
+    use super::*;
+
+    /// The held-STA pass waits on `aircraft_profiles_loaded` (#817): the refresh sets it on a
+    /// successful load and leaves it unset, with the table untouched, when the load fails.
+    #[sqlx::test]
+    async fn a_successful_load_marks_the_profiles_loaded_and_a_failed_one_does_not(pool: PgPool) {
+        let profiles = ArcSwap::from_pointee(ProfileTable::default());
+        let default_table = profiles.load_full();
+
+        let failed_flag = AtomicBool::new(false);
+        let closed = PgPool::connect_lazy_with(pool.connect_options().as_ref().clone());
+        closed.close().await;
+        let err = refresh_aircraft_profiles_once(&closed, &profiles, &failed_flag).await;
+        assert!(err.is_err(), "a closed pool cannot load");
+        assert!(
+            !failed_flag.load(Ordering::Relaxed),
+            "a failed load leaves it unset"
+        );
+        assert!(
+            Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a failed load leaves the table untouched"
+        );
+
+        let loaded = AtomicBool::new(false);
+        let ok = refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await;
+        assert_eq!(ok.as_deref(), Ok("reloaded"));
+        assert!(loaded.load(Ordering::Relaxed), "a successful load sets it");
+        assert!(
+            !Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a successful load installs the DB table"
+        );
+    }
+
+    /// The spawned job sets the flag it was handed, not one of its own; the loop's first tick runs
+    /// at once.
+    #[sqlx::test]
+    async fn the_spawned_refresh_marks_the_flag_it_is_given(pool: PgPool) {
+        let profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_aircraft_profiles_refresh(
+            Arc::new(JobRegistry::new()),
+            pool,
+            profiles,
+            loaded.clone(),
+        );
+        let set = tokio::time::timeout(Duration::from_secs(10), async {
+            while !loaded.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(set.is_ok(), "the first run sets the given flag");
     }
 }

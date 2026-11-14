@@ -14,6 +14,24 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `FcaBody` and `UpsertFcaRequest` gain `freeze_min`, the FCA's freeze horizon in minutes
+  (0-120, 0 turns it off). A value outside the range answers 400. A create that omits it gets 30; an
+  update that omits it keeps the stored value, so an existing caller is unaffected.
+  `PUT /api/v1/flow/fcas/{id}` clears the FCA's held crossing times when it changes a metering field
+  (points, filters, levels, direction, mode, rate, MIT or `freeze_min`); the manual order route
+  clears them when the order or the manual flag changes; `DELETE /api/v1/flow/fcas/{id}` clears them.
+  A background pass stores the held times; no read writes them. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
+  `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
+  held times. A flight that runs past its release or held time reports how far in `late_sec`: for an
+  airborne flight, how far its ETA has passed it, and it then crosses no earlier than its ETA (in auto mode a late held
+  flight crosses at the later of the slot it held while on time and its ETA, moves no release or other held flight, and sets
+  `slot_conflict` when that is inside another's gap; in manual mode it keeps its place in the controller's order); for a ground
+  release, how long now is past its wheels-up, and it then crosses no earlier than a takeoff now. In airport flow, an issued CFR's
+  `FlowFlight.sta` and `delay_min` now go through the same slot check as every other arrival; a CFR
+  is late only once now is past its wheels-up, and then crosses no earlier than a takeoff now would
+  give, and a CFR whose slot is taken shows the delay. A repeat RDY and a CFR re-issue search for the
+  new slot with the flight's own old release or CFR taken out, and RDY and Set space each pair by the
+  larger of the two gaps. (#817)
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,

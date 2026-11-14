@@ -69,6 +69,9 @@ fn validate(req: &UpsertAircraftProfileRequest) -> Result<(), ApiError> {
 async fn refresh_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiError> {
     let table = profiles_repo::load_all(pool).await?;
     state.aircraft_profiles.store(Arc::new(table));
+    state
+        .aircraft_profiles_loaded
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 

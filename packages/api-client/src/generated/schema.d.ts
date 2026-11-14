@@ -5281,6 +5281,12 @@ export interface components {
             /** @description Event FCA lifecycle: planned | published | archived (null for shared FCAs). */
             event_status?: string | null;
             fixes: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+             *     0 turns freezing off (#817).
+             */
+            freeze_min: number;
             id: string;
             /** @description Controller's manual crossing order (callsigns); empty = auto. */
             manual_order: string[];
@@ -5359,6 +5365,16 @@ export interface components {
             heading: number;
             /** Format: double */
             lat: number;
+            /**
+             * Format: int64
+             * @description Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
+             *     far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
+             *     since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
+             *     than that gives. In auto mode a late held flight crosses at the later of the slot it held
+             *     while on time and its ETA, and no release or other held flight moves for it; in manual mode
+             *     it keeps its place in the controller's order (#817).
+             */
+            late_sec: number;
             /** Format: double */
             lon: number;
             /**
@@ -5378,6 +5394,20 @@ export interface components {
              * @description 1-based sequence in the metered order.
              */
             seq: number;
+            /**
+             * @description A released crossing, or a held crossing running late, that sits inside another crossing's
+             *     required gap (#817).
+             */
+            slot_conflict: boolean;
+            /**
+             * @description An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
+             *     its STA is stored. A background pass, every 15 s, stores its STA from the first pass that
+             *     saw it there, for enabled FCAs only; from then `cross_time` keeps that STA while the ETA
+             *     moves, unless the flight runs late or a crossing placed ahead of it needs the gap (a
+             *     release, a held flight ahead that was itself pushed later, the manual order, or under MIT a
+             *     held flight ahead whose gap grew) (#817).
+             */
+            sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
             status: string;
         };
@@ -7635,6 +7665,12 @@ export interface components {
             dir?: string | null;
             enabled?: boolean | null;
             fixes?: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+             *     without it gets 30; an update without it keeps the stored value.
+             */
+            freeze_min?: number | null;
             /** Format: int32 */
             max_fl?: number | null;
             /** Format: int32 */

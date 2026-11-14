@@ -2510,6 +2510,9 @@ pub struct FcaBody {
     pub mode: String,
     pub rate: i32,
     pub mit: i32,
+    /// Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+    /// 0 turns freezing off (#817).
+    pub freeze_min: i32,
     pub enabled: bool,
     /// Controller's manual crossing order (callsigns); empty = auto.
     pub manual_order: Vec<String>,
@@ -2556,6 +2559,10 @@ pub struct UpsertFcaRequest {
     pub rate: Option<i32>,
     #[serde(default)]
     pub mit: Option<i32>,
+    /// Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+    /// without it gets 30; an update without it keeps the stored value.
+    #[serde(default)]
+    pub freeze_min: Option<i32>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -2647,6 +2654,23 @@ pub struct FcaFlight {
     /// The release's version, for `If-Match` (#585); null when not released.
     #[serde(default)]
     pub release_version: Option<i64>,
+    /// Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
+    /// far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
+    /// since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
+    /// than that gives. In auto mode a late held flight crosses at the later of the slot it held
+    /// while on time and its ETA, and no release or other held flight moves for it; in manual mode
+    /// it keeps its place in the controller's order (#817).
+    pub late_sec: i64,
+    /// A released crossing, or a held crossing running late, that sits inside another crossing's
+    /// required gap (#817).
+    pub slot_conflict: bool,
+    /// An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
+    /// its STA is stored. A background pass, every 15 s, stores its STA from the first pass that
+    /// saw it there, for enabled FCAs only; from then `cross_time` keeps that STA while the ETA
+    /// moves, unless the flight runs late or a crossing placed ahead of it needs the gap (a
+    /// release, a held flight ahead that was itself pushed later, the manual order, or under MIT a
+    /// held flight ahead whose gap grew) (#817).
+    pub sta_frozen: bool,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,

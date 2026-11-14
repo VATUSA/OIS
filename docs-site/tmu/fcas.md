@@ -14,6 +14,7 @@ A **Flow Constrained Area** (FCA) is a **line you draw across a flow** to identi
    - **Route fixes** — only meter aircraft whose filed route contains these fixes.
    - **Min FL / Max FL** — the altitude band to meter.
    - **Scope (ARTCCs)** — limit metering to specific ARTCCs' airspace.
+   - **Freeze horizon** — minutes before the line at which an airborne aircraft's crossing time stops changing (see below).
 
 ## Metering crossings
 
@@ -23,6 +24,14 @@ Once an FCA exists, OIS finds every aircraft whose **filed route** crosses the l
 - **MIT (miles-in-trail)** — a distance gap, scaled by each aircraft's crossing speed.
 
 The map draws the matched aircraft **tinted and numbered in crossing order**, and the FCA's row shows a live **count** of how many aircraft it's currently metering. When you need to override the computed order, you can **reorder** the sequence manually.
+
+Two aircraft are always spaced by the larger of the two gaps they need. Under MIT that is the gap of the slower one. Released aircraft keep their release time. In automatic order every other aircraft is spaced clear of them, except a frozen aircraft running late (below). If a release, or a frozen aircraft running late, ends up inside another aircraft's gap, its strip shows **IN GAP**, so you can re-release it or change the order.
+
+### Freeze horizon
+
+Each FCA has a **freeze horizon**, 30 minutes by default (0 to 120; 0 turns it off). An airborne aircraft whose ETA to the line is inside it keeps the crossing time it had when it entered. Its time no longer changes every update as ETAs move, and aircraft further out are sequenced around it. It moves later only when an aircraft placed ahead of it needs the gap: a departure released into its gap, a frozen aircraft ahead that was itself pushed later, a manual order that puts another aircraft ahead of it, or, under MIT, a gap that grows as predicted crossing speeds change. Departures are frozen by their release, not by the horizon. An aircraft whose ETA drifts more than 2 minutes past the horizon, or that disconnects, loses its frozen time. Changing the FCA's line, filters, spacing or horizon, or reordering it by hand, clears every frozen time, and the next update freezes them again under the new settings. Renaming or recoloring it keeps them. Disabling it drops them within one update.
+
+If an aircraft runs late, OIS shows it crossing no earlier than it can: an airborne aircraft whose ETA is past its release or frozen time at its ETA, and a departure still on the ground once the time is past its release's wheels-up, at a takeoff now. A departure waiting at the gate or taxiing before its wheels-up keeps its release time. In automatic order a late frozen aircraft keeps the slot it had while on time until its ETA passes that slot, then crosses at its ETA; no release or other frozen aircraft moves for it. While it runs late, automatic placement keeps the slot it had reserved: aircraft not yet frozen are spaced clear of both that slot and its new time. A departure released by RDY or Set is spaced only against its new time, so a release can still take the slot it left. In manual order it keeps its place in your order. A late release keeps its place first. Once it is 30 seconds or more late, its strip shows **late** with the minutes and seconds, beside any delay.
 
 ## Enabling & disabling
 
