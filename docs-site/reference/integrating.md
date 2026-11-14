@@ -190,7 +190,7 @@ the current `ETag: "2"`: re-read the flight, decide again, and retry with `"2"`.
 | 412 / 428 | `precondition_failed` / `precondition_required` |
 | 413 | `payload_too_large` |
 | 429 | `too_many_requests` |
-| 503 | `service_unavailable` — e.g. no live VATSIM feed yet; retry shortly |
+| 503 | `service_unavailable` — e.g. no live VATSIM feed yet, or your token could not be checked; keep the token and retry shortly |
 
 Note that a missing permission is `401`, not `403`. Which permission each endpoint needs is listed in
 [API permissions](./api-permissions.md).
