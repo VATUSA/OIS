@@ -3490,6 +3490,27 @@ mod vatusa_reset_run_prune_tests {
         assert_eq!((status.as_str(), finished), ("running", false));
     }
 
+    /// "Older than" the retention: a run finished exactly `AUDIT_RETAIN_DAYS` before `now` stays.
+    #[sqlx::test]
+    async fn a_run_finished_exactly_at_the_cutoff_is_kept(pool: PgPool) {
+        // Postgres keeps microseconds; a nanosecond `now` would put the stored row before the cutoff.
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6);
+        let at_cutoff = now - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+        let id: String = sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, status, started_at, finished_at) \
+             values ('test', 'succeeded', $1, $1) returning id",
+        )
+        .bind(at_cutoff)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let outcome = vatusa_reset_run_prune_once(&pool, now).await;
+
+        assert_eq!(outcome, Ok("0 deleted".to_string()));
+        assert_eq!(ids(&pool).await, vec![id]);
+    }
+
     /// A delete that fails is an `Err`, which `run_interval` records as a failed run.
     #[sqlx::test]
     async fn a_failed_delete_is_reported_to_the_job_registry(pool: PgPool) {
