@@ -3994,6 +3994,8 @@ mod unmapped_channel_tests {
             .filter(|e| e.message == message)
             .map(|e| {
                 assert_eq!(e.level, tracing::Level::WARN, "{e:?}");
+                // The direct-publish helper's target, so an inlined copy of the `warn!` fails.
+                assert_eq!(e.target, "ois_backend::handlers::tmu", "{e:?}");
                 assert_eq!(e.fields.get("channel").map(String::as_str), Some(channel));
                 e.fields
                     .get(field)

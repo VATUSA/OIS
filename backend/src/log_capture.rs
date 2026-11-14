@@ -82,8 +82,8 @@ pub(crate) async fn capturing<F: Future>(fut: F) -> (F::Output, Vec<Captured>) {
 }
 
 /// The `tmu` skipped-post WARNs among `events` (`handlers::tmu::skipped_post` and
-/// `skipped_advisory_post`), matched on the message's fixed prefix so a test asserting there are
-/// none cannot pass on a reworded call.
+/// `skipped_advisory_post`), matched on the message's fixed prefix. An `is_empty()` on this proves
+/// nothing if the prefix itself changes; tests that assert the full message pin it.
 pub(crate) fn skip_warnings(events: &[Captured]) -> Vec<&Captured> {
     events
         .iter()
