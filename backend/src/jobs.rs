@@ -1729,12 +1729,13 @@ async fn auto_activate_due_packages(pool: &PgPool, tally: &mut PackageLifecycleT
             .await
         {
             Ok(()) => tally.activated += 1,
-            // The plain `Conflict` is `mark_package_activated`'s status fence: another replica's
-            // pass or an Activate click flipped the package first, and this attempt rolled back.
-            // Every replica runs this pass, so that is the expected outcome, not a failure. Any
-            // other source of a plain `Conflict` in `activate_package` must be weighed against this.
+            // The plain `Conflict` is `mark_package_activated`'s status fence: the package stopped
+            // being a draft after it was listed (another replica's pass or an Activate click
+            // flipped it first), and this attempt rolled back. Every replica runs this pass, so
+            // that is the expected outcome, not a failure. Any other source of a plain `Conflict`
+            // in `activate_package` must be weighed against this.
             Err(ApiError::Conflict) => {
-                tracing::debug!(%package_id, "auto-activate: the package was activated elsewhere");
+                tracing::debug!(%package_id, "auto-activate: the package is no longer a draft");
             }
             Err(e) => {
                 tracing::warn!(%package_id, error = %e, "auto-activate package failed");

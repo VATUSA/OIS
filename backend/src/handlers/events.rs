@@ -3824,9 +3824,9 @@ mod lifecycle_failure_tests {
     //! in `jobs.rs` because a package item is only built through `normalize_item`, which is private to
     //! this module.
     //!
-    //! In every two-package test the failing package is created first and the test asserts the
-    //! listing returns it first, so a pass that stops at the first failure leaves the other package
-    //! untouched and goes red.
+    //! Every two-package test arranges for the failing package to be listed first (by creation or
+    //! activation order; the listing has no `order by`) and asserts that order, so a pass that stops
+    //! at the first failure leaves the other package untouched and goes red.
 
     use std::sync::{Arc, Mutex};
 
