@@ -3,15 +3,33 @@
 //! each case runs the binary with its own environment.
 //!
 //! `DATABASE_URL` is blank in every case, so a boot that gets past the check stops at the pool's URL
-//! parse with "relative URL without a base" before it connects anywhere or starts a poller. The
-//! working directory is an empty temp dir, so `dotenvy` finds no `.env`.
+//! parse with "relative URL without a base" before it connects anywhere or starts a poller. Each boot
+//! runs in a fresh temp dir. `dotenvy` also reads a `.env` in any parent directory, so `boot` refuses
+//! to run when one exists there.
 
+use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Runs the binary with `vars` and returns its exit success and its combined output, ANSI stripped.
 fn boot(vars: &[(&str, &str)]) -> (bool, String) {
-    let dir = std::env::temp_dir().join(format!("ois-startup-config-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create an empty working directory");
+    static BOOTS: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ois-startup-config-{}-{}",
+        std::process::id(),
+        BOOTS.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).expect("create a fresh working directory");
+    if let Some(found) = dir
+        .ancestors()
+        .map(|d| d.join(".env"))
+        .find(|f| Path::new(f).exists())
+    {
+        panic!(
+            "{} would load into the child; remove it to run these tests",
+            found.display()
+        );
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_ois-backend"));
     command
         .current_dir(&dir)
@@ -24,6 +42,7 @@ fn boot(vars: &[(&str, &str)]) -> (bool, String) {
         command.env(name, value);
     }
     let output = command.output().expect("run ois-backend");
+    std::fs::remove_dir_all(&dir).expect("remove the working directory");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -106,6 +125,7 @@ fn a_zero_pool_size_logs_one_error_naming_the_variable() {
         errors[0].contains("DATABASE_MAX_CONNECTIONS must be a whole number above 0, got \"0\""),
         "{output}"
     );
+    assert!(errors[0].contains("default=20"), "{output}");
     let (_, unset) = boot(&[]);
     assert!(!unset.contains(" ERROR "), "{unset}");
 }
