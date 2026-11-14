@@ -43,6 +43,12 @@ pub async fn run() -> color_eyre::Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
 
+    // Before anything connects: a bad hop count would key rate limits and audit IPs on a forgeable
+    // `X-Forwarded-For` entry (#923).
+    let hops = config::trusted_proxy_hops().map_err(|problem| color_eyre::eyre::eyre!(problem))?;
+    repos::audit::set_trusted_proxy_hops(hops)
+        .map_err(|_| color_eyre::eyre::eyre!("the trusted proxy hop count was stored twice"))?;
+
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
     demote_removed_server_admins(&state).await;
