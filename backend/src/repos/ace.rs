@@ -55,6 +55,22 @@ pub async fn get_request(pool: &PgPool, id: &str) -> Result<Option<AceRequestBod
         .map_err(|_| ApiError::Internal)
 }
 
+/// A request resolved through the event in the path: `None` when it belongs to another event (#920).
+pub async fn get_request_in_event(
+    pool: &PgPool,
+    event_id: i64,
+    id: &str,
+) -> Result<Option<AceRequestBody>, ApiError> {
+    sqlx::query_as::<_, AceRequestBody>(&format!(
+        "{REQUEST_SELECT} where r.id = $1 and r.event_id = $2"
+    ))
+    .bind(id)
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// Distinct ARTCCs with an open ACE request on the event — surfaces the `has_staffing` signal on the
 /// event's facility-support list (replaces the old staffing-request source).
 pub async fn open_request_artccs(pool: &PgPool, event_id: i64) -> Result<Vec<String>, ApiError> {
@@ -144,18 +160,24 @@ pub async fn claim_request(
 }
 
 /// Release the caller's own claim **in the caller's transaction**. Returns `(slots, claims_count_after)`
-/// for the notify job; `NotFound` if the caller had no claim on this request.
+/// for the notify job; `NotFound` if the caller had no claim on this request, or the request belongs
+/// to another event (#920).
 pub async fn release_claim(
     tx: &mut Transaction<'_, Postgres>,
+    event_id: i64,
     request_id: &str,
     claimer: &str,
 ) -> Result<(i32, i64), ApiError> {
-    let deleted = sqlx::query("delete from ace.claims where request_id = $1 and claimed_by = $2")
-        .bind(request_id)
-        .bind(claimer)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+    let deleted = sqlx::query(
+        "delete from ace.claims c using ace.requests r \
+         where c.request_id = $1 and c.claimed_by = $2 and r.id = c.request_id and r.event_id = $3",
+    )
+    .bind(request_id)
+    .bind(claimer)
+    .bind(event_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     if deleted.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
@@ -186,31 +208,37 @@ pub async fn claims_for(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Permanently delete a request (and its claims, via FK cascade). Returns false if absent.
-pub async fn delete_request(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
-    let res = sqlx::query("delete from ace.requests where id = $1")
+/// Permanently delete a request (and its claims, via FK cascade). Returns false if absent or on
+/// another event (#920).
+pub async fn delete_request(pool: &PgPool, event_id: i64, id: &str) -> Result<bool, ApiError> {
+    let res = sqlx::query("delete from ace.requests where id = $1 and event_id = $2")
         .bind(id)
+        .bind(event_id)
         .execute(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
     Ok(res.rows_affected() > 0)
 }
 
-/// Complete or cancel a request. `NotFound` if absent, `Conflict` if already terminal. `outcome`
-/// must be `completed` or `cancelled` (validated by the caller).
+/// Complete or cancel a request. `NotFound` if absent or on another event (#920), `Conflict` if
+/// already terminal. `outcome` must be `completed` or `cancelled` (validated by the caller). The
+/// locking select resolves the row through its event; the update then runs on the locked id.
 pub async fn decide_request(
     pool: &PgPool,
+    event_id: i64,
     id: &str,
     by: &Attribution,
     outcome: &str,
 ) -> Result<(), ApiError> {
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
-    let status =
-        sqlx::query_scalar::<_, String>("select status from ace.requests where id = $1 for update")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+    let status = sqlx::query_scalar::<_, String>(
+        "select status from ace.requests where id = $1 and event_id = $2 for update",
+    )
+    .bind(id)
+    .bind(event_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     match status.as_deref() {
         None => return Err(ApiError::NotFound),
         Some("completed") | Some("cancelled") => return Err(ApiError::Conflict),
@@ -546,6 +574,7 @@ mod tests {
         let request_id = seed_claimed_request(&pool, event_id, &requester, &claimer).await;
         decide_request(
             &pool,
+            event_id,
             &request_id,
             &crate::auth::principal::Attribution::for_user_id(&pool, &requester)
                 .await
