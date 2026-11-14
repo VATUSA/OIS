@@ -151,28 +151,95 @@ pub fn ois_public_url() -> Option<String> {
     trimmed_env("OIS_PUBLIC_URL")
 }
 
-/// Requests per minute allowed to one rate-limit bucket (#588), read from `name`
-/// (`RATE_LIMIT_CREDENTIAL_PER_MIN`, `RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_ANON_PER_MIN`). Unset,
-/// unparsable or zero falls back to `default` — a typo must not switch limiting off or lock everyone out.
-pub fn rate_limit_per_min(name: &str, default: u32) -> NonZeroU32 {
-    trimmed_env(name)
-        .and_then(|v| v.parse::<u32>().ok())
-        .and_then(NonZeroU32::new)
-        .or(NonZeroU32::new(default))
-        .unwrap_or(NonZeroU32::MIN)
+/// The raw value of `name`, for the `parse_*` functions below. Set but not UTF-8 comes back as its
+/// lossy form so it parses as malformed rather than reading as unset.
+fn raw_env(name: &str) -> Option<String> {
+    raw_from(std::env::var(name))
 }
 
-/// How many reverse proxies we run in front of the backend (`TRUSTED_PROXY_HOPS`, minimum 1). Each
-/// appends one `X-Forwarded-For` entry, so the client's address is this many from the right; anything
-/// further left came from the client and can be forged (#588).
+fn raw_from(value: Result<String, std::env::VarError>) -> Option<String> {
+    match value {
+        Ok(raw) => Some(raw),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(raw)) => Some(raw.to_string_lossy().into_owned()),
+    }
+}
+
+/// A whole number above zero from a raw env value (#923). Absent or blank is `Ok(None)`, so the caller
+/// applies its default; zero or anything that is not a whole number is an `Err` naming `name`.
+pub fn parse_nonzero_u32(name: &str, raw: Option<String>) -> Result<Option<NonZeroU32>, String> {
+    let Some(value) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    value
+        .parse::<u32>()
+        .ok()
+        .and_then(NonZeroU32::new)
+        .map(Some)
+        .ok_or_else(|| format!("{name} must be a whole number above 0, got {value:?}"))
+}
+
+/// `parse_nonzero_u32`, falling back to `default` on a bad value with one ERROR naming the variable.
+/// A typo keeps the default rather than switching a limit off or locking everyone out.
+fn nonzero_u32_or_default(name: &str, raw: Option<String>, default: u32) -> NonZeroU32 {
+    let fallback = NonZeroU32::new(default).unwrap_or(NonZeroU32::MIN);
+    match parse_nonzero_u32(name, raw) {
+        Ok(value) => value.unwrap_or(fallback),
+        Err(problem) => {
+            tracing::error!(variable = name, default, "{problem}; using the default");
+            fallback
+        }
+    }
+}
+
+/// Requests per minute allowed to one rate-limit bucket (#588), read from `name`
+/// (`RATE_LIMIT_CREDENTIAL_PER_MIN`, `RATE_LIMIT_USER_PER_MIN`, `RATE_LIMIT_ANON_PER_MIN`). Unset or
+/// blank is `default`; zero or malformed is `default` and logs an ERROR.
+pub fn rate_limit_per_min(name: &str, default: u32) -> NonZeroU32 {
+    nonzero_u32_or_default(name, raw_env(name), default)
+}
+
+/// The database pool's `max_connections` when `DATABASE_MAX_CONNECTIONS` is unset.
+pub const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 20;
+
+/// The database pool's `max_connections` (`DATABASE_MAX_CONNECTIONS`). Unset or blank is
+/// `DEFAULT_DATABASE_MAX_CONNECTIONS`; zero or malformed is the default and logs an ERROR.
+pub fn database_max_connections() -> u32 {
+    nonzero_u32_or_default(
+        "DATABASE_MAX_CONNECTIONS",
+        raw_env("DATABASE_MAX_CONNECTIONS"),
+        DEFAULT_DATABASE_MAX_CONNECTIONS,
+    )
+    .get()
+}
+
+/// Production's Cloudflare → Traefik chain.
+pub const DEFAULT_TRUSTED_PROXY_HOPS: usize = 2;
+
+/// How many reverse proxies we run in front of the backend (`TRUSTED_PROXY_HOPS`). Each appends one
+/// `X-Forwarded-For` entry, so the client's address is this many from the right; anything further left
+/// came from the client and can be forged (#588).
 ///
-/// The default, 2, is production's Cloudflare → Traefik chain. A deployment behind a single proxy (the
-/// compose stack behind one Caddy/nginx) must set 1, or every caller is keyed on the proxy's address.
-pub fn trusted_proxy_hops() -> usize {
-    trimmed_env("TRUSTED_PROXY_HOPS")
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(2)
-        .max(1)
+/// Absent or blank is `DEFAULT_TRUSTED_PROXY_HOPS`. A deployment behind a single proxy (the compose
+/// stack behind one Caddy/nginx) must set 1: at 2, callers there can forge their IP. Zero or a value
+/// that is not a whole number is an `Err` and startup refuses it (#923): falling back to 2 behind one
+/// proxy, or reading 0 hops, takes the client IP from the part of the header the client wrote.
+pub fn parse_trusted_proxy_hops(raw: Option<String>) -> Result<usize, String> {
+    let Some(value) = raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_TRUSTED_PROXY_HOPS);
+    };
+    match value.parse::<usize>() {
+        Ok(0) => Err("TRUSTED_PROXY_HOPS must be at least 1, got 0".to_string()),
+        Ok(hops) => Ok(hops),
+        Err(_) => Err(format!(
+            "TRUSTED_PROXY_HOPS must be a whole number of proxies, got {value:?}"
+        )),
+    }
+}
+
+/// `TRUSTED_PROXY_HOPS` from the environment; see `parse_trusted_proxy_hops`. Read once, by `run()`.
+pub fn trusted_proxy_hops() -> Result<usize, String> {
+    parse_trusted_proxy_hops(raw_env("TRUSTED_PROXY_HOPS"))
 }
 
 /// The key that encrypts stored secrets OIS must read back (today only the VATUSA webhook secret,
@@ -254,7 +321,13 @@ fn normalize_origin(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_origin, parse_server_admin_cids, server_admin_cids_from};
+    use super::{
+        DEFAULT_DATABASE_MAX_CONNECTIONS, DEFAULT_TRUSTED_PROXY_HOPS, nonzero_u32_or_default,
+        normalize_origin, parse_nonzero_u32, parse_server_admin_cids, parse_trusted_proxy_hops,
+        raw_from, server_admin_cids_from,
+    };
+    use std::num::NonZeroU32;
+    use std::sync::{Arc, Mutex};
 
     /// Unset is no admin; set but not UTF-8 is malformed, so it must not read as unset (#805).
     #[test]
@@ -329,6 +402,215 @@ mod tests {
         assert_eq!(
             normalize_origin("http://tauri.localhost"),
             "http://tauri.localhost"
+        );
+    }
+
+    /// The four variables `parse_nonzero_u32` serves (#923).
+    const NONZERO_VARIABLES: [&str; 4] = [
+        "RATE_LIMIT_CREDENTIAL_PER_MIN",
+        "RATE_LIMIT_USER_PER_MIN",
+        "RATE_LIMIT_ANON_PER_MIN",
+        "DATABASE_MAX_CONNECTIONS",
+    ];
+
+    fn some(raw: &str) -> Option<String> {
+        Some(raw.to_string())
+    }
+
+    /// Set but not UTF-8 is malformed, so it must not read as unset and take the default.
+    #[test]
+    fn a_raw_value_that_is_not_utf8_is_malformed_not_unset() {
+        use std::env::VarError;
+        assert_eq!(raw_from(Err(VarError::NotPresent)), None);
+        assert_eq!(raw_from(Ok("1".to_string())), some("1"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let raw = raw_from(Err(VarError::NotUnicode(std::ffi::OsString::from_vec(
+                vec![b'1', 0xff],
+            ))));
+            assert!(parse_trusted_proxy_hops(raw.clone()).is_err(), "{raw:?}");
+            assert!(
+                parse_nonzero_u32("RATE_LIMIT_USER_PER_MIN", raw.clone()).is_err(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_proxy_hops_absent_or_blank_is_the_default_two() {
+        for raw in [None, some(""), some("   ")] {
+            assert_eq!(parse_trusted_proxy_hops(raw.clone()), Ok(2), "{raw:?}");
+        }
+        assert_eq!(DEFAULT_TRUSTED_PROXY_HOPS, 2);
+    }
+
+    #[test]
+    fn trusted_proxy_hops_parses_a_whole_number_either_side_of_two() {
+        for (raw, hops) in [("1", 1), ("3", 3), (" 2 ", 2)] {
+            assert_eq!(parse_trusted_proxy_hops(some(raw)), Ok(hops), "{raw:?}");
+        }
+    }
+
+    /// Zero would take the client IP from the leftmost, client-written entry.
+    #[test]
+    fn trusted_proxy_hops_refuses_zero_naming_the_variable() {
+        assert_eq!(
+            parse_trusted_proxy_hops(some("0")),
+            Err("TRUSTED_PROXY_HOPS must be at least 1, got 0".to_string())
+        );
+    }
+
+    /// A set but unparseable value is refused, never read as the default. `2/` used to have its
+    /// slash stripped and read as 2.
+    #[test]
+    fn trusted_proxy_hops_refuses_a_malformed_value_naming_it() {
+        for raw in ["1x", "-1", "2/", "1.5", "18446744073709551616"] {
+            assert_eq!(
+                parse_trusted_proxy_hops(some(raw)),
+                Err(format!(
+                    "TRUSTED_PROXY_HOPS must be a whole number of proxies, got \"{raw}\""
+                )),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonzero_u32_absent_or_blank_is_unset() {
+        for name in NONZERO_VARIABLES {
+            for raw in [None, some(""), some("   ")] {
+                assert_eq!(
+                    parse_nonzero_u32(name, raw.clone()),
+                    Ok(None),
+                    "{name} {raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_u32_parses_a_positive_value() {
+        for name in NONZERO_VARIABLES {
+            for (raw, value) in [
+                ("1", 1),
+                ("450", 450),
+                (" 45 ", 45),
+                ("4294967295", u32::MAX),
+            ] {
+                assert_eq!(
+                    parse_nonzero_u32(name, some(raw)),
+                    Ok(NonZeroU32::new(value)),
+                    "{name} {raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonzero_u32_refuses_zero_or_malformed_naming_the_variable() {
+        for name in NONZERO_VARIABLES {
+            for raw in ["0", "abc", "-5", "300/", "1.5", "4294967296"] {
+                assert_eq!(
+                    parse_nonzero_u32(name, some(raw)),
+                    Err(format!(
+                        "{name} must be a whole number above 0, got \"{raw}\""
+                    )),
+                    "{name} {raw:?}"
+                );
+            }
+        }
+    }
+
+    /// Runs `f` under a subscriber that records every event, and returns the recorded lines.
+    fn captured_logs(f: impl FnOnce()) -> Vec<String> {
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("capture lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = capture.0.lock().expect("capture lock").clone();
+        String::from_utf8(bytes)
+            .expect("utf-8 log output")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A typo must not switch limiting off: it keeps the default and says so once (#923).
+    #[test]
+    fn a_malformed_limit_logs_one_error_and_keeps_its_default() {
+        for name in NONZERO_VARIABLES {
+            for raw in ["abc", "0"] {
+                let mut value = None;
+                let lines =
+                    captured_logs(|| value = Some(nonzero_u32_or_default(name, some(raw), 37)));
+                assert_eq!(value.map(NonZeroU32::get), Some(37), "{name} {raw:?}");
+                assert_eq!(lines.len(), 1, "{name} {raw:?}: {lines:?}");
+                assert!(lines[0].contains("ERROR"), "{name} {raw:?}: {lines:?}");
+                assert!(
+                    lines[0].contains(&format!("variable=\"{name}\"")),
+                    "{name}: {lines:?}"
+                );
+                for other in NONZERO_VARIABLES.iter().filter(|other| **other != name) {
+                    assert!(
+                        !lines[0].contains(other),
+                        "{name} line names {other}: {lines:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_absent_or_blank_limit_logs_nothing_and_keeps_its_default() {
+        for name in NONZERO_VARIABLES {
+            for raw in [None, some(""), some("  ")] {
+                let mut value = None;
+                let lines =
+                    captured_logs(|| value = Some(nonzero_u32_or_default(name, raw.clone(), 37)));
+                assert_eq!(value.map(NonZeroU32::get), Some(37), "{name} {raw:?}");
+                assert!(lines.is_empty(), "{name} {raw:?}: {lines:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_valid_limit_is_used_and_logs_nothing() {
+        for name in NONZERO_VARIABLES {
+            let mut value = None;
+            let lines =
+                captured_logs(|| value = Some(nonzero_u32_or_default(name, some("450"), 37)));
+            assert_eq!(value.map(NonZeroU32::get), Some(450), "{name}");
+            assert!(lines.is_empty(), "{name}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn the_database_pool_defaults_to_twenty_connections() {
+        assert_eq!(DEFAULT_DATABASE_MAX_CONNECTIONS, 20);
+    }
+
+    /// A zero default is never passed today; the wrapper still never returns zero.
+    #[test]
+    fn a_zero_default_is_raised_to_one() {
+        assert_eq!(
+            nonzero_u32_or_default("RATE_LIMIT_USER_PER_MIN", None, 0).get(),
+            1
         );
     }
 }

@@ -312,9 +312,25 @@ pub async fn fetch_audit_logs(
 /// client chose to send, so taking it (as this did before #588) let any caller pick its own IP — for
 /// the anonymous rate-limit bucket, the audit log and `api_keys.last_used_ip` alike.
 pub fn client_ip(headers: &HeaderMap) -> Option<String> {
-    static HOPS: std::sync::LazyLock<usize> =
-        std::sync::LazyLock::new(crate::config::trusted_proxy_hops);
-    client_ip_behind(headers, *HOPS)
+    client_ip_from(&TRUSTED_PROXY_HOPS, headers)
+}
+
+/// The `TRUSTED_PROXY_HOPS` value `run()` validated at startup (#923). A process that never ran
+/// `run()` (tests) has nothing stored and uses `DEFAULT_TRUSTED_PROXY_HOPS`.
+static TRUSTED_PROXY_HOPS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Stores the startup-validated hop count for `client_ip`. `Err` carries the value back when one was
+/// already stored.
+pub fn set_trusted_proxy_hops(hops: usize) -> Result<(), usize> {
+    TRUSTED_PROXY_HOPS.set(hops)
+}
+
+fn client_ip_from(hops: &std::sync::OnceLock<usize>, headers: &HeaderMap) -> Option<String> {
+    let hops = hops
+        .get()
+        .copied()
+        .unwrap_or(crate::config::DEFAULT_TRUSTED_PROXY_HOPS);
+    client_ip_behind(headers, hops)
 }
 
 fn client_ip_behind(headers: &HeaderMap, hops: usize) -> Option<String> {
@@ -420,6 +436,30 @@ mod tests {
             Some("198.51.100.4")
         );
         assert_eq!(client_ip_behind(&HeaderMap::new(), 1), None);
+    }
+
+    /// `client_ip` uses the value `run()` stored, not a read of `TRUSTED_PROXY_HOPS` (#923): the env
+    /// is unset here, so an env read would give 2 hops. This test sets the process-global hop count.
+    /// nextest runs each test in its own process; under a single-process `cargo test`
+    /// (`just test-rust`) the stored 1 also applies to every later test in this binary.
+    #[test]
+    fn client_ip_uses_the_hop_count_startup_stored() {
+        set_trusted_proxy_hops(1).expect("nothing else in this process stores the hop count");
+        let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
+        assert_eq!(client_ip(&spoofed).as_deref(), Some("203.0.113.9"));
+    }
+
+    /// A process that never ran `run()` keeps the 2-hop default.
+    #[test]
+    fn client_ip_without_a_stored_hop_count_uses_two_hops() {
+        let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
+        let empty = std::sync::OnceLock::new();
+        assert_eq!(client_ip_from(&empty, &spoofed).as_deref(), Some("7.7.7.7"));
+        let stored = std::sync::OnceLock::from(1);
+        assert_eq!(
+            client_ip_from(&stored, &spoofed).as_deref(),
+            Some("203.0.113.9")
+        );
     }
 
     async fn audit_row(pool: &PgPool, created_at: DateTime<Utc>) -> String {

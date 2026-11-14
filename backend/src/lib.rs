@@ -43,6 +43,12 @@ pub async fn run() -> color_eyre::Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
 
+    // Before anything connects: a bad hop count would key rate limits and audit IPs on a forgeable
+    // `X-Forwarded-For` entry (#923).
+    let hops = config::trusted_proxy_hops().map_err(|problem| color_eyre::eyre::eyre!(problem))?;
+    repos::audit::set_trusted_proxy_hops(hops)
+        .map_err(|_| color_eyre::eyre::eyre!("the trusted proxy hop count was stored twice"))?;
+
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
     demote_removed_server_admins(&state).await;
@@ -270,6 +276,28 @@ mod tests {
             pass[call..].contains("tracing::error!("),
             "a failed pass is logged"
         );
+    }
+
+    /// Startup checks `TRUSTED_PROXY_HOPS` and stores it for `client_ip` before building state (#923).
+    /// `tests/startup_config.rs` boots the binary to prove the refusal; the store is pinned here
+    /// because seeing its effect needs a serving backend. Comments stripped, as above.
+    #[test]
+    fn startup_stores_the_checked_proxy_hop_count_before_building_state() {
+        let code: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code.find("pub async fn run()").unwrap();
+        let run = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        let check = run
+            .find("let hops = config::trusted_proxy_hops()")
+            .expect("run() reads the hop count");
+        let store = run
+            .find("repos::audit::set_trusted_proxy_hops(hops)")
+            .expect("run() stores the checked hop count");
+        let state = run.find("state::AppState::from_env()").unwrap();
+        assert!(check < store && store < state);
     }
 
     /// Every version claimed by more than one migration file, with the files that claim it.
