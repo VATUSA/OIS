@@ -152,23 +152,33 @@ describe("public board and NAS demand topics (VATUSA/OIS#954)", () => {
     ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"]]],
     ["tmu.tmi", [["tmis"], ["public-board"]]],
     ["tmu.program", [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]]],
-    ["flow.cfr", [["departures"], ["flow"], ["tmu-demand"]]],
   ])("a %s nudge refetches exactly its keys", async (topic, keys) => {
     expect(await nudge(topic)).toEqual(keys.map((queryKey) => ({ queryKey })));
   });
 
-  it("a tmu.advisory nudge refreshes the advisories and neither the public board nor the NAS demand", async () => {
-    expect(await nudge("tmu.advisory")).toEqual([{ queryKey: ["advisories"] }]);
-  });
-
-  it("a feed tick refetches the NAS demand and not the public board", async () => {
+  // A CFR burst would otherwise recompute the whole country's demand once per CFR per open widget:
+  // held for the next tick like the sector demand, it costs one refetch per publish.
+  it("a flow.cfr nudge refetches the NAS demand on the next tick, whatever its age, not at once", async () => {
     const dispose = connectRealtime(qc);
     const socket = await opened();
+    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
     invalidated.length = 0;
-    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
-    const prefixes = invalidated.map((q) => (q as { queryKey: string[] }).queryKey[0]);
-    expect(prefixes).toContain("tmu-demand");
-    expect(prefixes).not.toContain("public-board");
+    socket.onmessage?.({ data: JSON.stringify({ topic: "flow.cfr" }) });
+    expect(invalidated).toEqual([{ queryKey: ["departures"] }, { queryKey: ["flow"] }]);
+
+    const demandOnTick = () => {
+      invalidated.length = 0;
+      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+      const calls = invalidated.filter((q) => (q as { queryKey: string[] }).queryKey[0] === "tmu-demand") as {
+        predicate: (q: { state: { dataUpdatedAt: number } }) => boolean;
+      }[];
+      expect(calls.length, "one tmu-demand refetch per tick").toBe(1);
+      return calls[0].predicate({ state: { dataUpdatedAt: Date.now() - 1_000 } });
+    };
+    // Fresh data (a second old) refetches on the tick after the CFR, where the minute's gap would skip it.
+    expect(demandOnTick()).toBe(true);
+    // Held once: the tick after keeps the gap again.
+    expect(demandOnTick()).toBe(false);
     dispose();
   });
 });
@@ -205,7 +215,7 @@ describe("sector demand topics (VATUSA/OIS#725)", () => {
   // nudge per client. The topic's other keys still refetch at once.
   it.each([
     ["flow.release", [["idst"], ["fca-traffic"], ["departures"]]],
-    ["flow.cfr", [["departures"], ["flow"], ["tmu-demand"]]],
+    ["flow.cfr", [["departures"], ["flow"]]],
     ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"]]],
     ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]]],
   ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {

@@ -52,10 +52,10 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"], ["public-board"]],
   "tmu.tmi": [["tmis"], ["public-board"]],
   "tmu.groundstop": [["ground-stops"], ["departures"], ["public-board"]],
-  // A program sets the rate the NAS demand ranks against; a CFR moves its wheels-up times (#954).
+  // A program sets the rate the NAS demand ranks against (#954).
   "tmu.program": [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]],
   "tmu.advisory": [["advisories"]],
-  "flow.cfr": [["departures"], ["flow"], ["tmu-demand"]],
+  "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
@@ -88,7 +88,9 @@ export const COALESCED_KEYS: Record<string, string[][]> = {
   "flow.release": [["sector-demand"]],
   "flow.fca": [["sector-demand"]],
   "tmu.gdp": [["sector-demand"]],
-  "flow.cfr": [["sector-demand"]],
+  // A CFR moves a wheels-up in the NAS demand too, which recomputes every rated airport per request
+  // and has no server cache (#954).
+  "flow.cfr": [["sector-demand"], ["tmu-demand"]],
 };
 
 /**
