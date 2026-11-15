@@ -148,6 +148,14 @@ check "$WORK/cwd" "$WORK/noprefix"
 expect_rc "_x" 1
 has "_x" "$ERR" "not a versioned migration (sqlx needs NNNN_name.sql): _x.sql"
 
+echo "== 12. Every duplicated version is listed, not only the first =="
+migrations "$WORK/twopairs" 0090_a.sql 90_b.sql 0091_c.sql 91_d.sql
+check "$WORK/cwd" "$WORK/twopairs"
+expect_rc "two duplicated versions" 1
+for f in 0090_a.sql 90_b.sql 0091_c.sql 91_d.sql; do
+    has "two duplicated versions" "$ERR" "$f"
+done
+
 echo ""
 echo "check-migration-versions: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
