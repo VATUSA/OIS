@@ -138,6 +138,15 @@ ci: check-migrations fmt-check check test-rust
 test *args:
     bash bin/run-tests.sh "$@"
 
+# Delete build output no build has written for DAYS days (default 7) in every checkout's target/:
+# cargo units, incremental state and ois-drift/ (bin/clean-stale.sh). A profile whose cargo build
+# is running is kept; a test run is not covered, so a suite mid-run can lose an old test binary.
+# --scratch also deletes old ${TMPDIR:-/tmp}/mutate.* dirs.
+# Delete stale build output across every worktree's target/
+[positional-arguments]
+clean-stale *args:
+    bash bin/clean-stale.sh "$@"
+
 # The same steps as `just test` (bin/run-tests.sh, so the two never drift), without the marker.
 # A step it cannot run here is MISSING, never passed. Not covered: the macOS/Windows/Linux
 # `desktop` matrix (clippy compiles the Tauri shell for this host only) and the `windows-hooks`

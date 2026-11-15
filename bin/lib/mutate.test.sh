@@ -18,8 +18,8 @@ trap cleanup EXIT
 
 PASS=0
 FAIL=0
-ok()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
-bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 F="$WORK/guard.rs"
 fixture() { chmod u+w "$F" 2>/dev/null; printf 'line one\nif ($a < $b) {\n    return 1;\n}\nno newline at end' > "$F"; cp "$F" "$WORK/expected"; }
@@ -142,8 +142,10 @@ out="$(cd "$REPO" && CARGO_TARGET_DIR=/elsewhere bash "$SCRIPT" "$F" 'line one' 
 [ "$(cat "$WORK/target.seen")" = "target=/elsewhere" ] && ok "a CARGO_TARGET_DIR the caller set is kept" || bad "CARGO_TARGET_DIR seen: $(cat "$WORK/target.seen")"
 
 echo "== restore =="
+# The failed restore keeps its mutate.* dir by design; keep it inside $WORK.
+mkdir -p "$WORK/tmp.restore"
 fixture
-out="$(bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && chmod a-w "$0"; exit 0' "$F" 2>&1)"; rc=$?
+out="$(TMPDIR="$WORK/tmp.restore" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && chmod a-w "$0"; exit 0' "$F" 2>&1)"; rc=$?
 if [ "$rc" -eq 3 ] && case "$out" in *"FAILED TO RESTORE $F"*) true ;; *) false ;; esac; then ok "a failed restore exits 3 and says where the original is"; else bad "failed restore (exit $rc): $out"; fi
 chmod u+w "$F"
 
@@ -155,6 +157,131 @@ grep -q 'line two' "$F" && ok "mutation applied before the interrupt" || bad "mu
 kill -TERM "$pid"
 wait "$pid" 2>/dev/null
 unchanged && ok "file restored after SIGTERM" || bad "file not restored after SIGTERM"
+
+echo "== the work directory goes with the run (#1020) =="
+# Each case runs the script with TMPDIR="$WORK/tmp" (an empty dir made for it), so
+# `find "$WORK/tmp" -maxdepth 1 -name 'mutate.*'` counts exactly the dirs this run left.
+#
+# Coverage matrix (VATUSA/OIS#1020, AC3)
+#
+# Requirement                              | Case                                                   | Status
+# -----------------------------------------|--------------------------------------------------------|-------
+# removed after RED                        | no mutate.* dir remains after RED                      | done
+# removed after GREEN                      | no mutate.* dir remains after GREEN                    | done
+# removed after a baseline refusal         | no mutate.* dir remains after a baseline failure       | done
+# removed after a compile-error refusal    | no mutate.* dir remains after a mutant that won't build| done
+# removed after an OLD-count refusal       | no mutate.* dir remains when OLD occurs 0 or 2 times   | done
+# removed after the other refusals         | ...after 126/127/signal exits and an uneditable FILE   | done
+# removed after an interrupt               | no mutate.* dir remains after SIGTERM / SIGINT         | done
+# kept when FILE could not be restored     | a failed restore (exit 3) leaves the dir and original  | done
+# the log path is not printed (implied)    | RED and GREEN lines carry no "output:"                 | done
+# a refusal still shows the output         | a refusal prints the last 40 log lines to stderr       | done
+#                                          | a refusal names no path the cleanup removed            | done
+
+# newtmp NAME: an empty TMPDIR for one case; left COUNTS the mutate.* dirs a run left in it.
+newtmp() { T="$WORK/tmp.$1"; mkdir -p "$T"; }
+left() { find "$T" -mindepth 1 -maxdepth 1 -name 'mutate.*' | wc -l | tr -d ' '; }
+none_left() { [ "$(left)" = 0 ] && ok "$1" || bad "$1 ($(left) left: $(ls "$T"))"; }
+
+newtmp red; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" '$a < $b' '$a <= $b' -- grep -q '< \$b' "$F" 2>&1)"; rc=$?
+expect "RED under a fresh TMPDIR" 0 "RED $F:2" "$out" "$rc"
+none_left "no mutate.* dir remains after RED"
+[ "$out" = "RED $F:2" ] && ok "the RED line carries no output: path" || bad "the RED line carries no output: path ($out)"
+
+newtmp green; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" '$a < $b' '$a <= $b' -- grep -q 'line one' "$F" 2>&1)"; rc=$?
+expect "GREEN under a fresh TMPDIR" 1 "GREEN $F:2" "$out" "$rc"
+none_left "no mutate.* dir remains after GREEN"
+[ "$out" = "GREEN $F:2" ] && ok "the GREEN line carries no output: path" || bad "the GREEN line carries no output: path ($out)"
+
+newtmp baseline; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'i=1; while [ $i -le 50 ]; do printf "L%02d\n" $i; i=$((i + 1)); done; exit 1' 2>&1)"; rc=$?
+expect "a baseline failure is refused" 2 "mutate: COMMAND fails before any mutation (exit 1)" "$out" "$rc"
+none_left "no mutate.* dir remains after a baseline failure"
+case "$out" in *L11*L50*) ok "a refusal prints the 40th-from-last line through the last" ;; *) bad "a refusal prints the last 40 lines: $out" ;; esac
+case "$out" in *L10*) bad "a refusal prints only the last 40 lines (L10 present)" ;; *) ok "a refusal prints only the last 40 lines" ;; esac
+case "$out" in *"$T"*) bad "a refusal names no path the cleanup removed: $out" ;; *) ok "a refusal names no path the cleanup removed" ;; esac
+
+newtmp compile; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && { echo "error[E0308]: mismatched types"; echo "error: could not compile \`ois-backend\` (lib test) due to 1 previous error"; exit 101; }; exit 0' "$F" 2>&1)"; rc=$?
+expect "a mutant that does not compile is refused" 2 "mutate: the mutant does not compile" "$out" "$rc"
+none_left "no mutate.* dir remains after a mutant that does not compile"
+case "$out" in *"error[E0308]: mismatched types"*) ok "the compile refusal shows rustc's error" ;; *) bad "the compile refusal shows rustc's error: $out" ;; esac
+
+for old in absent e; do
+    newtmp "old-$old"; fixture
+    out="$(TMPDIR="$T" bash "$SCRIPT" "$F" "$old" 'X' -- true 2>&1)"; rc=$?
+    expect "OLD '$old' is refused" 2 "mutate: OLD occurs" "$out" "$rc"
+    none_left "no mutate.* dir remains when OLD '$old' does not occur exactly once"
+done
+
+for code in 126 127 129; do
+    newtmp "exit-$code"; fixture
+    out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c "grep -q 'line two' \"\$0\" && { echo 'cmd says why'; exit $code; }; exit 0" "$F" 2>&1)"; rc=$?
+    expect "exit $code on the mutant is refused" 2 "mutate: COMMAND could not run or was killed on the mutant (exit $code)" "$out" "$rc"
+    none_left "no mutate.* dir remains after exit $code on the mutant"
+    case "$out" in *"cmd says why"*) ok "the exit-$code refusal shows the command's output" ;; *) bad "the exit-$code refusal shows the command's output: $out" ;; esac
+done
+
+newtmp readonly; fixture; chmod a-w "$F"
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- true 2>&1)"; rc=$?
+expect "an uneditable FILE is refused" 2 "mutate: cannot edit $F" "$out" "$rc"
+none_left "no mutate.* dir remains when FILE cannot be edited"
+chmod u+w "$F"
+
+newtmp sigterm; fixture
+TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && sleep 2; exit 0' "$F" > /dev/null 2>&1 &
+pid=$!
+for _ in $(seq 1 50); do grep -q 'line two' "$F" && break; sleep 0.1; done
+grep -q 'line two' "$F" && ok "the mutation is on disk before SIGTERM" || bad "the mutation is on disk before SIGTERM"
+kill -TERM "$pid"; wait "$pid" 2>/dev/null; rc=$?
+[ "$rc" -eq 143 ] && ok "the script dies of SIGTERM (exit 143)" || bad "the script dies of SIGTERM (exit 143, got $rc)"
+unchanged && ok "FILE restored after SIGTERM" || bad "FILE restored after SIGTERM"
+none_left "no mutate.* dir remains after SIGTERM during COMMAND"
+
+# `cmd &` in a non-interactive shell starts with SIGINT ignored, which bash cannot trap;
+# job control (set -m) starts it in its own process group with SIGINT at its default.
+newtmp sigint; fixture
+set -m
+TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && sleep 2; exit 0' "$F" > /dev/null 2>&1 &
+pid=$!
+set +m
+for _ in $(seq 1 50); do grep -q 'line two' "$F" && break; sleep 0.1; done
+grep -q 'line two' "$F" && ok "the mutation is on disk before SIGINT" || bad "the mutation is on disk before SIGINT"
+# Ctrl-C signals the whole process group, COMMAND included.
+kill -INT -- "-$pid"; wait "$pid" 2>/dev/null; rc=$?
+[ "$rc" -eq 130 ] && ok "the script dies of SIGINT (exit 130)" || bad "the script dies of SIGINT (exit 130, got $rc)"
+unchanged && ok "FILE restored after SIGINT" || bad "FILE restored after SIGINT"
+none_left "no mutate.* dir remains after SIGINT during COMMAND"
+
+newtmp backup; fixture; chmod 000 "$F"
+if [ "$(id -u)" -eq 0 ]; then
+    echo "  SKIP: running as root, which chmod 000 does not stop"
+else
+    out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- true 2>&1)"; rc=$?
+    # cp prints its own error first, so match the refusal anywhere.
+    case "$rc:$out" in "2:"*"mutate: cannot back up $F"*) ok "a FILE that cannot be backed up is refused" ;; *) bad "a FILE that cannot be backed up is refused (exit $rc): $out" ;; esac
+    none_left "no mutate.* dir remains when FILE cannot be backed up"
+fi
+chmod 644 "$F"
+
+# Before the edit the trap must not restore: FILE can only differ from the copy then
+# because something else wrote it, and the copy would overwrite that write.
+newtmp preedit; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'echo appended >> "$0"; exit 1' "$F" 2>&1)"; rc=$?
+expect "a baseline that writes FILE is refused" 2 "mutate: COMMAND fails before any mutation" "$out" "$rc"
+grep -q 'appended' "$F" && ok "a refusal before the edit leaves FILE as something else wrote it" || bad "a refusal before the edit leaves FILE as something else wrote it"
+none_left "no mutate.* dir remains after that refusal"
+
+newtmp restorefail; fixture
+out="$(TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && chmod a-w "$0"; exit 0' "$F" 2>&1)"; rc=$?
+chmod u+w "$F"
+[ "$rc" -eq 3 ] && ok "a failed restore exits 3" || bad "a failed restore exits 3 (got $rc): $out"
+[ "$(left)" = 1 ] && ok "a failed restore leaves its mutate.* dir" || bad "a failed restore leaves its mutate.* dir ($(left))"
+KEPT="$(find "$T" -mindepth 1 -maxdepth 1 -name 'mutate.*' | head -1)"
+cmp -s "$KEPT/original" "$WORK/expected" && ok "...holding the original byte for byte" || bad "...holding the original byte for byte"
+case "$out" in *"the original is $KEPT/original"*) ok "...at the path the message names" ;; *) bad "...at the path the message names: $out" ;; esac
 
 echo
 echo "mutate: $PASS passed, $FAIL failed"
