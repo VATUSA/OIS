@@ -8,9 +8,9 @@
 # must pass on the unmutated file first. Prints
 #   RED <file>:<line>    COMMAND failed: a test kills the mutation (exit 0)
 #   GREEN <file>:<line>  COMMAND passed: nothing kills it (exit 1)
-# and the path of COMMAND's output. Exit 2 refuses (bad arguments, a COMMAND that
-# fails unmutated, cannot run, is killed by a signal (exit 129-192), or a Rust
-# mutant that does not compile); exit 3 means FILE could not be restored.
+# Exit 2 refuses (bad arguments, a COMMAND that fails unmutated, cannot run, is
+# killed by a signal (exit 129-192), or a Rust mutant that does not compile);
+# exit 3 means FILE could not be restored.
 #
 #   bin/mutate.sh backend/src/handlers/tmu.rs 'a < b' 'a <= b' -- \
 #       cargo nextest run -p ois-backend -E 'test(tmi_window)'
@@ -27,9 +27,12 @@
 #
 # FILE is restored byte for byte on every exit path, interrupts included, from a
 # copy taken before the edit (`git checkout --` would also discard unstaged work).
-# SIGKILL of this script itself cannot be trapped: the copy stays under
-# ${TMPDIR:-/tmp}/mutate.*/original. The mutant is on disk while COMMAND runs, so
-# never mutate a tree another run is building (.claude/rules/test-quality.md), and
+# The copy and COMMAND's output live in ${TMPDIR:-/tmp}/mutate.*/, deleted on every
+# exit once FILE is restored; a refusal prints the output's last 40 lines first. The
+# dir stays only when the restore fails (exit 3) or this script is SIGKILLed, which
+# cannot be trapped: the copy is then ${TMPDIR:-/tmp}/mutate.*/original
+# (bin/clean-stale.sh --scratch deletes old ones). The mutant is on disk while
+# COMMAND runs, so never mutate a tree another run is building (.claude/rules/test-quality.md), and
 # mutate .claude/hooks/ only in a scratch copy: every session runs those hooks from
 # this checkout. Runs unchanged on macOS (bash 3.2, BSD userland) and Linux.
 # Tests: bin/lib/mutate.test.sh.
@@ -57,7 +60,7 @@ fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/mutate.XXXXXX")" || exit 2
 BACKUP="$WORK/original"
 LOG="$WORK/output.log"
-cp -p "$FILE" "$BACKUP" || { echo "mutate: cannot back up $FILE" >&2; exit 2; }
+cp -p "$FILE" "$BACKUP" || { echo "mutate: cannot back up $FILE" >&2; rm -rf "$WORK"; exit 2; }
 
 restore() {
     cmp -s "$BACKUP" "$FILE" && return 0
@@ -66,16 +69,32 @@ restore() {
     return 1
 }
 
+# EXIT trap: restores FILE once the edit has started, then deletes WORK, unless the
+# restore failed: WORK then keeps the backup. Before the edit FILE is left alone.
+MUTATED=0
+finish() {
+    if [ "$MUTATED" = 1 ]; then restore || exit 3; fi
+    rm -rf "$WORK"
+}
+
+# refuse MESSAGE: a refusal that needs COMMAND's output to diagnose.
+refuse() {
+    echo "mutate: $1" >&2
+    echo "mutate: last 40 lines of COMMAND's output:" >&2
+    tail -n 40 "$LOG" >&2
+    exit 2
+}
+
+trap finish EXIT
+
 # A kill only counts against a command that passes without the mutation.
 "$@" > "$LOG" 2>&1
 baseline=$?
 if [ "$baseline" -ne 0 ]; then
-    echo "mutate: COMMAND fails before any mutation (exit $baseline); fix it first. Output: $LOG" >&2
-    exit 2
+    refuse "COMMAND fails before any mutation (exit $baseline); fix it first"
 fi
 
-trap 'restore || exit 3' EXIT
-
+MUTATED=1
 # Replaces the single occurrence and prints its line number; prints the count
 # and exits 4 when there is not exactly one.
 LINE="$(perl -e '
@@ -102,18 +121,16 @@ esac
 status=$?
 # 126/127: the command could not run; 129-192: a signal (an OOM kill) ended it.
 if [ "$status" -eq 126 ] || [ "$status" -eq 127 ] || { [ "$status" -ge 129 ] && [ "$status" -le 192 ]; }; then
-    echo "mutate: COMMAND could not run or was killed on the mutant (exit $status). Output: $LOG" >&2
-    exit 2
+    refuse "COMMAND could not run or was killed on the mutant (exit $status)"
 fi
 # Cargo's build-failure line (rustc rejected the mutant, so no test ran); a failing
 # test prints `error: test run failed` instead, which stays RED.
 if [ "$status" -ne 0 ] && grep -qE '^error: could not compile ' "$LOG"; then
-    echo "mutate: the mutant does not compile (rustc rejected it, no test ran); pick a mutation that type-checks. Output: $LOG" >&2
-    exit 2
+    refuse "the mutant does not compile (rustc rejected it, no test ran); pick a mutation that type-checks"
 fi
 if [ "$status" -ne 0 ]; then
-    echo "RED $FILE:$LINE (output: $LOG)"
+    echo "RED $FILE:$LINE"
     exit 0
 fi
-echo "GREEN $FILE:$LINE (output: $LOG)"
+echo "GREEN $FILE:$LINE"
 exit 1
