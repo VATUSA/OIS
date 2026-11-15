@@ -13,9 +13,6 @@
   "dependencies": {
     "openapi-fetch": "^0.17.0"
   },
-  "peerDependencies": {
-    "@tanstack/react-query": "^5"
-  },
   "devDependencies": {
     "openapi-typescript": "^7.13.0",
     "typescript": "^5"
