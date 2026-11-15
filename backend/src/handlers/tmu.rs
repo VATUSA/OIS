@@ -215,6 +215,25 @@ pub async fn create_tmi(
     Ok(Json(tmi))
 }
 
+/// The NTML channel for a row that follows up a published TMI (an edit's revised row or a cancel):
+/// the channel its latest `tmi_publish` job posted to, else a fresh unscoped resolution.
+///
+/// A follow-up only reads right beside the row it supersedes, and re-resolving does not get there:
+/// `publish_tmi` resolves unscoped while `activate_package` passes the event's facility, so
+/// `resolve_scoped_id` can answer with a different guild for the same logical name (#436 review,
+/// #884). The posted channel wins even if the mapping has moved since. The fallback covers a TMI with
+/// no publish job (never published, published while no NTML channel was mapped, or published before
+/// jobs recorded one); `None` means "don't post".
+async fn ntml_channel_for_tmi(
+    pool: &sqlx::PgPool,
+    tmi_id: &str,
+) -> Result<Option<String>, ApiError> {
+    match integration_repo::published_channel_for_tmi(pool, tmi_id).await? {
+        Some(posted_to) => Ok(Some(posted_to)),
+        None => integration_repo::channel_id(pool, NTML_CHANNEL, None).await,
+    }
+}
+
 #[utoipa::path(
     patch,
     path = "/api/v1/tmu/tmis/{id}",
@@ -246,8 +265,8 @@ pub async fn update_tmi(
         }
         payload.restriction = Some(crate::tmi::encode(structured));
     }
-    // Resolved before the tx, like `publish_tmi`: no channel configured just means "don't post".
-    let channel = integration_repo::channel_id(pool, NTML_CHANNEL, None).await?;
+    // Resolved before the tx, like `publish_tmi`. The revised row goes where the original went (#884).
+    let channel = ntml_channel_for_tmi(pool, &id).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     let edit = tmu_repo::update_tmi(&mut tx, &id, &payload)
         .await?
@@ -345,17 +364,7 @@ pub async fn cancel_tmi(
 ) -> Result<Json<TmiBody>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    // The channel the publish actually posted to, not a fresh resolution (#436 review). A cancel row
-    // only corrects anything if it lands beside the row it corrects, and re-resolving does not get
-    // there: this path passes `None` while `activate_package` passes the event's facility, so
-    // `resolve_scoped_id` can answer with a different guild for the same logical name — publishing an
-    // event-package TMI to ZNY's channel and cancelling it in VATUSA's. Falling back to a fresh
-    // resolution covers a TMI with no publish job at all (never published, or published before this
-    // shipped); no config still just means "don't post".
-    let channel = match integration_repo::published_channel_for_tmi(pool, &id).await? {
-        Some(posted_to) => Some(posted_to),
-        None => integration_repo::channel_id(pool, NTML_CHANNEL, None).await?,
-    };
+    let channel = ntml_channel_for_tmi(pool, &id).await?;
     let mut tx = pool.begin().await.map_err(|_| ApiError::Internal)?;
     if !tmu_repo::cancel_tmi(&mut *tx, &id).await? {
         return Err(ApiError::Conflict);
@@ -939,6 +948,223 @@ mod tests {
         cancel_through_the_router(&pool, "tmi-3", true).await;
 
         assert_eq!(cancel_jobs(&pool, "tmi-3").await[0].0, "CH-VATUSA");
+    }
+
+    /// The `channel_id` and `ntml` of every `tmi_publish` job queued for this TMI, oldest first.
+    async fn publish_jobs(pool: &sqlx::PgPool, tmi_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "select payload->>'channel_id', payload->>'ntml' \
+             from integration.outbound_jobs \
+             where job_type = 'tmi_publish' and subject_type = 'tmi' and subject_id = $1 \
+             order by created_at",
+        )
+        .bind(tmi_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Drive the real edit route as a user holding `tmu.tmi.update`, changing the line so the edit
+    /// posts a revised row.
+    async fn edit_through_the_router(pool: &sqlx::PgPool, tmi_id: &str) -> http::StatusCode {
+        let user = scope_test_support::seed_user(pool).await;
+        scope_test_support::grant(pool, &user, "tmu.tmi.update", None).await;
+        let cookie = scope_test_support::session_cookie(pool, &user).await;
+        let state = scope_test_support::test_state(pool.clone(), Default::default());
+        scope_test_support::send(
+            &state,
+            http::Method::PATCH,
+            &format!("/api/v1/tmu/tmis/{tmi_id}"),
+            &cookie,
+            Some(json!({ "restriction": "JFK arrivals via CAMRN 25MIT" })),
+        )
+        .await
+    }
+
+    /// #884 AC1 and AC3. VATUSA sorts first and is unscoped, so a fresh unscoped resolution answers
+    /// CH-VATUSA; the publish went to ZNY's channel, and the revised row must land beside it.
+    #[sqlx::test]
+    async fn an_edit_posts_the_revised_row_to_the_channel_the_publish_used(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        published_tmi(&pool, "tmi-5", Some("CH-ZNY")).await;
+
+        assert_eq!(
+            edit_through_the_router(&pool, "tmi-5").await,
+            http::StatusCode::OK
+        );
+
+        let jobs = publish_jobs(&pool, "tmi-5").await;
+        assert_eq!(
+            jobs.len(),
+            2,
+            "the seeded publish plus one revised row: {jobs:?}"
+        );
+        assert_eq!(
+            jobs[0],
+            ("CH-ZNY".to_string(), "row".to_string()),
+            "the original is untouched"
+        );
+        assert_eq!(
+            jobs[1].0, "CH-ZNY",
+            "the revised row must land beside the original, not in whichever guild sorts first"
+        );
+        assert!(
+            jobs[1].1.contains("JFK arrivals via CAMRN 25MIT"),
+            "the revised row carries the edited line: {}",
+            jobs[1].1
+        );
+    }
+
+    /// #884 AC2. A published TMI with no publish job resolves the channel as before: the unscoped
+    /// lookup, which picks VATUSA by sort order.
+    #[sqlx::test]
+    async fn an_edit_without_a_publish_job_falls_back_to_the_mapped_channel(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        published_tmi(&pool, "tmi-6", None).await;
+
+        assert_eq!(
+            edit_through_the_router(&pool, "tmi-6").await,
+            http::StatusCode::OK
+        );
+
+        let jobs = publish_jobs(&pool, "tmi-6").await;
+        assert_eq!(jobs.len(), 1, "one revised row: {jobs:?}");
+        assert_eq!(jobs[0].0, "CH-VATUSA");
+        assert!(
+            jobs[0].1.contains("JFK arrivals via CAMRN 25MIT"),
+            "{}",
+            jobs[0].1
+        );
+    }
+
+    /// The cancel resolves through the latest publish job, which after an edit is the edit's own, so
+    /// an edit that posted to the unscoped guild would drag the later cancel there too (#884).
+    #[sqlx::test]
+    async fn a_cancel_after_an_edit_still_posts_to_the_published_channel(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        published_tmi(&pool, "tmi-7", Some("CH-ZNY")).await;
+
+        assert_eq!(
+            edit_through_the_router(&pool, "tmi-7").await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            cancel_through_the_router(&pool, "tmi-7", true).await,
+            http::StatusCode::OK
+        );
+
+        let edits = publish_jobs(&pool, "tmi-7").await;
+        assert_eq!(edits.len(), 2, "{edits:?}");
+        assert_eq!(edits[1].0, "CH-ZNY");
+        let cancels = cancel_jobs(&pool, "tmi-7").await;
+        assert_eq!(cancels.len(), 1, "{cancels:?}");
+        assert_eq!(cancels[0].0, "CH-ZNY");
+    }
+
+    /// Once a publish job exists, the edit follows the channel it posted to even after the guild's
+    /// NTML mapping has moved, so the revised row lands beside the original (#884).
+    #[sqlx::test]
+    async fn an_edit_follows_the_posted_channel_after_the_mapping_moved(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-NEW", 1, None).await;
+        published_tmi(&pool, "tmi-8", Some("CH-OLD")).await;
+
+        assert_eq!(
+            edit_through_the_router(&pool, "tmi-8").await,
+            http::StatusCode::OK
+        );
+
+        let jobs = publish_jobs(&pool, "tmi-8").await;
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        assert_eq!(jobs[1].0, "CH-OLD");
+        assert!(
+            jobs[1].1.contains("JFK arrivals via CAMRN 25MIT"),
+            "{}",
+            jobs[1].1
+        );
+    }
+
+    /// #884 AC1 end to end: the publish job comes from a real package activation for a ZNY event,
+    /// not a seeded row, and the edit of the TMI it created still lands in ZNY's channel.
+    #[sqlx::test]
+    async fn an_edit_of_an_activated_package_tmi_stays_in_the_events_guild(pool: sqlx::PgPool) {
+        guild(&pool, "VATUSA", "CH-VATUSA", 1, None).await;
+        guild(&pool, "ZNY", "CH-ZNY", 2, Some("ZNY")).await;
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values (884, 'Package edit', now(), now() + interval '3 hours', 'ZNY')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let planner = scope_test_support::seed_user(&pool).await;
+        scope_test_support::grant(&pool, &planner, "events.plan.update", None).await;
+        let cookie = scope_test_support::session_cookie(&pool, &planner).await;
+        let state = scope_test_support::test_state(pool.clone(), Default::default());
+        let post = |uri: String, body: Option<serde_json::Value>| {
+            let (state, cookie) = (state.clone(), cookie.clone());
+            async move {
+                scope_test_support::send(&state, http::Method::POST, &uri, &cookie, body).await
+            }
+        };
+
+        assert_eq!(
+            post(
+                "/api/v1/events/884/packages".into(),
+                Some(json!({ "name": "Plan" }))
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        let pkg: String =
+            sqlx::query_scalar("select id from events.tmi_package where event_id = 884")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let now = chrono::Utc::now();
+        let item = json!({ "kind": "restriction", "payload": {
+            "requesting": "N90", "providing": "ZNY", "restriction": "JFK arrivals via CAMRN 20MIT",
+            "start_time": now, "stop_time": now + chrono::Duration::hours(2),
+        }});
+        assert_eq!(
+            post(
+                format!("/api/v1/events/884/packages/{pkg}/items"),
+                Some(item)
+            )
+            .await,
+            http::StatusCode::OK
+        );
+        assert_eq!(
+            post(format!("/api/v1/events/884/packages/{pkg}/activate"), None).await,
+            http::StatusCode::OK
+        );
+        let tmi: String = sqlx::query_scalar(
+            "select subject_id from integration.outbound_jobs where job_type = 'tmi_publish'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            publish_jobs(&pool, &tmi).await[0].0,
+            "CH-ZNY",
+            "activation posted to the event's guild"
+        );
+
+        assert_eq!(
+            edit_through_the_router(&pool, &tmi).await,
+            http::StatusCode::OK
+        );
+
+        let jobs = publish_jobs(&pool, &tmi).await;
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
+        assert_eq!(jobs[1].0, "CH-ZNY");
+        assert!(
+            jobs[1].1.contains("JFK arrivals via CAMRN 25MIT"),
+            "{}",
+            jobs[1].1
+        );
     }
 
     /// The route is gated: without `tmu.tmi.publish` the cancel is refused and nothing is enqueued, so
