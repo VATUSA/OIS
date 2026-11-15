@@ -173,6 +173,8 @@ cache and turbo's cache, and that produces failure shapes that look like real on
 - **Limit a gate's load through the worktree's `.env`.** `bin/run-tests.sh` sources it, so
   `CARGO_BUILD_JOBS` and `NEXTEST_TEST_THREADS` there reach `just test`; renice the run after it
   starts. A `nice` or `VAR=` prefix on the command line is not a stamping form: no marker is written.
+- **Clear a build variable with `unset`, never `VAR=`.** cargo reads an empty `CARGO_INCREMENTAL`
+  as off. Print the build variables beside every build timing.
 
 **Never run two full suites in one checkout at once; the pre-push hook counts as one**
 (`bin/pre-push` runs clippy and the suite unless `just test` stamped the pushed commit). At most one
