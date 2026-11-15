@@ -2504,79 +2504,11 @@ mod repost_tests {
         .await
     }
 
-    /// Records every `tracing` event a request emits, so a test can assert on the skip WARN.
-    ///
-    /// `#[sqlx::test]` runs a current-thread runtime and `send` drives the production router in-task,
-    /// so a subscriber attached to the request future with `WithSubscriber` sees the handler's events
-    /// and reqlog's per-request line (`reqlog.rs`'s `the_middleware_actually_obeys_the_rule` is the
-    /// precedent). The reqlog INFO line is the positive control that capture was live.
+    /// Captures the skip WARN a TMI edit emits, through `scope_test_support::log_capture`.
     mod capture {
-        use std::collections::BTreeMap;
-        use std::sync::{Arc, Mutex};
-
         use sqlx::PgPool;
-        use tracing::instrument::WithSubscriber;
-        use tracing_subscriber::layer::SubscriberExt;
 
-        /// One event emitted while the request was in flight.
-        #[derive(Debug, Clone)]
-        pub(super) struct Captured {
-            pub(super) level: tracing::Level,
-            pub(super) target: String,
-            /// The formatted message, e.g. ``tmu: no Discord channel mapped for `tmu-ntml`; …``.
-            pub(super) message: String,
-            /// Every other field, string values unquoted (`tmi` → the TMI id).
-            pub(super) fields: BTreeMap<String, String>,
-        }
-
-        struct Recorder(Arc<Mutex<Vec<Captured>>>);
-
-        #[derive(Default)]
-        struct Visitor {
-            message: String,
-            fields: BTreeMap<String, String>,
-        }
-
-        impl tracing::field::Visit for Visitor {
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                if field.name() == "message" {
-                    self.message = value.to_owned();
-                } else {
-                    self.fields
-                        .insert(field.name().to_owned(), value.to_owned());
-                }
-            }
-
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.message = format!("{value:?}");
-                } else {
-                    self.fields
-                        .insert(field.name().to_owned(), format!("{value:?}"));
-                }
-            }
-        }
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                let mut visitor = Visitor::default();
-                event.record(&mut visitor);
-                let metadata = event.metadata();
-                self.0
-                    .lock()
-                    .expect("the recorder's mutex is only held for a push")
-                    .push(Captured {
-                        level: *metadata.level(),
-                        target: metadata.target().to_owned(),
-                        message: visitor.message,
-                        fields: visitor.fields,
-                    });
-            }
-        }
+        pub(super) use crate::scope_test_support::log_capture::{Captured, saw_the_request};
 
         /// `super::patch`, with every event the request emitted.
         pub(super) async fn patch_capturing(
@@ -2584,16 +2516,8 @@ mod repost_tests {
             tmi_id: &str,
             body: serde_json::Value,
         ) -> (http::StatusCode, Vec<Captured>) {
-            let events = Arc::new(Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::registry().with(Recorder(Arc::clone(&events)));
-            let status = super::patch(pool, tmi_id, body)
-                .with_subscriber(subscriber)
-                .await;
-            let captured = events
-                .lock()
-                .expect("the recorder's mutex is only held for a push")
-                .clone();
-            (status, captured)
+            crate::scope_test_support::log_capture::capturing(super::patch(pool, tmi_id, body))
+                .await
         }
 
         /// The `skipped_post` WARNs among `events`, matched on the message's fixed prefix so a test
@@ -2603,13 +2527,6 @@ mod repost_tests {
                 .iter()
                 .filter(|e| e.message.starts_with("tmu: no Discord channel mapped"))
                 .collect()
-        }
-
-        /// Positive control: reqlog's per-request INFO line, proving the capture saw the request.
-        pub(super) fn saw_the_request(events: &[Captured]) -> bool {
-            events
-                .iter()
-                .any(|e| e.level == tracing::Level::INFO && e.target == "ois_backend::reqlog")
         }
     }
 

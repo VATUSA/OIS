@@ -148,6 +148,47 @@ pub async fn record_audit<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     entry: AuditEntry,
 ) -> Result<(), ApiError> {
+    insert_audit(executor, &entry)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Records `entry` for a caller whose own work has already succeeded and must not fail over its
+/// audit row: the audit middleware and the API-key lifecycle handlers. A failed insert is logged at
+/// ERROR with the database error's Display and otherwise dropped.
+pub async fn record_audit_best_effort(pool: &PgPool, entry: AuditEntry) {
+    if let Err(error) = insert_audit(pool, &entry).await {
+        tracing::error!(
+            action = %entry.action,
+            resource_type = %entry.resource_type,
+            resource_id = entry.resource_id.as_deref().unwrap_or(""),
+            error = %error,
+            "audit: failed to record an audit log entry; the request still succeeded"
+        );
+    }
+}
+
+/// `resolved`'s actor id, or `None` with a WARN naming the principal when resolution failed, so the
+/// audit entry is still written, with a null actor, and the failure is visible.
+pub fn actor_id_or_warn(
+    resolved: Result<Option<String>, ApiError>,
+    principal_kind: &'static str,
+    principal_id: &str,
+) -> Option<String> {
+    resolved.unwrap_or_else(|_| {
+        tracing::warn!(
+            principal_kind,
+            principal_id,
+            "audit: could not resolve the audit actor; recording the entry with no actor"
+        );
+        None
+    })
+}
+
+async fn insert_audit<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    entry: &AuditEntry,
+) -> Result<(), sqlx::Error> {
     // before/after are serialized to text and cast to jsonb so we don't need sqlx's
     // `json` feature. ip is cast to inet (null-safe).
     let before = entry
@@ -167,18 +208,17 @@ pub async fn record_audit<'e>(
         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::inet)
         "#,
     )
-    .bind(entry.actor_id)
-    .bind(entry.action)
-    .bind(entry.resource_type)
-    .bind(entry.resource_id)
-    .bind(entry.artcc_id)
-    .bind(entry.reason)
+    .bind(entry.actor_id.as_deref())
+    .bind(entry.action.as_str())
+    .bind(entry.resource_type.as_str())
+    .bind(entry.resource_id.as_deref())
+    .bind(entry.artcc_id.as_deref())
+    .bind(entry.reason.as_deref())
     .bind(before)
     .bind(after)
-    .bind(entry.ip_address)
+    .bind(entry.ip_address.as_deref())
     .execute(executor)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    .await?;
 
     Ok(())
 }

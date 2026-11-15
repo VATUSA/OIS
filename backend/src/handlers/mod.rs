@@ -60,6 +60,8 @@ mod actor_ratchet_tests;
 #[cfg(test)]
 mod aircraft_profiles_tests;
 #[cfg(test)]
+mod audit_write_tests;
+#[cfg(test)]
 mod auth_annotation_tests;
 #[cfg(test)]
 mod credential_db_error_tests;
