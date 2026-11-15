@@ -60,6 +60,8 @@ mod actor_ratchet_tests;
 #[cfg(test)]
 mod auth_annotation_tests;
 #[cfg(test)]
+mod event_fca_scope_tests;
+#[cfg(test)]
 mod fca_freeze_tests;
 #[cfg(test)]
 mod flow_event_fca_visibility_tests;
