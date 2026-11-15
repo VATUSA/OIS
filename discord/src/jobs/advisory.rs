@@ -5,7 +5,7 @@ use serenity::all::{
     ButtonStyle, CreateActionRow, CreateAllowedMentions, CreateButton, CreateMessage, Http,
 };
 
-use crate::util::{ADV_STRUCTURED_PREFIX, channel, str_field};
+use crate::util::{ADV_STRUCTURED_PREFIX, channel, fence_safe, str_field};
 
 /// Discord rejects a message over this outright. The fence costs 8 more characters
 /// (```` ```\n ```` + ```` \n``` ````), which [`fenced_chunks`] accounts for.
@@ -19,17 +19,6 @@ const MESSAGE_LIMIT: usize = 2000;
 /// indistinguishable from a right one.
 fn document(p: &Value) -> Result<&str, String> {
     str_field(p, "document").ok_or_else(|| "payload carries no rendered document".to_string())
-}
-
-/// Replaces characters that would escape the code block the document is about to be wrapped in.
-///
-/// Unlike an NTML row, newlines are **meaningful here** — the document is multi-line and its
-/// alignment is its content — so only the fence character is neutralised. An advisory's free-text
-/// lines (`REMARKS`, `ASSOCIATED RESTRICTIONS`, `MODIFICATIONS`) are typed by a controller and
-/// filtered nowhere, so a backtick run would otherwise close the fence early and render the rest of
-/// the document as live Discord markdown.
-fn fence_safe(document: &str) -> String {
-    document.replace('`', "'")
 }
 
 /// Splits a document into code-block-wrapped messages, each under Discord's limit.

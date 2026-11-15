@@ -51,3 +51,40 @@ pub(crate) fn ephemeral(content: &str) -> CreateInteractionResponse {
             .ephemeral(true),
     )
 }
+
+/// Replaces the one character that could close a code block around controller-typed text.
+///
+/// Newlines are kept: an advisory document is multi-line and its alignment is its content, and the
+/// structured breakdown is pretty-printed JSON. Discord code blocks have no escape, so the fence
+/// character is swapped for `'`. An advisory's free text (`remarks`, `associated_restrictions`,
+/// `modifications`) is typed by a controller and filtered nowhere, so a backtick run would
+/// otherwise close the fence early and render the rest as live Discord markdown.
+pub(crate) fn fence_safe(text: &str) -> String {
+    text.replace('`', "'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fence_safe_replaces_every_backtick_with_an_apostrophe() {
+        for (input, expected) in [
+            ("`", "'"),
+            ("```", "'''"),
+            ("a`b```c``d", "a'b'''c''d"),
+            ("", ""),
+        ] {
+            assert_eq!(fence_safe(input), expected, "input {input:?}");
+        }
+    }
+
+    /// Newlines carry an advisory document's layout, so only the fence character may change.
+    #[test]
+    fn fence_safe_leaves_newlines_and_other_characters_alone() {
+        assert_eq!(
+            fence_safe("ROUTE  ORIG\n  J75 `x`\n[click](https://evil.example) *b* \u{e9}"),
+            "ROUTE  ORIG\n  J75 'x'\n[click](https://evil.example) *b* \u{e9}"
+        );
+    }
+}
