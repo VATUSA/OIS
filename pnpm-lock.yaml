@@ -46,9 +46,6 @@ importers:
 
   packages/api-client:
     dependencies:
-      '@tanstack/react-query':
-        specifier: ^5
-        version: 5.101.4(react@19.3.0)
       openapi-fetch:
         specifier: ^0.17.0
         version: 0.17.0
@@ -1622,9 +1619,6 @@ packages:
     resolution: {integrity: sha512-utTS5L2OkeYUzXGohL1Z8sefu1GLNOJcxe8Hd6iIdc/Xo1K1nDB2JEp4iSFhvYh33xKC9V91TxrS8qfrpoKobQ==}
     engines: {node: '>=20.19'}
 
-  '@tanstack/query-core@5.101.4':
-    resolution: {integrity: sha512-gNwcvOJcRbLWPOLG/2OBm+zM+Yv+MKsXKEOWC57USuZDEsI71hEErQsiEGx5wX9rzWWkfwM0fVSPoiIFSsxfiw==}
-
   '@tanstack/query-core@5.106.0':
     resolution: {integrity: sha512-3GuqVrhCG0bBfmLt4AU0SIm8UuZ1rzeRjDiQBnYuzW3lkri1RdawWN73jZYvB4kC8WyDUoDgBx3kyO3TbNH/6Q==}
 
@@ -1633,11 +1627,6 @@ packages:
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
-
-  '@tanstack/react-query@5.101.4':
-    resolution: {integrity: sha512-yRg2pfOCxIs4ZJW3XYYHU/WgtD04FHSnfHlpRT7h7pR77hwkdRG4wxbKe4aq6P0RvXUTBSQpQeadS1SUYUe+KA==}
-    peerDependencies:
-      react: ^18 || ^19
 
   '@tanstack/react-query@5.106.0':
     resolution: {integrity: sha512-OuP/ST9dEMBwHhisE5A/bBSWMhMmB/xKPfeZ2U0Wy8W/txb9QiGd7iXhxJPQ7jGbfcKlV13sJUHip9Nki54yyg==}
@@ -5177,8 +5166,6 @@ snapshots:
 
   '@tanstack/history@1.162.4': {}
 
-  '@tanstack/query-core@5.101.4': {}
-
   '@tanstack/query-core@5.106.0': {}
 
   '@tanstack/react-charts@1.5.0(preact@10.29.8)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(vue@3.5.43(typescript@5.9.3))':
@@ -5198,11 +5185,6 @@ snapshots:
       - solid-js
       - svelte
       - vue
-
-  '@tanstack/react-query@5.101.4(react@19.3.0)':
-    dependencies:
-      '@tanstack/query-core': 5.101.4
-      react: 19.3.0
 
   '@tanstack/react-query@5.106.0(@types/react@19.3.0)(react@19.3.0)':
     dependencies:
