@@ -11,6 +11,16 @@
 // Move menu lists the refetched collections     | offers every collection in a row's Move menu after ... | the row menu stops reading LibraryCollections, or
 //                                              |                                                          | the Provider is dropped or moved below the table
 // Rename and Move still reach the board          | (same test) and renames a board from its row ...       | onMove / onRename lose their wiring in actionsFor
+//
+// Coverage matrix (#877, the Collection column after a collection rename)
+//
+// Requirement                                  | Test                                                     | Red when
+// ---------------------------------------------|----------------------------------------------------------|------------------------------------------
+// AC1/AC3 renamed collection shows in its row  | shows a collection's new name in its row when only ...   | the Collection column resolves the name in an
+//                                              |                                                          | accessorFn over `collections` (the row model
+//                                              |                                                          | is memoized on `data`, which did not change)
+// AC2 ascending sort orders by the new name    | sorts by the new collection names, ascending, after ...  | the sort reads the per-row cached accessor value
+// AC2 descending sort orders by the new name   | sorts by the new collection names, descending, after ... | as above, on the second header click
 import type * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
@@ -127,9 +137,8 @@ describe("An armed Delete in the library list survives a collections change (#82
     expect(del).not.toHaveBeenCalled();
 
     // A real refetch through the hook's queryFn: a collection was added and the board moved into it
-    // (another tab used Move). The board must change too: with `dashboards` deep-equal, structural
-    // sharing keeps its reference and the table keeps each row's cached Collection value, so the
-    // positive control below could not see the refetch.
+    // (another tab used Move), so the positive control below sees the refetch through a changed row.
+    // A refetch that changes only the collections is the #877 tests' case.
     get.mockResolvedValue({
       data: {
         dashboards: [{...LIBRARY.dashboards[0]!, collection_id: "c2"}],
@@ -294,5 +303,89 @@ describe("The list view's row menu still files and renames boards (#824)", () =>
       params: {path: {id: "b1"}},
       body: {name: "ZDC arrivals", data: undefined, collection_id: undefined},
     });
+  });
+});
+
+describe("The Collection column follows a collection rename (#877)", () => {
+  /** A refetch through the hook's queryFn that renames collections and leaves every board as seeded,
+   *  so structural sharing hands the table the same `dashboards` array. */
+  async function refetchWith(qc: QueryClient, data: DashboardLibrary) {
+    get.mockResolvedValue({data, error: undefined, response: {status: 200}});
+    await act(async () => {
+      await qc.refetchQueries({queryKey: ["dashboards"]});
+    });
+    await settle();
+  }
+
+  it("shows a collection's new name in its row when only the collection was renamed", async () => {
+    const {host, qc} = await mount(LIBRARY);
+    expect(host.querySelector("tbody")?.textContent).toContain("Arrivals");
+
+    await refetchWith(qc, {
+      dashboards: LIBRARY.dashboards.map((b) => ({...b})),
+      collections: [{id: "c1", name: "Holding"}],
+    } as DashboardLibrary);
+    // Positive control: the refetch landed, and structural sharing kept the seeded boards array.
+    expect(get).toHaveBeenCalledWith("/api/v1/dashboards");
+    const cached = qc.getQueryData<DashboardLibrary>(["dashboards"]);
+    expect(cached?.collections[0]?.name).toBe("Holding");
+    expect(cached?.dashboards).toBe(LIBRARY.dashboards);
+
+    const row = host.querySelector("tbody")?.textContent ?? "";
+    expect(row).toContain("Holding");
+    expect(row).not.toContain("Arrivals");
+  });
+
+  // b1 sits in "Arrivals" and b2 in "Departures"; renaming c1 to "Zulu" flips their order by name, so
+  // a sort over the old names gives the opposite order to a sort over the new ones.
+  const TWO = {
+    dashboards: [
+      {id: "b1", name: "Board one", collection_id: "c1", updated_at: "2026-10-02T00:00:00Z"},
+      {id: "b2", name: "Board two", collection_id: "c2", updated_at: "2026-10-01T00:00:00Z"},
+    ],
+    collections: [
+      {id: "c1", name: "Arrivals"},
+      {id: "c2", name: "Departures"},
+    ],
+  } as DashboardLibrary;
+  const renamed = () =>
+    ({
+      dashboards: TWO.dashboards.map((b) => ({...b})),
+      collections: [
+        {id: "c1", name: "Zulu"},
+        {id: "c2", name: "Departures"},
+      ],
+    }) as DashboardLibrary;
+
+  function collectionHeader(host: HTMLElement) {
+    const th = [...host.querySelectorAll("thead th")].find((h) => h.textContent?.trim() === "Collection");
+    if (!th) throw new Error("no Collection header");
+    return th;
+  }
+  const sortCollection = (host: HTMLElement) => click(collectionHeader(host).querySelector("button")!);
+  const rowNames = (host: HTMLElement) =>
+    [...host.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td")?.textContent?.trim());
+
+  it("sorts by the new collection names, ascending, after a collection rename", async () => {
+    const {host, qc} = await mount(TWO);
+    await refetchWith(qc, renamed());
+    expect(qc.getQueryData<DashboardLibrary>(["dashboards"])?.dashboards).toBe(TWO.dashboards);
+
+    await sortCollection(host);
+    expect(collectionHeader(host).getAttribute("aria-sort")).toBe("ascending");
+    // "Departures" before "Zulu"; the old names would put "Arrivals" (b1) first.
+    expect(rowNames(host)).toEqual(["Board two", "Board one"]);
+    expect(host.querySelector("tbody")?.textContent).not.toContain("Arrivals");
+  });
+
+  it("sorts by the new collection names, descending, after a collection rename", async () => {
+    const {host, qc} = await mount(TWO);
+    await refetchWith(qc, renamed());
+
+    await sortCollection(host);
+    await sortCollection(host);
+    expect(collectionHeader(host).getAttribute("aria-sort")).toBe("descending");
+    // "Zulu" before "Departures"; the old names would put "Departures" (b2) first.
+    expect(rowNames(host)).toEqual(["Board one", "Board two"]);
   });
 });
