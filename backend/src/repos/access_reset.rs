@@ -180,6 +180,20 @@ pub async fn running_run(pool: &PgPool) -> Result<Option<String>, ApiError> {
     .map_err(|_| ApiError::Internal)
 }
 
+/// Delete every run that finished before `before`, and return how many went. A `running` row has no
+/// `finished_at` (0131's check), so it never matches.
+pub async fn prune_finished_runs(pool: &PgPool, before: DateTime<Utc>) -> Result<u64, ApiError> {
+    sqlx::query("delete from access.vatusa_reset_runs where finished_at < $1")
+        .bind(before)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(|e| {
+            tracing::error!(error = %e, "pruning finished access-reset runs failed");
+            ApiError::Internal
+        })
+}
+
 /// One run, or `None` if there is no such run. A row still `running` while no session holds the reset
 /// lock was left by a process that died, and is reported as failed with how far it got.
 pub async fn fetch_run(pool: &PgPool, id: &str) -> Result<Option<AccessResetRun>, ApiError> {

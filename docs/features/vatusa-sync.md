@@ -193,7 +193,9 @@ holding exactly their `system` grants plus what VATUSA justifies.
 - **Its result.** `GET /api/v1/admin/access/vatusa-reset/runs/{id}` returns the run: `running`, then
   `succeeded` with the result or `failed` with the failure. Runs live in `access.vatusa_reset_runs`
   (0131), so any replica answers. The dialog polls it each second and shows the result when it
-  finishes; closing the dialog doesn't stop the run.
+  finishes; closing the dialog doesn't stop the run. The `vatusa_reset_run_prune` job deletes a run
+  180 days after it finished (`AUDIT_RETAIN_DAYS`, the audit log's horizon); its GET then answers
+  `404`. A run still `running` is never deleted.
 - **`USER` and `SERVER_ADMIN` stay** because they are `system` rows. Migration 0098 backfilled both
   as `manual`; 0130 re-tagged them `system` (#805). A `SERVER_ADMIN` row written by hand as `manual`
   is removed like any other hand-made grant: `OIS_SERVER_ADMIN_CID` alone grants and removes it.
