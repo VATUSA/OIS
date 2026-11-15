@@ -44,6 +44,7 @@
 #                                              | output outside build/, incremental/, ois-drift/ survives| done
 # a checkout with no target/ (edge)            | a worktree with no target/ is skipped, the rest cleaned | done
 # per-target summary (plan)                    | each target/ is named, with the dirs and MB it freed   | done
+# each line counts only its own (3 iterations)| three profiles and two targets, each line's exact text  | done
 # just clean-stale [days] (AC2 entry point)    | just clean-stale passes DAYS and --scratch through      | done
 # a profile with only incremental/            | it is cleaned like any other profile                    | done
 # cargo's older layout (deps/, .fingerprint/)  | the profile is kept whole, a current-layout one cleaned | done
@@ -240,6 +241,26 @@ removed "the 42 MiB unit is removed" "$MAIN/target/debug/build/pkga/big"
 has "the profile line reports the MB freed" "target/debug: removed 2 dirs, 42 MB"
 has "the target total reports the MB freed" "total: removed 2 dirs, 42 MB"
 has "the run total reports the MB freed" "removed 2 dirs, 42 MB in all"
+
+echo "== each summary line counts only its own profile and target =="
+setup counts
+# big PATH MiB: a unit of MiB allocated, 8 days old.
+big() { mkdir -p "$1"; fallocate -l "$2M" "$1/blob" 2>/dev/null || dd if=/dev/zero of="$1/blob" bs=1048576 count="$2" 2>/dev/null; find "$1" -depth -exec touch -t "$(stamp 8)" {} +; }
+# Three profiles in the primary, one in the worktree; a fresh sibling keeps each build/<pkg>/.
+for p in debug release zeta; do unit "$MAIN/target/$p/build/pkga/fresh" 1; done
+unit "$WT/target/debug/build/pkga/fresh" 1
+big "$MAIN/target/debug/build/pkga/d1" 2
+big "$MAIN/target/release/build/pkga/r1" 1; big "$MAIN/target/release/build/pkga/r2" 2
+big "$MAIN/target/zeta/build/pkga/z1" 1; big "$MAIN/target/zeta/build/pkga/z2" 1; big "$MAIN/target/zeta/build/pkga/z3" 1
+big "$WT/target/debug/build/pkga/w1" 1
+clean
+has "the first profile counts its own" "  $MAIN/target/debug: removed 1 dirs, 2 MB"
+has "the second profile counts only its own" "  $MAIN/target/release: removed 2 dirs, 3 MB"
+has "the third profile counts only its own" "  $MAIN/target/zeta: removed 3 dirs, 3 MB"
+has "the primary's total sums its profiles" "  total: removed 6 dirs, 8 MB"
+has "the worktree's profile counts only its own" "  $WT/target/debug: removed 1 dirs, 1 MB"
+has "the worktree's total counts only its target" "  total: removed 1 dirs, 1 MB"
+has "the run total sums every target" "clean-stale: removed 7 dirs, 9 MB in all"
 
 echo "== a profile a build is using =="
 setup locked

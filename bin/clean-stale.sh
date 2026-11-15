@@ -29,7 +29,8 @@
 # --scratch also deletes ${TMPDIR:-/tmp}/mutate.*/ dirs (bin/mutate.sh's backup and
 # log; a failed restore leaves its backup there) older than DAYS. Nothing else.
 #
-# Exit 0 done, 1 some directory could not be deleted (each is named), 2 bad arguments.
+# Exit 0 done, 1 some directory could not be deleted (each is named), 2 bad arguments
+# or no usable repository (not inside one, or `git worktree list` failed).
 # Tests: bin/lib/clean-stale.test.sh.
 # ==============================================================================
 set -uo pipefail
