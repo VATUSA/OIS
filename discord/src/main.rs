@@ -10,7 +10,8 @@
 //!
 //! Config (env / `.env`): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN` (an `ois_sa_…` token
 //! for a service account keyed `discord` holding the BOT role; any other key gets 403 on every
-//! lease), optional `OIS_POLL_SECS` (default 5).
+//! lease), optional `OIS_POLL_SECS` (default 5 when unset or blank; any other value that is not a
+//! whole number of seconds above 0 fails startup).
 
 mod config;
 mod discord;
