@@ -23,7 +23,7 @@ tables. Migrations are embedded in the backend binary and applied on startup (sq
 ## Identity
 
 - `identity.users` — one row per person, keyed by VATSIM `cid`. Carries email, names,
-  rating, status.
+  rating.
 - `identity.sessions` — issued at login; `session_token` (cookie), `expires_at`,
   `revoked_at`.
 
