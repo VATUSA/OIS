@@ -800,4 +800,168 @@ mod tests {
             "{events:?}"
         );
     }
+
+    /// Two failing closes per loop, so an early exit after the first failure is caught whatever
+    /// order the map yields its sessions in: it would log one WARN, not two.
+    #[sqlx::test]
+    async fn a_failed_close_does_not_stop_the_other_closes_in_the_tick(pool: PgPool) {
+        let controller_sids: [i64; 3] = [937_003, 937_004, 937_005];
+        let flight_sids: [i64; 3] = [937_013, 937_014, 937_015];
+        for sid in controller_sids {
+            sqlx::query(
+                "insert into stats.controller_session
+                     (session_id, cid, callsign, logon_time, first_seen, last_seen)
+                 values ($1, 1300003, 'ZBW_CTR', '2026-01-01T10:00:00Z',
+                         '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z')",
+            )
+            .bind(sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for sid in flight_sids {
+            sqlx::query(
+                "insert into stats.flight
+                     (session_id, cid, callsign, logon_time, first_seen, last_seen, status)
+                 values ($1, 1300004, 'AAL937', '2026-01-01T10:00:00Z',
+                         '2026-01-01T10:00:00Z', '2026-01-01T11:00:00Z', 'active')",
+            )
+            .bind(sid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // 937_003 and 937_004 fail to close; 937_005 closes. Likewise 937_013, 937_014 and 937_015.
+        raise_on_update(
+            &pool,
+            "stats.controller_session",
+            "old.session_id in (937003, 937004)",
+        )
+        .await;
+        sqlx::raw_sql(
+            "create function t937_boom_flight() returns trigger language plpgsql as $$ \
+             begin if old.session_id in (937013, 937014) then raise exception 'injected'; \
+             end if; return new; end $$; \
+             create trigger t937_boom_flight before update on stats.flight \
+             for each row execute function t937_boom_flight();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut controllers: HashMap<i64, Active> = controller_sids
+            .iter()
+            .map(|sid| (*sid, gone("2026-01-01T11:00:00Z")))
+            .collect();
+        let mut pilots: HashMap<i64, Active> = flight_sids
+            .iter()
+            .map(|sid| (*sid, gone("2026-01-01T11:00:00Z")))
+            .collect();
+        let (result, events) = tick_capturing(
+            &pool,
+            "2026-01-01T11:10:00Z",
+            "",
+            &mut pilots,
+            &mut controllers,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let duration: Option<i32> = sqlx::query_scalar(
+            "select duration_s from stats.controller_session where session_id = 937005",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(duration, Some(3600), "the closing controller still closes");
+        let status: String =
+            sqlx::query_scalar("select status from stats.flight where session_id = 937015")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed", "the closing flight still closes");
+
+        let mut kept_controllers: Vec<i64> = controllers.keys().copied().collect();
+        kept_controllers.sort_unstable();
+        assert_eq!(kept_controllers, vec![937_003, 937_004]);
+        let mut kept_pilots: Vec<i64> = pilots.keys().copied().collect();
+        kept_pilots.sort_unstable();
+        assert_eq!(kept_pilots, vec![937_013, 937_014]);
+
+        let warned = |prefix: &str| {
+            let mut sids: Vec<String> = events_starting(&events, prefix)
+                .iter()
+                .filter_map(|e| e.fields.get("sid").cloned())
+                .collect();
+            sids.sort_unstable();
+            sids
+        };
+        assert_eq!(
+            warned("stats: failed to close controller session"),
+            vec!["937003", "937004"],
+            "{events:?}"
+        );
+        assert_eq!(
+            warned("stats: failed to close flight"),
+            vec!["937013", "937014"],
+            "{events:?}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn the_collector_logs_a_failed_reload_and_a_failed_tick_with_the_errors_display(
+        pool: PgPool,
+    ) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // With the schema gone, the startup reload and the tick's snapshot insert both fail.
+        sqlx::raw_sql("alter schema stats rename to stats_t937")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let feed = crate::feed::new_state();
+        feed.write().await.snapshot = Some(Arc::new(crate::feed::Snapshot {
+            fetched_at: parse_ts("2026-01-01T11:10:00Z").unwrap(),
+            source_timestamp: "2026-01-01T11:10:00Z".to_owned(),
+            data: crate::feed::vatsim::VatsimData::default(),
+        }));
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber =
+            tracing_subscriber::registry().with(capture::Recorder(Arc::clone(&events)));
+
+        // The collector never returns; its first tick fires at once and the next 10 s later.
+        let ran = tokio::time::timeout(
+            Duration::from_secs(2),
+            collector(pool, feed, Arc::new(Boundaries::default())).with_subscriber(subscriber),
+        )
+        .await;
+        assert!(ran.is_err(), "the collector loops until stopped");
+        let events = events
+            .lock()
+            .expect("the recorder's mutex is only held for a push")
+            .clone();
+
+        for message in [
+            "stats: could not reload active flights",
+            "stats: collection tick failed",
+        ] {
+            let warns: Vec<_> = events.iter().filter(|e| e.message == message).collect();
+            assert_eq!(warns.len(), 1, "{message}: {events:?}");
+            assert_eq!(warns[0].level, tracing::Level::WARN, "{message}");
+            assert_eq!(
+                warns[0].fields.get("error").map(String::as_str),
+                Some("internal server error"),
+                "{message}: the error's Display"
+            );
+        }
+        // Positive control: the tick reached the database and failed on the renamed schema.
+        assert!(
+            events.iter().any(|e| e.message == "stats db error"
+                && e.fields
+                    .get("error")
+                    .is_some_and(|v| v.contains("does not exist"))),
+            "{events:?}"
+        );
+    }
 }
