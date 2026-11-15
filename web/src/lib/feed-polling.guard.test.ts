@@ -21,6 +21,7 @@ const HOOKS: [file: string, hook: string][] = [
   ["idst.ts", "useIdst"],
   ["departures.ts", "useDepartures"],
   ["departures.ts", "useMultiDepartures"],
+  ["tmu.ts", "useAirportDemand"],
 ];
 
 function body(file: string, hook: string): string {

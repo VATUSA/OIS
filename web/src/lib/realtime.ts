@@ -38,6 +38,8 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   // every viewer (`AppState::sector_demand`): a miss costs one projection, 179–540 ms of CPU per ARTCC
   // in release on the live feed; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
   { key: ["sector-demand"], minGapMs: 60_000 },
+  // Every airport's arrival demand against its rate (#954): its old 60 s poll.
+  { key: ["tmu-demand"], minGapMs: 60_000 },
 ];
 
 export const TOPIC_KEYS: Record<string, string[][]> = {
@@ -46,12 +48,14 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   // Enabling, disabling or deleting an FCA changes which releases hold a wheels-up (#721).
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
-  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
-  "tmu.tmi": [["tmis"]],
-  "tmu.groundstop": [["ground-stops"], ["departures"]],
-  "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  // The public advisories board lists active ground stops, GDPs, restrictions and programs (#954).
+  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"], ["public-board"]],
+  "tmu.tmi": [["tmis"], ["public-board"]],
+  "tmu.groundstop": [["ground-stops"], ["departures"], ["public-board"]],
+  // A program sets the rate the NAS demand ranks against; a CFR moves its wheels-up times (#954).
+  "tmu.program": [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]],
   "tmu.advisory": [["advisories"]],
-  "flow.cfr": [["departures"], ["flow"]],
+  "flow.cfr": [["departures"], ["flow"], ["tmu-demand"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.

@@ -132,6 +132,47 @@ describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {
   });
 });
 
+describe("public board and NAS demand topics (VATUSA/OIS#954)", () => {
+  async function nudge(topic: string) {
+    const dispose = connectRealtime(qc);
+    await flush();
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    invalidated.length = 0; // drop the reconnect catch-up
+    socket.onmessage?.({ data: JSON.stringify({ topic }) });
+    dispose();
+    return [...invalidated];
+  }
+
+  // `handlers/public.rs::get_board` loads active ground stops, GDPs, restrictions (TMIs) and programs;
+  // `handlers/feed.rs::airport_demand` reads programs and issued CFRs. The whole list is asserted, so a
+  // dropped key and a key mapped onto the wrong topic both fail.
+  it.each([
+    ["tmu.groundstop", [["ground-stops"], ["departures"], ["public-board"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"]]],
+    ["tmu.tmi", [["tmis"], ["public-board"]]],
+    ["tmu.program", [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]]],
+    ["flow.cfr", [["departures"], ["flow"], ["tmu-demand"]]],
+  ])("a %s nudge refetches exactly its keys", async (topic, keys) => {
+    expect(await nudge(topic)).toEqual(keys.map((queryKey) => ({ queryKey })));
+  });
+
+  it("a tmu.advisory nudge refreshes the advisories and neither the public board nor the NAS demand", async () => {
+    expect(await nudge("tmu.advisory")).toEqual([{ queryKey: ["advisories"] }]);
+  });
+
+  it("a feed tick refetches the NAS demand and not the public board", async () => {
+    const dispose = connectRealtime(qc);
+    const socket = await opened();
+    invalidated.length = 0;
+    socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+    const prefixes = invalidated.map((q) => (q as { queryKey: string[] }).queryKey[0]);
+    expect(prefixes).toContain("tmu-demand");
+    expect(prefixes).not.toContain("public-board");
+    dispose();
+  });
+});
+
 describe("sector demand topics (VATUSA/OIS#725)", () => {
   /** Connects, opens and subscribes to the tick, and drops the reconnect catch-up. */
   async function connected() {
@@ -164,8 +205,8 @@ describe("sector demand topics (VATUSA/OIS#725)", () => {
   // nudge per client. The topic's other keys still refetch at once.
   it.each([
     ["flow.release", [["idst"], ["fca-traffic"], ["departures"]]],
-    ["flow.cfr", [["departures"], ["flow"]]],
-    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"]]],
+    ["flow.cfr", [["departures"], ["flow"], ["tmu-demand"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"]]],
     ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]]],
   ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {
     const { dispose, send } = await connected();
@@ -334,6 +375,7 @@ const FEED = [
   ["idst"],
   ["departures"],
   ["sector-demand"],
+  ["tmu-demand"],
 ];
 
 /** Open the socket the client created and return it. */
@@ -381,6 +423,9 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     ["departures", 60_000],
     // New with #725, not a pre-#648 poll: its hook's fallback poll is the same minute.
     ["sector-demand", 60_000],
+    // #954, not a pre-#648 poll: `useAirportDemand` polled a flat minute before it joined the tick.
+    // 59_999 ms must not refetch, 60_000 ms must.
+    ["tmu-demand", 60_000],
   ] as const)("a tick refetches %s no more often than its old %ims poll", async (prefix, polledMs) => {
     const dispose = connectRealtime(qc);
     const socket = await opened();
