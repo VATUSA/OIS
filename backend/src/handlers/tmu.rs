@@ -1246,6 +1246,38 @@ mod tests {
         assert_eq!(body_now().await, "vATCSCC ADVZY 001 amended");
     }
 
+    /// A `tmu.adv.update` holder scoped to another ARTCC is refused with exactly 403, the status the
+    /// route's OpenAPI responses list (#878). The PATCH carries a body: without one the `Json`
+    /// extractor rejects it before the scope check runs.
+    #[sqlx::test]
+    async fn editing_another_facilitys_advisory_is_refused_with_403(pool: PgPool) {
+        let id = seed_draft_for(&pool, "ZDC").await;
+        let (state, user, cookie) = caller(&pool).await;
+        let uri = format!("/api/v1/tmu/advisories/{id}");
+        let edit = || Some(serde_json::json!({"body": "vATCSCC ADVZY 001 amended"}));
+        let body_now = async || {
+            crate::repos::tmu::get_advisory(&pool, &id)
+                .await
+                .unwrap()
+                .unwrap()
+                .body
+        };
+
+        grant(&pool, &user, "tmu.adv.update", Some("ZNY")).await;
+        let refused = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(refused, http::StatusCode::FORBIDDEN);
+        assert_eq!(
+            body_now().await,
+            "vATCSCC ADVZY",
+            "a refused edit must not have rewritten another facility's document"
+        );
+
+        grant(&pool, &user, "tmu.adv.update", Some("ZDC")).await;
+        let allowed = send(&state, http::Method::PATCH, &uri, &cookie, edit()).await;
+        assert_eq!(allowed, http::StatusCode::OK);
+        assert_eq!(body_now().await, "vATCSCC ADVZY 001 amended");
+    }
+
     #[sqlx::test]
     async fn abandoning_an_advisory_requires_the_update_permission(pool: PgPool) {
         let id = seed_draft(&pool).await;
@@ -2273,7 +2305,7 @@ pub async fn create_advisory(
     patch, path = "/api/v1/tmu/advisories/{id}", tag = "tmu",
     security(("session" = ["tmu.adv.update"]), ("api_key" = ["tmu.adv.update"]), ("service_account" = ["tmu.adv.update"])),
     params(("id" = String, Path)), request_body = UpdateAdvisoryRequest,
-    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 404))
+    responses((status = 200, body = AdvisoryBody), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_advisory(
     State(state): State<AppState>,
