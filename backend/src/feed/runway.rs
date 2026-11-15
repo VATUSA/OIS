@@ -674,3 +674,102 @@ mod tests {
         assert!(delay_ms > 30_000, "{delay_ms} ms");
     }
 }
+
+// Coverage matrix (VATUSA/OIS#818)
+//
+// Requirement                                | Test
+// -------------------------------------------|----------------------------------------------------------------
+// AC1 family tier reaches runway ETE (feed)  | collect_arrivals_times_a_jet_with_no_type_row_on_its_family_row
+#[cfg(test)]
+mod family_profile_tests {
+    use std::collections::HashMap;
+
+    use chrono::DateTime;
+
+    use super::collect_arrivals;
+    use crate::feed::{
+        airports::{Airport, AirportDb},
+        nav::NavData,
+        predict,
+        trajectory::{AircraftProfile, ProfileTable},
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+
+    /// `collect_arrivals` (runway ETE) times a B772, a jet in `ENGINE_REF` with no type row, on the
+    /// jet family row its table holds.
+    #[test]
+    fn collect_arrivals_times_a_jet_with_no_type_row_on_its_family_row() {
+        let ap: AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KDCA".to_string(), Airport::at(38.8521, -77.0377)),
+        ]);
+        let data = VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.2,
+                longitude: -74.0,
+                altitude: 24_000,
+                groundspeed: 400,
+                heading: 220,
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    altitude: "35000".into(),
+                    cruise_tas: "440".into(),
+                    aircraft: "B772".into(),
+                    aircraft_short: "B772".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let nav = NavData::load();
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let family = AircraftProfile {
+            desc_fpm: 3_000.0,
+            ..AircraftProfile::default()
+        };
+        let with = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([("jet".to_string(), family.clone())]),
+            HashMap::new(),
+        );
+        let eta = |t: &ProfileTable| {
+            collect_arrivals("KDCA", &data, &ap, &nav, &Winds::default(), t, now, 600)
+                .into_iter()
+                .find(|a| a.cs == "AAL1")
+                .expect("AAL1 is inbound")
+                .eta_ms
+        };
+        let direct = predict::arrival_eta(
+            &nav,
+            &ap,
+            &Winds::default(),
+            &family,
+            &predict::ArrivalInput {
+                dep: "KJFK",
+                arr: "KDCA",
+                route: "",
+                pos: [40.2, -74.0],
+                alt_ft: 24_000.0,
+                gs: 400,
+                hdg: 220,
+                arr_ll: [38.8521, -77.0377],
+                cruise_ft: 35_000.0,
+                cruise_tas: 440.0,
+            },
+            0.0,
+            now,
+        );
+
+        assert_eq!(eta(&with), direct.eta.timestamp_millis());
+        assert_ne!(
+            eta(&with),
+            eta(&ProfileTable::default()),
+            "the family row moves the ETA"
+        );
+    }
+}

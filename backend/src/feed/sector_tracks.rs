@@ -1132,4 +1132,67 @@ mod tests {
             .fold(0.0, f64::max);
         assert!(most > 2.0, "the tracks part by at most {most} nm");
     }
+
+    /// #818: `walk` resolves the flight's profile through the table `project_tracks` is given. A
+    /// B772 (a jet in `ENGINE_REF`, no type row) flies a different vertical track on the jet family
+    /// row; a QQQQ (no engine family) does not.
+    #[test]
+    fn a_jet_with_no_type_row_is_projected_on_its_family_row() {
+        let typed = |cs: &str, ty: &str| Pilot {
+            flight_plan: Some(FlightPlan {
+                aircraft_short: ty.into(),
+                ..plan()
+            }),
+            ..pilot(cs, 400)
+        };
+        let data = pilots(vec![typed("JET1", "B772"), typed("CTL1", "QQQQ")]);
+        let jet = ProfileTable::new(
+            trajectory::AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([(
+                "jet".to_string(),
+                trajectory::AircraftProfile {
+                    desc_fpm: 3_000.0,
+                    climb_fpm_hi: 3_000.0,
+                    ..trajectory::AircraftProfile::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+        let alts = |table: &ProfileTable| -> HashMap<String, Vec<(i64, Option<i64>)>> {
+            project_tracks(
+                &data,
+                &NavData::load(),
+                &airports(),
+                table,
+                &Winds::default(),
+                &HashMap::new(),
+                &HashSet::new(),
+                now(),
+                None,
+            )
+            .into_iter()
+            .map(|t| {
+                let fixes = t
+                    .fixes
+                    .iter()
+                    .map(|f| (f.t_ms, f.alt_ft.map(|a| a.round() as i64)))
+                    .collect();
+                (t.id, fixes)
+            })
+            .collect()
+        };
+        let (without, with) = (alts(&ProfileTable::default()), alts(&jet));
+        let id = |cs: &str| without.keys().find(|k| k.contains(cs)).expect(cs).clone();
+        assert_ne!(
+            with[&id("JET1")],
+            without[&id("JET1")],
+            "the jet family row must move its track"
+        );
+        assert_eq!(
+            with[&id("CTL1")],
+            without[&id("CTL1")],
+            "control: no engine family"
+        );
+    }
 }

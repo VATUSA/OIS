@@ -117,9 +117,19 @@ export function parseDescent(
   };
 }
 
+/** The engine families a `family` profile may be keyed by: `feed::flow::ENGINE_FAMILIES`, whose
+ * keys the backend accepts and no other. */
+export const ENGINE_FAMILIES = ["jet", "turboprop", "piston"] as const;
+
+/** `jet` → `Jet`. */
+export function familyName(key: string): string {
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 /** Human label for a profile row's identity. */
 export function profileLabel(p: AircraftProfile): string {
   if (p.kind === "default") return "Default (all other aircraft)";
   if (p.kind === "wake") return `Wake class ${p.key}`;
+  if (p.kind === "family") return `${familyName(p.key)} family`;
   return p.key;
 }

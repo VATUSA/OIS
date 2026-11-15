@@ -21,11 +21,11 @@ const PROFILE_SELECT: &str = "select p.kind, p.key, p.name, \
     from flow.aircraft_profile p left join identity.users u on u.id = p.updated_by \
     left join access.actors a on a.id = p.updated_by_actor";
 
-/// The whole catalog, ordered default → wake → type for display.
+/// The whole catalog, ordered default → wake → family → type for display.
 pub async fn list(pool: &PgPool) -> Result<Vec<AircraftProfileBody>, ApiError> {
     sqlx::query_as::<_, AircraftProfileBody>(&format!(
         "{PROFILE_SELECT} order by \
-         case p.kind when 'default' then 0 when 'wake' then 1 else 2 end, p.key"
+         case p.kind when 'default' then 0 when 'wake' then 1 when 'family' then 2 else 3 end, p.key"
     ))
     .fetch_all(pool)
     .await
@@ -114,16 +114,22 @@ pub async fn delete(pool: &PgPool, kind: &str, key: &str) -> Result<bool, ApiErr
 pub async fn load_all(pool: &PgPool) -> Result<ProfileTable, ApiError> {
     let rows = list(pool).await?;
     let t = StoredTiers::from_rows(&rows);
-    Ok(ProfileTable::new(t.default, t.by_wake, t.by_type))
+    Ok(ProfileTable::new(
+        t.default,
+        t.by_wake,
+        t.by_family,
+        t.by_type,
+    ))
 }
 
-/// Stored rows split into the three tiers [`ProfileTable`] resolves through, keys uppercased. The
-/// one place a row's `kind` picks its tier, shared by [`load_all`] and the aircraft-profile
+/// Stored rows split into the tiers [`ProfileTable`] resolves through: type and wake keys uppercased,
+/// family keys lowercased. The one place a row's `kind` picks its tier, shared by [`load_all`] and the aircraft-profile
 /// backtest's stored set (#828).
 #[derive(Debug, Clone)]
 pub struct StoredTiers {
     pub default: AircraftProfile,
     pub by_wake: HashMap<String, AircraftProfile>,
+    pub by_family: HashMap<String, AircraftProfile>,
     pub by_type: HashMap<String, AircraftProfile>,
 }
 
@@ -132,6 +138,7 @@ impl StoredTiers {
         let mut t = Self {
             default: AircraftProfile::default(),
             by_wake: HashMap::new(),
+            by_family: HashMap::new(),
             by_type: HashMap::new(),
         };
         for r in rows {
@@ -141,8 +148,14 @@ impl StoredTiers {
                 "wake" => {
                     t.by_wake.insert(r.key.to_ascii_uppercase(), p);
                 }
-                _ => {
+                "family" => {
+                    t.by_family.insert(r.key.to_ascii_lowercase(), p);
+                }
+                "type" => {
                     t.by_type.insert(r.key.to_ascii_uppercase(), p);
+                }
+                other => {
+                    tracing::warn!(kind = other, key = %r.key, "aircraft profile row of unknown kind skipped");
                 }
             }
         }
@@ -202,5 +215,173 @@ mod tests {
         assert_eq!(table.resolve("ZZ9Z", "H").desc_fpm, 3_333.0, "type tier");
         assert_eq!(table.resolve("QQQQ", "H").desc_fpm, 2_222.0, "wake tier");
         assert_eq!(table.resolve("QQQQ", "").desc_fpm, 1_111.0, "default tier");
+    }
+
+    // Coverage matrix (VATUSA/OIS#818)
+    //
+    // Requirement                                   | Test
+    // ----------------------------------------------|---------------------------------------------------------------
+    // migration 0134 admits kind 'family'           | load_all_puts_a_family_row_in_the_family_tier
+    // AC1 order through the stored table            | load_all_puts_a_family_row_in_the_family_tier
+    // constraint still refuses an unknown kind      | the_kind_check_still_refuses_an_unknown_kind
+    // admin page lists groups in order              | list_orders_default_then_wake_then_family_then_type
+    // from_rows: family lowercased, unknown skipped | from_rows_keys_family_rows_lowercase_and_skips_an_unknown_kind
+
+    /// Migration 0134 + `load_all`: a family row lands in the family tier, between type and wake.
+    #[sqlx::test]
+    async fn load_all_puts_a_family_row_in_the_family_tier(pool: PgPool) {
+        for (kind, key, fpm) in [("wake", "H", 2_222.0), ("type", "B738", 3_333.0)] {
+            let n = sqlx::query(
+                "update flow.aircraft_profile set desc_fpm = $3 where kind = $1 and key = $2",
+            )
+            .bind(kind)
+            .bind(key)
+            .bind(fpm)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+            assert_eq!(n, 1, "0059 seeds {kind} {key}");
+        }
+        sqlx::query(
+            "insert into flow.aircraft_profile (kind, key, desc_fpm) \
+             values ('family', 'jet', 4444), ('family', 'turboprop', 5555)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let table = load_all(&pool).await.unwrap();
+
+        assert_eq!(
+            table.resolve("B772", "H").desc_fpm,
+            4_444.0,
+            "family beats wake"
+        );
+        assert_eq!(table.resolve_label("B772", "H"), "family:jet");
+        assert_eq!(
+            table.resolve("AT72", "H").desc_fpm,
+            5_555.0,
+            "its own family"
+        );
+        assert_eq!(
+            table.resolve("B738", "H").desc_fpm,
+            3_333.0,
+            "type beats family"
+        );
+        assert_eq!(
+            table.resolve("QQQQ", "H").desc_fpm,
+            2_222.0,
+            "no family: wake"
+        );
+    }
+
+    /// Migration 0134 replaces 0059's unnamed kind check with one named check that still refuses a
+    /// kind it does not list.
+    #[sqlx::test]
+    async fn the_kind_check_still_refuses_an_unknown_kind(pool: PgPool) {
+        let err =
+            sqlx::query("insert into flow.aircraft_profile (kind, key) values ('bogus', 'X')")
+                .execute(&pool)
+                .await
+                .unwrap_err();
+        let db = err.as_database_error().expect("a database error");
+        assert_eq!(db.code().as_deref(), Some("23514"), "check_violation");
+        assert_eq!(db.constraint(), Some("aircraft_profile_kind_check"));
+        let bogus: i64 =
+            sqlx::query_scalar("select count(*) from flow.aircraft_profile where kind = 'bogus'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bogus, 0);
+
+        let checks: Vec<String> = sqlx::query_scalar(
+            "select conname::text from pg_constraint \
+             where conrelid = 'flow.aircraft_profile'::regclass and contype = 'c' order by 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(checks, vec!["aircraft_profile_kind_check".to_string()]);
+
+        sqlx::query("insert into flow.aircraft_profile (kind, key) values ('family', 'piston')")
+            .execute(&pool)
+            .await
+            .expect("positive control: a family row is admitted");
+    }
+
+    /// The admin page groups rows in list order: default, wake, family, type, then key.
+    #[sqlx::test]
+    async fn list_orders_default_then_wake_then_family_then_type(pool: PgPool) {
+        for key in ["turboprop", "piston", "jet"] {
+            sqlx::query("insert into flow.aircraft_profile (kind, key) values ('family', $1)")
+                .bind(key)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let rows = super::list(&pool).await.unwrap();
+
+        let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        let n_type = kinds.iter().filter(|k| **k == "type").count();
+        let mut want = vec![
+            "default", "wake", "wake", "wake", "wake", "family", "family", "family",
+        ];
+        want.extend(std::iter::repeat_n("type", n_type));
+        assert!(n_type > 0, "0059 seeds type rows");
+        assert_eq!(kinds, want);
+        let families: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.kind == "family")
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(families, ["jet", "piston", "turboprop"]);
+    }
+
+    fn body(kind: &str, key: &str, desc_fpm: f64) -> crate::models::AircraftProfileBody {
+        let d = crate::feed::trajectory::AircraftProfile::default();
+        crate::models::AircraftProfileBody {
+            kind: kind.into(),
+            key: key.into(),
+            name: String::new(),
+            climb_ias_lo: d.climb_ias_lo,
+            climb_ias_hi: d.climb_ias_hi,
+            climb_mach: None,
+            climb_fpm_lo: d.climb_fpm_lo,
+            climb_fpm_hi: d.climb_fpm_hi,
+            cruise_tas: None,
+            cruise_mach: None,
+            service_ceiling_ft: d.service_ceiling_ft,
+            desc_mach: None,
+            desc_ias_hi: d.desc_ias_hi,
+            desc_ias_lo: d.desc_ias_lo,
+            desc_fpm,
+            updated_at: chrono::DateTime::from_timestamp(1_790_000_000, 0).unwrap(),
+            updated_by: None,
+        }
+    }
+
+    /// `StoredTiers::from_rows` maps each kind explicitly; an unknown kind is skipped, not a type.
+    #[test]
+    fn from_rows_keys_family_rows_lowercase_and_skips_an_unknown_kind() {
+        let t = super::StoredTiers::from_rows(&[
+            body("family", "Turboprop", 2_000.0),
+            body("type", "b738", 3_000.0),
+            body("bogus", "A321", 9_999.0),
+        ]);
+        let fam: Vec<(&str, f64)> = t
+            .by_family
+            .iter()
+            .map(|(k, p)| (k.as_str(), p.desc_fpm))
+            .collect();
+        assert_eq!(fam, [("turboprop", 2_000.0)]);
+        let ty: Vec<(&str, f64)> = t
+            .by_type
+            .iter()
+            .map(|(k, p)| (k.as_str(), p.desc_fpm))
+            .collect();
+        assert_eq!(ty, [("B738", 3_000.0)]);
+        assert!(t.by_wake.is_empty());
     }
 }
