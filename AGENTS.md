@@ -277,8 +277,9 @@ just test rust -p ois-backend -E 'test(name)'   # targeted nextest run; never st
 just test web web src/lib/time.test.ts          # targeted vitest run (package, then vitest args); never stamps
 just ci-full       # the same steps as `just test`, never stamps
 just clean-stale   # delete build output untouched for 7 days (`just clean-stale 14` for 14) in every
-                   #   checkout's target/, skipping a profile a running build holds; --scratch also
-                   #   deletes old ${TMPDIR:-/tmp}/mutate.* dirs
+                   #   checkout's target/, skipping a profile whose cargo build is running (not a test
+                   #   run: a suite mid-run can lose an old test binary); --scratch also deletes old
+                   #   ${TMPDIR:-/tmp}/mutate.* dirs
 just ci            # fast subset: migration versions + fmt-check + cargo check + rust tests, then lint + typecheck
 
 # once per clone

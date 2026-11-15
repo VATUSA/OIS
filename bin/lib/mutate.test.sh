@@ -18,10 +18,8 @@ trap cleanup EXIT
 
 PASS=0
 FAIL=0
-TODO=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
-todo() { echo "  TODO $1"; TODO=$((TODO + 1)); }
 
 F="$WORK/guard.rs"
 fixture() { chmod u+w "$F" 2>/dev/null; printf 'line one\nif ($a < $b) {\n    return 1;\n}\nno newline at end' > "$F"; cp "$F" "$WORK/expected"; }
@@ -144,8 +142,10 @@ out="$(cd "$REPO" && CARGO_TARGET_DIR=/elsewhere bash "$SCRIPT" "$F" 'line one' 
 [ "$(cat "$WORK/target.seen")" = "target=/elsewhere" ] && ok "a CARGO_TARGET_DIR the caller set is kept" || bad "CARGO_TARGET_DIR seen: $(cat "$WORK/target.seen")"
 
 echo "== restore =="
+# The failed restore keeps its mutate.* dir by design; keep it inside $WORK.
+mkdir -p "$WORK/tmp.restore"
 fixture
-out="$(bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && chmod a-w "$0"; exit 0' "$F" 2>&1)"; rc=$?
+out="$(TMPDIR="$WORK/tmp.restore" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line two" "$0" && chmod a-w "$0"; exit 0' "$F" 2>&1)"; rc=$?
 if [ "$rc" -eq 3 ] && case "$out" in *"FAILED TO RESTORE $F"*) true ;; *) false ;; esac; then ok "a failed restore exits 3 and says where the original is"; else bad "failed restore (exit $rc): $out"; fi
 chmod u+w "$F"
 
@@ -235,7 +235,8 @@ TMPDIR="$T" bash "$SCRIPT" "$F" 'line one' 'line two' -- sh -c 'grep -q "line tw
 pid=$!
 for _ in $(seq 1 50); do grep -q 'line two' "$F" && break; sleep 0.1; done
 grep -q 'line two' "$F" && ok "the mutation is on disk before SIGTERM" || bad "the mutation is on disk before SIGTERM"
-kill -TERM "$pid"; wait "$pid" 2>/dev/null
+kill -TERM "$pid"; wait "$pid" 2>/dev/null; rc=$?
+[ "$rc" -eq 143 ] && ok "the script dies of SIGTERM (exit 143)" || bad "the script dies of SIGTERM (exit 143, got $rc)"
 unchanged && ok "FILE restored after SIGTERM" || bad "FILE restored after SIGTERM"
 none_left "no mutate.* dir remains after SIGTERM during COMMAND"
 
@@ -248,7 +249,9 @@ pid=$!
 set +m
 for _ in $(seq 1 50); do grep -q 'line two' "$F" && break; sleep 0.1; done
 grep -q 'line two' "$F" && ok "the mutation is on disk before SIGINT" || bad "the mutation is on disk before SIGINT"
-kill -INT "$pid"; wait "$pid" 2>/dev/null
+# Ctrl-C signals the whole process group, COMMAND included.
+kill -INT -- "-$pid"; wait "$pid" 2>/dev/null; rc=$?
+[ "$rc" -eq 130 ] && ok "the script dies of SIGINT (exit 130)" || bad "the script dies of SIGINT (exit 130, got $rc)"
 unchanged && ok "FILE restored after SIGINT" || bad "FILE restored after SIGINT"
 none_left "no mutate.* dir remains after SIGINT during COMMAND"
 
@@ -281,5 +284,5 @@ cmp -s "$KEPT/original" "$WORK/expected" && ok "...holding the original byte for
 case "$out" in *"the original is $KEPT/original"*) ok "...at the path the message names" ;; *) bad "...at the path the message names: $out" ;; esac
 
 echo
-echo "mutate: $PASS passed, $FAIL failed, $TODO todo"
+echo "mutate: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -12,12 +12,19 @@
 #   ois-drift/<dir>/                 bin/run-tests.sh's client-drift spec
 # Age is the newest mtime, not atime: /home is mounted noatime here, and cargo writes
 # nothing to a unit it reuses, so a unit still current but not rebuilt for DAYS days
-# goes too and costs one rebuild (sccache serves its rustc step when installed).
+# goes too and costs one rebuild.
 #
 # A running build holds an exclusive flock on <profile>/.cargo-build-lock. This
 # script takes that lock with `flock -n` and holds it while it deletes the profile's
-# units, so it never deletes under a build and no build starts mid-delete. When the
-# lock is held, cannot be opened, or flock is not installed, the profile is kept.
+# units, so it never deletes under cargo's build and no build starts mid-delete. When
+# the lock is held, cannot be opened, or flock is not installed, the profile is kept.
+# The lock does not cover a test run: cargo releases it once the build is done, and
+# nextest then runs test binaries from build/<pkg>/<hash>/out/. A unit DAYS old that a
+# running suite has yet to spawn can be deleted, and that test fails to start.
+#
+# The unit layout is the one this repo's nightly writes (build/<pkg>/<hash>/, no deps/).
+# A profile with a deps/ or .fingerprint/ dir is cargo's older layout, where a
+# build/<pkg>-<hash>/ entry is not a whole unit; it is kept untouched.
 #
 # --scratch also deletes ${TMPDIR:-/tmp}/mutate.*/ dirs (bin/mutate.sh's backup and
 # log; a failed restore leaves its backup there) older than DAYS. Nothing else.
@@ -58,7 +65,7 @@ stale() {
 remove() {
     local kb
     kb="$(du -sk "$1" 2>/dev/null | cut -f1)"
-    if rm -rf "$1" && [ ! -e "$1" ]; then
+    if rm -rf "$1"; then
         FREED_KB=$(( FREED_KB + ${kb:-0} )) REMOVED=$(( REMOVED + 1 ))
     else
         echo "clean-stale: could not delete $1" >&2
@@ -107,6 +114,10 @@ clean_target() {
     for profile in "$1"/*/; do
         profile="${profile%/}"
         [ -d "$profile/build" ] || [ -d "$profile/incremental" ] || continue
+        if [ -d "$profile/deps" ] || [ -d "$profile/.fingerprint" ]; then
+            echo "  kept $profile: cargo's older layout (deps/ or .fingerprint/), whose units this script cannot tell apart"
+            continue
+        fi
         clean_profile "$profile"
     done
     for drift in "$1"/ois-drift/*/; do
@@ -117,10 +128,11 @@ clean_target() {
 
 REMOVED=0 FREED_KB=0
 echo "clean-stale: deleting build output untouched for ${DAYS} days"
+LISTING="$(git -C "$ROOT" worktree list --porcelain)" || { echo "clean-stale: git worktree list failed" >&2; exit 2; }
 while IFS= read -r checkout; do
     [ -d "$checkout/target" ] && clean_target "$checkout/target"
 done <<EOF
-$(git -C "$ROOT" worktree list --porcelain | sed -n 's/^worktree //p')
+$(printf '%s\n' "$LISTING" | sed -n 's/^worktree //p')
 EOF
 
 if [ "$SCRATCH" = 1 ]; then

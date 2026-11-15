@@ -28,13 +28,14 @@
 # FILE is restored byte for byte on every exit path, interrupts included, from a
 # copy taken before the edit (`git checkout --` would also discard unstaged work).
 # The copy and COMMAND's output live in ${TMPDIR:-/tmp}/mutate.*/, deleted on every
-# exit once FILE is restored; a refusal prints the output's last 40 lines first. The
-# dir stays only when the restore fails (exit 3) or this script is SIGKILLed, which
-# cannot be trapped: the copy is then ${TMPDIR:-/tmp}/mutate.*/original
+# exit once FILE is restored; a refusal caused by COMMAND prints its last 40 lines.
+# The dir stays only when the restore fails (exit 3) or this script is SIGKILLed,
+# which cannot be trapped: the copy is then ${TMPDIR:-/tmp}/mutate.*/original
 # (bin/clean-stale.sh --scratch deletes old ones). The mutant is on disk while
-# COMMAND runs, so never mutate a tree another run is building (.claude/rules/test-quality.md), and
-# mutate .claude/hooks/ only in a scratch copy: every session runs those hooks from
-# this checkout. Runs unchanged on macOS (bash 3.2, BSD userland) and Linux.
+# COMMAND runs, so never mutate a tree another run is building
+# (.claude/rules/test-quality.md), and mutate .claude/hooks/ only in a scratch copy:
+# every session runs those hooks from this checkout. Runs unchanged on macOS
+# (bash 3.2, BSD userland) and Linux.
 # Tests: bin/lib/mutate.test.sh.
 # ==============================================================================
 set -uo pipefail

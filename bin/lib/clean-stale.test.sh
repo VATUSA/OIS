@@ -43,8 +43,12 @@
 # never anything else                          | non-target files and non-mutate TMPDIR entries survive  | done
 #                                              | output outside build/, incremental/, ois-drift/ survives| done
 # a checkout with no target/ (edge)            | a worktree with no target/ is skipped, the rest cleaned | done
-# per-target summary (plan)                    | each target/ is named in the output with what it freed  | done
+# per-target summary (plan)                    | each target/ is named, with the dirs and MB it freed   | done
 # just clean-stale [days] (AC2 entry point)    | just clean-stale passes DAYS and --scratch through      | done
+# a profile with only incremental/            | it is cleaned like any other profile                    | done
+# cargo's older layout (deps/, .fingerprint/)  | the profile is kept whole, a current-layout one cleaned | done
+# -h, --help, outside a git repository         | exit 2 with the usage line or the reason                | done
+# git worktree list fails                      | exit 2, says so, deletes nothing                        | done
 # ==============================================================================
 set -uo pipefail
 
@@ -62,10 +66,8 @@ export GIT_CONFIG_NOSYSTEM=1 HOME="$WORK"
 
 PASS=0
 FAIL=0
-TODO=0
 ok()   { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
-todo() { echo "  TODO $1"; TODO=$((TODO + 1)); }
 
 NOW="$(date +%s)"
 # stamp DAYS: the `touch -t` timestamp DAYS whole days before NOW (GNU or BSD date).
@@ -178,6 +180,66 @@ clean
 [[ "$RC" -eq 0 ]] && ok "a worktree with no target/ does not fail the run" || bad "no-target run exits 0 (got $RC): $OUT"
 removed "...and the rest are cleaned" "$MAIN/target/debug/build/pkga/aaa"
 removed "...and no target/ is created in the worktree" "$WT/target"
+lacks "...and the worktree is not named in the summary" "$WT/target"
+
+echo "== arguments, layout and sizes =="
+setup args
+unit "$MAIN/target/debug/build/pkga/aaa" 8
+for h in -h --help; do
+    clean "$h"
+    [[ "$RC" -eq 2 ]] && ok "$h exits 2" || bad "$h exits 2 (got $RC)"
+    has "...with the usage line" "usage:"
+done
+kept "...and deletes nothing" "$MAIN/target/debug/build/pkga/aaa/out"
+mkdir -p "$WORK/nogit"
+OUT="$(cd "$WORK/nogit" && GIT_CEILING_DIRECTORIES="$WORK" bash "$SCRIPT" 2>&1)"; RC=$?
+[[ "$RC" -eq 2 ]] && ok "outside a git repository exits 2" || bad "outside a git repository exits 2 (got $RC): $OUT"
+has "...and says so" "not inside a git repository"
+
+setup gitfail
+# A `git worktree list` that fails must not read as a clean run over zero checkouts.
+mkdir -p "$WORK/gitstub"
+cat > "$WORK/gitstub/git" <<EOF
+#!/bin/bash
+for a in "\$@"; do [ "\$a" = worktree ] && { echo "fatal: stub" >&2; exit 128; }; done
+exec "$(command -v git)" "\$@"
+EOF
+chmod +x "$WORK/gitstub/git"
+unit "$MAIN/target/debug/build/pkga/aaa" 8
+PATH="$WORK/gitstub:$PATH" clean
+[[ "$RC" -eq 2 ]] && ok "a failed git worktree list exits 2" || bad "a failed git worktree list exits 2 (got $RC): $OUT"
+has "...and says so" "git worktree list failed"
+kept "...and deletes nothing" "$MAIN/target/debug/build/pkga/aaa/out"
+
+setup incronly
+# A profile with only incremental/ (no build/) is still a profile.
+unit "$MAIN/target/check/incremental/crate-1abc" 8
+clean
+removed "a profile holding only incremental/ is cleaned" "$MAIN/target/check/incremental/crate-1abc"
+
+setup oldlayout
+# cargo's older layout: build/<pkg>-<hash>/ beside deps/ and .fingerprint/.
+unit "$MAIN/target/debug/build/pkga-0123/out" 8; unit "$MAIN/target/debug/deps" 8
+unit "$MAIN/target/release/build/pkga-4567/out" 8; unit "$MAIN/target/release/.fingerprint/pkga-4567" 8
+unit "$MAIN/target/new/build/pkga/aaa" 8
+clean
+kept "a profile with deps/ (older layout) is kept whole" "$MAIN/target/debug/build/pkga-0123/out/out"
+kept "a profile with .fingerprint/ (older layout) is kept whole" "$MAIN/target/release/build/pkga-4567/out/out"
+has "...and says why" "cargo's older layout"
+removed "...while a profile in the current layout is cleaned" "$MAIN/target/new/build/pkga/aaa"
+
+setup sizes
+# 42 MiB allocated: du -sk is just over 43008 KB, which reads 42 MB at 1024 KB per MB
+# and 43 at 1000, so the unit is pinned.
+mkdir -p "$MAIN/target/debug/build/pkga/big"
+fallocate -l 42M "$MAIN/target/debug/build/pkga/big/blob" 2>/dev/null \
+    || dd if=/dev/zero of="$MAIN/target/debug/build/pkga/big/blob" bs=1048576 count=42 2>/dev/null
+find "$MAIN/target/debug/build/pkga/big" -depth -exec touch -t "$(stamp 8)" {} +
+clean
+removed "the 42 MiB unit is removed" "$MAIN/target/debug/build/pkga/big"
+has "the profile line reports the MB freed" "target/debug: removed 2 dirs, 42 MB"
+has "the target total reports the MB freed" "total: removed 2 dirs, 42 MB"
+has "the run total reports the MB freed" "removed 2 dirs, 42 MB in all"
 
 echo "== a profile a build is using =="
 setup locked
@@ -283,12 +345,12 @@ unit "$MAIN/target/debug/build/pkga/aaa" 8; unit "$MAIN/target/ois-drift/run-new
 unit "$MAIN/old-dir" 8; printf 'n\n' > "$MAIN/notes.txt"; touch -t "$(stamp 8)" "$MAIN/notes.txt"
 unit "$SCRATCH/other.abc" 8; unit "$SCRATCH/setup-worktree-test.x" 8
 printf 'm\n' > "$SCRATCH/mutate.txt"; touch -t "$(stamp 8)" "$SCRATCH/mutate.txt"
-unit "$MAIN/target/debug/deps/old" 8; unit "$MAIN/target/debug/examples/old" 8; unit "$MAIN/target/doc/old" 8
+unit "$MAIN/target/debug/examples/old" 8; unit "$MAIN/target/doc/old" 8
 unit "$MAIN/target/tmp/old" 8
 clean --scratch
 removed "the stale build unit is removed (positive control)" "$MAIN/target/debug/build/pkga/aaa"
 for f in "$MAIN/old-dir/out" "$MAIN/notes.txt" "$SCRATCH/other.abc/out" "$SCRATCH/setup-worktree-test.x/out" \
-         "$SCRATCH/mutate.txt" "$MAIN/target/debug/deps/old/out" "$MAIN/target/debug/examples/old/out" \
+         "$SCRATCH/mutate.txt" "$MAIN/target/debug/examples/old/out" \
          "$MAIN/target/doc/old/out" "$MAIN/target/tmp/old/out" "$MAIN/target/debug/.cargo-build-lock"; do
     kept "untouched: ${f#"$WORK"/}" "$f"
 done
@@ -315,5 +377,5 @@ else
 fi
 
 echo
-echo "clean-stale: $PASS passed, $FAIL failed, $TODO todo"
+echo "clean-stale: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

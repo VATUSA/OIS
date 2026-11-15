@@ -139,8 +139,9 @@ test *args:
     bash bin/run-tests.sh "$@"
 
 # Delete build output no build has written for DAYS days (default 7) in every checkout's target/:
-# cargo units, incremental state and ois-drift/ (bin/clean-stale.sh). A profile a running build
-# holds the lock on is kept. --scratch also deletes old ${TMPDIR:-/tmp}/mutate.* dirs.
+# cargo units, incremental state and ois-drift/ (bin/clean-stale.sh). A profile whose cargo build
+# is running is kept; a test run is not covered, so a suite mid-run can lose an old test binary.
+# --scratch also deletes old ${TMPDIR:-/tmp}/mutate.* dirs.
 # Delete stale build output across every worktree's target/
 [positional-arguments]
 clean-stale *args:
