@@ -8,8 +8,8 @@
 # temp dir. Every run but the default-directory case starts from a cwd with no
 # backend/migrations, so a mutant that ignores $1 finds nothing instead of this
 # checkout's real migrations. Each case asserts the exit code and the message:
-# several mutants exit 1 for the wrong reason. Pure shell; runs unchanged on macOS
-# bash 3.2 and Linux. Self-reports pass/fail, exits non-zero on any failure.
+# several mutants exit 1 for the wrong reason. Pure shell; runs under bash 3.2 and
+# Linux. Self-reports pass/fail, exits non-zero on any failure.
 # ==============================================================================
 set -uo pipefail
 
@@ -141,6 +141,12 @@ for lc in C "$EN_US"; do
     lacks "LC_ALL=$lc 0090_a + 90_b + 900_c" "$ERR" "900_c.sql"
 done
 CHECK_LC=""
+
+echo "== 11. A name with no digits before the underscore is refused =="
+migrations "$WORK/noprefix" 0090_a.sql _x.sql
+check "$WORK/cwd" "$WORK/noprefix"
+expect_rc "_x" 1
+has "_x" "$ERR" "not a versioned migration (sqlx needs NNNN_name.sql): _x.sql"
 
 echo ""
 echo "check-migration-versions: $PASS passed, $FAIL failed"
