@@ -56,9 +56,9 @@ pub(crate) fn ephemeral(content: &str) -> CreateInteractionResponse {
 ///
 /// Newlines are kept: an advisory document is multi-line and its alignment is its content, and the
 /// structured breakdown is pretty-printed JSON. Discord code blocks have no escape, so the fence
-/// character is swapped for `'`. An advisory's free text (`remarks`, `associated_restrictions`,
-/// `modifications`) is typed by a controller and filtered nowhere, so a backtick run would
-/// otherwise close the fence early and render the rest as live Discord markdown.
+/// character is swapped for `'`. An advisory's text fields are typed by a controller and no backend
+/// path removes backticks from them, so a backtick run would otherwise close the fence early and
+/// render the rest as live Discord markdown.
 pub(crate) fn fence_safe(text: &str) -> String {
     text.replace('`', "'")
 }
