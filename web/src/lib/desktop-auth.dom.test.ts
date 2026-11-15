@@ -2,7 +2,7 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 
 const post = vi.fn();
-vi.mock("@/lib/api", () => ({ API_BASE: "http://127.0.0.1:3000", ois: { POST: (...a: unknown[]) => post(...a) } }));
+vi.mock("@/lib/api", () => ({ ois: { POST: (...a: unknown[]) => post(...a) } }));
 vi.mock("@/lib/desktop-token", () => ({
   getDesktopToken: async () => "ois_dsk_stored",
   setDesktopToken: vi.fn(),
@@ -14,7 +14,7 @@ vi.mock("@/lib/platform", () => ({
   invokeDesktop: vi.fn(async () => undefined),
 }));
 
-import {LAUNCH_REFRESH_BUDGET_MS, refreshBeforeLaunch, rotateOnLaunch} from "./desktop-auth";
+import {desktopLogin, LAUNCH_REFRESH_BUDGET_MS, refreshBeforeLaunch, rotateOnLaunch} from "./desktop-auth";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -65,5 +65,20 @@ describe("rotateOnLaunch (VATUSA/OIS#349 review)", () => {
     platform.tauri = false;
     await rotateOnLaunch();
     expect(post).not.toHaveBeenCalled();
+  });
+});
+
+describe("desktopLogin (VATUSA/OIS#924)", () => {
+  it("invokes begin_login without an API base and exchanges the code it returns", async () => {
+    const {invokeDesktop} = await import("@/lib/platform");
+    const invoke = vi.mocked(invokeDesktop);
+    invoke.mockImplementation(async (command: string) => (command === "begin_login" ? "code-1" : undefined) as never);
+    post.mockResolvedValue({data: {token: "ois_dsk_new"}, error: undefined});
+
+    await desktopLogin();
+
+    const call = invoke.mock.calls.find(([command]) => command === "begin_login");
+    expect(call).toEqual(["begin_login"]);
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/desktop/exchange", {body: {code: "code-1"}});
   });
 });

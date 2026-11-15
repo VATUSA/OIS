@@ -15,7 +15,11 @@ use flate2::{Compression, write::GzEncoder};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
-use crate::{logging::LOG_FILE_NAME, redact::redact};
+use crate::{
+    api_origin::{Build, THIS_BUILD},
+    logging::LOG_FILE_NAME,
+    redact::redact,
+};
 
 /// The server's route; it only accepts a desktop session token (`ois_dsk_…`).
 const UPLOAD_PATH: &str = "/api/v1/diagnostics/reports";
@@ -24,14 +28,15 @@ const UPLOAD_PATH: &str = "/api/v1/diagnostics/reports";
 /// top out near 8 MB (see `logging.rs`); text compresses roughly tenfold, well inside the 5 MB cap.
 const MAX_LOG_BYTES: usize = 12 * 1024 * 1024;
 
-/// Uploads one report and returns its id, or a message fit to show the user.
+/// Uploads one report and returns its id, or a message fit to show the user. The report goes to this
+/// build's API origin, checked before the token is read; the webview names no destination (#924).
 #[tauri::command]
 pub async fn send_diagnostics(
     app: AppHandle,
-    api_base: String,
     note: String,
     context: Value,
 ) -> Result<String, String> {
+    let url = upload_url(&THIS_BUILD)?;
     let token = crate::auth::get_token(app.clone())?
         .ok_or_else(|| "Sign in to send diagnostics.".to_string())?;
     let logs = match app.path().app_log_dir() {
@@ -67,7 +72,6 @@ pub async fn send_diagnostics(
                 .mime_str("application/gzip")
                 .map_err(|e| e.to_string())?,
         );
-    let url = format!("{}{UPLOAD_PATH}", api_base.trim_end_matches('/'));
     let response = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token)
@@ -94,6 +98,11 @@ pub async fn send_diagnostics(
         429 => "You've sent several reports recently. Please wait an hour and try again.".into(),
         _ => format!("OIS couldn't accept the report ({status})."),
     })
+}
+
+/// The report endpoint on `build`'s API origin, or the refusal when that origin is not allowed.
+fn upload_url(build: &Build) -> Result<String, String> {
+    Ok(format!("{}{UPLOAD_PATH}", build.api_origin()?))
 }
 
 /// The `meta` JSON and the gzipped logs, both redacted, the logs cut to their last
@@ -232,6 +241,100 @@ mod tests {
         assert!(
             !sent.contains("89abcdef"),
             "no fragment of the token survives"
+        );
+    }
+
+    // #924: send_diagnostics uploads to this build's API origin only.
+
+    #[test]
+    fn upload_url_refuses_a_build_whose_origin_is_not_allowed() {
+        let refused = [
+            Build {
+                pinned: None,
+                debug: false,
+            },
+            Build {
+                pinned: Some("http://evil.test"),
+                debug: false,
+            },
+            Build {
+                pinned: Some("https://ois.example.org?x=1"),
+                debug: false,
+            },
+            Build {
+                pinned: Some("http://127.0.0.1:3000"),
+                debug: false,
+            },
+        ];
+        for build in &refused {
+            let result = upload_url(build);
+            assert!(
+                result.as_ref().is_err_and(|m| !m.is_empty()),
+                "{:?}: {result:?}",
+                build.pinned
+            );
+        }
+        assert!(
+            upload_url(&refused[1])
+                .unwrap_err()
+                .contains("http://evil.test")
+        );
+    }
+
+    #[test]
+    fn upload_url_is_the_pinned_origin_and_the_reports_path() {
+        let build = Build {
+            pinned: Some("https://ois.example.org/"),
+            debug: false,
+        };
+        assert_eq!(
+            upload_url(&build),
+            Ok("https://ois.example.org/api/v1/diagnostics/reports".into())
+        );
+    }
+
+    #[test]
+    fn upload_url_uses_the_dev_origin_in_a_debug_build_with_no_pin() {
+        assert_eq!(
+            upload_url(&Build {
+                pinned: None,
+                debug: true
+            }),
+            Ok("http://127.0.0.1:3000/api/v1/diagnostics/reports".into())
+        );
+    }
+
+    /// The check sits at the top of `send_diagnostics` (#924 AC5), before the token is read, so a
+    /// refusal can neither carry nor log it. The command needs an app handle, the keychain and
+    /// `THIS_BUILD`, so its wiring is pinned by its source rather than by calling it.
+    #[test]
+    fn send_diagnostics_resolves_its_url_through_upload_url_before_any_io() {
+        let source = include_str!("diagnostics.rs");
+        let source = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let start = source.find("pub async fn send_diagnostics(").unwrap();
+        let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+        let signature = &body[..body.find('{').unwrap()];
+        assert!(
+            !signature.contains("api_base"),
+            "the webview names no origin: {signature}"
+        );
+        let check = body
+            .find("upload_url(&THIS_BUILD)?")
+            .expect("send_diagnostics calls upload_url");
+        for effect in [
+            "get_token(",
+            "app_log_dir(",
+            "reqwest::Client",
+            ".post(&url)",
+        ] {
+            let at = body
+                .find(effect)
+                .unwrap_or_else(|| panic!("{effect} in send_diagnostics"));
+            assert!(check < at, "the origin check must come before {effect}");
+        }
+        assert!(
+            !body.contains("UPLOAD_PATH"),
+            "send_diagnostics builds no URL of its own"
         );
     }
 

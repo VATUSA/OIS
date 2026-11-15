@@ -1,4 +1,4 @@
-import {API_BASE, ois} from "@/lib/api";
+import {ois} from "@/lib/api";
 import {getDesktopToken, setDesktopToken} from "@/lib/desktop-token";
 import {invokeDesktop, isMainWindow, isTauri} from "@/lib/platform";
 
@@ -32,9 +32,9 @@ async function store(token: string) {
 export async function desktopLogin(): Promise<void> {
   if (!isTauri()) throw new Error("desktopLogin() is only available in the desktop app");
 
-  // Tauri maps command args to camelCase; the shell takes the API base from here so the two
-  // never disagree about which backend is being signed in to.
-  const code = await invokeDesktop<string>("begin_login", {apiBase: API_BASE});
+  // The shell builds the sign-in URL on its own build's API origin, never one the webview names
+  // (#924). A release pins both halves to the same `VITE_OIS_API_URL`.
+  const code = await invokeDesktop<string>("begin_login");
   const {data, error} = await ois.POST("/api/v1/auth/desktop/exchange", {body: {code}});
   if (error || !data) throw new Error("Sign-in failed: the code was rejected");
 
