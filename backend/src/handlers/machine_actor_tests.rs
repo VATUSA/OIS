@@ -25,7 +25,11 @@ const ROLE: &str = "T583_MACHINE";
 
 /// A service account holding `permission` through a role scoped to `artcc` (`None` = national).
 /// Returns `(account id, bearer token)`.
-async fn service_account(pool: &PgPool, permission: &str, artcc: Option<&str>) -> (String, String) {
+pub(super) async fn service_account(
+    pool: &PgPool,
+    permission: &str,
+    artcc: Option<&str>,
+) -> (String, String) {
     sqlx::query(
         "insert into access.roles (name, is_system) values ($1, false) on conflict do nothing",
     )
@@ -94,7 +98,7 @@ async fn bare_service_account(pool: &PgPool) -> String {
 
 /// A user's API key granted `permission`, its owner holding it too (a key is capped by its owner).
 /// Returns `(key id, bearer token)`.
-async fn api_key(pool: &PgPool, permission: &str) -> (String, String) {
+pub(super) async fn api_key(pool: &PgPool, permission: &str) -> (String, String) {
     let owner = seed_user(pool).await;
     grant(pool, &owner, permission, None).await;
     let token = format!("ois_pat_{}", uuid::Uuid::new_v4().simple());
@@ -140,7 +144,7 @@ async fn call(
 
 /// [`call`] carrying several entries at once: a bearer (`Bearer …` → `Authorization`), a session
 /// (`ois_session=…` → `Cookie`), or any other header written `Name: value` — e.g. `If-None-Match: *`.
-async fn call_with(
+pub(super) async fn call_with(
     state: &AppState,
     method: http::Method,
     uri: &str,
