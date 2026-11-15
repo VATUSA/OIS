@@ -7497,6 +7497,7 @@ mod family_profile_wiring_tests {
             mode: "mit".into(),
             rate: 0,
             mit: 20,
+            freeze_min: 30,
             enabled: true,
             manual_order: vec![],
             manual_seq: false,
