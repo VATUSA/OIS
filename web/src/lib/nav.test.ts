@@ -108,7 +108,7 @@ describe("nav gating", () => {
       expect(canSeeItem(null, item)).toBe(false);
       // Every other link's permission, but none of this one's.
       expect(canSeeItem(holding(...ALL_REQUIRED.filter((p) => !required.includes(p))), item)).toBe(false);
-      for (const permission of required) expect(canSeeItem(holding(permission), item)).toBe(true);
+      for (const permission of required) expect(canSeeItem(holding(permission), item), `${to} via ${permission}`).toBe(true);
     });
   }
 
@@ -144,10 +144,18 @@ describe("nav gating", () => {
     expect(labels(holding("flow.fca.read"), "operations")).toEqual(["FCA", "IDST"]);
   });
 
-  // AC2 (VATUSA/OIS#966): each tab permission that admits no other Operations link, held alone.
-  for (const permission of ["tmu.groundstop.read", "tmu.gdp.read", "tmu.adv.read"]) {
-    it(`gives a ${permission}-only holder exactly the TMU link in Operations`, () => {
-      expect(labels(holding(permission), "operations")).toEqual(["TMU"]);
+  // AC2/AC3 (VATUSA/OIS#966): every TMU tab permission, held alone, shows the TMU link beside exactly
+  // the other Operations links that permission opens.
+  const TMU_TAB_OPERATIONS: [permission: string, operations: string[]][] = [
+    ["tmu.program.read", ["Airport", "TMU", "My Dashboard", "AADC"]],
+    ["tmu.tmi.read", ["TMU"]],
+    ["tmu.groundstop.read", ["TMU"]],
+    ["tmu.gdp.read", ["TMU"]],
+    ["tmu.adv.read", ["TMU"]],
+  ];
+  for (const [permission, operations] of TMU_TAB_OPERATIONS) {
+    it(`gives a ${permission}-only holder the TMU link in Operations`, () => {
+      expect(labels(holding(permission), "operations")).toEqual(operations);
     });
   }
 
