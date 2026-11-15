@@ -38,6 +38,55 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-11-15-fca-freeze-horizon",
+    date: "2026-11-15",
+    title: "FCA freeze horizon, engine-family profiles and scoped event FCAs",
+    sections: [
+      {
+        heading: "Flow and FCAs",
+        highlights: [
+          "Each FCA has a freeze horizon, set in the FCA editor as \"Freeze horizon · min\" (30 by default, 0 turns it off). Inside it, a flight's crossing time is held instead of moving on every feed update.",
+          "Released and held flights are now checked against each other, so two aircraft no longer sit closer than the FCA's spacing without a warning. A flight inside another crossing's gap shows IN GAP, and a flight running past its release or held time shows how late it is.",
+          "Every pair of crossings is spaced by the larger of the two gaps the aircraft need, in auto and manual mode and when Set searches for a slot.",
+          "Aircraft profiles have a new engine-family tier (jet, turboprop, piston) between the aircraft type and the wake class. Staff add, edit and delete family profiles in the \"Engine families\" section of the aircraft profiles page. None are added by default, so ETAs stay the same until someone adds one.",
+        ],
+      },
+      {
+        heading: "Events",
+        highlights: [
+          "Creating, editing, deleting, publishing, archiving or auto-publishing an event FCA now needs event-planning access at that FCA's facility. A planner scoped to one ARTCC can no longer change another ARTCC's event FCAs.",
+          "Deleting, deciding or releasing a claim on an ACE request only works on a request that belongs to the event in the address.",
+        ],
+      },
+      {
+        heading: "Discord",
+        highlights: [
+          "Editing a published TMI now posts its revised NTML row to the same channel as the original, on installs with more than one Discord server.",
+          "ACE request posts and claim DMs can no longer ping @everyone or a role from the text they carry.",
+          "Backticks in an advisory's remarks no longer break the \"View structured\" reply's formatting.",
+          "The bot gives up on a call to OIS that hangs, so one stuck request no longer stops the queue until a restart.",
+        ],
+      },
+      {
+        heading: "Dashboards and app",
+        highlights: [
+          "Live dashboard widgets no longer poll on a timer while live updates are arriving.",
+          "Renaming a collection now updates the Collection column in the library list view.",
+          "The app no longer opens to a blank page when the browser blocks site storage.",
+          "Secondary buttons get the same thin border as the other buttons, and tooltip dots and shortcut hints use the standard corner radii.",
+        ],
+      },
+      {
+        heading: "Security and reliability",
+        highlights: [
+          "The desktop app only sends sign-in and diagnostics requests to the OIS server it was built for.",
+          "When OIS cannot check your sign-in because of a database fault, it answers with a temporary error instead of signing you out.",
+          "VATUSA access-reset runs, which list the members they reset, are deleted 180 days after they finish.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-11-09-rap-winds",
     date: "2026-11-09",
     title: "RAP winds for every ETA, and Set finds a free slot",
