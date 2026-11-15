@@ -46,6 +46,7 @@ vi.mock("@/pages/tmu/restrictions", () => ({RestrictionsTab: () => <div data-tab
 vi.mock("@/pages/tmu/ground-stops", () => ({GroundStopsTab: () => <div data-tab="ground-stops" />}));
 vi.mock("@/pages/tmu/gdp", () => ({GdpTab: () => <div data-tab="gdp" />}));
 vi.mock("@/pages/tmu/rate-calc", () => ({RateCalculatorTab: () => <div data-tab="rate-calculator" />}));
+vi.mock("@/pages/tmu/advisories", () => ({AdvisoriesTab: () => <div data-tab="advisories" />}));
 
 import {TmuPage} from "./tmu";
 
@@ -119,6 +120,7 @@ const GATES: [permission: string, tab: string, label: string][] = [
   ["tmu.groundstop.read", "ground-stops", "Ground stops"],
   ["tmu.gdp.read", "gdp", "Ground delay"],
   ["tmu.program.read", "rate-calculator", "Rate calculator"],
+  ["tmu.adv.read", "advisories", "Advisories"],
 ];
 
 const ALL = [...new Set(GATES.map(([p]) => p))];
@@ -142,6 +144,17 @@ describe("TMU tab permission gates (VATUSA/OIS#506)", () => {
     expect(host.querySelector(`[data-tab="${tab}"]`)).not.toBeNull();
   });
 
+  // VATUSA/OIS#966 AC2: the TMU nav link carries no `?tab=`, so a holder of one tab's permission
+  // must land on that tab from the bare URL, not only when they ask for it by name.
+  it.each([
+    ["tmu.groundstop.read", "ground-stops"],
+    ["tmu.gdp.read", "gdp"],
+    ["tmu.adv.read", "advisories"],
+  ])("opens %s's tab for its sole holder when no tab is asked for", (permission, tab) => {
+    const host = render([permission]);
+    expect([...host.querySelectorAll("[data-tab]")].map((n) => n.getAttribute("data-tab"))).toEqual([tab]);
+  });
+
   // AC 1 — a holder of every *other* permission still cannot reach this tab, even by asking for it
   // in `?tab=`. Granting the rest is what makes this fail on a removed gate rather than merely on
   // an empty page.
@@ -161,7 +174,7 @@ describe("TMU tab permission gates (VATUSA/OIS#506)", () => {
     expect(host.querySelector("[data-tab]")).toBeNull();
   });
 
-  // AC 3, the other half: the full permitted list is pinned, so adding a sixth tab fails here and
+  // AC 3, the other half: the full permitted list is pinned, so adding a tab fails here and
   // whoever adds it has to extend `GATES` — which is the review signal #506 asked for.
   it("offers exactly the known tabs to a holder of everything", () => {
     render(ALL);

@@ -350,3 +350,32 @@ describe("the Sectors page in the palette", () => {
     expect(row?.textContent).not.toContain("Flow");
   });
 });
+
+// VATUSA/OIS#966 AC1/AC2 through ⌘K: the Pages scope lists every page the user may open, so the
+// TMU row is there exactly when the nav link is. Each user is a real permission tree with
+// `server_admin: false`, since a server admin passes every gate.
+describe("the TMU page in the palette (VATUSA/OIS#966)", () => {
+  const pageRows = () =>
+    Array.from(document.querySelectorAll("[data-index]")).map((r) => r.textContent ?? "");
+  const holder = (permissions: unknown) => ({ cid: 1, server_admin: false, permissions }) as never;
+
+  it("offers no TMU page to a flow.fca.read-only holder, beside the FCA page it does offer", async () => {
+    await mountSearch({ me: holder({ flow: { fca: ["read"] } }) });
+    paletteType("@pages ");
+    expect(pageRows().some((r) => r.startsWith("FCA"))).toBe(true);
+    expect(pageRows().filter((r) => r.startsWith("TMU"))).toEqual([]);
+  });
+
+  it("offers no TMU page to a flow.runway.read-only holder, beside the Runway page it does offer", async () => {
+    await mountSearch({ me: holder({ flow: { runway: ["read"] } }) });
+    paletteType("@pages ");
+    expect(pageRows().some((r) => r.startsWith("Runway"))).toBe(true);
+    expect(pageRows().filter((r) => r.startsWith("TMU"))).toEqual([]);
+  });
+
+  it("offers the TMU page to a tmu.groundstop.read-only holder", async () => {
+    await mountSearch({ me: holder({ tmu: { groundstop: ["read"] } }) });
+    paletteType("@pages ");
+    expect(pageRows().filter((r) => r.startsWith("TMU"))).toHaveLength(1);
+  });
+});
