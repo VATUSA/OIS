@@ -32,10 +32,16 @@ migrations() {
     for f in "$@"; do : > "$dir/$f"; done
 }
 
-# check CWD [ARG] — run the real script from CWD; sets RC, OUT (stdout), ERR (stderr)
+# check CWD [ARG] — run the real script from CWD; sets RC, OUT (stdout), ERR (stderr).
+# CHECK_LC, when set, is the run's LC_ALL; otherwise the caller's locale applies.
+CHECK_LC=""
 check() {
     local cwd="$1"; shift
-    (cd "$cwd" && bash "$SCRIPT" "$@") >"$WORK/out" 2>"$WORK/err" </dev/null
+    if [[ -n $CHECK_LC ]]; then
+        (cd "$cwd" && LC_ALL="$CHECK_LC" bash "$SCRIPT" "$@") >"$WORK/out" 2>"$WORK/err" </dev/null
+    else
+        (cd "$cwd" && bash "$SCRIPT" "$@") >"$WORK/out" 2>"$WORK/err" </dev/null
+    fi
     RC=$?
     OUT="$(cat "$WORK/out")"
     ERR="$(cat "$WORK/err")"
@@ -119,6 +125,22 @@ migrations "$WORK/mixed" 0090_a.sql 0091_b.sql README.md
 check "$WORK/cwd" "$WORK/mixed"
 expect_rc "README.md beside two migrations" 0
 has "README.md beside two migrations" "$OUT" "migration versions are unique (2 files)"
+
+echo "== 10. The sort is numeric, whatever the locale collates =="
+# The script sorts "<version> <name>" lines. glibc's en_US.UTF-8 collation ignores the
+# space, so a plain text sort orders these 90, 900, 90 and the pair is not adjacent.
+migrations "$WORK/collate" 0090_a.sql 90_b.sql 900_c.sql
+EN_US="$(locale -a 2>/dev/null | grep -E '^en_US\.(UTF-8|utf8)$' | head -n 1)"
+for lc in C "$EN_US"; do
+    if [[ -z $lc ]]; then echo "  SKIP: no en_US.UTF-8 locale on this host"; continue; fi
+    CHECK_LC="$lc"
+    check "$WORK/cwd" "$WORK/collate"
+    expect_rc "LC_ALL=$lc 0090_a + 90_b + 900_c" 1
+    has "LC_ALL=$lc 0090_a + 90_b + 900_c" "$ERR" "0090_a.sql"
+    has "LC_ALL=$lc 0090_a + 90_b + 900_c" "$ERR" "90_b.sql"
+    lacks "LC_ALL=$lc 0090_a + 90_b + 900_c" "$ERR" "900_c.sql"
+done
+CHECK_LC=""
 
 echo ""
 echo "check-migration-versions: $PASS passed, $FAIL failed"
