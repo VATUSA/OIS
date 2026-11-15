@@ -1,9 +1,9 @@
-//! Desktop authentication: the OS keychain, and the loopback half of the VATSIM OAuth flow (#346).
+//! Desktop authentication: the token store, and the loopback half of the VATSIM OAuth flow (#346).
 //!
 //! The desktop app cannot carry the website's session cookie — a Tauri webview has no browser
 //! origin — so it authenticates with a session token sent as `Authorization: Bearer ois_dsk_…`.
-//! That token lives in the real OS keychain (macOS Keychain, Windows Credential Manager, Linux
-//! Secret Service), which is also what makes the session survive a restart.
+//! That token lives in the OS credential store on Windows and Linux and in a 0600 file on macOS
+//! (see `store`, #535), which is also what makes the session survive a restart.
 //!
 //! Sign-in follows RFC 8252 (OAuth for native apps): we open the **system browser**, not an
 //! in-app one, so the app never observes the user's VATSIM credentials. The browser lands on a
@@ -90,8 +90,7 @@ fn entry() -> Result<keyring::Entry, String> {
 ///
 /// Every Tauri webview loads its own copy of the frontend, so each pop-out (#349) and each restored
 /// route window has its own in-memory cache and used to make its own `get_token` call — N windows
-/// meant N keychain reads. On macOS every read is ACL-gated and can put up a login-password prompt,
-/// so that multiplied the prompts (#535). Caching here makes it one read per process however many
+/// meant N store reads (#535). Caching here makes it one read per process however many
 /// windows ask. [`store_token`] and [`delete_token`] keep it in step, since both already know the
 /// value they wrote.
 ///

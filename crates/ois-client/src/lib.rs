@@ -172,7 +172,8 @@ impl OisClient {
     }
 
     /// Lease up to `limit` of `consumer`'s pending outbound jobs (marks them in-progress). Needs
-    /// `integration.jobs.update`. The backend requires `consumer` and returns only that consumer's jobs.
+    /// `integration.jobs.update`. The consumer is the calling service account's key; `consumer`, if
+    /// sent, must match it, and the lease returns only that consumer's jobs.
     pub async fn lease_jobs(
         &self,
         consumer: &str,
@@ -220,8 +221,6 @@ impl OisClient {
         Ok(())
     }
 
-    /// Claim an ACE request on behalf of a Discord user (resolved to the linked OIS user server-side).
-    /// A `403` means that Discord account isn't linked; a `409` means it was already claimed.
     /// The event window + pre-computed HHMM slot options for a request's claim selectors.
     pub async fn ace_info(&self, request_id: &str) -> Result<AceInfo, ClientError> {
         let resp = self
@@ -269,6 +268,8 @@ impl OisClient {
         Ok(resp.json::<DiscordAdvisoryInfo>().await?)
     }
 
+    /// Claim an ACE request on behalf of a Discord user (resolved to the linked OIS user server-side).
+    /// A `403` means that Discord account isn't linked; a `409` means it was already claimed.
     #[allow(clippy::too_many_arguments)]
     pub async fn claim_ace_via_discord(
         &self,

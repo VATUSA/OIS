@@ -168,8 +168,8 @@ export async function openPopout(spec: PopoutSpec): Promise<boolean> {
  * Opens a whole route in its own window, so the app can be spread across monitors (#350).
  *
  * Unlike a pop-out this is an ordinary window — full shell, not pinned on top — because it is the
- * app, not a floating readout. It authenticates without a second sign-in: the token lives in the OS
- * keychain (#346), not a per-window cookie.
+ * app, not a floating readout. It authenticates without a second sign-in: the token lives in the
+ * desktop's token store (#346, #535), not a per-window cookie.
  *
  * A no-op on the web build, where `can("multiWindow")` is false.
  */

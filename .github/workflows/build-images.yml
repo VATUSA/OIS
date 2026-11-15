@@ -1,7 +1,7 @@
 name: Build images
 
-# Build and push the backend + web images to GHCR on pushes to main and next, on version tags, and
-# on demand. Deploying a given tag to dev/staging/prod is a downstream step (pull the tag you want).
+# Build and push the backend, web, docs and discord images to GHCR on pushes to main and next, on
+# version tags, and on demand. Deploying a given tag to dev/staging/prod is a downstream step (pull the tag you want).
 #
 # `next` is the integration/test-server branch (see #87): a push to it builds and tags `:next`
 # (never `:latest`, which is gated to the default branch below) and auto-deploys to the test server

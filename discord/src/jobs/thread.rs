@@ -8,8 +8,7 @@ use serenity::all::{
 
 use crate::util::{channel, str_field, truncate};
 
-/// Fallback body if the payload somehow lacks `thread_template` (e.g. mid-deploy) — identical text
-/// to what was hard-coded here before the website-configured template existed.
+/// Fallback body if the payload lacks `thread_template` (e.g. a job enqueued mid-deploy).
 const FALLBACK_TEMPLATE: &str = "**{{title}} | Planning Thread**\n\
     {{title}} is on {{date_line}}\n\n\
     Review the following for your facility:\n\

@@ -35,7 +35,7 @@ deploy:
     just smoke
 
 # Post-deploy health check: retries through both "not reachable yet" and "reachable but DB not
-# ready" — migrations (63 today) run before the API's TCP listener binds, so on a fresh DB or a
+# ready" — migrations run before the API's TCP listener binds, so on a fresh DB or a
 # heavy migration the port can take a while to open, and a container can start answering /health
 # before its own DB pool's first connection lands. Only fails loudly (non-zero exit, real reason
 # printed) once the full budget is spent — /health always returns HTTP 200 even when the database
