@@ -18,11 +18,12 @@
 # The full gate is every job .github/workflows/ci.yml runs that can run here, in CI's
 # order: migration versions, cargo fmt --check, clippy -D warnings, nextest (--profile
 # ci), doc tests, pnpm install --frozen-lockfile, lint, typecheck, vitest, pnpm audit,
-# cargo deny and the client-drift check. Every step runs and prints its result, then a
+# cargo deny, the client-drift check and the shell suites (bin/run-shell-suites.sh: every
+# bin/lib/*.test.sh, CI's shell-tests job). Every step runs and prints its result, then a
 # summary. A step whose tool is missing is MISSING, never passed, and blocks the
 # marker: CI runs every one of them. Not covered: CI's macOS/Windows/Linux desktop
 # matrix (clippy compiles the Tauri shell for this host only) and its windows-hooks job
-# (bin/lib/file-lock.test.sh on Windows; run it by hand here).
+# (bin/lib/file-lock.test.sh on Windows; the shell suites step runs it on this host).
 #
 # pnpm audit and cargo deny are ADVISORY: they run and print their result, but neither a
 # failure nor a missing cargo-deny blocks the marker. Both judge the dependency tree
@@ -38,7 +39,9 @@
 # printed (.claude/rules/test-quality.md): nextest's `Summary [...] N tests run: N
 # passed`, with at least one test run and nothing failed; each `test result:` line
 # of the doc tests (OIS has none today, so zero passed is a pass); vitest's `Test
-# Files` and `Tests` lines, with nothing failed and at least one test passed.
+# Files` and `Tests` lines, with nothing failed and at least one test passed. The shell
+# suites step passes on bin/run-shell-suites.sh's exit code, which is non-zero when a
+# suite failed or none was found.
 #
 # .env is loaded (`set -a; . ./.env; set +a`) because every #[sqlx::test] needs
 # DATABASE_URL; the full gate refuses to start without it or without node_modules.
@@ -273,6 +276,8 @@ else
 fi
 # client-drift job
 run_step "client drift" - -- drift
+# shell-tests job
+run_step "shell suites" - -- bash "$SCRIPT_DIR/run-shell-suites.sh"
 
 echo
 echo "==> run-tests summary"

@@ -6,7 +6,8 @@
 #   bash bin/lib/run-tests.test.sh
 #
 # Each case runs the script inside a scratch git repo with stub `cargo` and `pnpm`
-# first on PATH, so every step's output and exit code are whatever the case says.
+# first on PATH and one stub shell suite in bin/lib, so every step's output and exit
+# code are whatever the case says.
 # Removing any guard turns at least one refusal case red. Self-reports pass/fail,
 # exits non-zero on any failure.
 #
@@ -22,7 +23,9 @@ SCRIPT="$ROOT/bin/run-tests.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/run-tests-test.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR CARGO_TARGET_DIR
+# DATABASE_URL: `just test` exports .env to its shell suites step, which runs this suite; each
+# scratch repo's own .env must decide it.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR CARGO_TARGET_DIR DATABASE_URL
 export GIT_AUTHOR_NAME=T GIT_AUTHOR_EMAIL=t@e.com GIT_COMMITTER_NAME=T GIT_COMMITTER_EMAIL=t@e.com
 export GIT_CONFIG_NOSYSTEM=1 HOME="$WORK"
 # Real locks, in a directory no live run uses.
@@ -115,8 +118,10 @@ export NX_GREEN DOC_OK VT_GREEN
 # with a .env and node_modules (both ignored).
 new_repo() {
     REPO="$WORK/repo.$1"
-    mkdir -p "$REPO/.github/scripts" "$REPO/packages/api-client/src/generated" "$REPO/node_modules"
+    mkdir -p "$REPO/.github/scripts" "$REPO/packages/api-client/src/generated" "$REPO/node_modules" "$REPO/bin/lib"
     git -C "$REPO" init -q -b feat/1/x
+    # The one shell suite the shell suites step finds: logs its run, exits $STUB_SUITE_RC.
+    printf '#!/bin/bash\necho "shell suite ok" >> "$STUB_LOG"\nexit "${STUB_SUITE_RC:-0}"\n' > "$REPO/bin/lib/ok.test.sh"
     printf '#!/bin/bash\nexit "${STUB_MIGRATIONS_RC:-0}"\n' > "$REPO/.github/scripts/check-migration-versions.sh"
     chmod +x "$REPO/.github/scripts/check-migration-versions.sh"
     printf 'export interface paths {}\n' > "$REPO/packages/api-client/src/generated/schema.d.ts"
@@ -139,7 +144,7 @@ invoke() {
     RC=$?
     unset STUB_HOOK GIT_FAIL_STATUS STUB_NX STUB_NX_RC STUB_DOC STUB_DOC_RC STUB_VT STUB_VT_RC STUB_VT_TAIL \
         STUB_FMT_RC STUB_CLIPPY_RC STUB_DENY_RC STUB_LINT_RC STUB_TYPECHECK_RC STUB_AUDIT_RC \
-        STUB_MIGRATIONS_RC STUB_NO_NEXTEST STUB_NO_DENY STUB_DRIFT
+        STUB_MIGRATIONS_RC STUB_NO_NEXTEST STUB_NO_DENY STUB_DRIFT STUB_SUITE_RC
 }
 
 # run NAME [ARGS...]: invoke in a fresh committed repo.
@@ -175,8 +180,9 @@ run clean
 expect_stamp "every step green on a clean commit (captured nextest, doc-test and vitest summaries)"
 summary_has "...the summary lists each step's result" "PASS     rust tests (cargo nextest --profile ci)"
 summary_has "...the vitest step included" "PASS     pnpm test"
+summary_has "...the shell suites step included" "PASS     shell suites"
 if [[ "$(cat "$WORK_ARGS")" == "nextest run --workspace --all-targets --profile ci" ]]; then ok "runs cargo nextest run --workspace --all-targets --profile ci"; else bad "nextest arguments: $(cat "$WORK_ARGS")"; fi
-want="cargo fmt --all -- --check|cargo clippy --workspace --all-targets -- -D warnings|cargo nextest --version|cargo nextest run|cargo test --workspace --doc|pnpm install --frozen-lockfile --prefer-offline|pnpm exec turbo run lint --force|pnpm exec turbo run typecheck --force|pnpm exec turbo run test --force|pnpm audit --audit-level=high|cargo deny --version|cargo deny check|cargo test -p ois-backend --lib openapi::dump_openapi_json|pnpm --filter @ois/api-client codegen"
+want="cargo fmt --all -- --check|cargo clippy --workspace --all-targets -- -D warnings|cargo nextest --version|cargo nextest run|cargo test --workspace --doc|pnpm install --frozen-lockfile --prefer-offline|pnpm exec turbo run lint --force|pnpm exec turbo run typecheck --force|pnpm exec turbo run test --force|pnpm audit --audit-level=high|cargo deny --version|cargo deny check|cargo test -p ois-backend --lib openapi::dump_openapi_json|pnpm --filter @ois/api-client codegen|shell suite ok"
 got="$(sed -E 's/^(cargo nextest run|cargo test -p ois-backend --lib openapi::dump_openapi_json|pnpm --filter @ois\/api-client codegen).*/\1/' "$STUB_LOG" | paste -sd'|' -)"
 [[ "$got" == "$want" ]] && ok "...every CI step, in CI's order, and no cargo check" || bad "steps run: $got"
 for task in lint typecheck test; do
@@ -270,6 +276,18 @@ for step in FMT CLIPPY LINT TYPECHECK MIGRATIONS; do
     expect_none "a failing ${step} step" "failed:"
 done
 
+export STUB_SUITE_RC=1
+run suite-red
+expect_none "a shell suite exiting 1" "failed: shell suites"
+summary_has "...the summary names the step" "FAIL     shell suites (exited 1)"
+[[ $RC -eq 1 ]] && ok "...and the gate exits 1" || bad "exit code $RC, want 1"
+
+new_repo no-suites
+git -C "$REPO" rm -q bin/lib/ok.test.sh && git -C "$REPO" -c core.hooksPath=/dev/null commit -qm "no suites"
+SHA="$(git -C "$REPO" rev-parse HEAD)"
+invoke no-suites
+expect_none "no shell suite to run" "failed: shell suites"
+
 export STUB_DRIFT=1
 run drift
 expect_none "a stale generated client" "failed: client drift"
@@ -333,7 +351,7 @@ expect_none "no node_modules" "node_modules missing"
 echo "Subdirectory:"
 new_repo subdir
 mkdir -p "$REPO/bin/lib" "$REPO/sub"
-cp "$SCRIPT" "$ROOT/bin/with-lock.sh" "$REPO/bin/" && cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/portable.sh" "$ROOT/bin/lib/flock-run.pl" "$REPO/bin/lib/" && printf 'x\n' > "$REPO/sub/f"
+cp "$SCRIPT" "$ROOT/bin/with-lock.sh" "$ROOT/bin/run-shell-suites.sh" "$REPO/bin/" && cp "$ROOT/bin/lib/marker_manifest.py" "$ROOT/bin/lib/file_lock.py" "$ROOT/bin/lib/portable.sh" "$ROOT/bin/lib/flock-run.pl" "$REPO/bin/lib/" && printf 'x\n' > "$REPO/sub/f"
 git -C "$REPO" add bin sub && git -C "$REPO" -c core.hooksPath=/dev/null commit -qm script
 SHA="$(git -C "$REPO" rev-parse HEAD)"
 export STUB_LOG="$WORK/log.subdir" WORK_ARGS="$WORK/args.subdir"

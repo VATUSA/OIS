@@ -164,3 +164,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: OIS_OPENAPI_URL=/tmp/ois-openapi.json pnpm --filter @ois/api-client codegen
       - run: git diff --exit-code -- packages/api-client/src/generated/schema.d.ts
+
+  shell-tests:
+    # Every bin/lib/*.test.sh suite: the tests for the git hooks, the Claude Code gates in
+    # .claude/hooks/ and the bin/ scripts (#909). bin/run-shell-suites.sh finds them by glob,
+    # names each failing suite and prints its log; `just test` runs the same script as its
+    # `shell suites` step. A suite that cannot run here says SKIP from a check of its own.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash bin/run-shell-suites.sh
