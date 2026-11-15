@@ -21,6 +21,7 @@
 //                                              |                                                          | is memoized on `data`, which did not change)
 // AC2 ascending sort orders by the new name    | sorts by the new collection names, ascending, after ...  | the sort reads the per-row cached accessor value
 // AC2 descending sort orders by the new name   | sorts by the new collection names, descending, after ... | as above, on the second header click
+// No collection, or a missing one, shows "—"   | shows a dash for a board with no collection and for ...  | the row's name falls back to anything but ""
 import type * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
@@ -336,10 +337,37 @@ describe("The Collection column follows a collection rename (#877)", () => {
     expect(row).not.toContain("Arrivals");
   });
 
+  it("shows a dash for a board with no collection and for one whose collection is gone", async () => {
+    const {host, qc} = await mount({
+      dashboards: [
+        {id: "b1", name: "Ungrouped board", collection_id: null, updated_at: "2026-10-02T00:00:00Z"},
+        {id: "b2", name: "Orphaned board", collection_id: "gone", updated_at: "2026-10-01T00:00:00Z"},
+        {id: "b3", name: "Filed board", collection_id: "c1", updated_at: "2026-09-30T00:00:00Z"},
+      ],
+      collections: [{id: "c1", name: "Arrivals"}],
+    } as DashboardLibrary);
+    await refetchWith(qc, {
+      dashboards: (qc.getQueryData<DashboardLibrary>(["dashboards"])?.dashboards ?? []).map((b) => ({...b})),
+      collections: [{id: "c1", name: "Holding"}],
+    } as DashboardLibrary);
+
+    const cells = [...host.querySelectorAll("tbody tr")].map((tr) =>
+      [...tr.querySelectorAll("td")].slice(0, 2).map((td) => td.textContent?.trim()),
+    );
+    // Positive control: the filed board picked up the rename in the same render.
+    expect(cells).toEqual([
+      ["Ungrouped board", "—"],
+      ["Orphaned board", "—"],
+      ["Filed board", "Holding"],
+    ]);
+  });
+
   // b1 sits in "Arrivals" and b2 in "Departures"; renaming c1 to "Zulu" flips their order by name, so
-  // a sort over the old names gives the opposite order to a sort over the new ones.
-  const TWO = {
+  // a sort over the old names puts b1 and b2 the other way round. b3 has no collection (an empty name)
+  // and is the newest, so the page's starting order, b3 b1 b2, is neither sorted result.
+  const THREE = {
     dashboards: [
+      {id: "b3", name: "Board three", collection_id: null, updated_at: "2026-10-03T00:00:00Z"},
       {id: "b1", name: "Board one", collection_id: "c1", updated_at: "2026-10-02T00:00:00Z"},
       {id: "b2", name: "Board two", collection_id: "c2", updated_at: "2026-10-01T00:00:00Z"},
     ],
@@ -350,7 +378,7 @@ describe("The Collection column follows a collection rename (#877)", () => {
   } as DashboardLibrary;
   const renamed = () =>
     ({
-      dashboards: TWO.dashboards.map((b) => ({...b})),
+      dashboards: THREE.dashboards.map((b) => ({...b})),
       collections: [
         {id: "c1", name: "Zulu"},
         {id: "c2", name: "Departures"},
@@ -367,25 +395,26 @@ describe("The Collection column follows a collection rename (#877)", () => {
     [...host.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td")?.textContent?.trim());
 
   it("sorts by the new collection names, ascending, after a collection rename", async () => {
-    const {host, qc} = await mount(TWO);
+    const {host, qc} = await mount(THREE);
     await refetchWith(qc, renamed());
-    expect(qc.getQueryData<DashboardLibrary>(["dashboards"])?.dashboards).toBe(TWO.dashboards);
+    expect(qc.getQueryData<DashboardLibrary>(["dashboards"])?.dashboards).toBe(THREE.dashboards);
 
     await sortCollection(host);
     expect(collectionHeader(host).getAttribute("aria-sort")).toBe("ascending");
-    // "Departures" before "Zulu"; the old names would put "Arrivals" (b1) first.
-    expect(rowNames(host)).toEqual(["Board two", "Board one"]);
+    // No collection, then "Departures", then "Zulu"; the old names would put "Arrivals" (b1) second.
+    expect(rowNames(host)).toEqual(["Board three", "Board two", "Board one"]);
     expect(host.querySelector("tbody")?.textContent).not.toContain("Arrivals");
   });
 
   it("sorts by the new collection names, descending, after a collection rename", async () => {
-    const {host, qc} = await mount(TWO);
+    const {host, qc} = await mount(THREE);
     await refetchWith(qc, renamed());
+    expect(qc.getQueryData<DashboardLibrary>(["dashboards"])?.dashboards).toBe(THREE.dashboards);
 
     await sortCollection(host);
     await sortCollection(host);
     expect(collectionHeader(host).getAttribute("aria-sort")).toBe("descending");
-    // "Zulu" before "Departures"; the old names would put "Departures" (b2) first.
-    expect(rowNames(host)).toEqual(["Board one", "Board two"]);
+    // "Zulu", then "Departures", then no collection; the old names would put "Departures" (b2) first.
+    expect(rowNames(host)).toEqual(["Board one", "Board two", "Board three"]);
   });
 });
