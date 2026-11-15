@@ -89,9 +89,10 @@ jobs:
       # Overrides:
       #   * `vitepress>vite: ^6.4.4` (docs-site > vitepress@1.6.4 > vite, which @vitejs/plugin-vue
       #     shares as its peer). vitepress 1.6.4 declares vite ^5.4.14, and the last vite 5 (5.4.21)
-      #     still carries GHSA-587h-7wmj-h5pm (high, launch-editor) and four lower advisories; vite
-      #     6.4.5 is patched and plugin-vue 5.2.4 accepts it. Origin #894. Revisit when vitepress
-      #     2.0.0 ships stable (2.0.0-alpha.21 declares vite ^8.3.4), then drop the override.
+      #     still carries GHSA-587h-7wmj-h5pm (high, launch-editor), seven lower vite advisories and
+      #     esbuild 0.21.5's GHSA-67mh-4wv8-2f99; vite 6.4.5 is patched and plugin-vue 5.2.4 accepts
+      #     it. Origin #894. Revisit when vitepress 2.0.0 ships stable (2.0.0-alpha.21 declares vite
+      #     ^8.3.4), then drop the override.
       #
       # Ignores: none.
       - run: pnpm audit --audit-level=high
