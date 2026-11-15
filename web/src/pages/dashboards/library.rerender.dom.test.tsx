@@ -21,7 +21,7 @@
 //                                              |                                                          | is memoized on `data`, which did not change)
 // AC2 ascending sort orders by the new name    | sorts by the new collection names, ascending, after ...  | the sort reads the per-row cached accessor value
 // AC2 descending sort orders by the new name   | sorts by the new collection names, descending, after ... | as above, on the second header click
-// No collection, or a missing one, shows "—"   | shows a dash for a board with no collection and for ...  | the row's name falls back to anything but ""
+// No collection, or a missing one, shows "—"   | shows a dash for a board with no collection and for ...  | the row's name falls back to a non-empty string
 import type * as React from "react";
 import {act} from "react";
 import {createRoot} from "react-dom/client";
