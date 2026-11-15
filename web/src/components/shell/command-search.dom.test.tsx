@@ -362,7 +362,7 @@ describe("the TMU page in the palette (VATUSA/OIS#966)", () => {
   it("offers no TMU page to a flow.fca.read-only holder, beside the FCA page it does offer", async () => {
     await mountSearch({ me: holder({ flow: { fca: ["read"] } }) });
     paletteType("@pages ");
-    expect(pageRows().some((r) => r.startsWith("FCA"))).toBe(true);
+    expect(pageRows()).toContain("FCAOperations");
     expect(pageRows().filter((r) => r.startsWith("TMU"))).toEqual([]);
   });
 
