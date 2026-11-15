@@ -91,6 +91,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
   count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
   prefiled flights must wait for the pilot to connect. (#834)
+- **Documented: 403 on the advisory edit route** (#878). `PATCH /api/v1/tmu/advisories/{id}` already
+  answered 403 for an advisory outside the caller's facility scope; the OpenAPI document now lists it.
+  Nothing changes for a caller.
 - **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
   `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
   `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory
