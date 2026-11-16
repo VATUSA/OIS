@@ -16,8 +16,10 @@ when a cited line no longer defines its constant.
 For each flight:
 
 - **Its position**, for a connected pilot: latitude, longitude, heading, groundspeed and altitude
-  from the VATSIM feed, polled every `FAST_POLL_SECS` (`backend/src/feed/mod.rs:64`) seconds and
-  every `STALE_POLL_BACKOFF_SECS` (`backend/src/feed/mod.rs:72`) while the feed repeats itself. A
+  from the VATSIM feed, polled `REFRESH_BUFFER_SECS` (`backend/src/feed/mod.rs:60`) seconds after
+  each publish's `update_timestamp`, retried every `FAST_POLL_SECS` (`backend/src/feed/mod.rs:64`)
+  seconds once that time has passed, and every `STALE_POLL_BACKOFF_SECS`
+  (`backend/src/feed/mod.rs:72`) while the feed repeats itself (`next_poll_delay`). A
   prefile has no position. It is timed only when it holds a lock, from its departure field's
   reference point; one with no lock gets no proposed wheels-up and is not timed (#814).
 - **Its flight plan**: departure, arrival, route, filed cruise altitude, filed cruise speed,
@@ -135,7 +137,7 @@ freeze. What freezes is the schedule, in three places:
 
 There is no freeze horizon, a distance or time inside which an unreleased flight's slot stops
 moving. #817 [The metering scheduler never re-checks a fixed slot and has no freeze horizon, so
-released and late flights sit inside the required gap] adds one for FCA metering.
+released and late flights sit inside the required gap] tracks adding one for FCA metering.
 
 ## The release time
 

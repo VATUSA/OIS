@@ -445,6 +445,48 @@ async fn fca_traffic_times_a_flight_from_a_lock_held_elsewhere(pool: PgPool) {
     }
 }
 
+/// #814: a release on this FCA earlier than a lock held elsewhere does not time the flight. Released
+/// here at now + 20 and held to a CFR at now + 45, it crosses one airborne ETE after the CFR: 35 min
+/// after its unlocked twin, timed from now + 10.
+#[sqlx::test]
+async fn fca_traffic_times_a_release_from_a_later_lock_held_elsewhere(pool: PgPool) {
+    let data = VatsimData {
+        pilots: vec![parked("UNL", ""), parked("REL", "")],
+        ..Default::default()
+    };
+    let state = state_with(&pool, data).await;
+    let id = corridor_fca(&pool).await;
+    let now = Utc::now();
+    issue_cfr(&pool, "REL", now + Duration::minutes(45)).await;
+    let edct = (now + Duration::minutes(20)).timestamp_millis();
+    sqlx::query(
+        "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, 'REL', $2, $3)",
+    )
+    .bind(&id)
+    .bind(edct + 30 * 60_000)
+    .bind(edct)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, board) = send_json(
+        &state,
+        Method::GET,
+        &format!("/api/v1/flow/fcas/{id}/traffic"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{board}");
+    let (unl, rel) = (row(&board, "UNL"), row(&board, "REL"));
+    assert_eq!(unl["wheels_up_proposed"], true, "positive control: {unl}");
+    assert_eq!(rel["released"], true, "{rel}");
+    let shift = gap(&rel["eta"], &unl["eta"]);
+    assert!(
+        (shift - 35 * 60).abs() <= 2,
+        "timed from the CFR at now + 45, not the release at now + 20: {shift} s after the twin: {rel}"
+    );
+}
+
 /// #814 AC2: the route popup's per-fix table and the IDST advisory EDCT time a CFR-held flight from
 /// its CFR, as the FCA board does.
 #[sqlx::test]
@@ -493,6 +535,11 @@ async fn the_fix_table_and_the_idst_advisory_time_from_a_cfr(pool: PgPool) {
     assert!(
         off <= 2,
         "the advisory EDCT is the CTA less the ETE from the CFR, off by {off} s: {advisory}"
+    );
+    let early = (at(&advisory["edct"]) - lock).num_seconds().abs();
+    assert!(
+        early <= 2,
+        "unmetered, the advisory EDCT is the CFR itself, off by {early} s: {advisory}"
     );
 }
 
