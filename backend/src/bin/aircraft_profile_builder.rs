@@ -165,7 +165,7 @@ async fn main() -> Result<(), String> {
             let rows = aircraft_profiles::list(&pool)
                 .await
                 .map_err(|e| format!("loading flow.aircraft_profile: {e:?}"))?;
-            let (set_a, set_b, b_types): (_, _, BTreeSet<String>) =
+            let (set_a, set_b, b_tiers): (_, _, BTreeSet<String>) =
                 backtest::profile_sets(&rows, &built);
             let client = reqwest::Client::builder()
                 .user_agent("ois-aircraft-profile-builder/0.1 (+https://vatusa.net)")
@@ -180,7 +180,7 @@ async fn main() -> Result<(), String> {
                 airports: &airports,
                 set_a: &set_a,
                 set_b: &set_b,
-                b_types: &b_types,
+                b_tiers: &b_tiers,
             };
             let (scored, held_out) = backtest::run(&pool, &replay, from, to)
                 .await

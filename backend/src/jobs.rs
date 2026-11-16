@@ -36,6 +36,7 @@ use crate::repos::sector_consolidations as sector_consolidations_repo;
 use crate::repos::sector_limits as sector_limits_repo;
 use crate::repos::stats as stats_repo;
 use crate::repos::tmu as tmu_repo;
+use crate::state::AppState;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -45,10 +46,9 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// "about 30 minutes" after its validity ends. The pass is what decides that, so its cadence is the
 /// tolerance: at 5 minutes removal lands in **[30, 35)** minutes rather than [30, 45).
 ///
-/// The shared constant is left at 15 minutes deliberately. Its other four users
-/// (`desktop_auth_code_prune`, `outbound_job_reaper`, `audit_log_prune`, `departure_runway_prune`)
-/// work on horizons of 12 hours and longer, where running three times as often changes no outcome
-/// and only adds load.
+/// The shared constant is left at 15 minutes deliberately: its other users are prune passes and the
+/// outbound-job reaper, where a 15-minute cadence only delays a cleanup or a requeue, and running
+/// three times as often would mostly add load.
 const TMU_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often the server admin reconciliation runs (#805): once on starting, like every `run_interval`
@@ -61,6 +61,10 @@ const SERVER_ADMIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// How often to run the event-FCA auto-publish / auto-archive pass.
 const EVENT_FCA_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often the held-STA pass meters every enabled FCA (#817). VATSIM publishes every 15 s, so a
+/// flight entering the freeze horizon is held within one feed update; until then reads re-meter it.
+const FCA_HOLD_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How often to age the stats position table.
 const STATS_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -141,7 +145,7 @@ const NAV_REFRESH_JOB: &str = "nav_refresh";
 
 /// How often to refresh winds aloft: RAP publishes a new cycle every hour.
 const WINDS_REFRESH_INTERVAL: Duration = Duration::from_secs(60 * 60);
-const WINDS_REFRESH_JOB: &str = "winds_refresh";
+pub(crate) const WINDS_REFRESH_JOB: &str = "winds_refresh";
 /// The most one RAP fetch may take before the pass gives up on it: every candidate file it falls
 /// through (up to 8), each an index and 30 range reads.
 const RAP_FETCH_BUDGET: Duration = Duration::from_secs(120);
@@ -196,11 +200,6 @@ const XPLANE_GATE_SEED_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// startup failure self-heals within minutes instead of requiring a restart; slow enough not to
 /// hammer the upstream (mwgg/Airports on GitHub raw).
 const AIRPORTS_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// How often to reload taxi observation samples from the DB (#164 sub-issue E). Observations
-/// accrue continuously and slowly from live traffic — no write path needs an instant force-reload
-/// the way admin-edited gates do, so a slow poll is enough.
-const TAXI_ESTIMATE_SAMPLES_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Fetch the latest NASR data once and hot-swap it in when it changes — but never for an older
 /// cycle than the one loaded, so a failed fetch's bundle fallback can't replace good live data.
@@ -563,6 +562,25 @@ pub fn spawn_winds_refresh(
     });
 }
 
+/// The registry name of the aircraft-profiles refresh; the held-STA pass reads its outcome.
+pub(crate) const AIRCRAFT_PROFILES_REFRESH_JOB: &str = "aircraft_profiles_refresh";
+
+/// One aircraft-profiles load: install the DB catalog and mark the table loaded (the held-STA pass
+/// waits on it, #817). A failed load keeps the current table and leaves the flag as it was.
+pub(crate) async fn refresh_aircraft_profiles_once(
+    pool: &PgPool,
+    profiles: &ArcSwap<ProfileTable>,
+    loaded: &AtomicBool,
+) -> Result<String, String> {
+    let table = aircraft_profiles_repo::load_all(pool).await.map_err(|e| {
+        tracing::error!(error = %e, "aircraft profile load failed");
+        format!("{e:?}")
+    })?;
+    profiles.store(Arc::new(table));
+    loaded.store(true, Ordering::Relaxed);
+    Ok("reloaded".to_string())
+}
+
 /// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
 /// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
 /// current table (initially the legacy default).
@@ -570,23 +588,16 @@ pub fn spawn_aircraft_profiles_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
     profiles: Arc<ArcSwap<ProfileTable>>,
+    loaded: Arc<AtomicBool>,
 ) {
     tokio::spawn(run_interval(
         reg,
-        "aircraft_profiles_refresh",
+        AIRCRAFT_PROFILES_REFRESH_JOB,
         "Reload aircraft performance profiles from the DB",
         AIRCRAFT_PROFILES_INTERVAL,
         move || {
-            let (pool, profiles) = (pool.clone(), profiles.clone());
-            async move {
-                match aircraft_profiles_repo::load_all(&pool).await {
-                    Ok(table) => {
-                        profiles.store(Arc::new(table));
-                        Ok("reloaded".to_string())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
+            let (pool, profiles, loaded) = (pool.clone(), profiles.clone(), loaded.clone());
+            async move { refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await }
         },
     ));
 }
@@ -762,7 +773,7 @@ pub fn spawn_sector_consolidations_refresh(
 }
 
 /// Keep the airport surface gate cache current for the DB-less feed subsystem
-/// (`feed::taxi_observations`'s gate matching): load every gate from the DB at startup and
+/// (`departure_runway_derive_once`'s gate matching): load every gate from the DB at startup and
 /// hot-swap it in, then reload periodically. Fails safe — a failed load keeps the current map.
 pub fn spawn_airport_gates_refresh(
     reg: Arc<JobRegistry>,
@@ -901,37 +912,6 @@ pub fn spawn_faa_surface_seed(reg: Arc<JobRegistry>, pool: PgPool) {
     ));
 }
 
-/// Keep the learned taxi-observation sample cache current for the DB-less feed subsystem
-/// (`feed::flow::resolve_ground_allowance_sec`, #164 sub-issue E): load every observation from the
-/// DB, group by airport, and hot-swap it in, then reload periodically. Fails safe — a failed load
-/// keeps the current map.
-pub fn spawn_taxi_estimate_samples_refresh(
-    reg: Arc<JobRegistry>,
-    pool: PgPool,
-    samples: Arc<
-        ArcSwap<std::collections::HashMap<String, Vec<crate::feed::taxi_estimate::TaxiSample>>>,
-    >,
-) {
-    tokio::spawn(run_interval(
-        reg,
-        "taxi_estimate_samples_refresh",
-        "Reload taxi observation samples from the DB",
-        TAXI_ESTIMATE_SAMPLES_INTERVAL,
-        move || {
-            let (pool, samples) = (pool.clone(), samples.clone());
-            async move {
-                match stats_repo::load_all_taxi_samples(&pool).await {
-                    Ok(by_airport) => {
-                        samples.store(Arc::new(by_airport));
-                        Ok("reloaded".to_string())
-                    }
-                    Err(e) => Err(format!("{e:?}")),
-                }
-            }
-        },
-    ));
-}
-
 /// Age the stats position time-series through the weekly `COMPACTION_TIERS` ladder — full fidelity
 /// for a week, then progressively coarser, forever (nothing is hard-deleted past the ladder
 /// anymore). Rows inside an open/saved `stats.capture` window are skipped at every tier (retained
@@ -959,8 +939,9 @@ pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
 
 /// One stats-compaction pass: downsample the narrow slice of positions crossing each
 /// `COMPACTION_TIERS` boundary, and prune everything past the unrelated retention horizons (winds,
-/// TM history, flight legs — `stats.position` is never hard-deleted anymore). Best-effort — a
-/// failed sub-pass is logged and the others still run; returns a summary of rows removed.
+/// TM history, flight legs — `stats.position` is never hard-deleted anymore). A
+/// failed sub-pass is logged and the others still run; the pass then returns `Err` naming every
+/// failed sub-pass, so the job registry records the run as failed.
 async fn stats_compaction_once(
     pool: &PgPool,
     last_tier_hour: &AtomicI64,
@@ -984,31 +965,31 @@ async fn stats_compaction_once(
     let hour_bucket = now.timestamp() / STATS_COMPACTION_INTERVAL.as_secs() as i64;
     let tiers_due = last_tier_hour.swap(hour_bucket, Ordering::Relaxed) != hour_bucket;
 
-    let mut passes: Vec<(&str, Result<u64, ApiError>)> = Vec::new();
+    let mut passes: Vec<(String, Result<u64, ApiError>)> = Vec::new();
     if tiers_due {
         for &(age_days, keep_every) in COMPACTION_TIERS {
             let to = now - chrono::Duration::days(age_days);
             let from = to - slice;
             passes.push((
-                "downsample",
+                format!("downsample-{age_days}d"),
                 stats_repo::downsample_positions(pool, from, to, keep_every).await,
             ));
         }
     }
-    passes.push(("winds", stats_repo::prune_winds(pool, winds_before).await));
     passes.push((
-        "tm-history",
+        "winds".into(),
+        stats_repo::prune_winds(pool, winds_before).await,
+    ));
+    passes.push((
+        "tm-history".into(),
         crate::repos::tmu::prune_history(pool, prune_before).await,
     ));
     passes.push((
-        "flight-legs",
+        "flight-legs".into(),
         stats_repo::prune_flight_legs(pool, legs_before).await,
     ));
-    passes.push((
-        "taxi-observations",
-        stats_repo::prune_taxi_observations(pool, legs_before).await,
-    ));
 
+    let mut failed: Vec<String> = Vec::new();
     for (label, res) in passes {
         match res {
             Ok(n) => {
@@ -1017,8 +998,18 @@ async fn stats_compaction_once(
                 }
                 removed += n;
             }
-            Err(_) => tracing::warn!(pass = label, "stats: compaction sub-pass failed"),
+            // `ApiError` carries no cause; the stats repos log it (`repos/stats.rs::db`).
+            Err(_) => {
+                tracing::warn!(pass = %label, "stats: compaction sub-pass failed");
+                failed.push(label);
+            }
         }
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "compaction sub-pass(es) failed: {}; {removed} rows removed by the rest",
+            failed.join(", ")
+        ));
     }
     Ok(format!("{removed} rows removed"))
 }
@@ -1045,75 +1036,107 @@ pub fn spawn_capture_scheduler(reg: Arc<JobRegistry>, pool: PgPool) {
 /// without this an event's numbers would quietly fall to zero a month after it ran. Taken over the
 /// event's own window, matching what the stats endpoint reports.
 ///
-/// Best-effort: a failure here costs the frozen copy, not the capture lifecycle the scheduler is
-/// actually responsible for, and the endpoint still computes from legs until they age out. So it logs
-/// and returns rather than propagating. The next tick retries, since the missing row is exactly what
-/// makes the event match again.
-///
-/// Returns whether a row was actually written, so the pass's summary — which the admin Jobs page
-/// shows as `last_detail` — counts freezes rather than attempts.
+/// `Ok(true)` when a row was written, so the pass's summary counts freezes rather than attempts.
+/// `Ok(false)` is a decline: the event has no airports, or nothing moved. `Err` is a failure (the
+/// airports, the breakdown or the write), which the pass counts so the run is recorded as failed
+/// (#917). The next tick retries either way, since the missing row is what makes the event match.
 async fn snapshot_event_movements(
     pool: &PgPool,
     event_id: i64,
     start_time: chrono::DateTime<Utc>,
     end_time: chrono::DateTime<Utc>,
-) -> bool {
+) -> Result<bool, String> {
     let icaos: Vec<String> = match events_repo::list_airport_rates(pool, event_id).await {
         Ok(rates) => rates.into_iter().map(|r| r.icao).collect(),
-        Err(_) => {
-            tracing::warn!(
-                event = event_id,
-                "stats: snapshot skipped, airports unreadable"
-            );
-            return false;
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot skipped, airports unreadable");
+            return Err(format!("event {event_id}: airports unreadable"));
         }
     };
     if icaos.is_empty() {
-        return false;
+        return Ok(false);
     }
 
-    match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
-        Ok(rows) => {
-            // Never freeze an all-zero breakdown. For an event whose legs have already been pruned
-            // the recomputed movements are zero for that reason alone, and freezing them would make
-            // an artifact of retention permanent — the row is what makes the freeze pass stop
-            // matching the event, so no later pass could do better. Leaving it unfrozen costs nothing: the read
-            // path computes the same zero, and keeps the option open (#433 review).
-            if rows.iter().all(|r| r.arrivals + r.departures == 0) {
-                tracing::debug!(
-                    event = event_id,
-                    "stats: no observed movements to freeze, left to compute"
-                );
-                return false;
-            }
-            match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows)
-                .await
-            {
-                Ok(n) => {
-                    tracing::info!(event = event_id, airports = n, "stats: froze movements");
-                    true
-                }
-                Err(_) => {
-                    tracing::warn!(event = event_id, "stats: snapshot write failed");
-                    false
-                }
-            }
+    let rows = match stats_repo::event_airport_breakdown(pool, &icaos, start_time, end_time).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot breakdown failed");
+            return Err(format!("event {event_id}: breakdown failed"));
         }
-        Err(_) => {
-            tracing::warn!(event = event_id, "stats: snapshot breakdown failed");
-            false
+    };
+    // Never freeze an all-zero breakdown. For an event whose legs have already been pruned the
+    // recomputed movements are zero for that reason alone, and freezing them would make an artifact
+    // of retention permanent: the row is what makes the freeze pass stop matching the event, so no
+    // later pass could do better. Leaving it unfrozen costs nothing: the read path computes the same
+    // zero, and keeps the option open (#433 review).
+    if rows.iter().all(|r| r.arrivals + r.departures == 0) {
+        tracing::debug!(
+            event = event_id,
+            "stats: no observed movements to freeze, left to compute"
+        );
+        return Ok(false);
+    }
+    match stats_repo::snapshot_event_movements(pool, event_id, start_time, end_time, &rows).await {
+        Ok(n) => {
+            tracing::info!(event = event_id, airports = n, "stats: froze movements");
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::warn!(event = event_id, error = %e, "stats: snapshot write failed");
+            Err(format!("event {event_id}: snapshot write failed"))
         }
     }
 }
 
-/// One capture-scheduler pass: open a capture for each event now inside its window, and close+save
-/// captures whose window has ended. Idempotent. Returns a summary of what changed.
+/// What one capture-scheduler pass did, counted across the window loop and the freeze pass.
+#[derive(Default)]
+struct CaptureTally {
+    opened: u32,
+    saved: u32,
+    frozen: u32,
+    failed: u32,
+}
+
+/// One capture-scheduler pass: open a capture for each event now inside its window, close+save
+/// captures whose window has ended, and freeze finished events' movements. Idempotent.
+///
+/// Every event is attempted; a failed open, close, unfrozen-event query or snapshot is counted and
+/// the run reports `Err` with the counts once both halves finish, so the job registry records it as
+/// failed (#917). A declined snapshot is not a failure. A failed schedule query fails the run at
+/// once, before either half.
 async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
     let rows = stats_repo::list_capture_schedule(pool)
         .await
         .map_err(|_| "capture schedule query failed".to_string())?;
-    let now = Utc::now();
-    let (mut opened, mut saved) = (0u32, 0u32);
+    let mut tally = CaptureTally::default();
+    run_capture_windows(pool, rows, Utc::now(), &mut tally).await;
+    freeze_finished_events(pool, &mut tally).await;
+
+    let CaptureTally {
+        opened,
+        saved,
+        frozen,
+        failed,
+    } = tally;
+    if failed > 0 {
+        return Err(format!(
+            "{opened} opened, {saved} saved, {frozen} frozen, {failed} failed"
+        ));
+    }
+    Ok(if opened == 0 && saved == 0 && frozen == 0 {
+        "no changes".to_string()
+    } else {
+        format!("{opened} opened, {saved} saved, {frozen} frozen")
+    })
+}
+
+/// Open a capture for each event inside its window, and close+save each whose window has passed.
+async fn run_capture_windows(
+    pool: &PgPool,
+    rows: Vec<stats_repo::ScheduleRow>,
+    now: chrono::DateTime<Utc>,
+    tally: &mut CaptureTally,
+) {
     for r in rows {
         let window_start = r.start_time - chrono::Duration::minutes(r.pre_minutes as i64);
         let window_end = r.end_time + chrono::Duration::minutes(r.post_minutes as i64);
@@ -1133,56 +1156,66 @@ async fn capture_scheduler_once(pool: &PgPool) -> Result<String, String> {
                 {
                     Ok(id) => {
                         tracing::info!(event = r.event_id, capture = %id, "stats: opened event capture");
-                        opened += 1;
+                        tally.opened += 1;
                     }
-                    Err(_) => tracing::warn!(event = r.event_id, "stats: open capture failed"),
+                    Err(e) => {
+                        tracing::warn!(event = r.event_id, error = %e, "stats: open capture failed");
+                        tally.failed += 1;
+                    }
                 }
             }
-            // Past the window with an open capture → close + save it.
+            // Past the window with an open capture → close + save it. Zero rows updated means the
+            // capture was no longer open (another replica's pass or a discard got there first):
+            // neither a save nor a failure.
             (false, Some(_)) if now > window_end => {
-                if let Ok(n) =
-                    stats_repo::close_open_event_captures(pool, r.event_id, window_end).await
-                    && n > 0
-                {
-                    tracing::info!(event = r.event_id, "stats: saved event capture");
-                    saved += 1;
+                match stats_repo::close_open_event_captures(pool, r.event_id, window_end).await {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        tracing::info!(event = r.event_id, "stats: saved event capture");
+                        tally.saved += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(event = r.event_id, error = %e, "stats: close capture failed");
+                        tally.failed += 1;
+                    }
                 }
             }
             _ => {}
         }
     }
-    // Freeze the movements of every finished event that isn't frozen yet (#433 review).
-    //
-    // This is deliberately one pass rather than a snapshot on the close transition plus a separate
-    // backfill. The close arm only fires for an event with an *open* capture, so on its own it could
-    // never reach anything that closed before `stats.event_movements` existed — those events kept
-    // computing from `stats.flight_leg` and fell to zero as their legs crossed
-    // DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
-    // with one query, and it runs in the same invocation as the close above, so a capture that
-    // closes on this tick is still frozen on this tick. A call in the close arm as well was
-    // redundant: deleting it left every test green, because this pass had already done the work.
-    //
-    // Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
-    // legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
-    // the query is bounded to the same retention horizon so it does not re-ask about them every
-    // minute for the life of the deployment.
-    let mut frozen = 0u32;
-    match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
-        Ok(unfrozen) => {
-            for e in unfrozen {
-                if snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
-                    frozen += 1;
-                }
-            }
-        }
-        Err(_) => tracing::warn!("stats: unfrozen-event query failed"),
-    }
+}
 
-    Ok(if opened == 0 && saved == 0 && frozen == 0 {
-        "no changes".to_string()
-    } else {
-        format!("{opened} opened, {saved} saved, {frozen} frozen")
-    })
+/// Freeze the movements of every finished event that isn't frozen yet (#433 review).
+///
+/// This is deliberately one pass rather than a snapshot on the close transition plus a separate
+/// backfill. The close arm only fires for an event with an *open* capture, so on its own it could
+/// never reach anything that closed before `stats.event_movements` existed — those events kept
+/// computing from `stats.flight_leg` and fell to zero as their legs crossed
+/// DELAY_LEG_RETAIN_DAYS. Asking "which finished events have no snapshot" answers both cases
+/// with one query, and it runs in the same invocation as the close, so a capture that closes on
+/// this tick is still frozen on this tick.
+///
+/// Idempotent and self-limiting — writing the row is what stops the event matching. Events whose
+/// legs are already gone are declined by the all-zero guard in `snapshot_event_movements`, and
+/// the query is bounded to the same retention horizon so it does not re-ask about them every
+/// minute for the life of the deployment.
+async fn freeze_finished_events(pool: &PgPool, tally: &mut CaptureTally) {
+    let unfrozen =
+        match stats_repo::events_missing_movement_snapshot(pool, DELAY_LEG_RETAIN_DAYS).await {
+            Ok(unfrozen) => unfrozen,
+            Err(e) => {
+                tracing::warn!(error = %e, "stats: unfrozen-event query failed");
+                tally.failed += 1;
+                return;
+            }
+        };
+    for e in unfrozen {
+        match snapshot_event_movements(pool, e.event_id, e.start_time, e.end_time).await {
+            Ok(true) => tally.frozen += 1,
+            Ok(false) => {}
+            Err(_) => tally.failed += 1,
+        }
+    }
 }
 
 /// How often to check for ACE claims crossing a reminder threshold.
@@ -1355,7 +1388,7 @@ pub fn spawn_cleanup(reg: Arc<JobRegistry>, pool: PgPool) {
 }
 
 /// Delete one-time desktop auth codes long past their 60-second life (VATUSA/OIS#346). Nothing
-/// else removes them, so without this the table only grows. Same cadence as the TMU cleanup.
+/// else removes them, so without this the table only grows. Runs every `CLEANUP_INTERVAL`.
 pub fn spawn_desktop_auth_code_prune(reg: Arc<JobRegistry>, pool: PgPool) {
     tokio::spawn(run_interval(
         reg,
@@ -1449,6 +1482,39 @@ pub(crate) async fn diagnostics_report_prune_once(
         now - chrono::Duration::days(DIAGNOSTICS_RETAIN_DAYS),
     )
     .await
+}
+
+/// Delete finished VATUSA access-reset runs past [`AUDIT_RETAIN_DAYS`] (#941). A run's `result`
+/// holds the CID and display name of every member it reset, and its `reason` is free text; the audit
+/// log holds the same facts and keeps them as long, so the two horizons agree. A run still `running`
+/// is never deleted.
+///
+/// The deleted runs are unrecoverable: no copy is kept, and their GET answers 404 afterwards.
+pub fn spawn_vatusa_reset_run_prune(reg: Arc<JobRegistry>, pool: PgPool) {
+    tokio::spawn(run_interval(
+        reg,
+        "vatusa_reset_run_prune",
+        "Delete finished VATUSA access-reset runs past their retention window",
+        CLEANUP_INTERVAL,
+        move || {
+            let pool = pool.clone();
+            async move { vatusa_reset_run_prune_once(&pool, Utc::now()).await }
+        },
+    ));
+}
+
+/// One pass of [`spawn_vatusa_reset_run_prune`] as of `now`, so a test can place the cutoff.
+pub(crate) async fn vatusa_reset_run_prune_once(
+    pool: &PgPool,
+    now: chrono::DateTime<Utc>,
+) -> Result<String, String> {
+    crate::repos::access_reset::prune_finished_runs(
+        pool,
+        now - chrono::Duration::days(AUDIT_RETAIN_DAYS),
+    )
+    .await
+    .map(|n| format!("{n} deleted"))
+    .map_err(|_| "prune failed".to_string())
 }
 
 /// Delete departure-runway assignments past [`DEPARTURE_RUNWAY_RETAIN_HOURS`] (#509).
@@ -1637,6 +1703,26 @@ pub fn spawn_event_fca_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events: Ev
     ));
 }
 
+/// Store and drop each enabled FCA's freeze-horizon STAs, and delete the holds of FCAs nothing
+/// meters (#817). The only background writer of `flow.fca_held_sta`; every read only reads it. Runs
+/// on every replica: the first STA stored wins (`on conflict do nothing`).
+pub fn spawn_fca_hold_sync(reg: Arc<JobRegistry>, state: AppState) {
+    tokio::spawn(run_interval(
+        reg,
+        "fca_hold_sync",
+        "Hold FCA crossing times inside the freeze horizon",
+        FCA_HOLD_SYNC_INTERVAL,
+        move || {
+            let state = state.clone();
+            async move {
+                crate::handlers::flow::sync_fca_holds_once(&state, chrono::Utc::now())
+                    .await
+                    .map(str::to_string)
+            }
+        },
+    ));
+}
+
 /// Drive event TMI packages through their lifecycle: auto-activate draft + auto packages ~30 min
 /// before their event starts (materializing live TMU rows), and auto-deactivate (archive) activated
 /// ones when it ends. Acts as the package's `updated_by_actor`. Nudges connected clients when anything
@@ -1654,92 +1740,135 @@ pub fn spawn_event_package_lifecycle(reg: Arc<JobRegistry>, pool: PgPool, events
     ));
 }
 
+/// What one event-TMI-package lifecycle pass did, counted across both halves.
+#[derive(Default)]
+struct PackageLifecycleTally {
+    activated: u32,
+    archived: u32,
+    failed: u32,
+}
+
 /// One event-TMI-package lifecycle pass: auto-activate draft+auto packages entering the pre-event
 /// window and auto-archive activated ones whose event ended; nudges clients when anything changed.
+///
+/// Every package is attempted; a failed activation, archive or listing query is counted and the
+/// run reports `Err` once both halves finish, so the job registry records it as failed (#916).
 pub(crate) async fn event_package_lifecycle_once(
     pool: &PgPool,
     events: &Events,
 ) -> Result<String, String> {
-    let mut changed = 0u32;
+    let mut tally = PackageLifecycleTally::default();
+    auto_activate_due_packages(pool, &mut tally).await;
+    auto_archive_ended_packages(pool, &mut tally).await;
 
-    // Auto-activate: draft + auto packages entering the 30-min pre-event window.
-    match events_repo::auto_due_packages(pool).await {
-        Ok(due) => {
-            for (package_id, event_id, actor) in due {
-                // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a
-                // disabled service account issues nothing, as its request would be refused.
-                let principal = match Principal::from_actor(pool, &actor).await {
-                    Ok(Some(principal)) => principal,
-                    Ok(None) => {
-                        tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::warn!(%package_id, "auto-activate: cannot load the armer");
-                        continue;
-                    }
-                };
-                match crate::handlers::events::activate_package(
-                    pool,
-                    event_id,
-                    &package_id,
-                    &principal,
-                )
-                .await
-                {
-                    Ok(()) => changed += 1,
-                    Err(_) => tracing::warn!(%package_id, "auto-activate package failed"),
-                }
-            }
-        }
-        Err(_) => tracing::warn!("auto-due package query failed"),
-    }
-
-    // Auto-archive: activated packages whose event has ended.
-    match events_repo::ended_activated_packages(pool).await {
-        Ok(ended) => {
-            for (package_id, _event_id, actor) in ended {
-                // Archiving only cancels what the package issued, so it runs even if the activator's
-                // credential has since been revoked — otherwise its TMIs would outlive the event. It is
-                // attributed to that actor either way.
-                let by = match Principal::from_actor(pool, &actor).await {
-                    Ok(Some(principal)) => principal.attribution_in(pool).await,
-                    Ok(None) => Ok(Attribution {
-                        user_id: None,
-                        actor_id: Some(actor.clone()),
-                    }),
-                    Err(e) => Err(e),
-                };
-                let by = match by {
-                    Ok(by) => by,
-                    Err(e) => {
-                        tracing::warn!(
-                            package_id,
-                            "auto-archive: cannot attribute the package: {e:?}"
-                        );
-                        continue;
-                    }
-                };
-                match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
-                    Ok(()) => changed += 1,
-                    Err(_) => tracing::warn!(%package_id, "auto-archive package failed"),
-                }
-            }
-        }
-        Err(_) => tracing::warn!("ended-package query failed"),
-    }
-
+    let changed = tally.activated + tally.archived;
     if changed > 0 {
         for t in [topic::PROGRAM, topic::TMI, topic::GROUND_STOP] {
             events.publish(t);
         }
         tracing::info!(changed, "event package lifecycle pass");
     }
+    let PackageLifecycleTally {
+        activated,
+        archived,
+        failed,
+    } = tally;
+    if failed > 0 {
+        return Err(format!(
+            "{activated} activated, {archived} archived, {failed} failed"
+        ));
+    }
     Ok(if changed > 0 {
         format!("{changed} changed")
     } else {
         "no changes".to_string()
     })
+}
+
+/// Auto-activate: draft + auto packages entering the 30-min pre-event window.
+async fn auto_activate_due_packages(pool: &PgPool, tally: &mut PackageLifecycleTally) {
+    let due = match events_repo::auto_due_packages(pool).await {
+        Ok(due) => due,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-due package query failed");
+            tally.failed += 1;
+            return;
+        }
+    };
+    for (package_id, event_id, actor) in due {
+        // Whoever armed it, rebuilt as they would authenticate now: a revoked key or a disabled
+        // service account issues nothing, as its request would be refused.
+        let principal = match Principal::from_actor(pool, &actor).await {
+            Ok(Some(principal)) => principal,
+            Ok(None) => {
+                tracing::warn!(%package_id, "auto-activate: the armer's credential no longer works");
+                tally.failed += 1;
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-activate: cannot load the armer");
+                tally.failed += 1;
+                continue;
+            }
+        };
+        match crate::handlers::events::activate_package(pool, event_id, &package_id, &principal)
+            .await
+        {
+            Ok(()) => tally.activated += 1,
+            // The plain `Conflict` is `mark_package_activated`'s status fence: the package stopped
+            // being a draft after it was listed (another replica's pass or an Activate click
+            // flipped it first), and this attempt rolled back. Every replica runs this pass, so
+            // that is the expected outcome, not a failure. Any other source of a plain `Conflict`
+            // in `activate_package` must be weighed against this.
+            Err(ApiError::Conflict) => {
+                tracing::debug!(%package_id, "auto-activate: the package is no longer a draft");
+            }
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-activate package failed");
+                tally.failed += 1;
+            }
+        }
+    }
+}
+
+/// Auto-archive: activated packages whose event has ended.
+async fn auto_archive_ended_packages(pool: &PgPool, tally: &mut PackageLifecycleTally) {
+    let ended = match events_repo::ended_activated_packages(pool).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            tracing::warn!(error = %e, "ended-package query failed");
+            tally.failed += 1;
+            return;
+        }
+    };
+    for (package_id, _event_id, actor) in ended {
+        // Archiving only cancels what the package issued, so it runs even if the activator's
+        // credential has since been revoked — otherwise its TMIs would outlive the event. It is
+        // attributed to that actor either way.
+        let by = match Principal::from_actor(pool, &actor).await {
+            Ok(Some(principal)) => principal.attribution_in(pool).await,
+            Ok(None) => Ok(Attribution {
+                user_id: None,
+                actor_id: Some(actor.clone()),
+            }),
+            Err(e) => Err(e),
+        };
+        let by = match by {
+            Ok(by) => by,
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-archive: cannot attribute the package");
+                tally.failed += 1;
+                continue;
+            }
+        };
+        match crate::handlers::events::deactivate_package(pool, &package_id, &by).await {
+            Ok(()) => tally.archived += 1,
+            Err(e) => {
+                tracing::warn!(%package_id, error = %e, "auto-archive package failed");
+                tally.failed += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1995,6 +2124,97 @@ mod departure_runway_prune_tests {
 }
 
 #[cfg(test)]
+mod stats_compaction_tests {
+    use std::sync::atomic::AtomicI64;
+
+    use sqlx::PgPool;
+
+    use super::stats_compaction_once;
+
+    /// A published TMI that ended `age` ago: the TM-history prune deletes it past 14 days.
+    async fn seed_ended_tmi(pool: &PgPool, id: &str, age: &str) {
+        sqlx::query(&format!(
+            "insert into tmu.tmis \
+             (id, requesting, providing, restriction, status, start_time, published_at, ended_at) \
+             values ($1, 'N90', 'ZNY', 'JFK arrivals via CAMRN 20MIT', 'expired', \
+                     now() - interval '{age}', now() - interval '{age}', now() - interval '{age}')"
+        ))
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn tmi_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from tmu.tmis")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Failed sub-passes fail the run (code-quality.md § Fail-Open), each is named, and they do
+    /// not stop the sub-passes after them.
+    #[sqlx::test]
+    async fn a_failed_sub_pass_fails_the_run_and_the_rest_still_prune(pool: PgPool) {
+        seed_ended_tmi(&pool, "old", "40 days").await;
+        seed_ended_tmi(&pool, "recent", "1 day").await;
+        // Contained to this test's own database (test-writing.md: DDL inside #[sqlx::test]).
+        for table in ["stats.winds", "stats.flight_leg"] {
+            sqlx::query(&format!("drop table {table}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let res = stats_compaction_once(&pool, &AtomicI64::new(0)).await;
+
+        let err = res.expect_err("a failed prune must fail the run");
+        assert_eq!(
+            err, "compaction sub-pass(es) failed: winds, flight-legs; 1 rows removed by the rest",
+            "every failed sub-pass is named, and only those"
+        );
+        assert_eq!(
+            tmi_count(&pool).await,
+            1,
+            "the TM-history prune after the failed winds prune still ran"
+        );
+    }
+
+    /// Positive control: with every sub-pass healthy the run succeeds.
+    #[sqlx::test]
+    async fn a_healthy_run_succeeds_and_prunes(pool: PgPool) {
+        seed_ended_tmi(&pool, "old", "40 days").await;
+        seed_ended_tmi(&pool, "recent", "1 day").await;
+
+        let summary = stats_compaction_once(&pool, &AtomicI64::new(0))
+            .await
+            .expect("a healthy run succeeds");
+
+        assert_eq!(summary, "1 rows removed");
+        assert_eq!(tmi_count(&pool).await, 1);
+    }
+
+    /// Each downsample tier is named on its own, so a failed run says which age boundary failed.
+    #[sqlx::test]
+    async fn a_failed_downsample_names_each_tier(pool: PgPool) {
+        sqlx::query("drop table stats.position")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = stats_compaction_once(&pool, &AtomicI64::new(0))
+            .await
+            .expect_err("a failed downsample must fail the run");
+
+        assert_eq!(
+            err,
+            "compaction sub-pass(es) failed: downsample-7d, downsample-14d, downsample-21d; \
+             0 rows removed by the rest"
+        );
+    }
+}
+
+#[cfg(test)]
 mod winds_retention_tests {
     use std::sync::atomic::AtomicI64;
 
@@ -2147,27 +2367,38 @@ mod capture_scheduler_tests {
     /// a hard-coded date would silently drift out of both — first out of the retention window, and
     /// eventually the test would be asserting nothing at all.
     fn at(hour: u32, minute: u32) -> DateTime<Utc> {
-        (Utc::now() - chrono::Duration::days(1))
-            .date_naive()
+        // Yesterday, fixed once per test process: nextest runs each test in its own process, so a
+        // test that straddles 00:00 UTC still seeds and asserts against the same day.
+        static DAY: std::sync::OnceLock<chrono::NaiveDate> = std::sync::OnceLock::new();
+        DAY.get_or_init(|| (Utc::now() - chrono::Duration::days(1)).date_naive())
             .and_hms_opt(hour, minute, 0)
             .expect("a valid time of day")
             .and_utc()
     }
 
-    /// An event that ran 12:00–14:00 with the default ±30 min capture padding, so its capture window
-    /// is 11:30–14:30. Both are in the past, so one scheduler pass closes the capture.
-    async fn seed(pool: &PgPool, capture_status: &str) {
+    /// An event that ran 12:00–14:00 at `icao` with the default ±30 min capture padding, so its
+    /// capture window is 11:30–14:30. Both are in the past, so one scheduler pass closes an `open`
+    /// capture; a `saved` one goes straight to the freeze query. `capture_id` keys `stats.capture`, so
+    /// two events seeded in one test need two ids.
+    async fn seed(
+        pool: &PgPool,
+        event_id: i64,
+        icao: &str,
+        capture_id: &str,
+        capture_status: &str,
+    ) {
         sqlx::query(
             "insert into events.event (id, title, start_time, end_time) values ($1, 'Test', $2, $3)",
         )
-        .bind(EVENT)
+        .bind(event_id)
         .bind(at(12, 0))
         .bind(at(14, 0))
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, 'KJFK')")
-            .bind(EVENT)
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, $2)")
+            .bind(event_id)
+            .bind(icao)
             .execute(pool)
             .await
             .unwrap();
@@ -2175,15 +2406,16 @@ mod capture_scheduler_tests {
             "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
              values ($1, true, 30, 30)",
         )
-        .bind(EVENT)
+        .bind(event_id)
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
             "insert into stats.capture (id, event_id, label, start_time, end_time, status) \
-             values ('cap-sched', $1, 'Test', $2, $3, $4)",
+             values ($1, $2, 'Test', $3, $4, $5)",
         )
-        .bind(EVENT)
+        .bind(capture_id)
+        .bind(event_id)
         .bind(at(11, 30))
         .bind((capture_status == "saved").then(|| at(14, 30)))
         .bind(capture_status)
@@ -2192,13 +2424,14 @@ mod capture_scheduler_tests {
         .unwrap();
     }
 
-    async fn leg(pool: &PgPool, kind: &str, cid: i32, end: DateTime<Utc>) {
+    async fn leg(pool: &PgPool, airport: &str, kind: &str, cid: i32, end: DateTime<Utc>) {
         sqlx::query(
             "insert into stats.flight_leg \
              (kind, airport, callsign, cid, start_time, end_time, duration_sec) \
-             values ($1, 'KJFK', $2, $3, $4, $5, 600)",
+             values ($1, $2, $3, $4, $5, $6, 600)",
         )
         .bind(kind)
+        .bind(airport)
         .bind(format!("TEST{cid}"))
         .bind(cid)
         .bind(end - chrono::Duration::minutes(10))
@@ -2210,9 +2443,9 @@ mod capture_scheduler_tests {
 
     /// Seed one leg inside the event and one inside the padding on either side of it.
     async fn three_legs(pool: &PgPool) {
-        leg(pool, "departure", 1, at(11, 45)).await; // padding, before the event
-        leg(pool, "departure", 2, at(13, 0)).await; // inside the event
-        leg(pool, "arrival", 3, at(14, 15)).await; // padding, after the event
+        leg(pool, "KJFK", "departure", 1, at(11, 45)).await; // padding, before the event
+        leg(pool, "KJFK", "departure", 2, at(13, 0)).await; // inside the event
+        leg(pool, "KJFK", "arrival", 3, at(14, 15)).await; // padding, after the event
     }
 
     /// A capture that closes on this tick is frozen on this tick, over the **event's** window rather
@@ -2225,7 +2458,7 @@ mod capture_scheduler_tests {
     /// one that serves every event past leg retention (#433 review).
     #[sqlx::test]
     async fn the_scheduler_freezes_over_the_events_window_not_the_padded_capture(pool: PgPool) {
-        seed(&pool, "open").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "open").await;
         three_legs(&pool).await;
 
         capture_scheduler_once(&pool).await.unwrap();
@@ -2252,7 +2485,7 @@ mod capture_scheduler_tests {
     /// state every event on the board was in before this shipped (#433 review).
     #[sqlx::test]
     async fn an_event_that_closed_before_the_table_existed_is_still_frozen(pool: PgPool) {
-        seed(&pool, "saved").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
         three_legs(&pool).await;
         assert!(
             stats_repo::event_movements_snapshot(&pool, EVENT)
@@ -2286,7 +2519,7 @@ mod capture_scheduler_tests {
     /// matching — so it is deliberately left unfrozen (#433 review).
     #[sqlx::test]
     async fn an_event_with_no_surviving_legs_is_not_frozen_at_zero(pool: PgPool) {
-        seed(&pool, "saved").await;
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
         // The shape of a pruned event: the connections are still there (`stats.flight` is never
         // pruned) so the breakdown is *not* empty — it is a row of zero movements beside a real pilot
         // count, which is exactly what the page renders as "Movements 0 / Pilots 1".
@@ -2310,9 +2543,10 @@ mod capture_scheduler_tests {
             (0, 0, 1)
         );
 
-        assert!(
-            !snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
-            "it reports that it froze nothing, so the job summary stays honest"
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Ok(false),
+            "a decline, not a failure: it froze nothing, so the job summary stays honest"
         );
         assert!(
             stats_repo::event_movements_snapshot(&pool, EVENT)
@@ -2322,6 +2556,513 @@ mod capture_scheduler_tests {
             "a zero-movement breakdown must not be frozen — freezing it would make the artifact \
              permanent, since the row is what stops the backfill matching"
         );
+    }
+
+    // ---- a failed sub-step fails the pass; a decline does not (#917) ----------------------------
+    //
+    // X is event 801 at KJFK, the event whose step is made to fail; Y is event 802 at KBOS, the event
+    // in the same pass that must still succeed. Distinct airports keep one event's legs out of the
+    // other's breakdown. Every failure trigger is created after seeding, so it refuses only the
+    // pass's own writes.
+    //
+    // X2 is event 803 at KLGA, a second event whose step fails. The schedule query has no `order by`,
+    // and the unfrozen-event query orders by `end_time`, which every seeded event shares, so neither
+    // loop's order is fixed. A pass that stopped at its first failure could still reach Y; it cannot
+    // also reach the second failure, so "2 failed" holds only when every event was attempted.
+
+    const X: i64 = 801;
+    const Y: i64 = 802;
+    const X2: i64 = 803;
+
+    /// An event inside its capture window right now (started 30 min ago, ends in 30 min, ±30 min
+    /// padding) with no capture yet, so the pass's open arm fires for it. Its end is in the future, so
+    /// the freeze query never lists it.
+    async fn in_window(pool: &PgPool, event_id: i64, icao: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) values ($1, 'Live', $2, $3)",
+        )
+        .bind(event_id)
+        .bind(now - chrono::Duration::minutes(30))
+        .bind(now + chrono::Duration::minutes(30))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into events.airport_rate (event_id, icao) values ($1, $2)")
+            .bind(event_id)
+            .bind(icao)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into stats.event_capture (event_id, enabled, pre_minutes, post_minutes) \
+             values ($1, true, 30, 30)",
+        )
+        .bind(event_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A `before <op>` row trigger on `table` that, for rows of events 801 and 803, runs `action`: `raise
+    /// exception …` to fail the statement, or `return null` to skip the row. `table` and `op` are
+    /// test constants, never input.
+    async fn trigger_on_x(pool: &PgPool, table: &str, op: &str, action: &str) {
+        sqlx::raw_sql(&format!(
+            "create function t917() returns trigger language plpgsql as $$ \
+             begin if new.event_id in (801, 803) then {action}; end if; return new; end $$; \
+             create trigger t917 before {op} on {table} for each row execute function t917();"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn fail_x(pool: &PgPool, table: &str, op: &str) {
+        trigger_on_x(pool, table, op, "raise exception 'injected #917 failure'").await;
+    }
+
+    async fn captures(pool: &PgPool, event_id: i64) -> Vec<(String, Option<DateTime<Utc>>)> {
+        sqlx::query_as(
+            "select status, end_time from stats.capture where event_id = $1 order by start_time",
+        )
+        .bind(event_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn frozen_movements(pool: &PgPool, event_id: i64) -> Option<i64> {
+        stats_repo::event_movements_snapshot(pool, event_id)
+            .await
+            .unwrap()
+            .map(|s| s.rows.iter().map(|r| r.arrivals + r.departures).sum())
+    }
+
+    #[sqlx::test]
+    async fn a_failed_open_fails_the_pass_and_the_other_event_still_opens(pool: PgPool) {
+        in_window(&pool, X, "KJFK").await;
+        in_window(&pool, Y, "KBOS").await;
+        in_window(&pool, X2, "KLGA").await;
+        fail_x(&pool, "stats.capture", "insert").await;
+
+        let (result, seen) = recorded(capture_scheduler_once(&pool)).await;
+        assert_eq!(
+            result,
+            Err("1 opened, 0 saved, 0 frozen, 2 failed".to_string())
+        );
+        assert_eq!(
+            warn_events(&seen, "stats: open capture failed"),
+            vec![
+                ("801".to_string(), "internal server error".to_string()),
+                ("803".to_string(), "internal server error".to_string()),
+            ],
+            "each failed open logs a WARN with its event and the error"
+        );
+        assert_eq!(captures(&pool, X).await, vec![], "X's open was refused");
+        assert_eq!(captures(&pool, X2).await, vec![], "X2's open was refused");
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("open".to_string(), None)],
+            "Y opened in the same pass"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_close_fails_the_pass_and_the_other_event_still_closes(pool: PgPool) {
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        seed(&pool, X2, "KLGA", "cap-x2", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        fail_x(&pool, "stats.capture", "update").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("0 opened, 1 saved, 1 frozen, 2 failed".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(captures(&pool, X2).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1), "Y froze");
+        assert_eq!(
+            frozen_movements(&pool, X).await,
+            None,
+            "an open capture keeps X out of the freeze"
+        );
+    }
+
+    /// AC 3: the failed close logs a WARN carrying the event id and the error's Display. The cause
+    /// itself is on the stats repo's `stats db error` line just before it.
+    #[sqlx::test]
+    async fn a_failed_close_logs_a_warn_with_the_event_and_the_error(pool: PgPool) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        fail_x(&pool, "stats.capture", "update").await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Recorder(seen.clone()));
+        let result = capture_scheduler_once(&pool)
+            .with_subscriber(subscriber)
+            .await;
+        assert!(result.is_err());
+
+        let seen = seen.lock().unwrap();
+        let closes: Vec<_> = seen
+            .iter()
+            .filter(|e| e.message == "stats: close capture failed")
+            .collect();
+        assert_eq!(closes.len(), 1, "one close failed: {seen:#?}");
+        assert_eq!(closes[0].level, tracing::Level::WARN);
+        assert_eq!(
+            closes[0].fields.get("event").map(String::as_str),
+            Some("801")
+        );
+        assert_eq!(
+            closes[0].fields.get("error").map(String::as_str),
+            Some("internal server error"),
+            "the ApiError's Display"
+        );
+        assert!(
+            seen.iter()
+                .any(|e| e.message == "stats: saved event capture"
+                    && e.fields.get("event").map(String::as_str) == Some("802")),
+            "positive control: the recorder saw Y's save in the same pass"
+        );
+        assert!(
+            seen.iter().any(|e| e.level == tracing::Level::WARN
+                && e.message == "stats db error"
+                && e.fields
+                    .get("error")
+                    .is_some_and(|v| v.contains("injected #917 failure"))),
+            "the stats repo logs the database cause beside the close WARN: {seen:#?}"
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_close_that_matches_no_row_is_neither_a_failure_nor_a_save(pool: PgPool) {
+        seed(&pool, X, "KJFK", "cap-x", "open").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        // Skipping X's row leaves the update succeeding with zero rows, the shape of another
+        // replica having closed it first.
+        trigger_on_x(&pool, "stats.capture", "update", "return null").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("0 opened, 1 saved, 1 frozen".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+    }
+
+    #[sqlx::test]
+    async fn a_failed_freeze_query_fails_the_pass_and_the_close_still_saves(pool: PgPool) {
+        // X is finished and due a freeze; the failed query keeps it unfrozen. Y closes in the same
+        // pass.
+        seed(&pool, X, "KJFK", "cap-x", "saved").await;
+        leg(&pool, "KJFK", "departure", 1, at(13, 0)).await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        sqlx::query("alter table stats.event_movements rename to event_movements_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (result, seen) = recorded(capture_scheduler_once(&pool)).await;
+        assert_eq!(
+            result,
+            Err("0 opened, 1 saved, 0 frozen, 1 failed".to_string())
+        );
+        let query_warns: Vec<_> = seen
+            .iter()
+            .filter(|e| {
+                e.level == tracing::Level::WARN && e.message == "stats: unfrozen-event query failed"
+            })
+            .map(|e| e.fields.get("error").cloned())
+            .collect();
+        assert_eq!(
+            query_warns,
+            vec![Some("internal server error".to_string())],
+            "the failed query logs one WARN with the error"
+        );
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))],
+            "the close ran before the freeze query and stands"
+        );
+        sqlx::query("alter table stats.event_movements_gone rename to event_movements")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(frozen_movements(&pool, X).await, None, "X was not frozen");
+        assert_eq!(frozen_movements(&pool, Y).await, None, "nor was Y");
+    }
+
+    #[sqlx::test]
+    async fn a_failed_snapshot_write_fails_the_pass_and_the_other_event_still_freezes(
+        pool: PgPool,
+    ) {
+        seed(&pool, X, "KJFK", "cap-x", "saved").await;
+        seed(&pool, Y, "KBOS", "cap-y", "saved").await;
+        seed(&pool, X2, "KLGA", "cap-x2", "saved").await;
+        leg(&pool, "KJFK", "departure", 1, at(13, 0)).await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+        leg(&pool, "KLGA", "departure", 3, at(13, 0)).await;
+        fail_x(&pool, "stats.event_movements", "insert").await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Err("0 opened, 0 saved, 1 frozen, 2 failed".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1), "Y froze");
+        assert_eq!(
+            frozen_movements(&pool, X).await,
+            None,
+            "X has no frozen row"
+        );
+        let mut unfrozen: Vec<i64> =
+            stats_repo::events_missing_movement_snapshot(&pool, super::DELAY_LEG_RETAIN_DAYS)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event_id)
+                .collect();
+        unfrozen.sort_unstable();
+        assert_eq!(unfrozen, vec![X, X2], "the next tick retries X and X2 only");
+    }
+
+    /// AC 5: the fixture of `an_event_with_no_surviving_legs_is_not_frozen_at_zero`, through the
+    /// pass. A decline is not a failure.
+    #[sqlx::test]
+    async fn an_all_zero_event_is_declined_and_the_pass_succeeds(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        sqlx::query(
+            "insert into stats.flight \
+             (session_id, cid, callsign, logon_time, first_seen, last_seen, status, departure, arrival) \
+             values (1, 1001, 'TEST1', $1, $1, $2, 'active', 'KJFK', 'KBOS')",
+        )
+        .bind(at(12, 10))
+        .bind(at(13, 40))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("no changes".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn an_event_with_no_airports_is_declined_and_the_pass_succeeds(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("delete from events.airport_rate where event_id = $1")
+            .bind(EVENT)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("no changes".to_string())
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    /// Positive control for the failure tests: the same shapes with nothing injected keep the
+    /// existing Ok summary.
+    #[sqlx::test]
+    async fn a_clean_pass_reports_the_existing_summary(pool: PgPool) {
+        in_window(&pool, X, "KJFK").await;
+        seed(&pool, Y, "KBOS", "cap-y", "open").await;
+        leg(&pool, "KBOS", "departure", 2, at(13, 0)).await;
+
+        assert_eq!(
+            capture_scheduler_once(&pool).await,
+            Ok("1 opened, 1 saved, 1 frozen".to_string())
+        );
+        assert_eq!(captures(&pool, X).await, vec![("open".to_string(), None)]);
+        assert_eq!(
+            captures(&pool, Y).await,
+            vec![("saved".to_string(), Some(at(14, 30)))]
+        );
+        assert_eq!(frozen_movements(&pool, Y).await, Some(1));
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_declines_an_event_with_no_airports(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("delete from events.airport_rate where event_id = $1")
+            .bind(EVENT)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0)).await,
+            Ok(false)
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_airports_are_unreadable(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("alter table events.airport_rate rename to airport_rate_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: airports unreadable".to_string()));
+        assert_eq!(
+            warn_events(&seen, "stats: snapshot skipped, airports unreadable"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_breakdown_query_fails(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::query("alter table stats.flight_leg rename to flight_leg_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: breakdown failed".to_string()));
+        assert_eq!(
+            warn_events(&seen, "stats: snapshot breakdown failed"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    #[sqlx::test]
+    async fn the_snapshot_fails_when_the_write_fails(pool: PgPool) {
+        seed(&pool, EVENT, "KJFK", "cap-sched", "saved").await;
+        three_legs(&pool).await;
+        sqlx::raw_sql(
+            "create function t917() returns trigger language plpgsql as $$ \
+             begin raise exception 'injected #917 failure'; end $$; \
+             create trigger t917 before insert on stats.event_movements \
+             for each row execute function t917();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (result, seen) =
+            recorded(snapshot_event_movements(&pool, EVENT, at(12, 0), at(14, 0))).await;
+        assert_eq!(result, Err("event 800: snapshot write failed".to_string()));
+        assert_eq!(
+            warn_events(&seen, "stats: snapshot write failed"),
+            vec![("800".to_string(), "internal server error".to_string())],
+            "the failure logs a WARN with the event and the error"
+        );
+        assert_eq!(frozen_movements(&pool, EVENT).await, None);
+    }
+
+    /// Run `fut` with a [`Recorder`] installed, returning its output and every event it logged.
+    async fn recorded<F: std::future::Future>(fut: F) -> (F::Output, Vec<Captured>) {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = fut
+            .with_subscriber(tracing_subscriber::registry().with(Recorder(seen.clone())))
+            .await;
+        let events = std::mem::take(&mut *seen.lock().unwrap());
+        (out, events)
+    }
+
+    /// The `(event, error)` fields of every WARN logged with `message`, sorted.
+    fn warn_events(seen: &[Captured], message: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = seen
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN && e.message == message)
+            .map(|e| {
+                let field = |k: &str| e.fields.get(k).cloned().unwrap_or_default();
+                (field("event"), field("error"))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// One tracing event captured during a pass.
+    #[derive(Debug)]
+    struct Captured {
+        level: tracing::Level,
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    /// Records every event into a shared vector, so a test can assert what a pass logged.
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<Captured>>>);
+
+    #[derive(Default)]
+    struct Visitor {
+        message: String,
+        fields: std::collections::BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for Visitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record(field, value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record(field, format!("{value:?}"));
+        }
+    }
+
+    impl Visitor {
+        fn record(&mut self, field: &tracing::field::Field, value: String) {
+            if field.name() == "message" {
+                self.message = value;
+            } else {
+                self.fields.insert(field.name().to_owned(), value);
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = Visitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("the recorder's mutex is only held for a push")
+                .push(Captured {
+                    level: *event.metadata().level(),
+                    message: visitor.message,
+                    fields: visitor.fields,
+                });
+        }
     }
 }
 
@@ -2815,6 +3556,26 @@ mod registration_tests {
             "lib.rs must pass state.airspace_sectors_loaded"
         );
         let detached = "jobs::spawn_airspace_sectors_refresh(reg, pool, state.airspace_sectors.clone(), \
+                        Arc::new(AtomicBool::new(false)));";
+        assert!(
+            !wired(detached),
+            "the matcher must reject a flag of the job's own"
+        );
+    }
+
+    /// #817: the held-STA pass reads `AppState::aircraft_profiles_loaded`, so the profile refresh
+    /// must be handed that flag and not one of its own.
+    #[test]
+    fn the_profile_refresh_sets_the_states_own_loaded_flag() {
+        let wired = |lib: &str| {
+            call_args(lib, "spawn_aircraft_profiles_refresh")
+                .is_some_and(|args| args.contains("state.aircraft_profiles_loaded.clone()"))
+        };
+        assert!(
+            wired(LIB_RS),
+            "lib.rs must pass state.aircraft_profiles_loaded"
+        );
+        let detached = "jobs::spawn_aircraft_profiles_refresh(reg, pool, state.aircraft_profiles.clone(), \
                         Arc::new(AtomicBool::new(false)));";
         assert!(
             !wired(detached),
@@ -3354,6 +4115,185 @@ mod winds_refresh_tests {
         assert_eq!(
             record_winds_run(None, &winds, loaded.clone(), now).await,
             loaded
+        );
+    }
+}
+
+#[cfg(test)]
+mod aircraft_profiles_refresh_tests {
+    use super::*;
+
+    /// The held-STA pass waits on `aircraft_profiles_loaded` (#817): the refresh sets it on a
+    /// successful load and leaves it unset, with the table untouched, when the load fails.
+    #[sqlx::test]
+    async fn a_successful_load_marks_the_profiles_loaded_and_a_failed_one_does_not(pool: PgPool) {
+        let profiles = ArcSwap::from_pointee(ProfileTable::default());
+        let default_table = profiles.load_full();
+
+        let failed_flag = AtomicBool::new(false);
+        let closed = PgPool::connect_lazy_with(pool.connect_options().as_ref().clone());
+        closed.close().await;
+        let err = refresh_aircraft_profiles_once(&closed, &profiles, &failed_flag).await;
+        assert!(err.is_err(), "a closed pool cannot load");
+        assert!(
+            !failed_flag.load(Ordering::Relaxed),
+            "a failed load leaves it unset"
+        );
+        assert!(
+            Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a failed load leaves the table untouched"
+        );
+
+        let loaded = AtomicBool::new(false);
+        let ok = refresh_aircraft_profiles_once(&pool, &profiles, &loaded).await;
+        assert_eq!(ok.as_deref(), Ok("reloaded"));
+        assert!(loaded.load(Ordering::Relaxed), "a successful load sets it");
+        assert!(
+            !Arc::ptr_eq(&profiles.load_full(), &default_table),
+            "a successful load installs the DB table"
+        );
+    }
+
+    /// The spawned job sets the flag it was handed, not one of its own; the loop's first tick runs
+    /// at once.
+    #[sqlx::test]
+    async fn the_spawned_refresh_marks_the_flag_it_is_given(pool: PgPool) {
+        let profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        spawn_aircraft_profiles_refresh(
+            Arc::new(JobRegistry::new()),
+            pool,
+            profiles,
+            loaded.clone(),
+        );
+        let set = tokio::time::timeout(Duration::from_secs(10), async {
+            while !loaded.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(set.is_ok(), "the first run sets the given flag");
+    }
+}
+
+#[cfg(test)]
+mod vatusa_reset_run_prune_tests {
+    use chrono::Utc;
+    use sqlx::PgPool;
+
+    use super::{AUDIT_RETAIN_DAYS, vatusa_reset_run_prune_once};
+
+    // Absolute ages in days, never `AUDIT_RETAIN_DAYS ± 1`: a fixture built from the constant moves
+    // with it and stays green whatever the retention is (see `departure_runway_prune_tests`).
+    const FRESH_FINISHED_AGE_DAYS: i32 = 179;
+    const STALE_FINISHED_AGE_DAYS: i32 = 181;
+    /// Past the cutoff on `started_at` too, so a pass keyed on the wrong column deletes it.
+    const RUNNING_STARTED_AGE_DAYS: i32 = 400;
+
+    /// Insert a finished run (`status` succeeded or failed) that started and finished `days` ago.
+    async fn finished_run(pool: &PgPool, status: &str, days: i32) -> String {
+        sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, status, started_at, finished_at, result) \
+             values ('test', $1, now() - make_interval(days => $2::int), \
+                     now() - make_interval(days => $2::int), '{}'::jsonb) returning id",
+        )
+        .bind(status)
+        .bind(days)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Insert a run still `running`, started `days` ago.
+    async fn running_run(pool: &PgPool, days: i32) -> String {
+        sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, started_at) \
+             values ('test', now() - make_interval(days => $1::int)) returning id",
+        )
+        .bind(days)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn ids(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("select id from access.vatusa_reset_runs order by id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    /// Guards the constant: the fixed ages only straddle the horizon while it sits between them.
+    #[test]
+    fn the_fixed_ages_straddle_the_audit_retention() {
+        assert!(
+            i64::from(FRESH_FINISHED_AGE_DAYS) < AUDIT_RETAIN_DAYS
+                && AUDIT_RETAIN_DAYS < i64::from(STALE_FINISHED_AGE_DAYS)
+                && STALE_FINISHED_AGE_DAYS < RUNNING_STARTED_AGE_DAYS,
+            "retention is {AUDIT_RETAIN_DAYS} d, which no longer sits between \
+             {FRESH_FINISHED_AGE_DAYS} d and {STALE_FINISHED_AGE_DAYS} d (running row at \
+             {RUNNING_STARTED_AGE_DAYS} d) — update both the constant and these ages"
+        );
+    }
+
+    /// The pass, not the repo function: the repo takes its cutoff as a parameter, so testing it alone
+    /// proves nothing about the constant the job applies.
+    #[sqlx::test]
+    async fn the_pass_deletes_only_runs_finished_past_the_retention(pool: PgPool) {
+        finished_run(&pool, "succeeded", STALE_FINISHED_AGE_DAYS).await;
+        finished_run(&pool, "failed", STALE_FINISHED_AGE_DAYS).await;
+        let fresh = finished_run(&pool, "succeeded", FRESH_FINISHED_AGE_DAYS).await;
+        let running = running_run(&pool, RUNNING_STARTED_AGE_DAYS).await;
+
+        let outcome = vatusa_reset_run_prune_once(&pool, Utc::now()).await;
+
+        assert_eq!(outcome, Ok("2 deleted".to_string()));
+        assert_eq!(ids(&pool).await, sorted(vec![fresh, running]));
+    }
+
+    /// "Older than" the retention: a run finished exactly `AUDIT_RETAIN_DAYS` before `now` stays.
+    #[sqlx::test]
+    async fn a_run_finished_exactly_at_the_cutoff_is_kept(pool: PgPool) {
+        // Postgres keeps microseconds; a nanosecond `now` would put the stored row before the cutoff.
+        let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 6);
+        let at_cutoff = now - chrono::Duration::days(AUDIT_RETAIN_DAYS);
+        let id: String = sqlx::query_scalar(
+            "insert into access.vatusa_reset_runs (reason, status, started_at, finished_at) \
+             values ('test', 'succeeded', $1, $1) returning id",
+        )
+        .bind(at_cutoff)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let outcome = vatusa_reset_run_prune_once(&pool, now).await;
+
+        assert_eq!(outcome, Ok("0 deleted".to_string()));
+        assert_eq!(ids(&pool).await, vec![id]);
+    }
+
+    /// A delete that fails is an `Err`, which `run_interval` records as a failed run.
+    #[sqlx::test]
+    async fn a_failed_delete_returns_err(pool: PgPool) {
+        // Positive control: the same pass succeeds while the table exists.
+        assert_eq!(
+            vatusa_reset_run_prune_once(&pool, Utc::now()).await,
+            Ok("0 deleted".to_string())
+        );
+        // This test's own database (`#[sqlx::test]`), so the delete itself is what fails.
+        sqlx::query("drop table access.vatusa_reset_runs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vatusa_reset_run_prune_once(&pool, Utc::now()).await,
+            Err("prune failed".to_string())
         );
     }
 }

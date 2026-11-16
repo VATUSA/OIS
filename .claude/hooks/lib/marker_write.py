@@ -12,7 +12,7 @@ This is the cheap first line: it refuses the spellings it can read before a tool
 Write, Edit, MultiEdit and NotebookEdit are refused for a path in one of the three
 directories, the manifest beside them or the marker ledger (resolving symlinks, any letter
 case). A Bash line naming one of those paths literally passes only when every command on it
-is a read, one of the two scripts (from the checkout, on a line with no cd) or exactly
+is a read (a git GIT_READS subcommand included), one of the two scripts (from the checkout, on a line with no cd) or exactly
 `just test`; a write redirect, substitution or heredoc fails closed. So does a line that
 runs `marker_manifest.py stamp` itself, which only the two scripts call. A path the shell
 builds (a variable, glob, brace or ANSI-C word) and a tree copied in by tar, cp -r and the
@@ -42,6 +42,9 @@ NAMES = "names a marker, the manifest or the marker ledger"
 EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 READS = {"ls", "cat", "test", "[", "find", "stat", "wc", "head", "tail", "grep", "echo", "printf", "cd", "pwd",
          "true"}
+# git subcommands that only print. Global options before the subcommand (-c, -C, --exec-path) and an
+# --output file are refused: either can run or write something else.
+GIT_READS = {"log", "show", "status", "diff", "ls-files", "rev-parse", "rev-list", "cat-file", "blame"}
 STAMPING_SCRIPTS = {"run-tests.sh", "review-marker.sh"}
 FIND_WRITES = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
 SEPARATORS = {";", "&", "&&", "|", "||", "|&", "(", ")", "\n"}
@@ -215,7 +218,14 @@ def allowed(words, cwd, moves):
         return not moves
     if name == "find":
         return not any(word in FIND_WRITES for word in command[1:])
+    if command[0] == "git":  # no prefix: GIT_EXTERNAL_DIFF=… or GIT_PAGER=… would run a program
+        return words[0] == "git" and git_read(command[1:])
     return name in READS
+
+
+def git_read(args):
+    """Whether `git ARGS` only prints: a GIT_READS subcommand first, and no --output file."""
+    return bool(args) and args[0] in GIT_READS and not any(arg.startswith("--output") for arg in args[1:])
 
 
 def stamps(words, cwd):

@@ -3143,38 +3143,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/stats/taxi/estimates": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_taxi_estimates"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/stats/taxi/observations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_taxi_observations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/tmu/advisories": {
         parameters: {
             query?: never;
@@ -3287,10 +3255,11 @@ export interface paths {
         /**
          * Current arrival demand vs capacity for every airport at once, ranked by exceedance
          *     (VATUSA/OIS#475).
-         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
-         *     front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
+         * @description Shaped like `flow::fca_counts`, not like the per-airport handlers above: three queries up front
+         *     (programs, configs, issued CFRs), a brief feed read, the locked wheels-up read with the timing
+         *     tables (`TimingTables::live`), then a *single* blocking task for the whole loop. Fanning
          *     `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
-         *     be two queries and a blocking task each.
+         *     be three queries and a blocking task each.
          *
          *     Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
          *     derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a
@@ -3980,8 +3949,9 @@ export interface components {
         };
         /**
          * @description A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
-         *     trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
-         *     token, or empty). See migration 0059 and `feed::trajectory`.
+         *     trajectory / ETA model. Keyed by `kind` (`type` / `family` / `wake` / `default`) + `key` (ICAO
+         *     type, engine family `jet` / `turboprop` / `piston`, wake token, or empty). See migrations 0059
+         *     and 0134 and `feed::trajectory`.
          */
         AircraftProfileBody: {
             /** Format: double */
@@ -4813,7 +4783,7 @@ export interface components {
             /** Format: int64 */
             window_hours: number;
         };
-        /** @description A pending ground/proposed departure out of a field (for the Departures view). */
+        /** @description A pending ground departure out of a field, a connected pilot (for the Departures view). */
         DepartureFlight: {
             aircraft_type: string;
             /** @description Destination airport. */
@@ -4825,7 +4795,7 @@ export interface components {
             /**
              * Format: int64
              * @description The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
-             *     is issued for this callsign.
+             *     is issued for this callsign, and on a historical replay, which holds none of today's CFRs.
              */
             cfr_version?: number | null;
             /** Format: int64 */
@@ -4842,6 +4812,11 @@ export interface components {
             /** Format: date-time */
             sta?: string | null;
             status: string;
+            /**
+             * @description True when this departure holds no locked wheels-up (an issued CFR, an FCA release or a GDP
+             *     EDCT), so `eta` and `cfr` rest on its proposed wheels-up (`FlowFlight.etd`) (#814).
+             */
+            wheels_up_proposed: boolean;
         };
         /** @description The Departures view for one field (airport, TRACON, or ARTCC) plus summary counts. */
         DeparturesResponse: {
@@ -5281,6 +5256,12 @@ export interface components {
             /** @description Event FCA lifecycle: planned | published | archived (null for shared FCAs). */
             event_status?: string | null;
             fixes: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+             *     0 turns freezing off (#817).
+             */
+            freeze_min: number;
             id: string;
             /** @description Controller's manual crossing order (callsigns); empty = auto. */
             manual_order: string[];
@@ -5340,7 +5321,8 @@ export interface components {
             dep: string;
             /**
              * Format: int64
-             * @description Distance along the (remaining) route to the crossing, nm.
+             * @description Distance along the (remaining) route to the crossing, nm, as the ETA is timed: a ground
+             *     flight whose route does not resolve carries the 1.12 padding (#813).
              */
             distance_nm: number;
             /**
@@ -5359,6 +5341,16 @@ export interface components {
             heading: number;
             /** Format: double */
             lat: number;
+            /**
+             * Format: int64
+             * @description Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
+             *     far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
+             *     since until then the flight can still take off on time, however far its ETA has moved. A
+             *     late flight crosses no earlier than its ETA. In auto mode a late held flight crosses at the later of the slot it held
+             *     while on time and its ETA, and no release or other held flight moves for it; in manual mode
+             *     it keeps its place in the controller's order (#817).
+             */
+            late_sec: number;
             /** Format: double */
             lon: number;
             /**
@@ -5378,8 +5370,28 @@ export interface components {
              * @description 1-based sequence in the metered order.
              */
             seq: number;
+            /**
+             * @description A released crossing, or a held crossing running late, that sits inside another crossing's
+             *     required gap (#817).
+             */
+            slot_conflict: boolean;
+            /**
+             * @description An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
+             *     its STA is stored. A background pass, every 15 s, stores its STA from the first pass that
+             *     saw it there, for enabled FCAs only; from then `cross_time` keeps that STA while the ETA
+             *     moves, unless the flight runs late or a crossing placed ahead of it needs the gap (a
+             *     release, a held flight ahead that was itself pushed later, the manual order, or under MIT a
+             *     held flight ahead whose gap grew) (#817).
+             */
+            sta_frozen: boolean;
             /** @description `airborne` | `ground`. Connected pilots only; a prefile is never an FCA candidate (#834). */
             status: string;
+            /**
+             * @description True when this ground flight holds no locked wheels-up (a release here, an issued CFR, another
+             *     FCA's release or a GDP EDCT), so `eta` and `cross_time` rest on its proposed wheels-up
+             *     (`FlowFlight.etd`) (#814).
+             */
+            wheels_up_proposed: boolean;
         };
         /**
          * @description Per-flight debug info surfaced by the client's debug mode: which performance profile drove the
@@ -5410,9 +5422,11 @@ export interface components {
              *     (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
              */
             headwind?: number | null;
-            /** @description The resolved aircraft performance profile: "type:C172", "wake:H", or "default". */
+            /**
+             * @description The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
+             *     "default".
+             */
             profile: string;
-            taxi_estimate?: components["schemas"]["TaxiEstimateDebug"] | null;
             /**
              * @description Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
              *     source of ETA/track error.
@@ -5627,7 +5641,6 @@ export interface components {
             inbound: number;
             /** @description `demand_60min > aar` when a program exists, else null. */
             over_capacity?: boolean | null;
-            proposed: number;
             /**
              * @description Every STAR the nav data says serves this airport (raw procedure names, e.g. `CAPPS3`),
              *     sorted, whether or not any traffic is filed on it. Lets a gate be picked before a flight
@@ -5658,10 +5671,12 @@ export interface components {
             category?: string | null;
             /**
              * Format: date-time
-             * @description Proposed wheels-up (EDCT / Call-For-Release) for ground & proposed flights.
+             * @description The CFR (Call-For-Release) wheels-up of a metered ground flight: the issued CFR when
+             *     `cfr_issued`, else the metered one, its STA less the airborne ETE. Not the proposed wheels-up
+             *     (`etd` when `wheels_up_proposed`).
              */
             cfr?: string | null;
-            /** @description True when the CFR has been issued (locked) rather than merely proposed. */
+            /** @description True when the CFR has been issued (locked) rather than only metered. */
             cfr_issued: boolean;
             /**
              * Format: int64
@@ -5675,10 +5690,10 @@ export interface components {
             eta?: string | null;
             /**
              * Format: date-time
-             * @description Estimated wheels-up for ground/proposed inbounds, plus the ground allowance in each case: now
-             *     for a ground flight; for a prefile, its filed departure time (never earlier than now + 20 min),
-             *     or now + 20 min when it filed none or one that does not parse. Null once airborne. Used to back
-             *     out enroute time for airport-flow CFRs and GDP EDCTs.
+             * @description Wheels-up for ground inbounds: the locked wheels-up of one that holds an issued CFR, an FCA
+             *     release or a GDP slot, else the proposed one, the filed departure time plus 10 min, never
+             *     earlier than now + 10 min; a blank, malformed or `0000` filed time counts as now (#814). Null
+             *     once airborne. Used to back out enroute time for airport-flow CFRs and GDP EDCTs.
              */
             etd?: string | null;
             /** @description True when a program excludes this aircraft from metering (still shown). */
@@ -5697,8 +5712,13 @@ export interface components {
              * @description Metered (scheduled) time of arrival after CFR/EDCT sequencing; null if unmetered.
              */
             sta?: string | null;
-            /** @description `airborne` | `ground` | `proposed` | `arrived`. */
+            /** @description `airborne` | `ground` | `arrived`. Prefiles are not listed (#814). */
             status: string;
+            /**
+             * @description True when this ground inbound holds no locked wheels-up (an issued CFR, an FCA release or a
+             *     GDP slot), so `etd`, `eta` and `cfr` rest on its proposed wheels-up (#814).
+             */
+            wheels_up_proposed: boolean;
         };
         /** @description One per-gate restriction inside a program: an arrival fix/STAR with its own spacing. */
         GateRule: {
@@ -5905,7 +5925,7 @@ export interface components {
             exempt_reason?: string | null;
             /** @description True once the control time is frozen (persisted at publish). */
             frozen: boolean;
-            /** @description Current live status: `airborne` | `ground` | `proposed`. */
+            /** @description Current live status: `airborne` | `ground`. */
             status: string;
         };
         /** @description Program-wide delay tallies over the controlled flights. */
@@ -6076,7 +6096,12 @@ export interface components {
             dep: string;
             /**
              * Format: date-time
-             * @description Frozen wheels-up (EDCT) once released; null while unscheduled.
+             * @description Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
+             *     would meet `cross_time`. The EDCT a release stores can be earlier or later than the
+             *     proposal: RDY spaces the flight only against airborne and already-released crossings (in
+             *     manual mode it takes its ladder slot), plus a 15 s margin, and SET takes the first slot at
+             *     or after the controller's ready time plus the airborne flight time, with the same margin.
+             *     Null only when an unreleased flight has no metered crossing time or no ETA.
              */
             edct?: string | null;
             /** @description The FCA metering this flight (the "program"). */
@@ -6091,7 +6116,8 @@ export interface components {
             /**
              * @description The predicted departure runway (#511), or null when nothing could predict one — no airport
              *     configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
-             *     narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+             *     show the controller the wrong runway and let a release swap through between departures that use
+             *     different ones.
              */
             runway?: string | null;
             /**
@@ -6122,8 +6148,8 @@ export interface components {
             callsign: string;
             /**
              * Format: date-time
-             * @description Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used, else its estimated
-             *     wheels-up (`FlowFlight.etd`).
+             * @description Explicit wheels-up to lock; when omitted, the flight's metered CFR is used, else its locked or
+             *     proposed wheels-up (`FlowFlight.etd`), else now for a flight airport flow does not list.
              */
             ready_time?: string | null;
         };
@@ -7234,72 +7260,6 @@ export interface components {
              */
             rolling_since?: string | null;
         };
-        /**
-         * @description How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
-         *     gate/runway (if any) and each metric's fallback-ladder tier + sample count.
-         */
-        TaxiEstimateDebug: {
-            /** @description The matched gate/parking spot id, if the aircraft's position matched one. */
-            gate?: string | null;
-            /** Format: int64 */
-            pushback_samples: number;
-            /** Format: int64 */
-            pushback_sec: number;
-            /**
-             * @description Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
-             *     "airport", or "default".
-             */
-            pushback_tier: string;
-            /** @description The matched departure runway, if the aircraft was rolling. */
-            runway?: string | null;
-            /** Format: int64 */
-            startup_samples: number;
-            /** Format: int64 */
-            startup_sec: number;
-            /** @description Same tier labels as `pushback_tier`, for the start-up gap after the push (#277). */
-            startup_tier: string;
-            /** Format: int64 */
-            taxi_samples: number;
-            /** Format: int64 */
-            taxi_sec: number;
-            /** @description Same tier labels as `pushback_tier`, for the taxi-out metric. */
-            taxi_tier: string;
-        };
-        /**
-         * @description One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
-         *     currently filtered sample set — not a stored row.
-         */
-        TaxiEstimateEntry: {
-            aircraft?: string | null;
-            airport: string;
-            gate_id?: string | null;
-            /** Format: int64 */
-            pushback_sample_count: number;
-            /** Format: double */
-            pushback_sec: number;
-            pushback_tier: string;
-            runway?: string | null;
-            /** Format: int64 */
-            startup_sample_count: number;
-            /** Format: double */
-            startup_sec: number;
-            startup_tier: string;
-            /** Format: int64 */
-            taxi_sample_count: number;
-            /** Format: double */
-            taxi_sec: number;
-            taxi_tier: string;
-        };
-        /** @description A page of derived estimates. */
-        TaxiEstimatePage: {
-            items: components["schemas"]["TaxiEstimateEntry"][];
-            /** Format: int64 */
-            page: number;
-            /** Format: int64 */
-            page_size: number;
-            /** Format: int64 */
-            total: number;
-        };
         /** @description The Taxi Monitor view for one field: stats plus the in-progress departures. */
         TaxiField: {
             active: components["schemas"]["TaxiActive"][];
@@ -7311,38 +7271,6 @@ export interface components {
             sample_count: number;
             trend: string;
             volume: number;
-        };
-        /** @description One raw pushback/start-up/taxi observation (#164 sub-issue C, #277). */
-        TaxiObservationEntry: {
-            aircraft?: string | null;
-            airport: string;
-            gate_id?: string | null;
-            /** Format: int64 */
-            id: number;
-            /**
-             * @description True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
-             *     query time, never persisted.
-             */
-            is_outlier: boolean;
-            /** Format: date-time */
-            observed_at: string;
-            /** Format: int32 */
-            pushback_sec?: number | null;
-            runway?: string | null;
-            /** Format: int32 */
-            startup_sec?: number | null;
-            /** Format: int32 */
-            taxi_sec: number;
-        };
-        /** @description A page of raw observations. */
-        TaxiObservationPage: {
-            items: components["schemas"]["TaxiObservationEntry"][];
-            /** Format: int64 */
-            page: number;
-            /** Format: int64 */
-            page_size: number;
-            /** Format: int64 */
-            total: number;
         };
         /**
          * @description Outcome of generating Tier-1 support requests for an FNO: the neighbouring ARTCCs a request was
@@ -7635,6 +7563,12 @@ export interface components {
             dir?: string | null;
             enabled?: boolean | null;
             fixes?: string[];
+            /**
+             * Format: int32
+             * @description Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+             *     without it gets 30; an update without it keeps the stored value.
+             */
+            freeze_min?: number | null;
             /** Format: int32 */
             max_fl?: number | null;
             /** Format: int32 */
@@ -13095,6 +13029,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -13154,6 +13095,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -13202,6 +13150,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -13245,6 +13200,13 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13309,6 +13271,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Not Found */
             404: {
                 headers: {
@@ -13352,6 +13321,13 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18854,125 +18830,6 @@ export interface operations {
             };
         };
     };
-    list_taxi_estimates: {
-        parameters: {
-            query: {
-                /** @description Airport ICAO (required — estimates are computed per-airport) */
-                airport: string;
-                /** @description Filter to one gate/parking spot */
-                gate_id?: string;
-                /** @description Filter to one aircraft type */
-                aircraft?: string;
-                /** @description Filter to one departure runway */
-                runway?: string;
-                /** @description Only include samples observed at/after (RFC 3339) */
-                from?: string;
-                /** @description Only include samples observed at/before (RFC 3339) */
-                to?: string;
-                /** @description Include out-of-bounds samples in the estimate's input (default true) */
-                include_outliers?: boolean;
-                /** @description Only combos where pushback, start-up, or taxi resolved at this ladder tier */
-                fallback_tier?: string;
-                /** @description 1-based page (default 1) */
-                page?: number;
-                /** @description Page size (default 50, max 100) */
-                page_size?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaxiEstimatePage"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_taxi_observations: {
-        parameters: {
-            query?: {
-                /** @description Filter to one airport ICAO */
-                airport?: string;
-                /** @description Filter to one gate/parking spot */
-                gate_id?: string;
-                /** @description Filter to one aircraft type */
-                aircraft?: string;
-                /** @description Filter to one departure runway */
-                runway?: string;
-                /** @description Only observed at/after (RFC 3339) */
-                from?: string;
-                /** @description Only observed at/before (RFC 3339) */
-                to?: string;
-                /** @description Include rows outside taxi_estimate's sanity bounds (default true) */
-                include_outliers?: boolean;
-                /** @description 1-based page (default 1) */
-                page?: number;
-                /** @description Page size (default 50, max 100) */
-                page_size?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaxiObservationPage"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Rate limit exceeded: back off for `Retry-After` seconds. Every limited response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. */
-            429: {
-                headers: {
-                    /** @description Seconds until the next request will be accepted. */
-                    "Retry-After"?: string;
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     list_advisories: {
         parameters: {
             query?: never;
@@ -19184,6 +19041,13 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

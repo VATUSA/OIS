@@ -1,6 +1,6 @@
 /**
- * Rules for a persisted, user-chosen colour (an FCA, a route, a facility-map rule) — DESIGN.md
- * § "User-chosen domain colour". The backend enforces the same rule (`repos::flow::fca_color`).
+ * Rules for a persisted, user-chosen colour — DESIGN.md § "User-chosen domain colour". The backend
+ * enforces the same rule for FCA colours only (`repos::flow::fca_color`).
  */
 
 /** The dark theme's `--ground`: the background a user colour must stay visible on. */

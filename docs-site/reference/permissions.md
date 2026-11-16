@@ -93,7 +93,7 @@ something narrower.
 
 | Permission | Grants |
 | --- | --- |
-| `stats.data.read` | View [Historical](/historical/overview) — network stats, replay, delays, taxi insights |
+| `stats.data.read` | View [Historical](/historical/overview) — network stats, replay, delays |
 | `stats.capture.update` | Save or manage a capture window |
 | `stats.capture.delete` | Delete a saved capture window, releasing the position data it pinned |
 

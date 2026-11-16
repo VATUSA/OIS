@@ -38,20 +38,27 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   // every viewer (`AppState::sector_demand`): a miss costs one projection, 179–540 ms of CPU per ARTCC
   // in release on the live feed; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
   { key: ["sector-demand"], minGapMs: 60_000 },
+  // Every airport's arrival demand against its rate (#954): its old 60 s poll.
+  { key: ["tmu-demand"], minGapMs: 60_000 },
 ];
 
 export const TOPIC_KEYS: Record<string, string[][]> = {
   [FEED_TICK]: FEED_KEYS.map(({ key }) => key),
-  // A release, CFR or GDP slot also moves the sector demand's proposed counts: see COALESCED_KEYS.
-  "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
+  // Every lock (a release, an FCA switched on or off, a CFR, a GDP slot) times its flight on the FCA
+  // board, airport flow, the AADC, the departures list, the route popup's per-fix table and the GDP
+  // draft (#814). The sector demand and the NAS demand move too, on the next tick: see COALESCED_KEYS.
+  "flow.release": [["idst"], ["fca-traffic"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]],
   // Enabling, disabling or deleting an FCA changes which releases hold a wheels-up (#721).
-  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
-  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
-  "tmu.tmi": [["tmis"]],
-  "tmu.groundstop": [["ground-stops"], ["departures"]],
-  "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]],
+  // The public advisories board lists active ground stops, GDPs, restrictions and programs (#954).
+  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["aircraft-route"]],
+  "tmu.tmi": [["tmis"], ["public-board"]],
+  "tmu.groundstop": [["ground-stops"], ["departures"], ["public-board"]],
+  // A program sets the rate the NAS demand ranks against (#954). Programs change rarely, so it
+  // refetches at once.
+  "tmu.program": [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]],
   "tmu.advisory": [["advisories"]],
-  "flow.cfr": [["departures"], ["flow"]],
+  "flow.cfr": [["departures"], ["flow"], ["fca-traffic"], ["idst"], ["aadc"], ["aircraft-route"], ["gdp-board"]],
   "events.availability": [["event-availability"]],
   // Payload-free by design: each client refetches its own data and works out whether the change
   // was about them. The socket is broadcast to every signed-in client, so it must not carry who.
@@ -81,10 +88,12 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
  * the key's next one-minute tick refetch. If no tick comes, {@link COALESCE_MS} refetches it anyway.
  */
 export const COALESCED_KEYS: Record<string, string[][]> = {
-  "flow.release": [["sector-demand"]],
-  "flow.fca": [["sector-demand"]],
-  "tmu.gdp": [["sector-demand"]],
-  "flow.cfr": [["sector-demand"]],
+  // The same locks move the NAS demand (`tmu-demand`), which recomputes every rated airport per
+  // request and has no server cache (#954), so it is held for the tick on all four topics as well.
+  "flow.release": [["sector-demand"], ["tmu-demand"]],
+  "flow.fca": [["sector-demand"], ["tmu-demand"]],
+  "tmu.gdp": [["sector-demand"], ["tmu-demand"]],
+  "flow.cfr": [["sector-demand"], ["tmu-demand"]],
 };
 
 /**
@@ -159,8 +168,8 @@ export function isRealtimeLive(): boolean {
 
 /**
  * A feed-derived query's `refetchInterval`: off while feed ticks are arriving, `ms` otherwise. The
- * ticks replace the timer rather than adding to it. One backend replica is assumed: with several, a
- * client would miss ticks from the others until the hub is shared (#649).
+ * ticks replace the timer rather than adding to it. Each replica ticks only its own sockets
+ * (`Events::publish_local`, #648), so a client hears the replica it is connected to.
  */
 export function pollUnlessLive(ms: number, isLive: boolean): number | false {
   return isLive ? false : ms;

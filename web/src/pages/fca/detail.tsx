@@ -17,6 +17,7 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {flightStatus} from "@/lib/status";
 import {hhmmZulu} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 import {Ladder} from "@/pages/fca/ladder";
 import {can} from "@/lib/platform";
 import {openPopout, popoutSpecs} from "@/lib/popout";
@@ -59,6 +60,16 @@ function Strip({
   const canCfr = canEdit && f.status !== "airborne";
 
   const delayed = f.delay_sec >= DELAY_THRESHOLD_SEC;
+  // It runs past its release or held STA (#817; `late_sec`); shown beside any delay.
+  const late = f.late_sec >= DELAY_THRESHOLD_SEC;
+  const status =
+    [
+      delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : null,
+      late ? `late +${fmtDelaySec(f.late_sec)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "on time";
+  const statusTone = delayed ? "text-danger" : late ? "text-warning" : "text-success";
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -105,13 +116,16 @@ function Strip({
           )}
         </span>
         <span className="text-right font-mono leading-tight">
-          <span className={delayed ? "text-ink" : toneText[st.tone]}>
-            {hhmmZulu(f.cross_time)}
-          </span>
+          <ProposedTime
+            className={delayed ? "text-ink" : toneText[st.tone]}
+            iso={f.cross_time}
+            proposed={f.wheels_up_proposed}
+          />
           <span
-            className={`block text-xs ${delayed ? "text-danger" : "text-success"}`}
+            className={`block text-xs ${statusTone}`}
+            title={late ? "ETA is past its release or frozen time" : undefined}
           >
-            {delayed ? `${delayTag(f)} +${fmtDelaySec(f.delay_sec)}` : "on time"}
+            {status}
           </span>
         </span>
       </div>
@@ -123,6 +137,13 @@ function Strip({
         <span className="font-mono">{Math.round(f.distance_nm)}nm to line</span>
         {f.altitude > 0 && <span className="font-mono">FL{Math.round(f.altitude / 100)}</span>}
         {delayed && f.delay_nm > 0 && <span className="font-mono text-danger">+{f.delay_nm}nm</span>}
+        {f.slot_conflict && (
+          <span title="Inside another crossing's gap">
+            <StatusPill tone="bad" className="px-1.5 text-[10px] leading-4">
+              IN GAP
+            </StatusPill>
+          </span>
+        )}
       </div>
 
       {canCfr && (
@@ -186,17 +207,6 @@ function Strip({
           {f.debug.unresolved.length > 0 && (
             <div className="text-danger">
               unresolved: {f.debug.unresolved.join(" ")}
-            </div>
-          )}
-          {f.debug.taxi_estimate && (
-            <div>
-              push {f.debug.taxi_estimate.pushback_sec}s ({f.debug.taxi_estimate.pushback_tier}, n=
-              {f.debug.taxi_estimate.pushback_samples}) · start-up {f.debug.taxi_estimate.startup_sec}s (
-              {f.debug.taxi_estimate.startup_tier}, n={f.debug.taxi_estimate.startup_samples}) · taxi{" "}
-              {f.debug.taxi_estimate.taxi_sec}s (
-              {f.debug.taxi_estimate.taxi_tier}, n={f.debug.taxi_estimate.taxi_samples})
-              {f.debug.taxi_estimate.gate && ` · gate ${f.debug.taxi_estimate.gate}`}
-              {f.debug.taxi_estimate.runway && ` · rwy ${f.debug.taxi_estimate.runway}`}
             </div>
           )}
         </div>

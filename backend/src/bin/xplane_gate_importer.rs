@@ -49,10 +49,9 @@
 //!
 //! Stand names are made **unique within an airport**: 121 of the 183 airports repeat a name (KATW has
 //! two stands called "South Ramp"). Duplicates get a ` #2`, ` #3` … suffix. This is not cosmetic — the
-//! seed's per-airport re-pull matches on `(icao, name)` so that gate ids survive a refresh, and ids
-//! surviving is what keeps `stats.taxi_observation.gate_id` (on delete set null) from being wiped
-//! along with that airport's learned taxi history. Two stands sharing a name would make that match
-//! ambiguous. Operators can rename either one in the gate editor.
+//! seed's per-airport re-pull matches on `(icao, name)` so that gate ids survive a refresh, and two
+//! stands sharing a name would make that match ambiguous. Operators can rename either one in the gate
+//! editor.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -215,9 +214,8 @@ fn parse_size_code(field: &str) -> Option<String> {
 
 /// Make every name in `stands` unique, in file order, by suffixing repeats ` #2`, ` #3` …
 ///
-/// The seed's re-pull matches stands on `(icao, name)` to preserve gate ids (and with them the
-/// `stats.taxi_observation` rows that reference them), so a repeated name would make the match
-/// ambiguous. Suffixed names stay within the editor's 64-character limit: the longest raw name in the
+/// The seed's re-pull matches stands on `(icao, name)` to preserve gate ids, so a repeated name would
+/// make the match ambiguous. Suffixed names stay within the editor's 64-character limit: the longest raw name in the
 /// extract is 35 characters.
 fn disambiguate(stands: &mut [Stand]) {
     let mut seen: HashMap<String, usize> = HashMap::new();
@@ -392,8 +390,8 @@ mod tests {
         assert_eq!(stands[0].airline_codes, ["aal", "dal"]);
     }
 
-    /// Repeated names would make the seed's `(icao, name)` re-pull match ambiguous, and an ambiguous
-    /// match is what would silently wipe an airport's learned taxi history.
+    /// Repeated names would make the seed's `(icao, name)` re-pull match ambiguous, so a re-pull could
+    /// update the wrong stand.
     #[test]
     fn repeated_stand_names_are_disambiguated() {
         let mut stands = parse_stands(

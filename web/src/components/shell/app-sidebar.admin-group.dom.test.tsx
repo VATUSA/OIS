@@ -134,3 +134,20 @@ describe("the Admin area's sidebar at /admin/flow/sectors (#822)", () => {
     expect(crumbs).toEqual(["Admin", "Sectors"]);
   });
 });
+
+// VATUSA/OIS#966: the area crumb links to the first Operations link the user can see, so it follows
+// the TMU link's permissions. An FCA-only reader has no TMU link and lands on FCA instead.
+describe("the Operations breadcrumb link (VATUSA/OIS#966)", () => {
+  const areaCrumb = (host: HTMLElement) =>
+    host.querySelector('nav[aria-label="Breadcrumb"] a')?.getAttribute("href");
+
+  it("sends a flow.fca.read-only holder to FCA, not TMU", async () => {
+    const host = await renderAt("/ops/tmu", user({flow: {fca: ["read"]}}), true);
+    expect(areaCrumb(host)).toBe("/ops/fca");
+  });
+
+  it("sends a tmu.gdp.read-only holder to TMU", async () => {
+    const host = await renderAt("/ops/tmu", user({tmu: {gdp: ["read"]}}), true);
+    expect(areaCrumb(host)).toBe("/ops/tmu");
+  });
+});

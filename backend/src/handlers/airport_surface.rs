@@ -100,8 +100,9 @@ async fn require_edit(state: &AppState, principal: &Principal, icao: &str) -> Re
     }
 }
 
-/// Reload the DB gate catalog into `AppState::gates` so a write applies to `feed::taxi_observations`
-/// gate matching at once, instead of waiting for `jobs::spawn_airport_gates_refresh`'s next poll.
+/// Reload the DB gate catalog into `AppState::gates` so a write applies to the departure-runway
+/// derive's gate matching at once, instead of waiting for `jobs::spawn_airport_gates_refresh`'s next
+/// poll.
 async fn refresh_gates_cache(state: &AppState, pool: &sqlx::PgPool) -> Result<(), ApiError> {
     let by_icao = surface_repo::load_all_gates(pool).await?;
     state.gates.store(std::sync::Arc::new(by_icao));

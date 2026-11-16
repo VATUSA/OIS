@@ -1,6 +1,6 @@
 import {type FcaFlight} from "@/lib/fca";
 import {flightStatus} from "@/lib/status";
-import {hhmmZulu} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 import {ArrivalLadder} from "@/components/ladder/ArrivalLadder";
 import {TguiLadder} from "@/components/ladder/TguiLadder";
 import type {TguiColumn} from "@/components/ladder/tgui";
@@ -20,7 +20,8 @@ const LADDER_CH = 7; // ≈ px per monospace/tabular char at text-xs
 /** Estimated rendered pixel width of one metering tag — connector + pill padding/border/gaps +
  * text (seq + callsign + "HH:MMz"-ish time). Mirrors `airport.tsx`'s `stripW`. */
 function measureTagWidth(f: FcaFlight): number {
-  const chars = String(f.seq).length + f.callsign.length + 5;
+  // HHMMz, plus " P" when the time is proposed (#814).
+  const chars = String(f.seq).length + f.callsign.length + 5 + (f.wheels_up_proposed ? 2 : 0);
   return 12 /* connector tick */ + 42 /* pill padding + border + dot + gaps */ + chars * LADDER_CH;
 }
 
@@ -64,6 +65,7 @@ export function tguiColumn(flights: FcaFlight[], now: number, name: string): Tgu
       staTime: time,
       delayMin: f.delay_sec / 60,
       committed: f.released,
+      proposed: f.wheels_up_proposed,
     })),
   };
 }
@@ -110,7 +112,11 @@ export function Ladder({ flights, now, name = "FCA" }: { flights: FcaFlight[]; n
             <span className="size-1.5 shrink-0 rounded-full" style={{ background: st.color }} />
             <span className="font-mono text-ink-3">{f.seq}</span>
             <span className="font-mono font-semibold">{f.callsign}</span>
-            <span className="font-mono text-ink-2">{hhmmZulu(f.cross_time)}</span>
+            <ProposedTime
+              className="font-mono text-ink-2"
+              iso={f.cross_time}
+              proposed={f.wheels_up_proposed}
+            />
           </span>
         );
       }}

@@ -38,11 +38,12 @@ pub mod sector_demand_cache;
 pub mod sector_limits;
 pub mod service_accounts;
 pub mod stats;
-pub mod taxi_insights;
 pub mod tmu;
 pub mod users;
 pub mod webhooks;
 
+#[cfg(test)]
+mod ace_event_scope_tests;
 #[cfg(test)]
 mod topic_publish_tests;
 
@@ -56,7 +57,19 @@ mod sector_limits_tests;
 #[cfg(test)]
 mod actor_ratchet_tests;
 #[cfg(test)]
+mod aircraft_profiles_tests;
+#[cfg(test)]
+mod audit_write_tests;
+#[cfg(test)]
 mod auth_annotation_tests;
+#[cfg(test)]
+mod credential_db_error_tests;
+#[cfg(test)]
+mod eta_input_wiring_tests;
+#[cfg(test)]
+mod event_fca_scope_tests;
+#[cfg(test)]
+mod fca_freeze_tests;
 #[cfg(test)]
 mod flow_event_fca_visibility_tests;
 #[cfg(test)]
@@ -64,6 +77,10 @@ mod flow_prefile_candidate_tests;
 #[cfg(test)]
 mod machine_actor_tests;
 #[cfg(test)]
+mod proposed_wheels_up_tests;
+#[cfg(test)]
 mod service_account_grant_tests;
+#[cfg(test)]
+mod taxi_tests;
 #[cfg(test)]
 mod winds_tests;

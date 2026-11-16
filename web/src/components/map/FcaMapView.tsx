@@ -27,7 +27,6 @@ import {
   useUpdateFca,
   windsLabel,
   type Fca,
-  type UpsertFca,
 } from "@/lib/fca";
 import {useCreateRoute, useDeleteRoute, useRoutes, useUpdateRoute, type MapRoute, type UpsertRoute} from "@/lib/route";
 import {MAX_PROJECTION_SEC, usePredictedTraffic} from "@/lib/prediction";
@@ -44,7 +43,7 @@ import {usePersistedOrder} from "./hooks/usePersistedOrder";
 import {useFcaColors, useMapPalette, useRouteColors} from "./lib/colors";
 import {MAP_BUTTON, MAP_BUTTON_ON, MAP_PANEL} from "./lib/overlay";
 import {US_HOME} from "./lib/constants";
-import {haversine, normPoints, toDeckPath, type LatLng} from "./lib/geo";
+import {haversine, toDeckPath, type LatLng} from "./lib/geo";
 import type {NormAircraft} from "./lib/types";
 import type {AtcData} from "./layers/atc";
 import type {MatchedFlight} from "./layers/matched";
@@ -58,9 +57,8 @@ import {
   blankRouteForm,
   DraftEditor,
   draftFrom,
+  draftToUpsert,
   Kbd,
-  parseFl,
-  parseList,
   RouteEditor,
   routeFormFrom,
   type Draft,
@@ -443,21 +441,7 @@ export function FcaMapView({
 
   const save = () => {
     if (!draft || draft.points.length < 2) return;
-    const body: UpsertFca = {
-      name: draft.name.trim() || "FCA",
-      color: draft.color,
-      artcc: draft.artcc.trim().toUpperCase(),
-      points: normPoints(draft.points),
-      dests: parseList(draft.dests),
-      origins: parseList(draft.origins),
-      fixes: parseList(draft.fixes),
-      scope: parseList(draft.scope),
-      min_fl: parseFl(draft.minFl),
-      max_fl: parseFl(draft.maxFl),
-      mode: draft.mode,
-      rate: draft.rate,
-      mit: draft.mit,
-    };
+    const body = draftToUpsert(draft);
     if (draft.id) updateFca.mutate({ id: draft.id, body }, { onSuccess: cancel });
     else createFca.mutate(body, { onSuccess: cancel });
   };

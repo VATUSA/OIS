@@ -13,9 +13,13 @@
 # own checkout (main's, when a hook runs it; REVIEW_LENSES_MAP overrides it for tests):
 #   | <file> | <heading text> | Checked | <file:line or reason> |
 # Status is Checked, N/A or Finding; the last cell must not be empty. A lens owning
-# file "-" (intent) needs at least one row. A lens owning "@ac" needs one
+# "@claims" needs at least one `| SCOPE/COMMENT/DOC/COPY | ... |` row. A lens owning "@ac" needs one
 #   | AC-COUNT | <n> | Checked | <issue number, fetch time> |
 # row and exactly n `| AC | ... |` rows, every one Checked: an unmet AC is a gap.
+#
+# A lens the commit's tier leaves out is not checked (bin/lib/review-tier.sh review_lenses: the tier from
+# the paths the commit changes against origin/next, plus tests for a test file); a lens in the map
+# that no tier names is always checked.
 #
 # Repeat rounds (/code-review Phase 3): `prior` prints the nearest commit at or before SHA
 # whose set is complete in this checkout, so each checkout's rounds are one caller's. A row
@@ -33,6 +37,14 @@
 # ==============================================================================
 
 ATTEST_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=review-tier.sh
+if ! . "$ATTEST_SELF_DIR/review-tier.sh" 2>/dev/null || ! type review_lenses >/dev/null 2>&1; then
+    # Without the classifier every lens is required (Full) and no path is a test file, so nothing carries.
+    review_tier() { echo Full; }
+    tier_lenses() { echo "code ac tests security"; }
+    review_lenses() { tier_lenses Full; }
+    test_file() { return 1; }
+fi
 
 # attest_rows FILE: "file<TAB>heading<TAB>status<TAB>evidence" per table row, cells trimmed.
 attest_rows() {
@@ -64,14 +76,10 @@ ATTEST_CARRY_LENSES="code security"
 
 # attest_test_path PATH: 0 when PATH holds only tests, so a change to it is a tests-only delta.
 # A vitest file (*.test.ts, *.test.tsx), anything under a tests/ directory, or a shell test of the
-# tooling (bin/lib/*.test.sh). An inline Rust `#[cfg(test)] mod tests` does not qualify: its file
-# also holds the production code the code and security lenses attested.
+# tooling (bin/lib/*.test.sh): review-tier.sh's test_file. An inline Rust `#[cfg(test)] mod tests`
+# does not qualify: its file also holds the production code the code and security lenses attested.
 attest_test_path() {
-    case "$1" in
-        *.test.ts|*.test.tsx|tests/*|*/tests/*) return 0 ;;
-        bin/lib/*.test.sh) case "${1#bin/lib/}" in */*) return 1 ;; esac; return 0 ;;
-    esac
-    return 1
+    test_file "$1"
 }
 
 # attest_non_test_paths: reads paths on stdin, prints each one attest_test_path refuses.
@@ -130,7 +138,7 @@ carried_copy_gap() {
 
 # check_attestation SHA [ROOT]: prints each gap; returns 0 when none.
 check_attestation() {
-    local sha="$1" root="${2:-}" map dir lens file rows heading out gaps=0 seen carried
+    local sha="$1" root="${2:-}" map dir lens file rows heading out gaps=0 seen carried required
 
     [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null)"
     if [ -z "$root" ] || [ -z "$sha" ]; then
@@ -145,11 +153,15 @@ check_attestation() {
         return 1
     fi
     dir="$root/.claude/markers/attest/$sha"
-
+    # A lens the tier leaves out is skipped; a lens no tier names is always required.
+    required="$(review_lenses "$sha" "$root")"
     seen=""
     carried=""
     while IFS="$(printf '\t')" read -r lens file || [ -n "$lens" ]; do
         case "$lens" in ''|'#'*) continue ;; esac
+        case " $(tier_lenses Full) " in *" $lens "*)
+            case " $required " in *" $lens "*) ;; *) continue ;; esac ;;
+        esac
         if [ ! -f "$dir/$lens.md" ]; then
             case " $seen " in *" $lens "*) ;; *)
                 echo "GAP: no attestation for lens '$lens' ($dir/$lens.md)."
@@ -173,9 +185,9 @@ check_attestation() {
             gaps=$((gaps + 1))
             continue
         fi
-        if [ "$file" = "-" ]; then
-            if ! printf '%s\n' "$rows" | awk -F'\t' '($3 == "Checked" || $3 == "N/A" || $3 == "Finding") && $4 != "" { found = 1 } END { exit !found }'; then
-                echo "GAP: lens '$lens' has no row with a status and evidence."
+        if [ "$file" = "@claims" ]; then
+            if ! printf '%s\n' "$rows" | awk -F'\t' '$1 ~ /^(SCOPE|COMMENT|DOC|COPY)$/ && ($3 == "Checked" || $3 == "N/A" || $3 == "Finding") && $4 != "" { found = 1 } END { exit !found }'; then
+                echo "GAP: lens '$lens' has no SCOPE, COMMENT, DOC or COPY row with a status and evidence."
                 gaps=$((gaps + 1))
             fi
             continue
@@ -250,7 +262,7 @@ check_attestation_for_head() {
     if out="$(check_attestation "$sha")"; then
         return 0
     fi
-    echo "BLOCKED: the review lenses did not attest every rule heading for ${sha:0:8}."
+    echo "BLOCKED: the review lenses did not attest every rule heading for ${sha:0:8} (tier $(review_tier "$sha"))."
     printf '%s\n' "$out" | head -40
     total="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
     [ "$total" -le 40 ] || echo "... and $((total - 40)) more: bash bin/lib/review-attestation.sh check"
@@ -263,7 +275,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         check)
             sha="${2:-$(git rev-parse HEAD 2>/dev/null)}"
             if check_attestation "$sha"; then
-                echo "attestation complete for ${sha:0:8}"
+                echo "attestation complete for ${sha:0:8} (tier $(review_tier "$sha"): $(review_lenses "$sha"))"
                 exit 0
             fi
             exit 1

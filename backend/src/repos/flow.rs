@@ -11,7 +11,7 @@ use crate::models::{FcaBody, UpsertFcaRequest, UpsertRouteRequest};
 
 const FCA_SELECT: &str = "select f.id, f.name, f.color, f.artcc, f.points, f.dests, \
     f.origins, f.fixes, f.scope, f.min_fl, f.max_fl, f.dir, f.mode, f.rate, f.mit, \
-    f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
+    f.freeze_min, f.enabled, f.manual_order, f.manual_seq, f.updated_at, \
     coalesce(u.display_name, a.display_name) as updated_by, \
     f.event_id, f.event_status, f.auto_publish \
     from flow.fca f left join identity.users u on u.id = f.updated_by \
@@ -140,6 +140,7 @@ fn bind_fca<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     req: &'q UpsertFcaRequest,
     by: &'q Attribution,
+    freeze_min: Option<i32>,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     q.bind(req.name.trim())
         .bind(normalize_fca_color(req.color.as_deref()))
@@ -158,6 +159,15 @@ fn bind_fca<'q>(
         .bind(req.enabled.unwrap_or(true))
         .bind(&by.user_id)
         .bind(&by.actor_id)
+        .bind(freeze_min)
+}
+
+/// A new FCA's freeze horizon: the request's, else the default. `validate_fca` has bounded it.
+fn new_freeze_min(req: &UpsertFcaRequest) -> Option<i32> {
+    Some(
+        req.freeze_min
+            .unwrap_or(crate::feed::fca::DEFAULT_FREEZE_MIN),
+    )
 }
 
 pub async fn create_fca(
@@ -169,13 +179,13 @@ pub async fn create_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17)
+              updated_by_actor, created_by_actor, freeze_min)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18)
          returning id",
     );
-    // bind_fca sets $1..$17 (the 15 shared columns, then the user → `*_by` and the actor →
-    // `*_by_actor`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
-    let row = bind_fca(q, req, by)
+    // bind_fca sets $1..$18 (the 15 shared columns, the user → `*_by`, the actor → `*_by_actor`,
+    // then `freeze_min`); the created_* columns reuse $16/$17 in the SQL, so no extra bind is needed.
+    let row = bind_fca(q, req, by, new_freeze_min(req))
         .fetch_one(pool)
         .await
         .map_err(|_| ApiError::Internal)?;
@@ -196,11 +206,11 @@ pub async fn create_event_fca(
         "insert into flow.fca
              (name, color, artcc, points, dests, origins, fixes, scope, min_fl, max_fl,
               dir, mode, rate, mit, enabled, updated_by, created_by,
-              updated_by_actor, created_by_actor, event_id, event_status)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,'planned')
+              updated_by_actor, created_by_actor, freeze_min, event_id, event_status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,$17,$17,$18,$19,'planned')
          returning id",
     );
-    let row = bind_fca(q, req, by)
+    let row = bind_fca(q, req, by, new_freeze_min(req))
         .bind(event_id)
         .fetch_one(pool)
         .await
@@ -210,6 +220,10 @@ pub async fn create_event_fca(
         .map_err(|_| ApiError::Internal)
 }
 
+/// Update an FCA. When a metering input changes (geometry, filters, mode, rate, MIT or the freeze
+/// horizon) the same statement drops its held STAs, which were spaced under the old settings; the
+/// hold pass re-holds on its next tick (#817). A rename, recolor, ARTCC or enable change keeps them.
+/// A request without `freeze_min` (an older client) keeps the stored horizon.
 pub async fn update_fca(
     pool: &PgPool,
     id: &str,
@@ -217,13 +231,24 @@ pub async fn update_fca(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let q = sqlx::query(
-        "update flow.fca set
+        "with d as (
+             delete from flow.fca_held_sta where fca_id = $19 and exists (
+                 select 1 from flow.fca f where f.id = $19
+                   and (f.points, f.dests, f.origins, f.fixes, f.scope, f.min_fl, f.max_fl,
+                        f.dir, f.mode, f.rate, f.mit, f.freeze_min)
+                       is distinct from
+                       ($4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                        coalesce($18, f.freeze_min))
+             )
+         )
+         update flow.fca set
              name = $1, color = $2, artcc = $3, points = $4, dests = $5, origins = $6,
              fixes = $7, scope = $8, min_fl = $9, max_fl = $10, dir = $11, mode = $12,
-             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17
-         where id = $18",
+             rate = $13, mit = $14, enabled = $15, updated_by = $16, updated_by_actor = $17,
+             freeze_min = coalesce($18, freeze_min)
+         where id = $19",
     );
-    let result = bind_fca(q, req, by)
+    let result = bind_fca(q, req, by, req.freeze_min)
         .bind(id)
         .execute(pool)
         .await
@@ -317,12 +342,15 @@ pub async fn run_event_fca_lifecycle(pool: &PgPool) -> Result<u64, ApiError> {
 
 pub async fn delete_fca(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     // Soft-delete so the historical dashboard can still show the FCA during the window it existed.
-    let result =
-        sqlx::query("update flow.fca set deleted_at = now() where id = $1 and deleted_at is null")
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|_| ApiError::Internal)?;
+    // Its held STAs (#817) go with it; `sync_held_stas` stores none once the delete commits.
+    let result = sqlx::query(
+        "with d as (delete from flow.fca_held_sta where fca_id = $1)
+         update flow.fca set deleted_at = now() where id = $1 and deleted_at is null",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|_| ApiError::Internal)?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -431,7 +459,10 @@ pub async fn delete_route(pool: &PgPool, id: &str) -> Result<bool, ApiError> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Set (or clear) an FCA's manual crossing order.
+/// Set (or clear) an FCA's manual crossing order. When the order or the manual flag changes, the
+/// same statement drops the FCA's held STAs: manual mode anchors each flight at its held STA, so
+/// keeping the old order's holds would add delay to a reorder (#817). A save that changes neither
+/// keeps them.
 pub async fn set_manual_order(
     pool: &PgPool,
     id: &str,
@@ -440,7 +471,13 @@ pub async fn set_manual_order(
     by: &Attribution,
 ) -> Result<bool, ApiError> {
     let result = sqlx::query(
-        "update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4, \
+        "with d as (
+             delete from flow.fca_held_sta where fca_id = $1 and exists (
+                 select 1 from flow.fca f where f.id = $1
+                   and (f.manual_order, f.manual_seq) is distinct from ($2, $3)
+             )
+         )
+         update flow.fca set manual_order = $2, manual_seq = $3, updated_by = $4, \
              updated_by_actor = $5 where id = $1",
     )
     .bind(id)
@@ -535,32 +572,198 @@ pub async fn list_releases(
     .map_err(|_| ApiError::Internal)
 }
 
-/// The locked wheels-up (epoch ms) of each of `callsigns` that holds one, for the sector occupancy
-/// engine's proposed population (#721): the **latest** of its issued CFR, its releases in live FCAs (enabled,
-/// not deleted) and its slot in a published GDP. The latest is the binding constraint — a flight held for
-/// a later release can't satisfy an earlier one — and it is the flight advisory's rule too
-/// (`handlers::flow::flight_advisory`, `edcts.max()`). The departures list uses it too (#732).
+/// How long past its STA a held row still counts. A flight that has not crossed an hour after its
+/// held STA has left the flow; its row is ignored, then pruned on the next write (#817).
+pub const HELD_STA_RETAIN_MS: i64 = 3_600_000;
+
+/// The STAs held for each of `fca_ids`' flights inside its freeze horizon, by FCA then callsign
+/// (#817), in one query. Rows more than [`HELD_STA_RETAIN_MS`] past their STA are left out.
+pub async fn list_held_stas(
+    pool: &PgPool,
+    fca_ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<HashMap<String, HashMap<String, i64>>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        "select fca_id, callsign, sta_ms from flow.fca_held_sta
+         where fca_id = any($1) and sta_ms >= $2",
+    )
+    .bind(fca_ids)
+    .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "held STA list failed");
+        ApiError::Internal
+    })?;
+    let mut held: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    for (fca_id, callsign, sta) in rows {
+        held.entry(fca_id).or_default().insert(callsign, sta);
+    }
+    Ok(held)
+}
+
+/// Delete the held STAs of every FCA the hold pass does not meter: disabled, soft-deleted, or an
+/// event FCA that is not published (#817). One statement per pass tick.
+pub async fn prune_unmetered_held_stas(pool: &PgPool) -> Result<u64, ApiError> {
+    // `NOT_HIDDEN_EVENT` is a code constant over the alias `f`, not caller input.
+    let result = sqlx::query(&format!(
+        "delete from flow.fca_held_sta h where not exists (
+             select 1 from flow.fca f
+             where f.id = h.fca_id and f.enabled and f.deleted_at is null and {NOT_HIDDEN_EVENT}
+         )"
+    ))
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "held STA prune failed");
+        ApiError::Internal
+    })?;
+    Ok(result.rows_affected())
+}
+
+/// What one hold-pass tick changes in an FCA's held STAs.
+pub struct HeldStaSync<'a> {
+    /// Flights that just entered the freeze horizon, with the STA to hold.
+    pub store: &'a [(String, i64)],
+    /// Held flights this tick no longer holds: left the horizon, released, or gone from the feed.
+    pub drop: &'a [String],
+}
+
+/// Apply one hold-pass tick's changes to an FCA's held STAs, in one transaction (#817). Stale rows
+/// and `drop` are deleted first. A new row is stored only while the FCA is not deleted and still
+/// has the `fca_updated_at` the pass metered under, so a tick that metered before a committed edit,
+/// reorder or delete stores nothing. A sync that commits while an edit's, a reorder's or a delete's
+/// own statement runs can leave rows that statement's clear did not see. They act only as an earliest crossing until
+/// the flight leaves the horizon or the feed: the slot check spaces them, but after an edit that
+/// moves the line one can show the flight late or delayed at the new line until then. The first STA
+/// stored wins
+/// (`on conflict do nothing`), so concurrent replicas agree. No-op when there is nothing to change.
+pub async fn sync_held_stas(
+    pool: &PgPool,
+    fca_id: &str,
+    fca_updated_at: DateTime<Utc>,
+    sync: &HeldStaSync<'_>,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    if sync.store.is_empty() && sync.drop.is_empty() {
+        return Ok(());
+    }
+    let (callsigns, stas): (Vec<String>, Vec<i64>) = sync.store.iter().cloned().unzip();
+    // The pass reports only that this FCA failed, so this log is the record of the cause.
+    let fail = |e: sqlx::Error| {
+        tracing::error!(fca_id, error = %e, "held STA sync failed");
+        ApiError::Internal
+    };
+    let mut tx = pool.begin().await.map_err(fail)?;
+    sqlx::query(
+        "delete from flow.fca_held_sta
+         where fca_id = $1 and (sta_ms < $2 or callsign = any($3))",
+    )
+    .bind(fca_id)
+    .bind(now.timestamp_millis() - HELD_STA_RETAIN_MS)
+    .bind(sync.drop)
+    .execute(&mut *tx)
+    .await
+    .map_err(fail)?;
+    sqlx::query(
+        "insert into flow.fca_held_sta (fca_id, callsign, sta_ms)
+         select $1, c, s from unnest($2::text[], $3::bigint[]) as h(c, s)
+         where exists (
+             select 1 from flow.fca
+             where id = $1 and updated_at = $4 and deleted_at is null
+         )
+         on conflict (fca_id, callsign) do nothing",
+    )
+    .bind(fca_id)
+    .bind(&callsigns)
+    .bind(&stas)
+    .bind(fca_updated_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(fail)?;
+    tx.commit().await.map_err(fail)
+}
+
+/// The locked wheels-up (epoch ms) of each of `callsigns` that holds one: the **latest** of its issued
+/// CFR, its releases in live FCAs (enabled, not deleted, and not a planned or archived event FCA) and its
+/// slot in a published GDP. The latest is the binding constraint — a flight held for a later release
+/// can't satisfy an earlier one — and it is the flight advisory's rule too
+/// (`handlers::flow::flight_advisory`, `edcts.max()`). Sector occupancy (#721), the departures list
+/// (#732) and every surface that times a flight through `TimingTables::live` (#814) read it, public
+/// routes among them, so a hidden event FCA's release stays hidden here as it does in `list_fcas`.
 pub async fn locked_wheels_up(
     pool: &PgPool,
     callsigns: &[String],
 ) -> Result<HashMap<String, i64>, ApiError> {
+    locks(pool, callsigns, Except::default()).await
+}
+
+/// [`locked_wheels_up`] without the slots of `airport`'s own published GDPs: the GDP draft ranks a
+/// flight from every other lock it holds, but not from the slot that program gave it, or a revise or
+/// compress could never move it earlier (#814).
+pub async fn locked_wheels_up_outside_gdps_at(
+    pool: &PgPool,
+    callsigns: &[String],
+    airport: &str,
+) -> Result<HashMap<String, i64>, ApiError> {
+    let except = Except {
+        gdp_airport: Some(airport),
+        ..Except::default()
+    };
+    locks(pool, callsigns, except).await
+}
+
+/// `callsign`'s locked wheels-up from everything but its release on `fca_id`: the time RDY and SET
+/// on that FCA may not release it before (#814). A release it already holds there does not floor
+/// the new one.
+pub async fn locked_wheels_up_elsewhere(
+    pool: &PgPool,
+    callsign: &str,
+    fca_id: &str,
+) -> Result<Option<i64>, ApiError> {
+    let asked = [callsign.to_string()];
+    let except = Except {
+        fca: Some(fca_id),
+        ..Except::default()
+    };
+    Ok(locks(pool, &asked, except).await?.remove(callsign))
+}
+
+/// What a lock read leaves out: the releases on one FCA, the slots of one airport's GDPs.
+#[derive(Default, Clone, Copy)]
+struct Except<'a> {
+    fca: Option<&'a str>,
+    gdp_airport: Option<&'a str>,
+}
+
+/// [`locked_wheels_up`], leaving out what `except` names.
+async fn locks(
+    pool: &PgPool,
+    callsigns: &[String],
+    except: Except<'_>,
+) -> Result<HashMap<String, i64>, ApiError> {
     if callsigns.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query_as::<_, (String, i64)>(
+    // `NOT_HIDDEN_EVENT` is a trusted code constant; every value is bound.
+    let rows = sqlx::query_as::<_, (String, i64)>(&format!(
         "select callsign, max(t)::bigint from ( \
              select callsign, (extract(epoch from wheels_up) * 1000)::bigint as t \
              from tmu.issued_cfrs where callsign = any($1) \
              union all \
              select r.callsign, r.edct_ms from flow.fca_release r join flow.fca f on f.id = r.fca_id \
-             where f.enabled and f.deleted_at is null and r.callsign = any($1) \
+             where f.enabled and f.deleted_at is null and {NOT_HIDDEN_EVENT} \
+               and r.callsign = any($1) and r.fca_id is distinct from $2 \
              union all \
              select s.callsign, (extract(epoch from s.edct) * 1000)::bigint \
              from tmu.gdp_slot s join tmu.gdp g on g.id = s.gdp_id \
              where g.status = 'published' and s.edct is not null and s.callsign = any($1) \
-         ) locked group by callsign",
-    )
+               and upper(g.airport) is distinct from upper($3::text) \
+         ) locked group by callsign"
+    ))
     .bind(callsigns)
+    .bind(except.fca)
+    .bind(except.gdp_airport)
     .fetch_all(pool)
     .await
     .map_err(|_| ApiError::Internal)?;
@@ -753,7 +956,7 @@ mod locked_wheels_up_tests {
     use chrono::{DateTime, TimeZone, Utc};
     use sqlx::PgPool;
 
-    use super::locked_wheels_up;
+    use super::{locked_wheels_up, locked_wheels_up_elsewhere, locked_wheels_up_outside_gdps_at};
 
     fn at(h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 5, h, m, 0).unwrap()
@@ -870,5 +1073,111 @@ mod locked_wheels_up_tests {
         assert!(!locked.contains_key("NONE"), "nothing locked");
         assert!(!locked.contains_key("UNASKED"), "not asked for");
         assert!(locked_wheels_up(&pool, &[]).await.unwrap().is_empty());
+    }
+
+    /// #814 (#845's predicate): a release on a planned or archived event FCA locks nothing, as
+    /// `list_fcas` hides that FCA; one on a published event FCA does. Every timing surface, public
+    /// routes among them, reads this map.
+    #[sqlx::test]
+    async fn a_hidden_event_fcas_release_locks_nothing(pool: PgPool) {
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time) \
+             values (7461, 'E', now(), now() + interval '2 hours')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (status, callsign) in [
+            ("planned", "PLAN"),
+            ("archived", "ARCH"),
+            ("published", "PUB"),
+        ] {
+            let id: String = sqlx::query_scalar(
+                "insert into flow.fca (enabled, event_id, event_status) values (true, 7461, $1) \
+                 returning id",
+            )
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            release(&pool, &id, callsign, at(15, 0)).await;
+        }
+        let asked: Vec<String> = ["PLAN", "ARCH", "PUB"].map(String::from).into();
+        let locked = locked_wheels_up(&pool, &asked).await.unwrap();
+        assert_eq!(
+            locked.get("PUB").copied(),
+            Some(at(15, 0).timestamp_millis()),
+            "positive control: a published event FCA's release locks"
+        );
+        assert!(
+            !locked.contains_key("PLAN"),
+            "a planned event FCA is hidden"
+        );
+        assert!(
+            !locked.contains_key("ARCH"),
+            "an archived event FCA is hidden"
+        );
+    }
+
+    /// #814: the floor RDY and SET on one FCA respect leaves out that FCA's own release and keeps
+    /// every other lock: another FCA's release, a CFR and a published GDP slot, the latest winning.
+    #[sqlx::test]
+    async fn the_lock_elsewhere_leaves_out_only_this_fcas_release(pool: PgPool) {
+        let (here, there) = (fca(&pool, true, false).await, fca(&pool, true, false).await);
+        release(&pool, &here, "OWN", at(17, 0)).await;
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "OWN", &here)
+                .await
+                .unwrap(),
+            None,
+            "its own release here floors nothing"
+        );
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "OWN", &there)
+                .await
+                .unwrap(),
+            Some(at(17, 0).timestamp_millis()),
+            "positive control: the same release does floor another FCA"
+        );
+        release(&pool, &here, "MIX", at(18, 0)).await;
+        release(&pool, &there, "MIX", at(15, 0)).await;
+        cfr(&pool, "MIX", at(15, 30)).await;
+        gdp_slot(&pool, "published", "MIX", at(16, 0)).await;
+        assert_eq!(
+            locked_wheels_up_elsewhere(&pool, "MIX", &here)
+                .await
+                .unwrap(),
+            Some(at(16, 0).timestamp_millis()),
+            "the latest of the other FCA's release, the CFR and the GDP slot; not 18:00 here"
+        );
+    }
+
+    /// #814 decision 31: the GDP draft's lock read leaves out only the asking airport's own GDP
+    /// slots. The same slot locks for any other airport's read, and a CFR still locks.
+    #[sqlx::test]
+    async fn the_gdp_draft_leaves_out_only_its_own_airports_slots(pool: PgPool) {
+        gdp_slot(&pool, "published", "OWN", at(16, 0)).await;
+        gdp_slot(&pool, "published", "BOTH", at(16, 0)).await;
+        cfr(&pool, "BOTH", at(15, 0)).await;
+        let asked: Vec<String> = ["OWN", "BOTH"].map(String::from).into();
+        let here = locked_wheels_up_outside_gdps_at(&pool, &asked, "kjfk")
+            .await
+            .unwrap();
+        assert!(
+            !here.contains_key("OWN"),
+            "its own airport's slot: {here:?}"
+        );
+        assert_eq!(
+            here.get("BOTH").copied(),
+            Some(at(15, 0).timestamp_millis())
+        );
+        let elsewhere = locked_wheels_up_outside_gdps_at(&pool, &asked, "KBOS")
+            .await
+            .unwrap();
+        assert_eq!(
+            elsewhere.get("OWN").copied(),
+            Some(at(16, 0).timestamp_millis()),
+            "positive control: another airport's read keeps it"
+        );
     }
 }

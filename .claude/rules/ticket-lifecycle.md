@@ -295,6 +295,12 @@ points above, nothing more:
   worktrees mid-gate. A tracked file you did not modify, a stray `.bak` or a compile error in an
   unrelated file is the tell. Run `git status --porcelain` before and after every mutation or merge
   cycle, and keep backups in your scratchpad, not in the worktree.
+- **Stop only the PIDs your runner recorded** (`test-quality.md` → "Running the gate while other
+  worktrees are live"). A headless desktop walk starts gnome-keyring by absolute path, records its
+  PID, and never touches the user's session bus or keyring.
+- **Port 3000 is shared.** The desktop debug build reaches only `http://127.0.0.1:3000`, so a walk
+  that needs it requests the port from the orchestrator, which grants it to one agent at a time
+  (`/ticket-loop` → "2. BUILD").
 - **Inside a worktree session the harness confines git and edits to that worktree.** It refuses
   `git -C` into another checkout, git nested in `$(...)`, `<(...)` or a heredoc fed to bash,
   and Edit/Write to a primary-checkout path. Run git as plain commands with values written in

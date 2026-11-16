@@ -4,7 +4,7 @@ import {useToast} from "@ois/ui";
 
 import {ois} from "./api";
 import {useHistoricalAt} from "./historical-context";
-import {SOCKET_FALLBACK_MS} from "./realtime";
+import {SOCKET_FALLBACK_MS, pollUnlessLive, useRealtimeLive} from "./realtime";
 
 export type Tmi = components["schemas"]["TmiBody"];
 export type CreateTmi = components["schemas"]["CreateTmiRequest"];
@@ -149,6 +149,7 @@ export function usePrograms() {
  * because the per-airport flow hooks fan out one request per ICAO (`lib/historical.ts`).
  */
 export function useAirportDemand() {
+  const live = useRealtimeLive();
   return useQuery({
     queryKey: ["tmu-demand"],
     queryFn: async () => {
@@ -156,7 +157,7 @@ export function useAirportDemand() {
       if (error || !data) throw new Error("failed to load demand");
       return data;
     },
-    refetchInterval: 60_000,
+    refetchInterval: pollUnlessLive(60_000, live),
   });
 }
 

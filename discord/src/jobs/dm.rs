@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use serenity::all::{CreateMessage, Http, UserId};
+use serenity::all::{CreateAllowedMentions, CreateMessage, Http, UserId};
 
 use crate::util::str_field;
 
@@ -61,16 +61,57 @@ pub(crate) async fn send_claim_dm(http: &Arc<Http>, p: &Value) -> Result<Option<
 
     let content = build_dm_content(event_title, position, &documents, reminder);
     UserId::new(discord_user_id)
-        .dm(http, CreateMessage::new().content(content))
+        .dm(http, build_claim_dm(content))
         .await
         .map_err(|e| format!("dm failed: {e}"))?;
     Ok(None)
+}
+
+/// The claim confirmation or reminder DM. Split out from [`send_claim_dm`] so its payload can be
+/// asserted without a live Discord connection. `content` carries the caller's `event_title`, so an
+/// explicit empty `allowed_mentions` keeps any mention in it inert, as the TMI and advisory posts
+/// do (#933).
+fn build_claim_dm(content: String) -> CreateMessage {
+    CreateMessage::new()
+        .content(content)
+        .allowed_mentions(CreateAllowedMentions::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_at_everyone_in_a_claim_dm_cannot_ping_anyone() {
+        let content = build_dm_content(
+            "Fly-In @everyone <@&123> <@456>",
+            Some("ZDC_CTR"),
+            &[],
+            None,
+        );
+        let json = serde_json::to_value(build_claim_dm(content)).expect("serialize");
+
+        let mentions = json
+            .get("allowed_mentions")
+            .expect("allowed_mentions must be set, or Discord parses by default");
+        let parse = mentions.get("parse").and_then(Value::as_array);
+        assert_eq!(parse.map(Vec::len), Some(0), "got {mentions:?}");
+        for key in ["users", "roles"] {
+            let listed = mentions
+                .get(key)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            assert_eq!(listed, 0, "{key} listed in {mentions:?}");
+        }
+        // The DM really carries the caller's mentions, or the assertions above are vacuous.
+        assert!(
+            json["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("Fly-In @everyone <@&123> <@456>")),
+            "got {json}"
+        );
+    }
 
     #[test]
     fn build_dm_content_lists_documents_when_present() {

@@ -137,7 +137,13 @@ function BoardCard({
   );
 }
 
+const NO_BOARDS: DashboardSummary[] = [];
 const NO_COLLECTIONS: DashboardCollection[] = [];
+
+/** A list-view row: the board with its collection's name resolved. The table caches each row's
+ *  column values until its `data` changes, so the name lives on the row, rebuilt when the
+ *  collections change (#877). */
+type BoardRow = DashboardSummary & { collection_name: string };
 
 /**
  * The list view's row menu reads the collections from here, not from a column closure: a `cell`
@@ -169,8 +175,8 @@ export function BoardLibraryPage() {
   const renameCollection = useRenameCollection();
   const deleteCollection = useDeleteCollection();
 
-  const boards = data?.dashboards ?? [];
-  // A constant fallback, so the columns memo below doesn't rebuild on every render while loading.
+  // Constant fallbacks, so the memos below don't rebuild on every render while loading.
+  const boards = data?.dashboards ?? NO_BOARDS;
   const collections = data?.collections ?? NO_COLLECTIONS;
   // A national board is only useful to someone who works the NAS, so it is offered only to them —
   // the same `tmu_national` test the national widgets use (VATUSA/OIS#474, #475, #476). Curation,
@@ -313,11 +319,14 @@ export function BoardLibraryPage() {
   );
 
   const ungrouped = boards.filter((b) => !b.collection_id);
-  const collectionName = useMemo(() => new Map(collections.map((c) => [c.id, c.name])), [collections]);
+  const rows = useMemo<BoardRow[]>(() => {
+    const names = new Map(collections.map((c) => [c.id, c.name]));
+    return boards.map((b) => ({ ...b, collection_name: b.collection_id ? (names.get(b.collection_id) ?? "") : "" }));
+  }, [boards, collections]);
 
-  // Its own memo on `actionsFor` alone, so a collections change rebuilds the other columns but keeps
-  // this `cell` function, and the armed Delete inside it.
-  const actionsColumn = useMemo<DataColumn<DashboardSummary>>(
+  // Its own memo on `actionsFor` alone, so this `cell` function, and the armed Delete inside it,
+  // survives every re-render.
+  const actionsColumn = useMemo<DataColumn<BoardRow>>(
     () => ({
       id: "actions",
       header: "",
@@ -328,7 +337,7 @@ export function BoardLibraryPage() {
     [actionsFor],
   );
 
-  const columns = useMemo<DataColumn<DashboardSummary>[]>(
+  const columns = useMemo<DataColumn<BoardRow>[]>(
     () => [
       {
         accessorKey: "name",
@@ -346,7 +355,7 @@ export function BoardLibraryPage() {
       },
       {
         id: "collection",
-        accessorFn: (b) => (b.collection_id ? (collectionName.get(b.collection_id) ?? "") : ""),
+        accessorKey: "collection_name",
         header: "Collection",
         icon: Folder,
         cell: (c) => <span className="text-ink-2">{c.getValue<string>() || "—"}</span>,
@@ -367,7 +376,7 @@ export function BoardLibraryPage() {
       },
       actionsColumn,
     ],
-    [collectionName, actionsColumn],
+    [actionsColumn],
   );
 
   return (
@@ -393,7 +402,7 @@ export function BoardLibraryPage() {
           <DataTable
             label="Dashboards"
             columns={columns}
-            data={boards}
+            data={rows}
             getRowId={(b) => b.id}
             initialSort={[{ id: "updated_at", desc: true }]}
             rowCap={25}

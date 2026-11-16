@@ -2,6 +2,10 @@ import * as React from "react";
 
 type Theme = "light" | "dark" | "system";
 
+function isTheme(value: string | null): value is Theme {
+  return value === "light" || value === "dark" || value === "system";
+}
+
 type ThemeContextValue = {
   theme: Theme;
   resolvedTheme: "light" | "dark";
@@ -28,7 +32,14 @@ export function ThemeProvider({
 }) {
   const [theme, setThemeState] = React.useState<Theme>(() => {
     if (typeof window === "undefined") return defaultTheme;
-    return (localStorage.getItem(storageKey) as Theme | null) ?? defaultTheme;
+    // Storage can throw (blocked site data, a storage-blocked iframe embed), and this mounts above
+    // the ErrorBoundary, so a throw here would leave a blank page (#947).
+    try {
+      const stored = localStorage.getItem(storageKey);
+      return isTheme(stored) ? stored : defaultTheme;
+    } catch {
+      return defaultTheme;
+    }
   });
 
   const resolvedTheme: "light" | "dark" =
@@ -50,8 +61,12 @@ export function ThemeProvider({
 
   const setTheme = React.useCallback(
     (next: Theme) => {
-      localStorage.setItem(storageKey, next);
       setThemeState(next);
+      try {
+        localStorage.setItem(storageKey, next);
+      } catch {
+        /* storage unavailable: the theme still applies for this session */
+      }
     },
     [storageKey],
   );

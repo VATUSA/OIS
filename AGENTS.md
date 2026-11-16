@@ -152,8 +152,8 @@ per-aircraft `AircraftProfile`s resolved by exact type → wake class → defaul
   ETE (`feed/runway.rs`), sector occupancy (`feed/sector_tracks.rs`), and the shared prediction
   service (`feed/predict.rs`), which builds the `VerticalProfile` the others time against.
 - **Inputs, not callers:** `feed/fca.rs` supplies the route `predict.rs` times along
-  (`fca::route_path`), and `feed/taxi_estimate.rs` supplies the ground allowance `feed/flow.rs` adds
-  before wheels-up. A `trajectory.rs` change does not reach them, but a change to them moves every ETA
+  (`fca::route_path`), and the lock map `TimingTables::live` loads (`handlers/feed.rs`) sets each
+  ground flight's wheels-up (#814). A `trajectory.rs` change does not reach them, but a change to them moves every ETA
   built on them.
 - **Carry the `ProfileTable` only:** `state.rs` (the cache), `jobs.rs` (its refresh),
   `repos/aircraft_profiles.rs` (loading it), `handlers/aircraft_profiles.rs` (reloading it on write)
@@ -276,6 +276,10 @@ just test          # the full local gate, once per commit (bin/run-tests.sh): ev
 just test rust -p ois-backend -E 'test(name)'   # targeted nextest run; never stamps
 just test web web src/lib/time.test.ts          # targeted vitest run (package, then vitest args); never stamps
 just ci-full       # the same steps as `just test`, never stamps
+just clean-stale   # delete build output untouched for 7 days (`just clean-stale 14` for 14) in every
+                   #   checkout's target/, skipping a profile whose cargo build is running (not a test
+                   #   run: a suite mid-run can lose an old test binary); --scratch also deletes old
+                   #   ${TMPDIR:-/tmp}/mutate.* dirs
 just ci            # fast subset: migration versions + fmt-check + cargo check + rust tests, then lint + typecheck
 
 # once per clone

@@ -1,12 +1,14 @@
 import {useMemo, useState} from "react";
-import {Button, Card, ConfirmButton, type DataColumn, DataTable, EmptyState, Input, QueryState} from "@ois/ui";
+import {Button, Card, ConfirmButton, type DataColumn, DataTable, EmptyState, Input, QueryState, Select} from "@ois/ui";
 import {ArrowDownRight, ArrowUpRight, Gauge, Lock, MoveUp, Plane, Plus, X} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {
   type AircraftProfile,
+  ENGINE_FAMILIES,
   type UpsertAircraftProfile,
+  familyName,
   formatClimb,
   formatDescent,
   parseClimb,
@@ -103,36 +105,45 @@ function Field({
   );
 }
 
+/** What a new row is keyed by: an ICAO type typed in, or an engine family picked from `families`. */
+type NewRow = null | { kind: "type" } | { kind: "family"; families: string[] };
+
 function ProfileForm({
   initial,
-  isNewType,
+  newRow,
   onCancel,
   onSave,
   pending,
 }: {
   initial: FormState;
-  isNewType: boolean;
+  newRow: NewRow;
   onCancel: () => void;
-  onSave: (body: UpsertAircraftProfile, typeKey?: string) => void;
+  onSave: (body: UpsertAircraftProfile, newKey?: string) => void;
   pending: boolean;
 }) {
   const [f, setF] = useState<FormState>(initial);
   const [typeKey, setTypeKey] = useState("");
+  const [family, setFamily] = useState(newRow?.kind === "family" ? (newRow.families[0] ?? "") : "");
   const set = (patch: Partial<FormState>) => setF((p) => ({ ...p, ...patch }));
   const numeric = (v: string) => Number(v) || 0;
 
+  const newKey = newRow?.kind === "type" ? normType(typeKey) : newRow?.kind === "family" ? family : undefined;
   const save = () => {
     const body = toBody(f);
     if (!body) return;
-    onSave(body, isNewType ? normType(typeKey) : undefined);
+    onSave(body, newKey);
   };
-  const invalid = !toBody(f) || (isNewType && normType(typeKey).length < 2);
+  const invalid =
+    !toBody(f) ||
+    (newRow?.kind === "type" && normType(typeKey).length < 2) ||
+    (newRow?.kind === "family" && family === "");
+  const title = newRow?.kind === "type" ? "New aircraft type" : newRow?.kind === "family" ? "New engine family" : "Edit profile";
 
   return (
     <Card className="flex flex-col gap-3 p-4">
-      <h2 className="text-xl font-bold">{isNewType ? "New aircraft type" : "Edit profile"}</h2>
+      <h2 className="text-xl font-bold">{title}</h2>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {isNewType && (
+        {newRow?.kind === "type" && (
           <Field label="ICAO type">
             <Input
               className="font-mono uppercase"
@@ -140,6 +151,17 @@ function ProfileForm({
               onChange={(e) => setTypeKey(normType(e.target.value))}
               placeholder="C172"
             />
+          </Field>
+        )}
+        {newRow?.kind === "family" && (
+          <Field label="Engine family">
+            <Select value={family} onChange={(e) => setFamily(e.target.value)}>
+              {newRow.families.map((k) => (
+                <option key={k} value={k}>
+                  {familyName(k)}
+                </option>
+              ))}
+            </Select>
           </Field>
         )}
         <Field label="Name" wide>
@@ -225,7 +247,7 @@ const PROFILE_COLUMNS: DataColumn<AircraftProfile>[] = [
     cell: (c) => (
       <span className="whitespace-nowrap">
         <span className="font-semibold">{c.getValue<string>()}</span>
-        {c.row.original.name && c.row.original.kind === "type" && (
+        {c.row.original.name && (c.row.original.kind === "type" || c.row.original.kind === "family") && (
           <span className="ml-2 text-xs text-ink-3">{c.row.original.name}</span>
         )}
       </span>
@@ -255,6 +277,7 @@ const PROFILE_COLUMNS: DataColumn<AircraftProfile>[] = [
 const GROUPS: [string, string][] = [
   ["default", "Default"],
   ["wake", "Wake classes"],
+  ["family", "Engine families"],
   ["type", "Aircraft types"],
 ];
 
@@ -265,18 +288,37 @@ export function AircraftProfilesPage() {
   const profiles = useAircraftProfiles();
   const upsert = useUpsertAircraftProfile();
   const { mutate: del } = useDeleteAircraftProfile();
-  // `edit` holds the row being edited (kind+key + form), or a sentinel for a new type.
-  const [edit, setEdit] = useState<null | { kind: string; key: string; isNew: boolean; initial: FormState }>(null);
+  // `edit` holds the row being edited (kind+key + form), or, with `newRow`, a row being added.
+  const [edit, setEdit] = useState<null | { kind: string; key: string; newRow: NewRow; initial: FormState }>(null);
+  // Families with no row yet: an existing one is edited, not added again.
+  const freeFamilies = useMemo(
+    () => ENGINE_FAMILIES.filter((k) => !(profiles.data ?? []).some((p) => p.kind === "family" && p.key === k)),
+    [profiles.data],
+  );
 
   const actions = useMemo(
     () =>
       canEdit && !edit ? (
-        <Button size="sm" onClick={() => setEdit({ kind: "type", key: "", isNew: true, initial: BLANK })}>
-          <Plus className="size-3.5" />
-          Add type
-        </Button>
+        <div className="flex items-center gap-2">
+          {freeFamilies.length > 0 && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() =>
+                setEdit({ kind: "family", key: "", newRow: { kind: "family", families: freeFamilies }, initial: BLANK })
+              }
+            >
+              <Plus className="size-3.5" />
+              Add family
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setEdit({ kind: "type", key: "", newRow: { kind: "type" }, initial: BLANK })}>
+            <Plus className="size-3.5" />
+            Add type
+          </Button>
+        </div>
       ) : undefined,
-    [canEdit, edit],
+    [canEdit, edit, freeFamilies],
   );
   usePageHeader({
     subtitle: "Fine-grained aircraft performance mapping (climb, cruise, and descent) for the ETA and flow model.",
@@ -302,7 +344,7 @@ export function AircraftProfilesPage() {
                       size="sm"
                       variant="ghost"
                       className="h-7 px-2"
-                      onClick={() => setEdit({ kind: p.kind, key: p.key, isNew: false, initial: fromProfile(p) })}
+                      onClick={() => setEdit({ kind: p.kind, key: p.key, newRow: null, initial: fromProfile(p) })}
                     >
                       Edit
                     </Button>
@@ -333,9 +375,9 @@ export function AircraftProfilesPage() {
 
   const rows = profiles.data ?? [];
 
-  const save = (body: UpsertAircraftProfile, typeKey?: string) => {
+  const save = (body: UpsertAircraftProfile, newKey?: string) => {
     if (!edit) return;
-    const key = edit.isNew ? typeKey! : edit.key;
+    const key = edit.newRow ? newKey! : edit.key;
     upsert.mutate({ kind: edit.kind, key, body }, { onSuccess: () => setEdit(null) });
   };
 
@@ -344,7 +386,7 @@ export function AircraftProfilesPage() {
       {edit && (
         <ProfileForm
           initial={edit.initial}
-          isNewType={edit.isNew}
+          newRow={edit.newRow}
           onCancel={() => setEdit(null)}
           onSave={save}
           pending={upsert.isPending}

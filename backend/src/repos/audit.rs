@@ -148,6 +148,47 @@ pub async fn record_audit<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     entry: AuditEntry,
 ) -> Result<(), ApiError> {
+    insert_audit(executor, &entry)
+        .await
+        .map_err(|_| ApiError::Internal)
+}
+
+/// Records `entry` for a caller whose own work has already succeeded and must not fail over its
+/// audit row: the audit middleware and the API-key lifecycle handlers. A failed insert is logged at
+/// ERROR with the database error's Display and otherwise dropped.
+pub async fn record_audit_best_effort(pool: &PgPool, entry: AuditEntry) {
+    if let Err(error) = insert_audit(pool, &entry).await {
+        tracing::error!(
+            action = %entry.action,
+            resource_type = %entry.resource_type,
+            resource_id = entry.resource_id.as_deref().unwrap_or(""),
+            error = %error,
+            "audit: failed to record an audit log entry; the request still succeeded"
+        );
+    }
+}
+
+/// `resolved`'s actor id, or `None` with a WARN naming the principal when resolution failed, so the
+/// audit entry is still written, with a null actor, and the failure is visible.
+pub fn actor_id_or_warn(
+    resolved: Result<Option<String>, ApiError>,
+    principal_kind: &'static str,
+    principal_id: &str,
+) -> Option<String> {
+    resolved.unwrap_or_else(|_| {
+        tracing::warn!(
+            principal_kind,
+            principal_id,
+            "audit: could not resolve the audit actor; recording the entry with no actor"
+        );
+        None
+    })
+}
+
+async fn insert_audit<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    entry: &AuditEntry,
+) -> Result<(), sqlx::Error> {
     // before/after are serialized to text and cast to jsonb so we don't need sqlx's
     // `json` feature. ip is cast to inet (null-safe).
     let before = entry
@@ -167,18 +208,17 @@ pub async fn record_audit<'e>(
         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::inet)
         "#,
     )
-    .bind(entry.actor_id)
-    .bind(entry.action)
-    .bind(entry.resource_type)
-    .bind(entry.resource_id)
-    .bind(entry.artcc_id)
-    .bind(entry.reason)
+    .bind(entry.actor_id.as_deref())
+    .bind(entry.action.as_str())
+    .bind(entry.resource_type.as_str())
+    .bind(entry.resource_id.as_deref())
+    .bind(entry.artcc_id.as_deref())
+    .bind(entry.reason.as_deref())
     .bind(before)
     .bind(after)
-    .bind(entry.ip_address)
+    .bind(entry.ip_address.as_deref())
     .execute(executor)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    .await?;
 
     Ok(())
 }
@@ -312,9 +352,25 @@ pub async fn fetch_audit_logs(
 /// client chose to send, so taking it (as this did before #588) let any caller pick its own IP — for
 /// the anonymous rate-limit bucket, the audit log and `api_keys.last_used_ip` alike.
 pub fn client_ip(headers: &HeaderMap) -> Option<String> {
-    static HOPS: std::sync::LazyLock<usize> =
-        std::sync::LazyLock::new(crate::config::trusted_proxy_hops);
-    client_ip_behind(headers, *HOPS)
+    client_ip_from(&TRUSTED_PROXY_HOPS, headers)
+}
+
+/// The `TRUSTED_PROXY_HOPS` value `run()` validated at startup (#923). A process that never ran
+/// `run()` (tests) has nothing stored and uses `DEFAULT_TRUSTED_PROXY_HOPS`.
+static TRUSTED_PROXY_HOPS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Stores the startup-validated hop count for `client_ip`. `Err` carries the value back when one was
+/// already stored.
+pub fn set_trusted_proxy_hops(hops: usize) -> Result<(), usize> {
+    TRUSTED_PROXY_HOPS.set(hops)
+}
+
+fn client_ip_from(hops: &std::sync::OnceLock<usize>, headers: &HeaderMap) -> Option<String> {
+    let hops = hops
+        .get()
+        .copied()
+        .unwrap_or(crate::config::DEFAULT_TRUSTED_PROXY_HOPS);
+    client_ip_behind(headers, hops)
 }
 
 fn client_ip_behind(headers: &HeaderMap, hops: usize) -> Option<String> {
@@ -420,6 +476,30 @@ mod tests {
             Some("198.51.100.4")
         );
         assert_eq!(client_ip_behind(&HeaderMap::new(), 1), None);
+    }
+
+    /// `client_ip` uses the value `run()` stored, not a read of `TRUSTED_PROXY_HOPS` (#923): the env
+    /// is unset here, so an env read would give 2 hops. This test sets the process-global hop count.
+    /// nextest runs each test in its own process; under a single-process `cargo test`
+    /// (`just test-rust`) the stored 1 also applies to every later test in this binary.
+    #[test]
+    fn client_ip_uses_the_hop_count_startup_stored() {
+        set_trusted_proxy_hops(1).expect("nothing else in this process stores the hop count");
+        let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
+        assert_eq!(client_ip(&spoofed).as_deref(), Some("203.0.113.9"));
+    }
+
+    /// A process that never ran `run()` keeps the 2-hop default.
+    #[test]
+    fn client_ip_without_a_stored_hop_count_uses_two_hops() {
+        let spoofed = forwarded("6.6.6.6, 7.7.7.7, 203.0.113.9");
+        let empty = std::sync::OnceLock::new();
+        assert_eq!(client_ip_from(&empty, &spoofed).as_deref(), Some("7.7.7.7"));
+        let stored = std::sync::OnceLock::from(1);
+        assert_eq!(
+            client_ip_from(&stored, &spoofed).as_deref(),
+            Some("203.0.113.9")
+        );
     }
 
     async fn audit_row(pool: &PgPool, created_at: DateTime<Utc>) -> String {

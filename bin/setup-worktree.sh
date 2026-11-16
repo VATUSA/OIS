@@ -156,6 +156,21 @@ echo "  To boot this branch's backend against it (.claude/rules/database-postgre
 echo "    docker exec ois-postgres-1 psql -U ${DEV_USER} -d postgres -c 'create database ${DB_NAME};'"
 echo "    DATABASE_URL=${DEV_URL%/*}/${DB_NAME} BIND_ADDR=127.0.0.1:3407 cargo run -p ois-backend"
 
+# -- git hooks --
+# core.hooksPath lives in the shared config, so a fresh clone that never ran `just setup` fails the
+# health check below for every worktree. Set just setup's value when it is unset; leave any other.
+step "git hooks"
+HOOKS_PATH="$(git config core.hooksPath 2>/dev/null)"
+if [[ -z "$HOOKS_PATH" ]]; then
+    if git -C "$PROJECT_ROOT" config core.hooksPath .githooks; then
+        ok "core.hooksPath was unset; set it to .githooks (what just setup does)"
+    else
+        warn "could not set core.hooksPath; run just setup in ${PROJECT_ROOT}"
+    fi
+else
+    ok "core.hooksPath=${HOOKS_PATH} (leaving it alone)"
+fi
+
 # -- Health check --
 step "health check"
 if bash "$SCRIPT_DIR/verify-worktree.sh"; then

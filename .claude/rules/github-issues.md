@@ -237,7 +237,8 @@ Every instruction MUST be grounded in code that shipped on this branch:
 
 - **Give a route path, never a host.** `/admin/access`, not `https://<host>/admin/access`.
   Page paths come from `web/src/router.tsx`; API paths from `backend/src/router.rs`. Never invent
-  paths.
+  paths. A file is not its route: one page file can export components rendered on different routes,
+  so trace the component to where it renders and that site to `router.tsx` before naming the path.
 - "Click X / fill in Y / the Z menu" must point at a real string or component in a file from the
   diff, or one rendered by a touched component.
 - Described behavior must trace to a function in the diff. If you cannot point at the code that

@@ -173,11 +173,12 @@ describe("collapsed AppSidebar group triggers (#823)", () => {
     expect(document.querySelector('aside nav a[href="/"]')).not.toBeNull();
   });
 
-  it("adds an Operations trigger for a flow.fca.read holder whose flyout lists exactly TMU, FCA and IDST", async () => {
+  // VATUSA/OIS#966 AC1: no TMU tab is gated on flow.fca.read, so the flyout offers no TMU link.
+  it("adds an Operations trigger for a flow.fca.read holder whose flyout lists exactly FCA and IDST", async () => {
     await renderAt("/advisories", user("flow.fca.read"));
     expect(triggerNames()).toEqual(["Advisories", "Operations", "User"]);
     await open("Operations");
-    expect(menuItems()).toEqual(["TMU", "FCA", "IDST"]);
+    expect(menuItems()).toEqual(["FCA", "IDST"]);
   });
 
   it("gives an events.plan.read holder a Planning trigger and no Historical or Admin trigger", async () => {

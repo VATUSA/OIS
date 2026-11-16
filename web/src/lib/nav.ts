@@ -34,10 +34,11 @@ import {
 
 import type {Me} from "./auth";
 import {hasPermission} from "./permissions";
+import {TMU_TAB_PERMISSIONS} from "./tmu-tabs";
 
 /**
- * The one navigation map. The top nav, the area sidebars, the mobile menu, breadcrumbs and the ⌘K
- * page search all derive from it, so a link's permission is declared once. An item is visible when
+ * The one navigation map. The global sidebar, its phone drawer, breadcrumbs and the ⌘K page search
+ * all derive from it, so a link's permission is declared once. An item is visible when
  * the user holds `permission` (or any of `anyOf`); an item with neither is public.
  */
 export type NavItem = {
@@ -63,8 +64,6 @@ export type NavArea = {
   prefixes: readonly string[];
   groups: readonly NavGroup[];
 };
-
-const OPS_ANY = ["tmu.program.read", "tmu.tmi.read", "flow.fca.read", "flow.runway.read"] as const;
 
 export const AREAS: readonly NavArea[] = [
   {
@@ -92,7 +91,7 @@ export const AREAS: readonly NavArea[] = [
         icon: TowerControl,
         items: [
           { label: "Airport", to: "/ops/airport", icon: Plane, permission: "tmu.program.read" },
-          { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: OPS_ANY },
+          { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: TMU_TAB_PERMISSIONS },
           { label: "My Dashboard", to: "/ops/my", icon: LayoutDashboard, permission: "tmu.program.read" },
           { label: "FCA", to: "/ops/fca", icon: Waypoints, permission: "flow.fca.read" },
           { label: "IDST", to: "/ops/idst", icon: Timer, permission: "flow.fca.read" },
@@ -129,7 +128,6 @@ export const AREAS: readonly NavArea[] = [
           { label: "Dashboard", to: "/admin/historical/dashboard", icon: LayoutDashboard, permission: "stats.data.read" },
           { label: "Replay", to: "/admin/historical/replay", icon: Film, permission: "stats.data.read" },
           { label: "Delays", to: "/admin/historical/delays", icon: Timer, permission: "stats.data.read" },
-          { label: "Taxi", to: "/admin/historical/taxi", icon: PlaneTakeoff, permission: "stats.data.read" },
         ],
       },
       {

@@ -302,7 +302,7 @@ pub fn spawn_collector(pool: PgPool, feed: FeedState, runways: Arc<RunwayDb>) {
             }
             match repo::insert_flight_legs(&pool, &legs).await {
                 Ok(()) => tracing::info!(count = legs.len(), "delays: recorded flight legs"),
-                Err(_) => tracing::warn!("delays: leg insert failed"),
+                Err(e) => tracing::warn!(error = %e, "delays: leg insert failed"),
             }
         }
     });

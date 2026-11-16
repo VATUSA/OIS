@@ -130,7 +130,10 @@ is reused wherever it is needed.
   `just ci-full` runs, in one go. It stamps `.claude/markers/tests/<sha>` and its manifest line only
   for a green run on a clean, committed HEAD that did not move during the run. With arguments,
   `bin/run-tests.sh` passes them through to a targeted run and never stamps. Writing a marker
-  yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)").
+  yourself is prohibited (CLAUDE.md → "Absolute Prohibitions (enforced by hooks)"). The stamping
+  call is exactly `just test` or `cd <dir> && just test`, backgrounded, with its output file read
+  afterwards; a redirect or a chained command makes the marker audit revoke the stamp
+  (`ticket-lifecycle.md` has the same rule for review stamps).
 - **A gate counts once per SHA, wherever it ran.** For the exact SHA under review, either of these
   is the full gate: a tests marker in this checkout, or green CI check-runs on that SHA, every
   check-run concluded `success` (the check-runs are the job list, never a copied one):
@@ -161,6 +164,15 @@ cache and turbo's cache, and that produces failure shapes that look like real on
   assertion, and it lands on a different unrelated test each run. Re-run each named failure on its
   own: a flake does not survive isolation; a real failure repeats and sits in code you touched. Say
   in the PR which failures were flakes and that you re-ran them.
+- **Stop only a process you started, by the PID you recorded; never by pattern or name.** `pkill -f
+  target/debug/ois-backend` stops every worktree's backend and the shell running it; a pattern on
+  gnome-keyring's path killed the operator's keyring daemon, and gh then hung on every call. Record
+  `$!` or a pidfile in your scratchpad, check with `ps -o comm= -p <pid>` that it is the process
+  itself and not a wrapper still running it (`just`, a subshell with more than one command; take
+  its child from `pgrep -P`), and confirm its cwd and port before stopping it.
+- **Limit a gate's load through the worktree's `.env`.** `bin/run-tests.sh` sources it, so
+  `CARGO_BUILD_JOBS` and `NEXTEST_TEST_THREADS` there reach `just test`; renice the run after it
+  starts. A `nice` or `VAR=` prefix on the command line is not a stamping form: no marker is written.
 
 **Never run two full suites in one checkout at once; the pre-push hook counts as one**
 (`bin/pre-push` runs clippy and the suite unless `just test` stamped the pushed commit). At most one

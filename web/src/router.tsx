@@ -44,7 +44,6 @@ import {AirportSurfacePage} from "@/pages/planning/airport-surface";
 import {FacilityDocumentsPage} from "@/pages/planning/facility-documents";
 import {StatsPage} from "@/pages/stats";
 import {DelaysPage} from "@/pages/stats/delays";
-import {TaxiInsightsPage} from "@/pages/stats/taxi-insights";
 import {StatsFlightPage} from "@/pages/stats/flight";
 // Replay pulls in deck.gl + MapLibre — code-split so it only loads on its route.
 const CaptureReplayPage = lazyRouteComponent(() => import("@/pages/stats/replay"), "CaptureReplayPage");
@@ -558,13 +557,6 @@ const statsDelaysRoute = createRoute({
   component: DelaysPage,
 });
 
-const statsTaxiRoute = createRoute({
-  getParentRoute: () => statsRoute,
-  path: "taxi",
-  staticData: { title: "Taxi insights" },
-  component: TaxiInsightsPage,
-});
-
 const adminIndexRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/",
@@ -716,7 +708,6 @@ const routeTree = rootRoute.addChildren([
       statsReplayRoute,
       statsDashboardRoute,
       statsDelaysRoute,
-      statsTaxiRoute,
     ]),
   ]),
   ...legacyRedirects,

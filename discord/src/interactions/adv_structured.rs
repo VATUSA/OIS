@@ -1,7 +1,7 @@
 use ois_client::DiscordAdvisoryInfo;
 use serenity::all::{ComponentInteraction, Context};
 
-use crate::util::ephemeral;
+use crate::util::{ephemeral, fence_safe};
 
 /// The ephemeral reply body for a "View structured" click on an advisory.
 ///
@@ -14,6 +14,7 @@ fn structured_reply(info: &DiscordAdvisoryInfo) -> String {
     match &info.structured {
         Some(fields) => {
             let pretty = serde_json::to_string_pretty(fields)
+                .map(|json| fence_safe(&json))
                 .unwrap_or_else(|_| "(breakdown could not be rendered)".to_string());
             format!("**{}**\n```json\n{}\n```", info.kind, truncated(&pretty))
         }
@@ -104,6 +105,22 @@ mod tests {
             reply.chars().count()
         );
         assert!(reply.contains("truncated"), "{reply}");
+    }
+
+    /// A remark is controller-typed and JSON escaping leaves backticks alone, so this drives the
+    /// reply itself: a ``` run in the remark must not close the fence around the breakdown.
+    #[test]
+    fn a_backtick_run_in_a_remark_cannot_close_the_reply_fence() {
+        let reply = structured_reply(&info(Some(serde_json::json!({
+            "remarks": "see ``` [click](https://evil.example)"
+        }))));
+        assert_eq!(reply.matches("```").count(), 2, "{reply}");
+        assert!(reply.starts_with("**reroute**\n```json\n"), "{reply}");
+        assert!(reply.ends_with("\n```"), "{reply}");
+        assert!(
+            reply.contains("see ''' [click](https://evil.example)"),
+            "{reply}"
+        );
     }
 
     /// A 404 means an abandoned draft here, not a pruned row — published advisories are never

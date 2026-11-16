@@ -112,6 +112,18 @@ async fn seed_flight(pool: &PgPool, session_id: i64, start: DateTime<Utc>) {
 
 /// A flight of type `ty` on [`track`], climbing at `low_fpm` below 10,000 ft.
 async fn seed_typed(pool: &PgPool, session_id: i64, start: DateTime<Utc>, ty: &str, low_fpm: i32) {
+    seed_equipped(pool, session_id, start, ty, &format!("{ty}/L"), low_fpm).await;
+}
+
+/// As [`seed_typed`], with the FAA equipment string `faa` (`H/B77W/L` carries wake class H).
+async fn seed_equipped(
+    pool: &PgPool,
+    session_id: i64,
+    start: DateTime<Utc>,
+    ty: &str,
+    faa: &str,
+    low_fpm: i32,
+) {
     let pts = track(start, low_fpm);
     let end = pts.last().unwrap().0;
     sqlx::query(
@@ -124,7 +136,7 @@ async fn seed_typed(pool: &PgPool, session_id: i64, start: DateTime<Utc>, ty: &s
     .bind(start)
     .bind(end)
     .bind(ty)
-    .bind(format!("{ty}/L"))
+    .bind(faa)
     .execute(pool)
     .await
     .unwrap();
@@ -186,6 +198,48 @@ async fn the_builder_is_repeatable_and_skips_held_out_flights(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(none.source.flights_read, 0);
+}
+
+/// AC3 through the builder's entry point: `build` pools every jet's training flights into the
+/// `jet` family and each flight with a wake class into that class, and writes both to its output.
+#[sqlx::test]
+async fn the_builder_writes_engine_family_and_wake_rows(pool: PgPool) {
+    sqlx::query("insert into stats.winds (ts, data) values ($1, $2)")
+        .bind(t0() - Duration::minutes(30))
+        .bind(serde_json::json!({"stations": [{"lat": 40.0, "lon": -99.0,
+            "levels": [[3000, {"dir": null, "spd": 0.0}], [39000, {"dir": null, "spd": 0.0}]]}]}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 20 B738s with no wake class and 20 B77Ws filed as wake H, all training flights.
+    let ids: Vec<i64> = (1..).filter(|s| !is_held_out(*s)).take(40).collect();
+    for (k, pair) in ids.chunks(2).enumerate() {
+        let start = t0() + Duration::minutes(k as i64);
+        seed_equipped(&pool, pair[0], start, "B738", "B738/L", 2_000).await;
+        seed_equipped(&pool, pair[1], start, "B77W", "H/B77W/L", 2_000).await;
+    }
+
+    let set = build(&pool, t0() - Duration::hours(1), t0() + Duration::hours(3))
+        .await
+        .unwrap();
+
+    assert_eq!(set.source.training_flights, 40);
+    assert_eq!(set.families.keys().collect::<Vec<_>>(), ["jet"]);
+    let jet = &set.families["jet"];
+    assert_eq!(jet.flights, 40, "both jet types pool into the family");
+    assert!(jet.profiled);
+    assert_eq!(jet.fields["climb_fpm_lo"].median, 2_000.0);
+    assert_eq!(
+        set.wakes.keys().collect::<Vec<_>>(),
+        ["H"],
+        "a flight with no wake pools nowhere"
+    );
+    let heavy = &set.wakes["H"];
+    assert_eq!(heavy.flights, MIN_FLIGHTS_PER_FIELD);
+    assert!(heavy.profiled);
+    let json: serde_json::Value = serde_json::from_str(&to_json(&set)).unwrap();
+    assert_eq!(json["families"]["jet"]["flights"], 40);
+    assert_eq!(json["wakes"]["H"]["flights"], 20);
 }
 
 // ---- positions and winds read per batch of flights -------------------------------------------
