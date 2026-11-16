@@ -34,6 +34,7 @@ import {
 
 import type {Me} from "./auth";
 import {hasPermission} from "./permissions";
+import {TMU_TAB_PERMISSIONS} from "./tmu-tabs";
 
 /**
  * The one navigation map. The global sidebar, its phone drawer, breadcrumbs and the ⌘K page search
@@ -64,8 +65,6 @@ export type NavArea = {
   groups: readonly NavGroup[];
 };
 
-const OPS_ANY = ["tmu.program.read", "tmu.tmi.read", "flow.fca.read", "flow.runway.read"] as const;
-
 export const AREAS: readonly NavArea[] = [
   {
     id: "advisories",
@@ -92,7 +91,7 @@ export const AREAS: readonly NavArea[] = [
         icon: TowerControl,
         items: [
           { label: "Airport", to: "/ops/airport", icon: Plane, permission: "tmu.program.read" },
-          { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: OPS_ANY },
+          { label: "TMU", to: "/ops/tmu", icon: Gauge, anyOf: TMU_TAB_PERMISSIONS },
           { label: "My Dashboard", to: "/ops/my", icon: LayoutDashboard, permission: "tmu.program.read" },
           { label: "FCA", to: "/ops/fca", icon: Waypoints, permission: "flow.fca.read" },
           { label: "IDST", to: "/ops/idst", icon: Timer, permission: "flow.fca.read" },

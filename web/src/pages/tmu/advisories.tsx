@@ -33,7 +33,7 @@ type Mode = "structured" | "raw";
  * Authoring surface for ADVZY advisories (VATUSA/OIS#460).
  *
  * A tab rather than its own route, because that is how every other TMU surface works — and the tab is
- * registered behind `tmu.adv.read` in `tmu.tsx`, so a non-holder never sees it. `/advisories` remains
+ * registered behind `tmu.adv.read` in `lib/tmu-tabs.ts`, so a non-holder never sees it. `/advisories` remains
  * the pilot-facing board; #456 settled that.
  */
 export function AdvisoriesTab() {
