@@ -35,7 +35,7 @@ deploy:
     just smoke
 
 # Post-deploy health check: retries through both "not reachable yet" and "reachable but DB not
-# ready" — migrations (63 today) run before the API's TCP listener binds, so on a fresh DB or a
+# ready" — migrations run before the API's TCP listener binds, so on a fresh DB or a
 # heavy migration the port can take a while to open, and a container can start answering /health
 # before its own DB pool's first connection lands. Only fails loudly (non-zero exit, real reason
 # printed) once the full budget is spent — /health always returns HTTP 200 even when the database
@@ -119,8 +119,8 @@ dev: up
 check-migrations:
     .github/scripts/check-migration-versions.sh
 
-# Not what CI runs: it skips clippy, doc tests, pnpm test, the audits and the client-drift check,
-# which `just test` and `just ci-full` add.
+# Not what CI runs: it skips clippy, doc tests, pnpm test, the audits, the client-drift check and
+# the shell suites, which `just test` and `just ci-full` add.
 # Fast local validation (a subset of CI; see test)
 ci: check-migrations fmt-check check test-rust
     pnpm lint && pnpm typecheck
@@ -137,6 +137,15 @@ ci: check-migrations fmt-check check test-rust
 [positional-arguments]
 test *args:
     bash bin/run-tests.sh "$@"
+
+# Delete build output no build has written for DAYS days (default 7) in every checkout's target/:
+# cargo units, incremental state and ois-drift/ (bin/clean-stale.sh). A profile whose cargo build
+# is running is kept; a test run is not covered, so a suite mid-run can lose an old test binary.
+# --scratch also deletes old ${TMPDIR:-/tmp}/mutate.* dirs.
+# Delete stale build output across every worktree's target/
+[positional-arguments]
+clean-stale *args:
+    bash bin/clean-stale.sh "$@"
 
 # The same steps as `just test` (bin/run-tests.sh, so the two never drift), without the marker.
 # A step it cannot run here is MISSING, never passed. Not covered: the macOS/Windows/Linux

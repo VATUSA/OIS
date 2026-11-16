@@ -257,7 +257,7 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
     >
       <Search className="size-3.5" />
       Search
-      <kbd className="ml-auto rounded-[4px] border border-line px-1.5 font-mono text-[10px]">⌘K</kbd>
+      <kbd className="ml-auto rounded-xs border border-line px-1.5 font-mono text-[10px]">⌘K</kbd>
     </button>
   );
 }

@@ -24,9 +24,11 @@ every surface that times an aircraft. These rules capture what no single file sh
 2. **Airborne and not-yet-airborne are two paths.** `predict::arrival_eta` treats `gs >= 50` as
    airborne: timed from its position along the trimmed remaining route, anchored to its observed
    groundspeed. A ground or prefiled flight is timed from its departure field over the whole route,
-   with `GROUND_TAXI_SEC` (8 min) or the learned ground allowance added, and `GROUND_ROUTE_FACTOR`
-   (1.12) when its route does not resolve. Prefiles need their departure resolved
-   (`prefile_position`); a `(0, 0)` placeholder once timed KJFK→KDCA as ~4,900 nm (#225).
+   with `GROUND_ROUTE_FACTOR` (1.12) when its route does not resolve, from its wheels-up: the latest
+   lock it holds (CFR, FCA release, GDP slot), else its filed departure time plus
+   `PROPOSED_WHEELS_UP_MIN` (10 min) and no sooner than now plus that. No taxi time is added (#814).
+   A prefile is timed from its departure (`predict::Flight::Prefile`), never a `(0, 0)` placeholder,
+   which once timed KJFK→KDCA as ~4,900 nm (#225).
 3. **A national-scope and a facility-scope principal are two paths** for every write here
    (`secure-coding.md` → "Access Control").
 
@@ -45,7 +47,7 @@ every surface that times an aircraft. These rules capture what no single file sh
   `runway`, `sector_tracks` and `gdp` take tables, never a `PgPool`. Anything they need from the
   database is an `AppState` cache behind `ArcSwap`, loaded by a `jobs.rs` refresh pass and
   force-reloaded by its write handler (`code-quality.md` → "Caching"). The collectors that live
-  under `feed/` (`stats`, `delays`, `taxi_observations`, `events`, `vatusa`) hold a pool and write;
+  under `feed/` (`stats`, `delays`, `events`, `vatusa`) hold a pool and write;
   they are not on a request's prediction path.
 - Per-request inputs that are not cached (excluded callsigns, locked wheels-up times) are read by
   the handler before the blocking task and passed in.
@@ -75,11 +77,11 @@ calls to resolve a route and time it.
 ## Every caller of the model
 
 When adding or changing ANYTHING the model reads (a profile field, a speed rule, wind, the route
-resolver, the ground allowance), verify every caller in the same change. Silent drift between surfaces
+resolver, the wheels-up locks), verify every caller in the same change. Silent drift between surfaces
 is the default failure mode: one aircraft showing two ETAs.
 
-1. **Airport-flow demand**: `feed::flow::compute` (via `predict::arrival_eta`), behind
-   `handlers/feed.rs` and `handlers/gdp.rs`; `feed::flow::ground_estimate` for proposed departures
+1. **Airport-flow demand**: `feed::flow::compute` (via `predict::trajectory`, #813), behind
+   `handlers/feed.rs` and `handlers/gdp.rs`
 2. **Runway ETE**: `feed::runway::collect_arrivals`
 3. **Sector occupancy and demand**: `feed::sector_tracks::project_tracks`, cached per publish by
    `handlers/sector_demand_cache.rs`
@@ -87,9 +89,9 @@ is the default failure mode: one aircraft showing two ETAs.
    ground, feeding `MeterInput.cross_speed` from `predict::eta_along_route`
 5. **Map traffic and the per-fix debug table**: `handlers::flow::project_traffic`, `fix_predictions`,
    `prefile_fix_predictions`
-6. **Inputs, not callers**: `fca::route_path` (the route every surface times along) and
-   `feed/taxi_estimate.rs` via `feed::flow::resolve_ground_allowance_sec` (the ground allowance). A
-   change to them moves every ETA built on them.
+6. **Inputs, not callers**: `fca::route_path` (the route every surface times along) and the lock map
+   `TimingTables::live` loads (`handlers/feed.rs`, over `repos::flow::locked_wheels_up`), which sets
+   every ground flight's wheels-up (#814). A change to them moves every ETA built on them.
 7. **Carry the `ProfileTable` only**: `state.rs`, `jobs.rs` (its refresh), `repos/aircraft_profiles.rs`,
    `handlers/aircraft_profiles.rs` (reload on write), `handlers/sector_demand_cache.rs` (a cache key),
    `scope_test_support.rs`

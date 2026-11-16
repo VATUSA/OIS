@@ -334,12 +334,14 @@ pub async fn published_channel_for_advisory(
     .map_err(|_| ApiError::Internal)
 }
 
-/// The channel a TMI's publish post was actually sent to, if it was ever enqueued (#436 review).
+/// The channel a TMI's latest `tmi_publish` job was sent to, if one was ever enqueued (#436 review).
+/// That is the original publish, or the revised row of a later edit, which posts to the same channel
+/// (#884).
 ///
-/// A cancellation has to land beside the row it corrects, and re-deriving the channel does not get
-/// there: `publish_tmi` resolves it unscoped while `activate_package` resolves it with the event's
-/// facility, so `resolve_scoped_id` can legitimately answer with two different guilds for the same
-/// logical name. Reading it back off the publish job is exact and needs no decision about scoping.
+/// A cancellation or a revised row has to land beside the row it follows up, and re-deriving the
+/// channel does not get there: `publish_tmi` resolves it unscoped while `activate_package` resolves
+/// it with the event's facility, so `resolve_scoped_id` can legitimately answer with two different
+/// guilds for the same logical name. Reading it back off the publish job is exact and needs no decision about scoping.
 ///
 /// Deliberately not filtered on `status`: a TMI cancelled moments after publishing has a job that is
 /// still `pending`, and that job's channel is still the right answer. `(subject_type, subject_id)` is

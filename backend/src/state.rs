@@ -9,8 +9,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::feed::{
     self, FeedState, airspace::Boundaries, facilities::FacilityState, nav::NavData,
     runway_db::RunwayDb, sector_consolidations::SectorConsolidations, sector_limits::SectorLimits,
-    sectors::SectorTable, taxi_estimate, tracon::TraconState, trajectory::ProfileTable,
-    winds::Winds,
+    sectors::SectorTable, tracon::TraconState, trajectory::ProfileTable, winds::Winds,
 };
 use crate::models::AirportGateBody;
 
@@ -39,6 +38,10 @@ pub struct AppState {
     /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
+    /// Set by the first successful load from the DB (`jobs::refresh_aircraft_profiles_once`, or the
+    /// profile write handler's reload), never cleared: until then `aircraft_profiles` is the legacy
+    /// default table, so the held-STA pass waits on it (#817).
+    pub aircraft_profiles_loaded: Arc<AtomicBool>,
     /// ATC sector volumes (#594), the dataset kept when the Monitor was removed (#719). Starts empty and is reloaded from the DB
     /// by `jobs::spawn_airspace_sectors_refresh`, which the `airspace_sector_seed` job triggers when it
     /// writes the table (#821; see `feed::sectors`). Behind `ArcSwap` for lock-free reads
@@ -64,7 +67,7 @@ pub struct AppState {
     /// Airport surface gates/parking positions, keyed by ICAO. Starts empty and is reloaded from
     /// the DB by `jobs::spawn_airport_gates_refresh` (and force-reloaded on every gate write by
     /// `handlers::airport_surface`), so it sits behind an `ArcSwap` for lock-free reads from the
-    /// DB-less feed subsystem (`feed::taxi_observations`).
+    /// DB-less departure-runway derive (`jobs::departure_runway_derive_once`).
     pub gates: Arc<ArcSwap<HashMap<String, Vec<AirportGateBody>>>>,
     /// Manually excluded ("bogus") flight callsigns, keyed by ARTCC (#342). Starts empty and is
     /// reloaded from the DB by `jobs::spawn_flight_exclusions_refresh` (and force-reloaded on every
@@ -72,13 +75,6 @@ pub struct AppState {
     /// from the DB-less flow surfaces that must drop a bogus callsign from the map, the FCA
     /// crossing lists, metering, counts and AADC demand.
     pub flight_exclusions: Arc<ArcSwap<HashMap<String, HashSet<String>>>>,
-    /// Learned per-gate/type/runway pushback+taxi observation samples, keyed by departure ICAO
-    /// (#164 sub-issue E). Starts empty and is reloaded from the DB every 10 min by
-    /// `jobs::spawn_taxi_estimate_samples_refresh`, so it sits behind an `ArcSwap` for lock-free
-    /// reads from the DB-less feed subsystem (`feed::flow::resolve_ground_allowance_sec`). Distinct
-    /// from `FeedInner::taxi_samples`, `feed::taxi.rs`'s own unrelated live 3h rolling aggregate for
-    /// the Taxi Monitor page.
-    pub taxi_estimate_samples: Arc<ArcSwap<HashMap<String, Vec<taxi_estimate::TaxiSample>>>>,
     /// Epoch-ms of the last successful nav / winds fetch (0 = not yet fetched at runtime).
     pub nav_refreshed: Arc<AtomicI64>,
     pub winds_refreshed: Arc<AtomicI64>,
@@ -123,6 +119,7 @@ impl AppState {
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
         let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let aircraft_profiles_loaded = Arc::new(AtomicBool::new(false));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let airspace_sectors_loaded = Arc::new(AtomicBool::new(false));
         let sector_limits = Arc::new(ArcSwap::from_pointee(SectorLimits::default()));
@@ -130,7 +127,6 @@ impl AppState {
             Arc::new(ArcSwap::from_pointee(SectorConsolidations::default()));
         let gates = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let flight_exclusions = Arc::new(ArcSwap::from_pointee(HashMap::new()));
-        let taxi_estimate_samples = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let nav_refreshed = Arc::new(AtomicI64::new(0));
         let winds_refreshed = Arc::new(AtomicI64::new(0));
         let data_refresh_in_flight = Arc::new(AtomicBool::new(false));
@@ -148,11 +144,7 @@ impl AppState {
             // pool waits forever, so a single leaked connection silently wedges *every* request
             // (health included) into an apparent hang. With it, exhaustion surfaces as a fast 5xx that
             // shows up in logs instead of a stuck backend.
-            let max_connections = std::env::var("DATABASE_MAX_CONNECTIONS")
-                .ok()
-                .and_then(|v| v.trim().parse::<u32>().ok())
-                .filter(|v| *v > 0)
-                .unwrap_or(20);
+            let max_connections = crate::config::database_max_connections();
             let pool = PgPoolOptions::new()
                 .max_connections(max_connections)
                 .acquire_timeout(std::time::Duration::from_secs(10))
@@ -169,6 +161,7 @@ impl AppState {
                 runways,
                 winds,
                 aircraft_profiles,
+                aircraft_profiles_loaded: aircraft_profiles_loaded.clone(),
                 airspace_sectors,
                 airspace_sectors_loaded: airspace_sectors_loaded.clone(),
                 sector_limits,
@@ -176,7 +169,6 @@ impl AppState {
                 sector_demand: Arc::default(),
                 gates,
                 flight_exclusions,
-                taxi_estimate_samples,
                 nav_refreshed,
                 winds_refreshed,
                 data_refresh_in_flight,
@@ -199,6 +191,7 @@ impl AppState {
             runways,
             winds,
             aircraft_profiles,
+            aircraft_profiles_loaded,
             airspace_sectors,
             airspace_sectors_loaded,
             sector_limits,
@@ -206,7 +199,6 @@ impl AppState {
             sector_demand: Arc::default(),
             gates,
             flight_exclusions,
-            taxi_estimate_samples,
             nav_refreshed,
             winds_refreshed,
             data_refresh_in_flight,
@@ -230,6 +222,7 @@ impl AppState {
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
             aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
+            aircraft_profiles_loaded: Arc::new(AtomicBool::new(false)),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             airspace_sectors_loaded: Arc::new(AtomicBool::new(false)),
             sector_limits: Arc::new(ArcSwap::from_pointee(SectorLimits::default())),
@@ -237,7 +230,6 @@ impl AppState {
             sector_demand: Arc::default(),
             gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             nav_refreshed: Arc::new(AtomicI64::new(0)),
             winds_refreshed: Arc::new(AtomicI64::new(0)),
             data_refresh_in_flight: Arc::new(AtomicBool::new(false)),

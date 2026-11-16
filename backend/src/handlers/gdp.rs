@@ -135,51 +135,51 @@ fn validate_steps(
 }
 
 /// Project the live feed into GDP inbounds for `icao` (raw classification + ETA + ETD +
-/// departure ARTCC, no metering). Airborne/ground/proposed only — arrived flights dropped.
-async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<gdp::Inbound> {
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
+/// departure ARTCC, no metering). Airborne/ground only — arrived flights dropped, and prefiles are not listed (#814).
+async fn live_inbounds(
+    state: &AppState,
+    icao: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<gdp::Inbound>, ApiError> {
+    let Some(snap) = state.feed.read().await.snapshot.clone() else {
+        return Ok(Vec::new());
     };
-    let Some(snap) = snapshot else {
-        return Vec::new();
-    };
-    let nav = state.nav.load_full();
-    let winds = state.winds.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    // Every lock but this airport's own GDP slots: a flight held by an FCA release or a CFR is ranked
+    // from when it can arrive, while one timed from its own published slot would have its CTA as its
+    // ETA, so a revise or compress could never move it earlier and would store a delay of zero (#814).
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let callsigns: Vec<String> = snap
+        .data
+        .pilots
+        .iter()
+        .map(|p| p.callsign.clone())
+        .collect();
+    let locked =
+        crate::repos::flow::locked_wheels_up_outside_gdps_at(pool, &callsigns, icao).await?;
+    let tables = crate::handlers::feed::TimingTables::with_locks(state, locked).await;
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
     // `compute` resolves every arrival's filed route — pure CPU. Push it onto the blocking pool
     // (see `feed::flow_from_data`) rather than tying up an async worker.
-    let Ok(flow) = tokio::task::spawn_blocking(move || {
+    let flow = tokio::task::spawn_blocking(move || {
         flow::compute(
             &icao,
             None, // no metering — we want the raw arrival picture
             &snap.data,
-            airports.as_ref(),
-            nav.as_ref(),
-            winds.as_ref(),
-            profiles.as_ref(),
+            &tables.inputs(),
             &HashMap::new(),
-            gates.as_ref(),
-            runways.as_ref(),
-            taxi_estimate_samples.as_ref(),
             &manual_exclusions,
             now,
         )
     })
     .await
-    else {
-        return Vec::new();
-    };
+    .map_err(|_| ApiError::Internal)?;
     // Resolve each origin field's owning ARTCC once, memoized across shared departures.
     let map = state.facilities.read().await;
     let mut artcc_of: HashMap<String, Option<String>> = HashMap::new();
-    flow.flights
+    Ok(flow
+        .flights
         .into_iter()
         .filter(|f| f.status != "arrived")
         .filter_map(|f| {
@@ -196,7 +196,7 @@ async fn live_inbounds(state: &AppState, icao: &str, now: DateTime<Utc>) -> Vec<
                 etd_ms: f.etd.map(|e| e.timestamp_millis()),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn ms(v: i64, fallback: DateTime<Utc>) -> DateTime<Utc> {
@@ -211,7 +211,7 @@ async fn fresh_assignments(
 ) -> Result<(i64, i64, Vec<gdp::Assignment>), ApiError> {
     let (win_start, win_end) =
         resolve_window(now, &gdp.start_time, &gdp.end_time).ok_or(ApiError::Internal)?;
-    let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await;
+    let inbounds = live_inbounds(state, &gdp.airport.to_ascii_uppercase(), now).await?;
     let scope: Vec<String> = gdp.scope.split_whitespace().map(String::from).collect();
     let rates = rate_schedule(gdp, win_start, win_end);
     let assignments = gdp::ration_by_schedule(
@@ -230,7 +230,7 @@ async fn fresh_assignments(
 /// params and persist the controlled slots (replacing any existing ones). Used on publish
 /// and when revising a published program.
 /// The frozen slot rows, the resolved program window, and the delay statistics for `gdp` — computed
-/// entirely from the live feed, touching no database.
+/// from the live feed, with no transaction.
 ///
 /// Split out of [`freeze_slots`] for #508. Publishing must write the slots and the generated advisory in
 /// one transaction, and this is the expensive part: `fresh_assignments` runs the feed and RBS. Holding a
@@ -890,14 +890,13 @@ mod tests {
         .unwrap()
     }
 
-    /// #815: a ground flight's ETD is its estimated wheels-up, so the `max_enroute_min` tier counts
-    /// its airborne minutes, not its ground allowance on top. A tier between the airborne time and the
-    /// gate-to-arrival time (airborne + 11 min) controls the flight; one below the airborne time
-    /// exempts it.
+    /// #815: a ground flight's ETD is its proposed wheels-up, so the `max_enroute_min` tier counts
+    /// its airborne minutes, not the 10 minutes from now to that wheels-up on top (#814). A tier
+    /// between the airborne time and the now-to-arrival time (airborne + 10 min) controls the flight;
+    /// one below the airborne time exempts it.
     #[sqlx::test]
-    async fn the_enroute_tier_counts_airborne_minutes_not_the_ground_allowance(pool: PgPool) {
+    async fn the_enroute_tier_counts_airborne_minutes_not_the_time_to_wheels_up(pool: PgPool) {
         use crate::feed::airports::Airport;
-        use crate::feed::taxi_estimate::TaxiSample;
         use crate::feed::vatsim::{FlightPlan, Pilot, VatsimData};
         use std::sync::Arc;
 
@@ -924,31 +923,17 @@ mod tests {
                 ..Default::default()
             })));
         }
-        // Five samples at KBOS's airport tier: 50 + 40 + 570 = 660 s.
-        let sample = || TaxiSample {
-            gate_id: None,
-            aircraft: None,
-            runway: None,
-            pushback_sec: Some(50),
-            startup_sec: Some(40),
-            taxi_sec: 570,
-        };
-        state.taxi_estimate_samples.store(Arc::new(HashMap::from([(
-            "KBOS".to_string(),
-            (0..5).map(|_| sample()).collect::<Vec<_>>(),
-        )])));
-
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
-        let inbounds = live_inbounds(&state, "KJFK", now).await;
+        let inbounds = live_inbounds(&state, "KJFK", now).await.unwrap();
         let grd = inbounds
             .iter()
             .find(|f| f.cs == "GRD1")
             .expect("GRD1 inbound");
         assert_eq!(
             grd.etd_ms,
-            Some(now_ms + 660_000),
-            "wheels-up is now + 660 s"
+            Some(now_ms + 600_000),
+            "no filed time: wheels-up is now + 10 min"
         );
         let airborne_min = (grd.eta_ms - grd.etd_ms.unwrap()) / 60_000;
 
@@ -1322,6 +1307,109 @@ mod tests {
             live[0].2.contains("PROGRAM RATE: 20"),
             "the reissued document carries the revised rate; got:\n{}",
             live[0].2
+        );
+    }
+
+    // AC4 on the GDP surface: `live_inbounds` takes `now`, so the fixture is absolute. GRD2 holds a
+    // published GDP slot, and RBS still ranks it from its un-held ETA: the slot is not its input.
+    // GRD3 holds an FCA release, a lock elsewhere, and is ranked from it (decision 31). A prefile
+    // gets no proposed wheels-up and is not an inbound.
+    #[sqlx::test]
+    async fn a_gdp_inbounds_etd_is_its_filed_departure_plus_ten(pool: PgPool) {
+        use crate::feed::airports::Airport;
+        use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+        use chrono::TimeZone;
+        use std::sync::Arc;
+
+        let plan = |deptime: &str| FlightPlan {
+            departure: "KBOS".into(),
+            arrival: "KJFK".into(),
+            route: "DCT".into(),
+            deptime: deptime.into(),
+            ..Default::default()
+        };
+        let parked = |cs: &str, deptime: &str| Pilot {
+            callsign: cs.into(),
+            latitude: 42.3656,
+            longitude: -71.0096,
+            flight_plan: Some(plan(deptime)),
+            ..Default::default()
+        };
+        let state = test_state(pool.clone(), HashMap::new());
+        {
+            let mut feed = state.feed.write().await;
+            feed.airports = Arc::new(HashMap::from([
+                ("KBOS".to_string(), Airport::at(42.3656, -71.0096)),
+                ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ]));
+            feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+                pilots: vec![
+                    parked("GRD1", "2300"),
+                    parked("GRD2", ""),
+                    parked("GRD3", ""),
+                ],
+                prefiles: vec![Prefile {
+                    callsign: "PRE1".into(),
+                    flight_plan: Some(plan("2220")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })));
+        }
+        let at = |h, m, s| {
+            Utc.with_ymd_and_hms(2023, 11, 14, h, m, s)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let now = Utc.with_ymd_and_hms(2023, 11, 14, 22, 13, 20).unwrap();
+        let gdp: String = sqlx::query_scalar(
+            "insert into tmu.gdp (airport, aar, start_time, end_time, status) \
+             values ('KJFK', 30, '2200', '2359', 'published') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let slot = now + chrono::Duration::hours(2);
+        sqlx::query(
+            "insert into tmu.gdp_slot (gdp_id, callsign, original_eta, cta, edct) \
+             values ($1, 'GRD2', $2, $2, $2)",
+        )
+        .bind(&gdp)
+        .bind(slot)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let fca: String =
+            sqlx::query_scalar("insert into flow.fca (enabled) values (true) returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let release = now + chrono::Duration::minutes(50);
+        sqlx::query(
+            "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, 'GRD3', $2, $2)",
+        )
+        .bind(&fca)
+        .bind(release.timestamp_millis())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let inbounds = live_inbounds(&state, "KJFK", now).await.unwrap();
+        let by = |cs: &str| inbounds.iter().find(|f| f.cs == cs).unwrap();
+        assert_eq!(by("GRD1").etd_ms, Some(at(23, 10, 0)));
+        assert_eq!(by("GRD2").etd_ms, Some(at(22, 23, 20)));
+        assert_eq!(
+            by("GRD3").etd_ms,
+            Some(release.timestamp_millis()),
+            "ranked from its FCA release"
+        );
+        assert!(
+            inbounds.iter().all(|f| f.cs != "PRE1"),
+            "a prefile is not in the GDP draft (#814)"
+        );
+        assert_eq!(
+            by("GRD1").eta_ms - by("GRD1").etd_ms.unwrap(),
+            by("GRD2").eta_ms - by("GRD2").etd_ms.unwrap(),
+            "one airborne ETE from two wheels-ups"
         );
     }
 }

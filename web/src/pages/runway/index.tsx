@@ -20,8 +20,10 @@ import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {toneOf} from "@/lib/status";
 import {
+  presetEnds,
   type RunwayArrival,
   type RunwayEnd,
+  starBase,
   useDeleteConfig,
   useRunway,
   useSaveConfig,
@@ -30,7 +32,6 @@ import {
 } from "@/lib/runway";
 
 const BIN_MAX = 5;
-const PRESET_HDG: Record<string, number> = { W: 270, E: 90, N: 360, S: 180 };
 /** Balancer load level → level token (unknown reads as ok, like the original bins). */
 const LEVEL_TOKEN: Record<string, string> = {
   green: "level-ok",
@@ -45,9 +46,6 @@ const PRESETS = [
   { id: "OFF", label: "None" },
 ];
 
-function angleDiff(a: number, b: number): number {
-  return Math.abs((((a - b) % 360) + 540) % 360 - 180);
-}
 function zulu(iso: string): string {
   const d = new Date(iso);
   const p = (n: number) => String(n).padStart(2, "0");
@@ -55,10 +53,6 @@ function zulu(iso: string): string {
 }
 function minsFromNow(iso: string): number {
   return Math.round((new Date(iso).getTime() - Date.now()) / 60000);
-}
-/** STAR base name — strip the trailing revision (CAMRN4 → CAMRN). */
-function starBase(name: string): string {
-  return name.trim().toUpperCase().replace(/\d[A-Z]?$/, "");
 }
 
 export function RunwayPage() {
@@ -107,13 +101,7 @@ export function RunwayPage() {
   }
   function applyPreset(p: string) {
     if (!canEdit || !b) return;
-    const next =
-      p === "OFF"
-        ? []
-        : b.ends
-            .filter((e) => angleDiff(e.hdg, PRESET_HDG[p]) <= 65)
-            .map((e) => e.id);
-    save(next);
+    save(presetEnds(b.ends, p));
   }
   function saveRules(rules: Record<string, string>) {
     if (!icao || !b) return;

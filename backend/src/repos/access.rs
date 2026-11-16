@@ -31,7 +31,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub async fn find_current_user_by_session_token(
     pool: &PgPool,
     session_token: &str,
-) -> Result<Option<CurrentUser>, ApiError> {
+) -> Result<Option<CurrentUser>, sqlx::Error> {
     sqlx::query_as::<_, CurrentUser>(
         r#"
         select
@@ -52,7 +52,6 @@ pub async fn find_current_user_by_session_token(
     .bind(session_token)
     .fetch_optional(pool)
     .await
-    .map_err(|_| ApiError::Internal)
 }
 
 /// The live credential behind an `access.actors` row, for work done later on a principal's behalf (the
@@ -125,7 +124,7 @@ pub async fn find_current_service_account_by_actor(
 pub async fn find_current_service_account_by_bearer_token(
     pool: &PgPool,
     bearer_token: &str,
-) -> Result<Option<CurrentServiceAccount>, ApiError> {
+) -> Result<Option<CurrentServiceAccount>, sqlx::Error> {
     let token_hash = sha256_hex(bearer_token);
 
     let account = sqlx::query_as::<_, CurrentServiceAccount>(
@@ -143,8 +142,7 @@ pub async fn find_current_service_account_by_bearer_token(
     )
     .bind(&token_hash)
     .fetch_optional(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    .await?;
 
     if let Some(account) = account.as_ref() {
         // At most once a minute (#588), for the same reason as an API key's `last_used_at` below.
@@ -156,8 +154,7 @@ pub async fn find_current_service_account_by_bearer_token(
         .bind(&account.id)
         .bind(token_hash)
         .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+        .await?;
     }
 
     Ok(account)
@@ -170,7 +167,7 @@ pub async fn find_current_api_key_by_bearer_token(
     pool: &PgPool,
     bearer_token: &str,
     client_ip: Option<&str>,
-) -> Result<Option<CurrentApiKey>, ApiError> {
+) -> Result<Option<CurrentApiKey>, sqlx::Error> {
     let token_hash = sha256_hex(bearer_token);
 
     let key = sqlx::query_as::<_, CurrentApiKey>(
@@ -187,8 +184,7 @@ pub async fn find_current_api_key_by_bearer_token(
     )
     .bind(&token_hash)
     .fetch_optional(pool)
-    .await
-    .map_err(|_| ApiError::Internal)?;
+    .await?;
 
     if let Some(key) = key.as_ref() {
         // `last_used_ip` is inet; a malformed forwarded header simply leaves it null.
@@ -205,8 +201,7 @@ pub async fn find_current_api_key_by_bearer_token(
         .bind(&key.id)
         .bind(client_ip)
         .execute(pool)
-        .await
-        .map_err(|_| ApiError::Internal)?;
+        .await?;
     }
 
     Ok(key)

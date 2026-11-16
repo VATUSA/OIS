@@ -23,6 +23,7 @@ use crate::{
     errors::ApiError,
     feed::facilities,
     feed::flow::{self, ProgramInputs},
+    feed::predict,
     feed::taxi,
     handlers::release_authority,
     models::{DepartureFlight, DeparturesResponse, IssueCfrRequest, IssuedCfrBody},
@@ -97,25 +98,94 @@ pub(crate) async fn program_inputs(
         }))
 }
 
+/// The tables [`predict::trajectory`] reads, cloned out of `AppState` so a blocking task can own them.
+/// Every handler that times a flight builds its [`predict::Inputs`] from one of these, so none leaves
+/// a table out (#813).
+pub(crate) struct TimingTables {
+    pub nav: Arc<crate::feed::nav::NavData>,
+    pub airports: Arc<crate::feed::airports::AirportDb>,
+    pub winds: Arc<crate::feed::winds::Winds>,
+    pub profiles: Arc<crate::feed::trajectory::ProfileTable>,
+    pub locked: Arc<predict::LockedWheelsUp>,
+}
+
+impl TimingTables {
+    /// The live tables with `winds` and no locks: the historical replay passes the winds at its
+    /// instant, and holds none of today's releases, CFRs or GDP slots.
+    pub async fn load(state: &AppState, winds: Arc<crate::feed::winds::Winds>) -> Self {
+        TimingTables {
+            nav: state.nav.load_full(),
+            airports: state.feed.read().await.airports.clone(),
+            winds,
+            profiles: state.aircraft_profiles.load_full(),
+            locked: Arc::default(),
+        }
+    }
+
+    /// The live tables with the live winds and the wheels-up every pilot in `data` is held to, so a
+    /// locked ground flight is timed from its lock (#814). `data` is the snapshot the caller times, so
+    /// a publish between two reads cannot leave a flight it lists without its lock.
+    pub async fn live(
+        state: &AppState,
+        pool: &PgPool,
+        data: Option<&crate::feed::vatsim::VatsimData>,
+    ) -> Result<Self, ApiError> {
+        // Pilots only: no surface that reads these tables times a prefile (#814).
+        let callsigns: Vec<String> = data
+            .into_iter()
+            .flat_map(|d| d.pilots.iter().map(|p| p.callsign.clone()))
+            .collect();
+        Self::live_for(state, pool, &callsigns).await
+    }
+
+    /// [`Self::live`] holding only the locks of `callsigns`: for a route that times one flight.
+    pub async fn live_for(
+        state: &AppState,
+        pool: &PgPool,
+        callsigns: &[String],
+    ) -> Result<Self, ApiError> {
+        let locked = flow_repo::locked_wheels_up(pool, callsigns).await?;
+        Ok(Self::with_locks(state, locked).await)
+    }
+
+    /// The live tables with the live winds and `locked` (callsign -> epoch ms), for a caller that
+    /// reads its own set of locks.
+    pub async fn with_locks(state: &AppState, locked: HashMap<String, i64>) -> Self {
+        let locked = locked
+            .into_iter()
+            .filter_map(|(cs, ms)| Some((cs, DateTime::from_timestamp_millis(ms)?)))
+            .collect();
+        let tables = Self::load(state, state.winds.load_full()).await;
+        TimingTables {
+            locked: Arc::new(locked),
+            ..tables
+        }
+    }
+
+    pub fn inputs(&self) -> predict::Inputs<'_> {
+        predict::Inputs {
+            nav: &self.nav,
+            airports: &self.airports,
+            winds: &self.winds,
+            profiles: &self.profiles,
+            locked: &self.locked,
+        }
+    }
+}
+
 /// Compute the metered flow for one arrival airport against a given snapshot at `now` (loads the
 /// program + issued CFRs from the DB). Shared by the live handler and the historical replay — the
-/// only difference is which snapshot and instant are passed in.
+/// only difference is which snapshot, tables and instant are passed in.
 pub(crate) async fn flow_from_data(
     state: &AppState,
     pool: &PgPool,
     icao: &str,
     snap: Arc<crate::feed::Snapshot>,
-    winds: Arc<crate::feed::winds::Winds>,
+    tables: Arc<TimingTables>,
     now: DateTime<Utc>,
 ) -> Result<flow::Flow, ApiError> {
     let program = program_inputs(pool, icao).await?;
     let issued = tmu_repo::issued_cfr_map(pool, icao).await?;
-    let airports = state.feed.read().await.airports.clone();
-    let nav = state.nav.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let icao = icao.to_owned();
@@ -127,14 +197,8 @@ pub(crate) async fn flow_from_data(
             &icao,
             program.as_ref(),
             &snap.data,
-            airports.as_ref(),
-            nav.as_ref(),
-            winds.as_ref(),
-            profiles.as_ref(),
+            &tables.inputs(),
             &issued,
-            gates.as_ref(),
-            runways.as_ref(),
-            taxi_estimate_samples.as_ref(),
             &manual_exclusions,
             now,
         )
@@ -153,8 +217,8 @@ pub(crate) async fn flow_for(
     let snapshot = state.feed.read().await.snapshot.clone();
     match snapshot {
         Some(snap) => {
-            let winds = state.winds.load_full();
-            flow_from_data(state, pool, icao, snap, winds, Utc::now()).await
+            let tables = Arc::new(TimingTables::live(state, pool, Some(&snap.data)).await?);
+            flow_from_data(state, pool, icao, snap, tables, Utc::now()).await
         }
         None => Ok(flow::Flow {
             icao: icao.to_string(),
@@ -162,7 +226,6 @@ pub(crate) async fn flow_for(
             inbound: 0,
             airborne: 0,
             ground: 0,
-            proposed: 0,
             demand_60min: 0,
             over_capacity: None,
             flights: Vec::new(),
@@ -303,10 +366,11 @@ fn effective_aar(
 /// Current arrival demand vs capacity for every airport at once, ranked by exceedance
 /// (VATUSA/OIS#475).
 ///
-/// Shaped like `flow::fca_counts`, not like the per-airport handlers above: a fixed three queries up
-/// front, one brief feed read, then a *single* blocking task for the whole loop. Fanning
+/// Shaped like `flow::fca_counts`, not like the per-airport handlers above: three queries up front
+/// (programs, configs, issued CFRs), a brief feed read, the locked wheels-up read with the timing
+/// tables (`TimingTables::live`), then a *single* blocking task for the whole loop. Fanning
 /// `flow_for` out per airport (as `public::get_board` does for the handful of metered fields) would
-/// be two queries and a blocking task each.
+/// be three queries and a blocking task each.
 ///
 /// Gated coarsely on `tmu.program.read` at any scope, like the sibling feed reads — the ranking is
 /// derived from public VATSIM traffic, so a facility-scoped caller gets it too. "National" is a
@@ -366,26 +430,19 @@ pub async fn airport_demand(
             .insert(callsign, wheels_up);
     }
 
-    // Clone the snapshot + airport handles under one brief lock, then release it before the CPU.
-    let (snapshot, airports) = {
-        let guard = state.feed.read().await;
-        (guard.snapshot.clone(), guard.airports.clone())
-    };
+    // Clone the snapshot under one brief lock, then release it before the CPU.
+    let snapshot = state.feed.read().await.snapshot.clone();
     let Some(snap) = snapshot else {
         return Ok(Json(Vec::new()));
     };
 
-    let nav = state.nav.load_full();
-    let winds = state.winds.load_full();
-    let profiles = state.aircraft_profiles.load_full();
-    let gates = state.gates.load_full();
-    let runways = state.runways.clone();
-    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+    let tables = TimingTables::live(&state, pool, Some(&snap.data)).await?;
     let manual_exclusions =
         crate::handlers::flow::all_excluded_callsigns(state.flight_exclusions.load().as_ref());
     let now = Utc::now();
 
     let rows = tokio::task::spawn_blocking(move || {
+        let inp = tables.inputs();
         // Only airports something is actually flying to can be over capacity, so intersect the
         // capacity-bearing set with the arrivals in this snapshot. One pass.
         //
@@ -394,17 +451,13 @@ pub async fn airport_demand(
         // If that ever stopped holding, this intersection would come back empty and the ranking
         // would silently vanish rather than fail — so it is an invariant, not a coincidence.
         let mut arriving: HashSet<String> = HashSet::new();
+        // Connected pilots only, as `compute` counts them: an airport whose only arrivals are prefiles
+        // has no demand to rank (#814).
         for fp in snap
             .data
             .pilots
             .iter()
             .filter_map(|p| p.flight_plan.as_ref())
-            .chain(
-                snap.data
-                    .prefiles
-                    .iter()
-                    .filter_map(|p| p.flight_plan.as_ref()),
-            )
         {
             arriving.insert(fp.arrival.to_ascii_uppercase());
         }
@@ -435,14 +488,8 @@ pub async fn airport_demand(
                     icao,
                     program,
                     &snap.data,
-                    airports.as_ref(),
-                    nav.as_ref(),
-                    winds.as_ref(),
-                    profiles.as_ref(),
+                    &inp,
                     issued_by_airport.get(icao).unwrap_or(&empty_issued),
-                    gates.as_ref(),
-                    runways.as_ref(),
-                    taxi_estimate_samples.as_ref(),
                     &manual_exclusions,
                     now,
                 );
@@ -521,9 +568,9 @@ pub async fn list_departures(
         .snapshot
         .clone()
         .unwrap_or_else(|| Arc::new(crate::feed::Snapshot::of(Default::default())));
-    let winds = state.winds.load_full();
+    let tables = Arc::new(TimingTables::live(&state, pool, Some(&snap.data)).await?);
     Ok(Json(
-        departures_response(&state, pool, &dep, snap, winds, Utc::now()).await?,
+        departures_response(&state, pool, &dep, snap, tables, Utc::now()).await?,
     ))
 }
 
@@ -534,7 +581,7 @@ pub(crate) async fn departures_response(
     pool: &PgPool,
     dep: &str,
     snap: Arc<crate::feed::Snapshot>,
-    winds: Arc<crate::feed::winds::Winds>,
+    tables: Arc<TimingTables>,
     now: DateTime<Utc>,
 ) -> Result<DeparturesResponse, ApiError> {
     // Resolve the field: an airport is just itself; a TRACON/ARTCC spans many airports.
@@ -557,9 +604,9 @@ pub(crate) async fn departures_response(
     // Each departure's locked wheels-up: the latest of its issued CFR, its releases in live FCAs and its
     // published GDP slot (#732) — the time it is actually held to, and the rule the flight advisory and
     // the sector occupancy engine use. So an FCA release shows here even when the destination has no
-    // rate program (KSAN metered by an FCA).
-    let pending_callsigns: Vec<String> = pending.iter().map(|d| d.callsign.clone()).collect();
-    let locked = flow_repo::locked_wheels_up(pool, &pending_callsigns).await?;
+    // rate program (KSAN metered by an FCA). Read from the tables every row is timed from, so a
+    // replay, which holds no locks, shows none of today's (#814).
+    let locked = &tables.locked;
 
     // Metering data (by callsign) for destinations that have a program.
     let dests: HashSet<String> = pending
@@ -569,7 +616,7 @@ pub(crate) async fn departures_response(
         .collect();
     let mut meta: HashMap<String, MeteredCfr> = HashMap::new();
     for dest in &dests {
-        let flow = flow_from_data(state, pool, dest, snap.clone(), winds.clone(), now).await?;
+        let flow = flow_from_data(state, pool, dest, snap.clone(), tables.clone(), now).await?;
         for f in flow.flights {
             meta.insert(
                 f.callsign,
@@ -589,11 +636,11 @@ pub(crate) async fn departures_response(
         .into_iter()
         .map(|d| {
             let m = meta.remove(&d.callsign).unwrap_or_default();
+            // What the row was timed from: the live locks, none in the replay (#814).
+            let wheels_up_proposed = !tables.locked.contains_key(&d.callsign);
             // A locked time wins; the rate program's merely proposed CFR shows only when nothing is
             // locked, so a proposal can never hide the time the flight is held to (#732).
-            let locked_cfr = locked
-                .get(&d.callsign)
-                .and_then(|ms| DateTime::from_timestamp_millis(*ms));
+            let locked_cfr = locked.get(&d.callsign).copied();
             let cfr = locked_cfr.or(m.cfr);
             let has_program = metered.contains(&d.arrival) || locked_cfr.is_some();
             DepartureFlight {
@@ -609,15 +656,20 @@ pub(crate) async fn departures_response(
                 delay_min: m.delay_min,
                 cfr,
                 cfr_issued: m.cfr_issued || locked_cfr.is_some(),
+                wheels_up_proposed,
                 cfr_version: None,
                 seq: m.seq,
             }
         })
         .collect();
     // Each issued CFR's version, so a writer can send `If-Match` without provoking a 412 (#585 QA).
+    // Only on a row the tables lock: a replay holds none of today's CFRs, so it shows no version.
     let versions = tmu_repo::issued_cfr_versions(pool).await?;
     for d in &mut departures {
-        d.cfr_version = versions.get(&d.callsign).copied();
+        d.cfr_version = versions
+            .get(&d.callsign)
+            .copied()
+            .filter(|_| tables.locked.contains_key(&d.callsign));
     }
     // Metered (with a CFR) first, ordered by release; unmetered fall to the bottom.
     departures.sort_by_key(|r| r.cfr.map(|c| c.timestamp_millis()).unwrap_or(i64::MAX));
@@ -719,18 +771,10 @@ pub async fn issue_cfr(
         Some(ready) => {
             let program = program_inputs(pool, &airport).await?;
             let issued = tmu_repo::issued_cfr_map(pool, &airport).await?;
-            let (snapshot, airports) = {
-                let guard = state.feed.read().await;
-                (guard.snapshot.clone(), guard.airports.clone())
-            };
+            let snapshot = state.feed.read().await.snapshot.clone();
             match (program, snapshot) {
                 (Some(pg), Some(snap)) => {
-                    let nav = state.nav.load_full();
-                    let winds = state.winds.load_full();
-                    let profiles = state.aircraft_profiles.load_full();
-                    let gates = state.gates.load_full();
-                    let runways = state.runways.clone();
-                    let taxi_estimate_samples = state.taxi_estimate_samples.load_full();
+                    let tables = TimingTables::live(&state, pool, Some(&snap.data)).await?;
                     let airport = airport.clone();
                     let callsign = callsign.clone();
                     let manual_exclusions = crate::handlers::flow::all_excluded_callsigns(
@@ -742,14 +786,8 @@ pub async fn issue_cfr(
                             &airport,
                             &pg,
                             &snap.data,
-                            airports.as_ref(),
-                            nav.as_ref(),
-                            winds.as_ref(),
-                            profiles.as_ref(),
+                            &tables.inputs(),
                             &issued,
-                            gates.as_ref(),
-                            runways.as_ref(),
-                            taxi_estimate_samples.as_ref(),
                             &manual_exclusions,
                             &callsign,
                             ready,
@@ -1026,7 +1064,7 @@ mod departures_release_tests {
     use crate::{
         feed::{
             airports::Airport,
-            vatsim::{FlightPlan, Prefile, VatsimData},
+            vatsim::{FlightPlan, Pilot, VatsimData},
         },
         scope_test_support::{grant, seed_user, send_json, session_cookie, test_state},
         state::AppState,
@@ -1036,14 +1074,16 @@ mod departures_release_tests {
         Utc.with_ymd_and_hms(2026, 10, 5, h, m, 0).unwrap()
     }
 
-    /// Prefiles departing KJFK for KDCA, one per callsign.
+    /// Pilots parked at KJFK for KDCA, one per callsign.
     async fn state_with(pool: PgPool, callsigns: &[&str]) -> AppState {
         let state = test_state(pool, HashMap::new());
         state.feed.write().await.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-            prefiles: callsigns
+            pilots: callsigns
                 .iter()
-                .map(|c| Prefile {
+                .map(|c| Pilot {
                     callsign: (*c).into(),
+                    latitude: 40.64,
+                    longitude: -73.78,
                     flight_plan: Some(FlightPlan {
                         departure: "KJFK".into(),
                         arrival: "KDCA".into(),
@@ -1149,10 +1189,12 @@ mod departures_release_tests {
                 ("KDCA".to_string(), Airport::at(38.85, -77.04)),
             ]));
             feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
-                prefiles: ["P1", "P2", "P3"]
+                pilots: ["P1", "P2", "P3"]
                     .iter()
-                    .map(|c| Prefile {
+                    .map(|c| Pilot {
                         callsign: (*c).into(),
+                        latitude: 40.64,
+                        longitude: -73.78,
                         flight_plan: Some(FlightPlan {
                             departure: "KJFK".into(),
                             arrival: "KDCA".into(),
@@ -1238,5 +1280,144 @@ mod departures_release_tests {
             serde_json::json!([null, false, false]),
             "nothing locked, no program"
         );
+    }
+
+    // ---- #814 AC6: the departures list marks a proposed wheels-up --------------------------------
+
+    /// The departures list with a cookie holding `permission`, by callsign.
+    async fn listed(
+        pool: &PgPool,
+        state: &AppState,
+        permission: &str,
+    ) -> (http::StatusCode, serde_json::Value) {
+        let user = seed_user(pool).await;
+        grant(pool, &user, permission, None).await;
+        let cookie = session_cookie(pool, &user).await;
+        send_json(
+            state,
+            http::Method::GET,
+            "/api/v1/tmu/departures/KJFK",
+            &cookie,
+        )
+        .await
+    }
+
+    fn departure<'a>(body: &'a serde_json::Value, callsign: &str) -> &'a serde_json::Value {
+        body["departures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["callsign"] == callsign)
+            .unwrap_or_else(|| panic!("{callsign} missing: {body}"))
+    }
+
+    #[sqlx::test]
+    async fn the_departures_list_refuses_a_caller_without_program_read(pool: PgPool) {
+        let state = state_with(pool.clone(), &["P1"]).await;
+        let (status, _) =
+            send_json(&state, http::Method::GET, "/api/v1/tmu/departures/KJFK", "").await;
+        assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+        let (status, _) = listed(&pool, &state, "flow.fca.read").await;
+        assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+        let (status, body) = listed(&pool, &state, "tmu.program.read").await;
+        assert_eq!(status, http::StatusCode::OK, "{body}");
+        assert_eq!(departure(&body, "P1")["callsign"], "P1");
+    }
+
+    /// AC6 and the locked-ETA decision: only a departure nothing locks is marked proposed, and a
+    /// locked one is timed from its lock, its ETA one airborne ETE after it.
+    #[sqlx::test]
+    async fn only_a_departure_with_no_locked_wheels_up_is_marked_proposed(pool: PgPool) {
+        sqlx::query("insert into tmu.programs (icao, aar) values ('KDCA', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let callsigns = ["FREE", "CFR", "REL", "GDP", "DRAFT"];
+        let state = state_with(pool.clone(), &callsigns).await;
+        state.feed.write().await.airports = Arc::new(HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]));
+        let now = Utc::now().with_nanosecond(0).unwrap();
+        let lock = |hours| now + chrono::Duration::hours(hours);
+        sqlx::query(
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('CFR', 'KDCA', $1)",
+        )
+        .bind(lock(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let fca_id = fca(&pool, true, false).await;
+        release(&pool, &fca_id, "REL", lock(3)).await;
+        gdp_slot(&pool, "published", "GDP", lock(4)).await;
+        gdp_slot(&pool, "draft", "DRAFT", lock(5)).await;
+
+        let (status, body) = listed(&pool, &state, "tmu.program.read").await;
+        assert_eq!(status, http::StatusCode::OK, "{body}");
+        for (cs, proposed) in [
+            ("FREE", true),
+            ("DRAFT", true),
+            ("CFR", false),
+            ("REL", false),
+            ("GDP", false),
+        ] {
+            let d = departure(&body, cs);
+            assert_eq!(d["wheels_up_proposed"], proposed, "{cs}: {d}");
+            assert_eq!(d["cfr_issued"], !proposed, "{cs}: {d}");
+            assert!(d["eta"].is_string(), "{cs} has an ETA: {d}");
+        }
+        // Each lock moves its flight's ETA to the lock plus the one airborne ETE every flight here
+        // shares (the same plan from the same field), so the ETA gaps are the lock gaps.
+        let eta = |cs: &str| -> DateTime<Utc> {
+            serde_json::from_value(departure(&body, cs)["eta"].clone()).unwrap()
+        };
+        assert_eq!(eta("REL") - eta("CFR"), chrono::Duration::hours(1));
+        assert_eq!(eta("GDP") - eta("REL"), chrono::Duration::hours(1));
+        assert!(
+            eta("FREE") < eta("CFR"),
+            "the free flight is timed from its proposal"
+        );
+    }
+
+    /// #814 decision 32: the replay times from no locks, and its departures list shows none of
+    /// today's either. A CFR issued now is not on a replayed row, which is proposed; the same row from
+    /// the live tables carries it, unmarked (the positive control).
+    #[sqlx::test]
+    async fn a_replayed_departure_shows_none_of_todays_locks(pool: PgPool) {
+        let state = state_with(pool.clone(), &["CFR"]).await;
+        let lock = (Utc::now() + chrono::Duration::hours(1))
+            .with_nanosecond(0)
+            .unwrap();
+        sqlx::query(
+            "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('CFR', 'KDCA', $1)",
+        )
+        .bind(lock)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let snap = state.feed.read().await.snapshot.clone().unwrap();
+        let row = |r: &crate::models::DeparturesResponse| {
+            let d = r.departures.iter().find(|d| d.callsign == "CFR").unwrap();
+            (
+                d.cfr,
+                d.cfr_issued,
+                d.wheels_up_proposed,
+                d.cfr_version.is_some(),
+            )
+        };
+        let none = Arc::new(super::TimingTables::load(&state, state.winds.load_full()).await);
+        let replay =
+            super::departures_response(&state, &pool, "KJFK", snap.clone(), none, Utc::now())
+                .await
+                .unwrap();
+        assert_eq!(row(&replay), (None, false, true, false), "replay");
+        let live = super::TimingTables::live(&state, &pool, Some(&snap.data))
+            .await
+            .unwrap();
+        let live =
+            super::departures_response(&state, &pool, "KJFK", snap, Arc::new(live), Utc::now())
+                .await
+                .unwrap();
+        assert_eq!(row(&live), (Some(lock), true, false, true), "live");
     }
 }

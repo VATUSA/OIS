@@ -12,9 +12,9 @@ use crate::util::{TMI_STRUCTURED_PREFIX, channel, str_field};
 /// A hard error, not a placeholder. The row is the backend's to produce (`tmi::ntml_line` /
 /// `ntml_cancel_line`); if it is absent the payload is not one this bot understands — a key that moved,
 /// or a job enqueued by a backend from before the payload carried `ntml`, still pending or mid-retry
-/// across a deploy (`ack_job` retries up to `MAX_ATTEMPTS`). Posting "(no restriction text)" instead
-/// *succeeded*, so `ack_job` marked it `succeeded`: a wrong row in the NTML channel, indistinguishable
-/// from a right one. Failing lets it retry and then park as `failed` with a greppable reason.
+/// across a deploy (`ack_job` retries up to `MAX_ATTEMPTS`). A placeholder post would ack as
+/// `succeeded` and leave a wrong row in the NTML channel, indistinguishable from a right one. Failing
+/// lets it retry and then park as `failed` with a greppable reason.
 ///
 /// Split out for the same reason as [`build_message`] and `jobs::route` — `post_tmi` needs a live
 /// `Http`, so the decision is only assertable from here (#436 review).
@@ -52,8 +52,7 @@ fn code_block(line: &str) -> String {
 pub(crate) async fn post_tmi(http: &Arc<Http>, p: &Value) -> Result<Option<Value>, String> {
     let channel = channel(p)?;
     // The backend assembles the whole row — log stamp, restriction, valid window, REQ:PROV — so the
-    // bot never improvises NTML's shape. It used to build a bold `**N90 → ZNY**` header here
-    // precisely because nothing owned the complete line (#436).
+    // bot never improvises NTML's shape (#436).
     let line = ntml_row(p)?;
     let content = code_block(line);
 

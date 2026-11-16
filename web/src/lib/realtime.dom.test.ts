@@ -6,7 +6,7 @@ const token = vi.hoisted(() => ({value: undefined as string | undefined}));
 vi.mock("./desktop-token", () => ({getDesktopToken: async () => token.value}));
 vi.mock("./api", () => ({API_BASE: "https://ois.example"}));
 
-import {COALESCE_MS, TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
+import {COALESCED_KEYS, COALESCE_MS, TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
 
 /** Records how each socket was opened, and lets a test push frames through it. */
 class FakeSocket {
@@ -132,6 +132,72 @@ describe("ACE and runway topics (VATUSA/OIS#645, #646)", () => {
   });
 });
 
+describe("public board and NAS demand topics (VATUSA/OIS#954)", () => {
+  async function nudge(topic: string) {
+    const dispose = connectRealtime(qc);
+    await flush();
+    const socket = FakeSocket.opened.at(-1)!;
+    socket.onopen?.();
+    invalidated.length = 0; // drop the reconnect catch-up
+    socket.onmessage?.({ data: JSON.stringify({ topic }) });
+    dispose();
+    return [...invalidated];
+  }
+
+  // `handlers/public.rs::get_board` loads active ground stops, GDPs, restrictions (TMIs) and programs;
+  // `handlers/feed.rs::airport_demand` reads programs and issued CFRs. The whole list is asserted, so a
+  // dropped key and a key mapped onto the wrong topic both fail.
+  it.each([
+    ["tmu.groundstop", [["ground-stops"], ["departures"], ["public-board"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["aircraft-route"]]],
+    ["tmu.tmi", [["tmis"], ["public-board"]]],
+    ["tmu.program", [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]]],
+  ])("a %s nudge refetches exactly its keys", async (topic, keys) => {
+    expect(await nudge(topic)).toEqual(keys.map((queryKey) => ({ queryKey })));
+  });
+
+  // Literals, not the module's own table read back, so a key moved between the two lists fails here.
+  it("holds the sector and NAS demand for the tick on every lock topic, and nothing else", () => {
+    expect(COALESCED_KEYS).toEqual({
+      "flow.release": [["sector-demand"], ["tmu-demand"]],
+      "flow.fca": [["sector-demand"], ["tmu-demand"]],
+      "tmu.gdp": [["sector-demand"], ["tmu-demand"]],
+      "flow.cfr": [["sector-demand"], ["tmu-demand"]],
+    });
+  });
+
+  // A burst of locks would otherwise recompute the whole country's demand once per nudge per open
+  // widget: held for the next tick like the sector demand, it costs one refetch per publish.
+  it.each(["flow.release", "flow.fca", "tmu.gdp", "flow.cfr"])(
+    "a %s nudge refetches the NAS demand on the next tick, whatever its age, not at once",
+    async (topic) => {
+      const dispose = connectRealtime(qc);
+      const socket = await opened();
+      socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+      invalidated.length = 0;
+      socket.onmessage?.({ data: JSON.stringify({ topic }) });
+      const now = invalidated.map((q) => (q as { queryKey: string[] }).queryKey[0]);
+      expect(now.length, "the topic's immediate keys ran").toBeGreaterThan(0);
+      expect(now, "no immediate tmu-demand refetch").not.toContain("tmu-demand");
+
+      const demandOnTick = () => {
+        invalidated.length = 0;
+        socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+        const calls = invalidated.filter((q) => (q as { queryKey: string[] }).queryKey[0] === "tmu-demand") as {
+          predicate: (q: { state: { dataUpdatedAt: number } }) => boolean;
+        }[];
+        expect(calls.length, "one tmu-demand refetch per tick").toBe(1);
+        return calls[0].predicate({ state: { dataUpdatedAt: Date.now() - 1_000 } });
+      };
+      // Fresh data (a second old) refetches on the tick after the nudge, where the minute's gap would skip it.
+      expect(demandOnTick()).toBe(true);
+      // Held once: the tick after keeps the gap again.
+      expect(demandOnTick()).toBe(false);
+      dispose();
+    },
+  );
+});
+
 describe("sector demand topics (VATUSA/OIS#725)", () => {
   /** Connects, opens and subscribes to the tick, and drops the reconnect catch-up. */
   async function connected() {
@@ -163,10 +229,10 @@ describe("sector demand topics (VATUSA/OIS#725)", () => {
   // refetch waits for the next tick, so a burst costs the server one projection per ARTCC, not one per
   // nudge per client. The topic's other keys still refetch at once.
   it.each([
-    ["flow.release", [["idst"], ["fca-traffic"], ["departures"]]],
-    ["flow.cfr", [["departures"], ["flow"]]],
-    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"]]],
-    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]]],
+    ["flow.release", [["idst"], ["fca-traffic"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
+    ["flow.cfr", [["departures"], ["flow"], ["fca-traffic"], ["idst"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["aircraft-route"]]],
+    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
   ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {
     const { dispose, send } = await connected();
     send(topic);
@@ -334,6 +400,7 @@ const FEED = [
   ["idst"],
   ["departures"],
   ["sector-demand"],
+  ["tmu-demand"],
 ];
 
 /** Open the socket the client created and return it. */
@@ -381,6 +448,9 @@ describe("the feed tick (VATUSA/OIS#648)", () => {
     ["departures", 60_000],
     // New with #725, not a pre-#648 poll: its hook's fallback poll is the same minute.
     ["sector-demand", 60_000],
+    // #954, not a pre-#648 poll: `useAirportDemand` polled a flat minute before it joined the tick.
+    // 59_999 ms must not refetch, 60_000 ms must.
+    ["tmu-demand", 60_000],
   ] as const)("a tick refetches %s no more often than its old %ims poll", async (prefix, polledMs) => {
     const dispose = connectRealtime(qc);
     const socket = await opened();

@@ -38,6 +38,72 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-11-15-fca-freeze-horizon",
+    date: "2026-11-15",
+    title: "One ETA per flight, no taxi time, and the FCA freeze horizon",
+    sections: [
+      {
+        heading: "Flow and FCAs",
+        highlights: [
+          "Every page times a flight the same way, so one aircraft shows the same ETA on the FCA board, airport flow and sector demand.",
+          "OIS no longer adds a learned taxi time to any time it predicts. A ground flight with no ready time, release, CFR or GDP EDCT is timed from its filed departure time plus 10 min, and no sooner than now plus 10 min. Those times show a P.",
+          "A CFR, FCA release or GDP slot now moves that flight's times everywhere it is shown, including airport flow, departures and the AADC. The GDP draft takes every one of them except a slot from that airport's own GDP, so a revise or compress can still move the flight earlier.",
+          "RDY means ready at the runway now, and a Set time is a runway time.",
+          "Prefiled flights no longer appear in airport flow, the airport's arrival demand, the NAS demand ranking, the AADC, the GDP draft or the departures list. Sector demand still counts a prefile that holds a CFR, release or GDP slot.",
+          "The taxi insights page is gone. The Taxi tab on the Airport page still shows live taxi times.",
+          "Each FCA has a freeze horizon, set in the FCA editor as \"Freeze horizon · min\" (30 by default, 0 turns it off). Inside it, a flight's crossing time is held instead of moving on every feed update.",
+          "Released and held flights are now checked against each other, so two aircraft no longer sit closer than the FCA's spacing without a warning. A flight inside another crossing's gap shows IN GAP, and a flight running past its release or held time shows how late it is.",
+          "Every pair of crossings is spaced by the larger of the two gaps the aircraft need, in auto and manual mode and when Set searches for a slot.",
+          "Aircraft profiles have a new engine-family tier (jet, turboprop, piston) between the aircraft type and the wake class. Staff add, edit and delete family profiles in the \"Engine families\" section of the aircraft profiles page. None are added by default, so ETAs stay the same until someone adds one.",
+        ],
+      },
+      {
+        heading: "TMU and advisories",
+        highlights: [
+          "The public Advisories board updates as soon as a ground stop, GDP, restriction or program changes, instead of on its next poll.",
+          "The NAS demand widget updates as soon as a program changes, and on the next feed update after a GDP, CFR, FCA or release change, instead of on its next poll.",
+          "The TMU link in the sidebar and the command palette shows for everyone who can open a TMU tab, and only for them.",
+        ],
+      },
+      {
+        heading: "Events",
+        highlights: [
+          "Creating, editing, deleting, publishing, archiving or auto-publishing an event FCA now needs event-planning access at that FCA's facility. A planner scoped to one ARTCC can no longer change another ARTCC's event FCAs.",
+          "Deleting, deciding or releasing a claim on an ACE request only works on a request that belongs to the event in the address.",
+          "If the desktop app cannot load your ACE claims, it keeps the claims it already had for reminders instead of dropping them.",
+        ],
+      },
+      {
+        heading: "Discord",
+        highlights: [
+          "Editing a published TMI now posts its revised NTML row to the same channel as the original, on installs with more than one Discord server.",
+          "ACE request posts and claim DMs can no longer ping @everyone or a role from the text they carry.",
+          "Backticks in an advisory's remarks no longer break the \"View structured\" reply's formatting.",
+          "The bot gives up on a call to OIS that hangs, so one stuck request no longer stops the queue until a restart.",
+          "The bot refuses to start when OIS_POLL_SECS is not a whole number of seconds above 0, and names the variable, instead of quietly polling every 5 seconds.",
+        ],
+      },
+      {
+        heading: "Dashboards and app",
+        highlights: [
+          "Live dashboard widgets no longer poll on a timer while live updates are arriving.",
+          "Renaming a collection now updates the Collection column in the library list view.",
+          "The app no longer opens to a blank page when the browser blocks site storage.",
+          "Secondary buttons get the same thin border as the other buttons, and tooltip dots and shortcut hints use the standard corner radii.",
+        ],
+      },
+      {
+        heading: "Security and reliability",
+        highlights: [
+          "The desktop app only sends sign-in and diagnostics requests to the OIS server it was built for.",
+          "When OIS cannot check your sign-in because of a database fault, it answers with a temporary error instead of signing you out.",
+          "VATUSA access-reset runs, which list the members they reset, are deleted 180 days after they finish.",
+          "The backend refuses to start when TRUSTED_PROXY_HOPS is 0 or not a whole number, and names the variable, instead of quietly falling back to a default. A RATE_LIMIT_* variable or DATABASE_MAX_CONNECTIONS that is 0 or not a whole number still keeps its default, and now logs an error naming the variable.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-11-09-rap-winds",
     date: "2026-11-09",
     title: "RAP winds for every ETA, and Set finds a free slot",

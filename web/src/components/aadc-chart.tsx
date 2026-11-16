@@ -9,7 +9,6 @@ const BUCKET_OPTS = [15, 30, 60].map((b) => ({ value: String(b), label: `${b}m` 
 const STATUS_TOKEN: Record<string, string> = {
   airborne: "flight-airborne",
   ground: "flight-ground",
-  proposed: "flight-proposed",
 };
 
 const OTHER_TOKEN = "flight-arrived";

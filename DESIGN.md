@@ -185,23 +185,44 @@ a **documented exception to non-negotiable #9**, under all of these conditions:
 
 ### User-chosen domain colour
 
-An FCA, a route and a facility-map rule each carry a colour a person picked so that theirs reads apart
-on a shared map. That colour is **data**, not chrome, so it may be any `#rrggbb` — on these conditions
-(#698):
+An FCA, a route, a facility-map rule and a dashboard chart (a series, a category or a threshold
+line) each carry a colour a person picked. That colour is **data**, not chrome, so it may be any
+`#rrggbb`. The conditions below are the rule (#698); today only FCA colours meet all of them. What the
+others lack is listed after the conditions.
 
-- **Offered from tokens first.** The picker is `ColorSwatches` (`@ois/ui`), fed the named palette in
-  `web/src/lib/palette.ts` (`--series-*` and `--ink-3`, each with its name). A custom pick is the
-  fallback, not the default.
-- **Validated on the server**, on every write path: lowercase `#rrggbb` only.
+- **Offered from tokens first.** The FCA picker is `ColorSwatches` (`@ois/ui`) with `allowCustom`,
+  fed the named palette in `web/src/lib/palette.ts` (`--series-*` and `--ink-3`, each with its name).
+  A custom pick is the fallback, not the default.
+- **Validated on the server**, on every write path: lowercase `#rrggbb` only. For FCAs that is
+  `repos::flow::fca_color`, which `validate_fca` (`backend/src/handlers/flow.rs`) calls on all four FCA
+  write routes, the event FCA routes included.
 - **Never invisible.** At least 3:1 contrast against the dark ground (`#08080a`). Every token swatch
-  clears it in both themes; black and near-black don't. `ColorSwatches` refuses a darker pick, and the
-  server refuses it too.
-- **One parser.** The map draws it through `hexToRgb`, and a list chip uses `swatchCss`, which is the
-  same parse, so a value can't look right in a list and grey on the map.
+  clears it in both themes; black and near-black don't. `ColorSwatches` refuses a darker custom pick,
+  and `fca_color` refuses it too.
+- **One parser.** The map draws it through `hexToRgb`, and an FCA list chip uses `swatchCss`, which is
+  the same parse, so a value can't look right in a list and grey on the map.
 - **A `style` colour is allowed only for such data** (a chip, a swatch), never for chrome.
 - **It is stored as a hex, so it drifts with theme.** A swatch picked in light mode stores the light
   hex and shows that in dark mode too. That is known and accepted; storing a token name would fix it,
   at the cost of an API change.
+
+What the other user colours lack:
+
+- **Routes (#1081).** The server stores the colour as sent, `#38bdf8` when absent
+  (`repos::flow::create_route` and `update_route`); `validate_route` checks only the name and the route
+  string. No format check, no lowercasing, no contrast floor. The picker is `ColorSwatches` without a
+  custom pick, fed `useRouteColors` (`web/src/components/map/lib/colors.ts`), not `palette.ts`. List
+  chips draw the raw value, not `swatchCss`.
+- **Facility-map rules (#1082).** The server checks only that each rule colour and the default colour
+  are at most 16 bytes (`validate` in `backend/src/handlers/facility_map.rs`) and stores them as sent.
+  The picker is `ColorSwatches` fed `palette.ts`, without a custom pick. List chips draw the raw value.
+- **Dashboard charts.** Series, category and threshold colours live in the dashboard's `data` JSON,
+  which the server treats as opaque and checks only for total size (`check_size` in
+  `backend/src/handlers/dashboards.rs`); they are stored as sent. The picker is a native
+  `<input type="color">` (`web/src/features/dashboard/chart-config-panel.tsx`, `chart-widget.tsx`), so
+  there is no token-first offer and no contrast floor; #974 moves it to `ColorSwatches`. The chart
+  draws the stored hex as given (`colorFor`, `resolvedColor` and the threshold `stroke` in
+  `chart-widget.tsx`), so a picked colour does not follow a theme switch.
 
 ### Named exception: the Sector Monitor body
 
@@ -263,7 +284,9 @@ does not follow this file's look, and only inside its body:
 ## Charts
 
 One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (`Sparkline`,
-`TimeSeries`, `Bars`, `StackedBars`, `Donut`) that read their colours from tokens.
+`TimeSeries`, `Bars`, `StackedBars`, `Donut`) that read their colours from tokens. A dashboard chart's
+user-picked series, category and threshold colours are the exception: they are stored hex, drawn as
+given (§ "User-chosen domain colour").
 
 - **Flat fills only.** Areas are a flat translucent fill of the series hue; never a gradient.
 - **Semantic colour.** Status-bearing data uses status or domain tokens (a load level is
@@ -271,7 +294,8 @@ One approach: `@tanstack/charts`, wrapped by the chart components in `@ois/ui` (
 - **Faint structure.** Grid lines `--line-soft`, axes and tick labels `--ink-3` in mono 11–12px.
 - **Emphasize the endpoint.** Sparklines end in a dot in the line's hue; thresholds (an AAR cap) are
   a dashed 1px rule in `--warning`.
-- **Both themes.** Every colour comes through tokens, so a chart re-reads on theme switch.
+- **Both themes.** Every token colour re-reads on theme switch; a user-picked dashboard colour does
+  not.
 
 ---
 

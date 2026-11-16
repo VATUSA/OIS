@@ -2,8 +2,9 @@
 """Point a release build of the desktop app at the production API (VATUSA/OIS#347).
 
 A bundle has no container start to inject `window.__OIS_API_URL__` (the web image's `config.js`), so
-the API base is baked in at build time through `VITE_OIS_API_URL`. Unset, it falls back to
-`http://127.0.0.1:3000`: an installer that only ever talks to the user's own machine. The desktop
+the API base is baked in at build time through `VITE_OIS_API_URL`, which both the web build and the
+Rust shell (`desktop/src-tauri/src/api_origin.rs`, #924) read. Unset, the web build falls back to
+`http://127.0.0.1:3000` and a release build of the shell refuses to sign in at all. The desktop
 CSP (`app.security.csp.connect-src`, #346) must also allow that origin, REST and realtime alike, or
 every call from the shipped app is blocked and looks exactly like a down server.
 

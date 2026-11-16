@@ -126,6 +126,14 @@ describe("canSeeFavorite", () => {
     const withQuery: Favorite = { ...fcaPage, href: "/advisories/fcas?flight=UAL1" };
     expect(canSeeFavorite(holding(), withQuery)).toBe(true);
   });
+
+  // VATUSA/OIS#966: a TMU page favorite follows the TMU link, so it lists exactly where a TMU tab opens.
+  it("lists a TMU page favorite to a TMU tab reader and drops it for an FCA-only reader", () => {
+    const tmuTab: Favorite = { kind: "page", id: "/ops/tmu?tab=gdp", label: "TMU · Ground delay", href: "/ops/tmu?tab=gdp" };
+    expect(canSeeFavorite(holding("tmu.gdp.read"), tmuTab)).toBe(true);
+    expect(canSeeFavorite(holding("flow.fca.read"), tmuTab)).toBe(false);
+    expect(canSeeFavorite(holding("flow.runway.read"), tmuTab)).toBe(false);
+  });
 });
 
 describe("unavailable", () => {

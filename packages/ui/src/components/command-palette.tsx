@@ -185,7 +185,7 @@ export function CommandPalette({
           placeholder={placeholder}
           className="h-12 w-full bg-transparent text-sm text-ink outline-none placeholder:text-ink-3"
         />
-        <kbd className="rounded-[4px] border border-line px-1.5 font-mono text-[10px] text-ink-3">esc</kbd>
+        <kbd className="rounded-xs border border-line px-1.5 font-mono text-[10px] text-ink-3">esc</kbd>
       </div>
       {scopes && scopes.length > 0 && scope != null && (
         <ScopeChips scopes={scopes} scope={scope} onScopeChange={onScopeChange} />

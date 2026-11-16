@@ -10,7 +10,7 @@ export function ChartTooltip({ title, rows }: { title: React.ReactNode; rows: re
       <div className="flex flex-col gap-0.5">
         {rows.map((r, i) => (
           <div key={i} className="flex items-center gap-1.5">
-            <span className="inline-block size-2 rounded-[2px]" style={{ background: r.color }} />
+            <span className="inline-block size-2 rounded-full" style={{ background: r.color }} />
             {r.label != null && <span className="text-ink-2">{r.label}</span>}
             <span className="ml-auto pl-3 font-mono text-ink">{r.value}</span>
           </div>

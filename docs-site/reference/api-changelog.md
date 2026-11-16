@@ -14,6 +14,92 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Documentation:** `IdstFlight.edct` in `GET /api/v1/flow/idst` now documents what the route already
+  returns: before release it carries the proposed EDCT (the wheels-up that would meet `cross_time`), and
+  it is null only when an unreleased flight has no metered crossing time or no ETA. The EDCT a release
+  stores can be earlier or later than that proposal. No caller change.
+  (#827)
+- **Changed:** `FcaBody` and `UpsertFcaRequest` gain `freeze_min`, the FCA's freeze horizon in minutes
+  (0-120, 0 turns it off). A value outside the range answers 400. A create that omits it gets 30; an
+  update that omits it keeps the stored value, so an existing caller is unaffected.
+  `PUT /api/v1/flow/fcas/{id}` clears the FCA's held crossing times when it changes a metering field
+  (points, filters, levels, direction, mode, rate, MIT or `freeze_min`); the manual order route
+  clears them when the order or the manual flag changes; `DELETE /api/v1/flow/fcas/{id}` clears them.
+  A background pass stores the held times; no read writes them. `FcaFlight` (from `GET /api/v1/flow/fcas/{id}/traffic` and the release routes) gains
+  `late_sec`, `slot_conflict` and `sta_frozen`; the flight advisory's `cross_time` follows the same
+  held times. A flight that runs past its release or held time reports how far in `late_sec`: for an
+  airborne flight, how far its ETA has passed it, and it then crosses no earlier than its ETA (in auto mode a late held
+  flight crosses at the later of the slot it held while on time and its ETA, moves no release or other held flight, and sets
+  `slot_conflict` when that is inside another's gap; in manual mode it keeps its place in the controller's order); for a ground
+  release, how long now is past its wheels-up, and it then crosses no earlier than its ETA, which is a takeoff now unless another lock holds its wheels-up later. In airport flow, an issued CFR's
+  `FlowFlight.sta` and `delay_min` now go through the same slot check as every other arrival; a CFR
+  is late only once now is past its wheels-up, and then crosses no earlier than a takeoff now would
+  give, and a CFR whose slot is taken shows the delay. A repeat RDY and a CFR re-issue search for the
+  new slot with the flight's own old release or CFR taken out, and RDY and Set space each pair by the
+  larger of the two gaps. (#817)
+- **Changed:** the event FCA writes (`POST /api/v1/events/{id}/fcas`, and `PUT`, `DELETE`,
+  `POST …/publish`, `POST …/archive` and `PUT …/auto` on `/api/v1/events/{id}/fcas/{fca_id}`) answer
+  `403 forbidden` unless the caller holds `events.plan.update` at the FCA's `artcc`: the payload's on
+  create, both the stored and the payload's on update, the stored one otherwise. An FCA with no
+  `artcc` needs national scope. An FCA that belongs to another event still answers `404`. A caller
+  scoped to one facility that wrote another facility's event FCAs now gets `403` and must use a
+  credential scoped to that facility. `PUT` and `DELETE /api/v1/flow/fcas/{id}` on an event FCA now
+  also need `events.plan.update` at its `artcc` (the stored one, and on `PUT` the payload's), on top
+  of `flow.fca.update` or `flow.fca.delete` there; an ordinary FCA is unaffected. On a planned or
+  archived event FCA, `PUT /api/v1/flow/fcas/{id}/order`, `POST` and `DELETE
+  /api/v1/flow/fcas/{id}/release/{callsign}` and `POST /api/v1/flow/fcas/{id}/swap` answer
+  `403` to an event planner without `events.plan.update` at its `artcc`; a non-planner still gets
+  `404`. (#854)
+- **Changed:** `PUT` and `DELETE /api/v1/flow/aircraft-profiles/{kind}/{key}` accept `kind`
+  `family` with `key` `jet`, `turboprop` or `piston` (any other family key answers `400
+  bad_request`), and `GET /api/v1/flow/aircraft-profiles` lists those rows between the wake and type
+  rows. `FcaFlightDebug.profile` can read `family:<key>` when a flight resolved to an engine-family
+  profile. A caller that matches on `kind` or on the profile label should expect the new value;
+  nothing else changes. (#818)
+- **Changed: `503 service_unavailable` when a presented credential cannot be checked** (#922). On
+  every route, public routes and the `GET /api/v1/ws` upgrade included, a request carrying a session
+  cookie, a desktop `ois_dsk_` token, an `ois_pat_` API key or an `ois_sa_` service-account token whose
+  lookup fails on the database (recording the key's or account's last use included) answers `503`. It
+  used to be treated as anonymous: `401` on a protected route, the signed-out response on a public one.
+  A `503` here is not a sign-out: keep the token and retry. An unknown, revoked, expired or disabled
+  token is still anonymous (`401` on a protected route), and a request with no token is unchanged.
+- **Removed: taxi insights** (#814). `GET /api/v1/stats/taxi/observations` and
+  `GET /api/v1/stats/taxi/estimates` are gone and answer 404, with their schemas
+  (`TaxiObservationEntry`, `TaxiObservationPage`, `TaxiEstimateEntry`, `TaxiEstimatePage`) and the
+  debug block's `FcaFlightDebug.taxi_estimate`. A caller of either route has to stop calling it.
+- **Changed: no taxi time in any time OIS predicts** (#814). A ground flight that holds no ready time,
+  FCA release, CFR or GDP EDCT is wheels-up at its filed departure time plus 10 minutes: now plus 10
+  when that time has passed or is blank, malformed or `0000`. It was now plus a ground allowance
+  learned from taxi observations, 780 s where too few were stored. `FlowFlight.etd` and `eta`, `FcaFlight.eta` and `cross_time`, demand, GDP
+  inbounds and the advisory `edct` on `GET /api/v1/flow/idst` move with it; `POST /api/v1/tmu/cfr`
+  without a `ready_time` locks that wheels-up when no CFR is metered. RDY and SET never release a
+  ground flight before a CFR, GDP slot or other FCA release it holds. RDY
+  (`POST /api/v1/flow/fcas/{id}/release/{callsign}` without `ready`) means ready at the runway now: its
+  slot search starts at now plus the airborne flight time, not at the flight's ETA. A ground flight
+  that holds an issued CFR, an FCA release or a published GDP slot is timed from the latest of them,
+  so its `eta` is that time plus its airborne flight time and its delay reads only what was added
+  after the lock. A new boolean,
+  `wheels_up_proposed`, on `FlowFlight`, `FcaFlight` and `DepartureFlight` is true when a ground
+  flight's times rest on that proposed wheels-up. A caller needs do nothing; one that tells proposed
+  times from scheduled ones reads the new field.
+- **Changed: prefiles leave airport flow, demand and departures** (#814). `GET /api/v1/tmu/flow/{icao}`,
+  `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/flow/{icao}/aadc`, the GDP draft and
+  `GET /api/v1/tmu/departures/{dep}` list and count connected pilots only, and the `proposed` status
+  is gone from them. `Flow.proposed` is removed. `GET /api/v1/flow/aircraft/{callsign}/route` gives a
+  prefile no `fixes` unless it holds a CFR, GDP slot or FCA release. A caller that read
+  `Flow.proposed` or the `proposed` rows has to stop; the rest need do nothing.
+- **Changed: one trajectory per flight behind every time** (#813). `GET /api/v1/tmu/flow/{icao}`,
+  `GET /api/v1/tmu/demand`, `GET /api/v1/tmu/departures/{dep}`, `GET /api/v1/flow/fcas/{id}/traffic`,
+  `GET /api/v1/flow/counts`, `GET /api/v1/flow/idst`, `GET /api/v1/flow/traffic/projected`,
+  `GET /api/v1/flow/aircraft/{callsign}/route` and the `/api/v1/stats/hist/flow`, `departures` and
+  `runway` replays now time a flight the same way. A flight is `airborne` from 50 kt groundspeed at any altitude (airport flow
+  used above 60 kt and 300 ft). A flight whose route does not resolve is timed, projected and drawn
+  on the great circle to its destination; a ground one is padded by 1.12, its `FcaFlight.distance_nm`
+  is that padded distance, and
+  `AircraftRoute.points` draws the great circle instead of a single point. An unfiled cruise speed takes the altitude default instead of 420 kt, and a
+  step-climb altitude such as `FL350/370` reads as 35,000 ft. Airport-flow MIT converts at the
+  trailing flight's predicted speed 40 nm out (its descent speed there once it is inside 40 nm), not
+  360 kt. Response shapes are unchanged; a caller needs do nothing.
 - **Changed:** `POST /api/v1/flow/fcas/{id}/release/{callsign}` with a `ready` time treats it as the
   pilot's ready (runway) time and searches for a slot: the flight's `cross_time` is the first slot at
   or after `ready` plus the airborne flight time that keeps its spacing (on a manually sequenced FCA,
@@ -42,6 +128,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   (#865). The FCA delays in `GET /api/v1/public/flight/{callsign}` and `GET /api/v1/me/flight` no longer
   count prefiles ahead. A caller that filtered `proposed` rows out needs do nothing; one that released
   prefiled flights must wait for the pilot to connect. (#834)
+- **Documented: 403 on the advisory edit route** (#878). `PATCH /api/v1/tmu/advisories/{id}` already
+  answered 403 for an advisory outside the caller's facility scope; the OpenAPI document now lists it.
+  Nothing changes for a caller.
 - **Documented: 403 and 404 on the advisory publish, cancel and delete routes** (#824).
   `POST /api/v1/tmu/advisories/{id}/publish`, `POST /api/v1/tmu/advisories/{id}/cancel` and
   `DELETE /api/v1/tmu/advisories/{id}` already answered 404 for an unknown id and 403 for an advisory

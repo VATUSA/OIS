@@ -232,31 +232,35 @@ async fn record(
     }
     // Resolve (creating if needed) the actor for whichever principal made the request — user,
     // api key, or service account. An unauthenticated mutation has no actor and isn't logged.
-    // A resolution failure still logs with a null actor so the action is never silently dropped.
+    // A resolution failure is logged at WARN and the entry is still written with a null actor.
     let actor_id = if let Some(user) = actor.user.as_ref() {
-        audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name)
-            .await
-            .ok()
-            .flatten()
-    } else if let Some(key) = actor.api_key.as_ref() {
-        audit_repo::resolve_api_key_actor_id(
-            pool,
-            &key.id,
-            &format!("{} ({})", key.name, key.prefix),
+        audit_repo::actor_id_or_warn(
+            audit_repo::resolve_user_actor_id(pool, &user.id, &user.display_name).await,
+            "user",
+            &user.id,
         )
-        .await
-        .ok()
-        .flatten()
+    } else if let Some(key) = actor.api_key.as_ref() {
+        audit_repo::actor_id_or_warn(
+            audit_repo::resolve_api_key_actor_id(
+                pool,
+                &key.id,
+                &format!("{} ({})", key.name, key.prefix),
+            )
+            .await,
+            "api_key",
+            &key.id,
+        )
     } else if let Some(sa) = actor.service_account.as_ref() {
-        audit_repo::resolve_service_account_actor_id(pool, &sa.id, &sa.name)
-            .await
-            .ok()
-            .flatten()
+        audit_repo::actor_id_or_warn(
+            audit_repo::resolve_service_account_actor_id(pool, &sa.id, &sa.name).await,
+            "service_account",
+            &sa.id,
+        )
     } else {
         return; // unauthenticated mutation — nothing to attribute
     };
-    // Best-effort: never fail the user's request over an audit write.
-    let _ = audit_repo::record_audit(
+    // The request has already succeeded; a failed insert is logged, never returned to the caller.
+    audit_repo::record_audit_best_effort(
         pool,
         audit_repo::AuditEntry {
             actor_id,

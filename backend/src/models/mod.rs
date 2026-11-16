@@ -550,62 +550,6 @@ pub struct DiagnosticsReport {
     pub logs_bytes: i32,
 }
 
-// --- taxi insights (#183): browsable history over raw observations + derived estimates ---
-
-/// One raw pushback/start-up/taxi observation (#164 sub-issue C, #277).
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
-pub struct TaxiObservationEntry {
-    pub id: i64,
-    pub airport: String,
-    pub gate_id: Option<String>,
-    pub aircraft: Option<String>,
-    pub runway: Option<String>,
-    pub pushback_sec: Option<i32>,
-    pub startup_sec: Option<i32>,
-    pub taxi_sec: i32,
-    pub observed_at: DateTime<Utc>,
-    /// True when this row falls outside `taxi_estimate`'s own sanity-clamp bounds — computed at
-    /// query time, never persisted.
-    pub is_outlier: bool,
-}
-
-/// A page of raw observations.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TaxiObservationPage {
-    pub items: Vec<TaxiObservationEntry>,
-    pub total: i64,
-    pub page: i64,
-    pub page_size: i64,
-}
-
-/// One derived per-(gate, aircraft, runway) estimate (#164 sub-issue D), computed live from the
-/// currently filtered sample set — not a stored row.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TaxiEstimateEntry {
-    pub airport: String,
-    pub gate_id: Option<String>,
-    pub aircraft: Option<String>,
-    pub runway: Option<String>,
-    pub pushback_sec: f64,
-    pub pushback_tier: String,
-    pub pushback_sample_count: i64,
-    pub startup_sec: f64,
-    pub startup_tier: String,
-    pub startup_sample_count: i64,
-    pub taxi_sec: f64,
-    pub taxi_tier: String,
-    pub taxi_sample_count: i64,
-}
-
-/// A page of derived estimates.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TaxiEstimatePage {
-    pub items: Vec<TaxiEstimateEntry>,
-    pub total: i64,
-    pub page: i64,
-    pub page_size: i64,
-}
-
 // --- tmu: traffic management initiatives (TMIs) ---
 
 /// A Traffic Management Initiative.
@@ -1098,13 +1042,13 @@ pub struct IssueCfrRequest {
     pub callsign: String,
     /// The metered arrival airport this departure is bound for.
     pub airport: String,
-    /// Explicit wheels-up to lock; when omitted, the flight's proposed CFR is used, else its estimated
-    /// wheels-up (`FlowFlight.etd`).
+    /// Explicit wheels-up to lock; when omitted, the flight's metered CFR is used, else its locked or
+    /// proposed wheels-up (`FlowFlight.etd`), else now for a flight airport flow does not list.
     #[serde(default)]
     pub ready_time: Option<DateTime<Utc>>,
 }
 
-/// A pending ground/proposed departure out of a field (for the Departures view).
+/// A pending ground departure out of a field, a connected pilot (for the Departures view).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DepartureFlight {
     pub callsign: String,
@@ -1122,8 +1066,11 @@ pub struct DepartureFlight {
     pub delay_min: i64,
     pub cfr: Option<DateTime<Utc>>,
     pub cfr_issued: bool,
+    /// True when this departure holds no locked wheels-up (an issued CFR, an FCA release or a GDP
+    /// EDCT), so `eta` and `cfr` rest on its proposed wheels-up (`FlowFlight.etd`) (#814).
+    pub wheels_up_proposed: bool,
     /// The issued CFR's version, for `If-Match` on `POST`/`DELETE /tmu/cfr` (#585); null when no CFR
-    /// is issued for this callsign.
+    /// is issued for this callsign, and on a historical replay, which holds none of today's CFRs.
     #[serde(default)]
     pub cfr_version: Option<i64>,
     pub seq: Option<i64>,
@@ -1770,8 +1717,9 @@ pub struct SectorDemandBody {
 }
 
 /// A configurable aircraft performance profile (climb / cruise / descent schedules) used by the
-/// trajectory / ETA model. Keyed by `kind` (`type` / `wake` / `default`) + `key` (ICAO type, wake
-/// token, or empty). See migration 0059 and `feed::trajectory`.
+/// trajectory / ETA model. Keyed by `kind` (`type` / `family` / `wake` / `default`) + `key` (ICAO
+/// type, engine family `jet` / `turboprop` / `piston`, wake token, or empty). See migrations 0059
+/// and 0134 and `feed::trajectory`.
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AircraftProfileBody {
     pub kind: String,
@@ -2510,6 +2458,9 @@ pub struct FcaBody {
     pub mode: String,
     pub rate: i32,
     pub mit: i32,
+    /// Freeze horizon, minutes before the crossing: an airborne flight inside it keeps its STA.
+    /// 0 turns freezing off (#817).
+    pub freeze_min: i32,
     pub enabled: bool,
     /// Controller's manual crossing order (callsigns); empty = auto.
     pub manual_order: Vec<String>,
@@ -2556,6 +2507,10 @@ pub struct UpsertFcaRequest {
     pub rate: Option<i32>,
     #[serde(default)]
     pub mit: Option<i32>,
+    /// Freeze horizon in minutes, 0-120 (400 outside it); 0 turns freezing off (#817). A create
+    /// without it gets 30; an update without it keeps the stored value.
+    #[serde(default)]
+    pub freeze_min: Option<i32>,
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -2626,7 +2581,8 @@ pub struct FcaFlight {
     /// drawing the aircraft's full path across the FCA.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub path: Vec<[f64; 2]>,
-    /// Distance along the (remaining) route to the crossing, nm.
+    /// Distance along the (remaining) route to the crossing, nm, as the ETA is timed: a ground
+    /// flight whose route does not resolve carries the 1.12 padding (#813).
     pub distance_nm: i64,
     /// Unmetered ETA to the crossing.
     pub eta: Option<DateTime<Utc>>,
@@ -2644,9 +2600,30 @@ pub struct FcaFlight {
     pub edct: Option<DateTime<Utc>>,
     /// True when this aircraft has a frozen (issued) CFR release.
     pub released: bool,
+    /// True when this ground flight holds no locked wheels-up (a release here, an issued CFR, another
+    /// FCA's release or a GDP EDCT), so `eta` and `cross_time` rest on its proposed wheels-up
+    /// (`FlowFlight.etd`) (#814).
+    pub wheels_up_proposed: bool,
     /// The release's version, for `If-Match` (#585); null when not released.
     #[serde(default)]
     pub release_version: Option<i64>,
+    /// Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
+    /// far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
+    /// since until then the flight can still take off on time, however far its ETA has moved. A
+    /// late flight crosses no earlier than its ETA. In auto mode a late held flight crosses at the later of the slot it held
+    /// while on time and its ETA, and no release or other held flight moves for it; in manual mode
+    /// it keeps its place in the controller's order (#817).
+    pub late_sec: i64,
+    /// A released crossing, or a held crossing running late, that sits inside another crossing's
+    /// required gap (#817).
+    pub slot_conflict: bool,
+    /// An airborne, unreleased flight inside the FCA's freeze horizon, or up to 2 min past it once
+    /// its STA is stored. A background pass, every 15 s, stores its STA from the first pass that
+    /// saw it there, for enabled FCAs only; from then `cross_time` keeps that STA while the ETA
+    /// moves, unless the flight runs late or a crossing placed ahead of it needs the gap (a
+    /// release, a held flight ahead that was itself pushed later, the manual order, or under MIT a
+    /// held flight ahead whose gap grew) (#817).
+    pub sta_frozen: bool,
     pub groundspeed: i64,
     pub altitude: i64,
     pub heading: i64,
@@ -2660,7 +2637,8 @@ pub struct FcaFlight {
 /// ETA, the speeds/wind used, and any filed-route tokens that failed to resolve (issue #37).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FcaFlightDebug {
-    /// The resolved aircraft performance profile: "type:C172", "wake:H", or "default".
+    /// The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
+    /// "default".
     pub profile: String,
     /// Cruise TAS (kt) used for the ETA, after the profile cap.
     pub cruise_tas: i64,
@@ -2677,33 +2655,6 @@ pub struct FcaFlightDebug {
     /// Filed-route tokens that didn't resolve to a nav fix/navaid/airway/procedure — a likely
     /// source of ETA/track error.
     pub unresolved: Vec<String>,
-    /// The learned ground-allowance derivation (#164 sub-issue F) — absent for an airborne flight,
-    /// which never applies one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub taxi_estimate: Option<TaxiEstimateDebug>,
-}
-
-/// How a departure's pushback/start-up/taxi allowance was derived (#164 sub-issue F): the matched
-/// gate/runway (if any) and each metric's fallback-ladder tier + sample count.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TaxiEstimateDebug {
-    /// The matched gate/parking spot id, if the aircraft's position matched one.
-    pub gate: Option<String>,
-    /// The matched departure runway, if the aircraft was rolling.
-    pub runway: Option<String>,
-    pub pushback_sec: i64,
-    /// Which fallback-ladder tier produced `pushback_sec`: "gate+type+runway", "airport+runway",
-    /// "airport", or "default".
-    pub pushback_tier: String,
-    pub pushback_samples: i64,
-    pub startup_sec: i64,
-    /// Same tier labels as `pushback_tier`, for the start-up gap after the push (#277).
-    pub startup_tier: String,
-    pub startup_samples: i64,
-    pub taxi_sec: i64,
-    /// Same tier labels as `pushback_tier`, for the taxi-out metric.
-    pub taxi_tier: String,
-    pub taxi_samples: i64,
 }
 
 /// Issue a CFR release for a crossing aircraft. `ready` (HHMMz) is the pilot's ready (runway) time:
@@ -2760,7 +2711,12 @@ pub struct IdstFlight {
     pub delay_min: i64,
     /// Metered crossing time (CTA) at the FCA line.
     pub cross_time: Option<DateTime<Utc>>,
-    /// Frozen wheels-up (EDCT) once released; null while unscheduled.
+    /// Frozen wheels-up (EDCT) once released. Before release, a proposed EDCT: the wheels-up that
+    /// would meet `cross_time`. The EDCT a release stores can be earlier or later than the
+    /// proposal: RDY spaces the flight only against airborne and already-released crossings (in
+    /// manual mode it takes its ladder slot), plus a 15 s margin, and SET takes the first slot at
+    /// or after the controller's ready time plus the airborne flight time, with the same margin.
+    /// Null only when an unreleased flight has no metered crossing time or no ETA.
     pub edct: Option<DateTime<Utc>>,
     pub released: bool,
     /// The display name of the service account or API key that issued this release, or null when a
@@ -2768,7 +2724,8 @@ pub struct IdstFlight {
     pub released_by_machine: Option<String>,
     /// The predicted departure runway (#511), or null when nothing could predict one — no airport
     /// configuration, or no rule and no configured default. Null is a real answer: a wrong runway would
-    /// narrow the learned taxi estimate to the wrong bucket and move the EDCT with it.
+    /// show the controller the wrong runway and let a release swap through between departures that use
+    /// different ones.
     pub runway: Option<String>,
     /// Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
     /// *why* it was predicted and whether a human set it. Null exactly when `runway` is.

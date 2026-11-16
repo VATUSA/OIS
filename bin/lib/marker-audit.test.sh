@@ -57,7 +57,7 @@ git -C "$REPO" worktree add -q -b feat/1/x "$WT"
 mkdir -p "$WORK/bin"
 printf '#!/bin/bash\n[[ "$*" == test ]] && exec bash bin/run-tests.sh\nexit 1\n' > "$WORK/bin/just"
 chmod +x "$WORK/bin/just"
-# macOS tar and zip carry extended attributes as ._ files, which would leave the scratch tree unclean.
+# macOS tar carries extended attributes as ._ files, which would leave the scratch tree unclean.
 export COPYFILE_DISABLE=1
 export PATH="$WORK/bin:$PATH"
 
@@ -140,7 +140,7 @@ echo "A marker and its manifest line written by any other route are undone:"
 forge_tree; (cd "$SRC" && tar -cf "$WORK/mk.tar" .claude)
 call "tar -xf $WORK/mk.tar"; undone "tar -x carrying the marker and its line"
 forge_tree; call "python3 -m tarfile -e $WORK/mk.tar ."; undone "python -m tarfile -e"
-forge_tree; (cd "$SRC" && rm -f "$WORK/mk.zip" && zip -qr "$WORK/mk.zip" .claude); call "python3 -m zipfile -e $WORK/mk.zip ."
+forge_tree; (cd "$SRC" && rm -f "$WORK/mk.zip" && python3 -m zipfile -c "$WORK/mk.zip" .claude); call "python3 -m zipfile -e $WORK/mk.zip ."
 undone "python -m zipfile -e"
 forge_tree; call "scp -rq $SRC/.claude $REPO/"; undone "scp -r"
 forge_tree; printf '.claude/markers/tests/%s\n.claude/markers/manifest\n' "$SHA" > "$WORK/list"
@@ -427,9 +427,13 @@ call "just test"
 pre toolu_open "just test"
 if [[ "$(ls "$LEDGER" | sort | tr '\n' ' ')" == "ledger.json lock " ]]; then ok "accepted and pending lines, grants and an open snapshot are one file beside the lock"
 else bad "ledger files: $(ls "$LEDGER" | tr '\n' ' ')"; fi
+# fd 9 keeps the old file allocated: a call writes the ledger twice (gate, then audit), and ext4
+# hands the inode the first rename freed to the second write's new file.
+exec 9<"$LEDGER/ledger.json"
 BEFORE="$(inode "$LEDGER/ledger.json")"
 call "ls"
 if [[ "$(inode "$LEDGER/ledger.json")" != "$BEFORE" ]]; then ok "each write replaces the ledger with a new file by a rename, never in place"; else bad "the ledger was rewritten in place"; fi
+exec 9<&-
 printf '{"seal": "", "state": {"accepted": {}, "grants": [], "snapshots": {}}}' > "$LEDGER/ledger.json.tmp"
 call "ls"
 if [[ -z "$OUT" ]] && vouched "$REPO" tests "$SHA" && passes tests; then ok "a write killed before its rename is not tampering: the last whole state stands"

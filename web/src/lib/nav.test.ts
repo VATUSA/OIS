@@ -15,6 +15,7 @@ import {
   itemForPath,
   visibleGroups,
 } from "./nav";
+import {TMU_TABS} from "./tmu-tabs";
 
 function me(permissions: Record<string, unknown>, server_admin = false): Me {
   return {
@@ -55,7 +56,10 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/facility-map": [],
   "/pilot": [],
   "/ops/airport": ["tmu.program.read"],
-  "/ops/tmu": ["tmu.program.read", "tmu.tmi.read", "flow.fca.read", "flow.runway.read"],
+  // One per TMU tab's gate (Programs and Rate calculator share `tmu.program.read`), written out
+  // rather than read from `TMU_TABS`, so a tab gate dropped from both the page and the link still
+  // fails here (VATUSA/OIS#966).
+  "/ops/tmu": ["tmu.program.read", "tmu.tmi.read", "tmu.groundstop.read", "tmu.gdp.read", "tmu.adv.read"],
   "/ops/my": ["tmu.program.read"],
   "/ops/fca": ["flow.fca.read"],
   "/ops/idst": ["flow.fca.read"],
@@ -72,7 +76,6 @@ const REQUIRED: Record<string, readonly string[]> = {
   "/admin/historical/dashboard": ["stats.data.read"],
   "/admin/historical/replay": ["stats.data.read"],
   "/admin/historical/delays": ["stats.data.read"],
-  "/admin/historical/taxi": ["stats.data.read"],
   "/admin/access": ["access.users.read"],
   "/admin/groups": ["access.groups.read"],
   "/admin/audit": ["audit.logs.read"],
@@ -104,7 +107,7 @@ describe("nav gating", () => {
       expect(canSeeItem(null, item)).toBe(false);
       // Every other link's permission, but none of this one's.
       expect(canSeeItem(holding(...ALL_REQUIRED.filter((p) => !required.includes(p))), item)).toBe(false);
-      for (const permission of required) expect(canSeeItem(holding(permission), item)).toBe(true);
+      for (const permission of required) expect(canSeeItem(holding(permission), item), `${to} via ${permission}`).toBe(true);
     });
   }
 
@@ -131,9 +134,36 @@ describe("nav gating", () => {
     expect(visibleGroups(stats, areaById("admin")).map((g) => g.label)).toEqual(["Historical"]);
   });
 
-  it("shows Operations' TMU to any ops reader, the rest per permission", () => {
-    const runway = me({ flow: { runway: ["read"] } });
-    expect(labels(runway, "operations")).toEqual(["TMU", "Runway"]);
+  // AC1 (VATUSA/OIS#966): TMU opens to no FCA or runway reader, since no TMU tab is gated on either.
+  it("gives a flow.runway.read-only holder Runway in Operations and no TMU link", () => {
+    expect(labels(holding("flow.runway.read"), "operations")).toEqual(["Runway"]);
+  });
+
+  it("gives a flow.fca.read-only holder FCA and IDST in Operations and no TMU link", () => {
+    expect(labels(holding("flow.fca.read"), "operations")).toEqual(["FCA", "IDST"]);
+  });
+
+  // AC2/AC3 (VATUSA/OIS#966): every TMU tab permission, held alone, shows the TMU link beside exactly
+  // the other Operations links that permission opens.
+  const TMU_TAB_OPERATIONS: [permission: string, operations: string[]][] = [
+    ["tmu.program.read", ["Airport", "TMU", "My Dashboard", "AADC"]],
+    ["tmu.tmi.read", ["TMU"]],
+    ["tmu.groundstop.read", ["TMU"]],
+    ["tmu.gdp.read", ["TMU"]],
+    ["tmu.adv.read", ["TMU"]],
+  ];
+  for (const [permission, operations] of TMU_TAB_OPERATIONS) {
+    it(`gives a ${permission}-only holder the TMU link in Operations`, () => {
+      expect(labels(holding(permission), "operations")).toEqual(operations);
+    });
+  }
+
+  // AC3 (VATUSA/OIS#966): the link's list and the tabs' list are one list. `permission` would
+  // shadow `anyOf` in `canSeeItem`, so it must stay unset.
+  it("gates the TMU link on exactly the set of permissions the TMU tabs are gated on", () => {
+    const tmu = ITEMS.find((i) => i.to === "/ops/tmu")!;
+    expect(tmu.permission).toBeUndefined();
+    expect(new Set(tmu.anyOf)).toEqual(new Set(TMU_TABS.map((t) => t.permission)));
   });
 
   it("includes the jobs link that the old ADMIN_PERMISSIONS missed", () => {

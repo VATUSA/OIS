@@ -13,7 +13,7 @@ import {describe, expect, it} from "vitest";
  * A source scan rather than a component test, because the regression is a *re-added file or import* —
  * something no test of an existing component can see.
  *
- * Scoped to the **access** presets on purpose. `pages/runway/index.tsx` (runway heading presets) and
+ * Scoped to the **access** presets on purpose. `lib/runway.ts` (runway heading presets) and
  * `lib/hotkeys.ts` (hotkey combinations) use the word in unrelated senses and are not what this
  * forbids; a test matching the bare word would fail on both.
  */

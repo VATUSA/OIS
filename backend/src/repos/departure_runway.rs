@@ -137,18 +137,22 @@ pub async fn get(
     .map_err(|_| ApiError::Internal)
 }
 
-pub async fn list_for_airport(
-    pool: &PgPool,
-    icao: &str,
-) -> Result<Vec<DepartureRunwayAssignment>, ApiError> {
-    sqlx::query_as::<_, DepartureRunwayAssignment>(
-        "select icao, callsign, runway, source, updated_at \
-         from flow.departure_runway_assignment where icao = $1 order by callsign",
+/// Departure runways already assigned, keyed `(departure ICAO, callsign)` with `(runway, source)`.
+pub type AssignedRunways = std::collections::HashMap<(String, String), (String, String)>;
+
+/// Every stored assignment: the runway column IDST shows beside each departure (`list_idst`). The
+/// table holds at most `jobs::DEPARTURE_RUNWAY_RETAIN_HOURS` of departures.
+pub async fn assignment_map(pool: &PgPool) -> Result<AssignedRunways, ApiError> {
+    let rows = sqlx::query_as::<_, DepartureRunwayAssignment>(
+        "select icao, callsign, runway, source, updated_at from flow.departure_runway_assignment",
     )
-    .bind(icao)
     .fetch_all(pool)
     .await
-    .map_err(|_| ApiError::Internal)
+    .map_err(|_| ApiError::Internal)?;
+    Ok(rows
+        .into_iter()
+        .map(|a| ((a.icao, a.callsign), (a.runway, a.source)))
+        .collect())
 }
 
 /// Delete assignments last touched before `before`. Batched like `repos::audit::prune_audit_logs`.
@@ -267,9 +271,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let all = list_for_airport(&pool, "KJFK").await.unwrap();
+        let all = assignment_map(&pool).await.unwrap();
         assert_eq!(all.len(), 1, "one physical departure, one runway: {all:?}");
-        assert_eq!(all[0].callsign, "SWA3");
+        assert!(all.contains_key(&("KJFK".to_string(), "SWA3".to_string())));
     }
 
     /// Nothing cascades into this table, so the prune is the only thing that removes a row.

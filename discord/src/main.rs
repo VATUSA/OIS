@@ -2,12 +2,16 @@
 //!
 //! Two responsibilities, both mediated by the backend (the bot owns no data):
 //!   1. **Drain the outbound-job queue** — poll `integration.outbound_jobs` via the API, perform the
-//!      Discord side-effect (post/edit an embed), and ack the job with any ids it produced.
-//!   2. **Handle interactions** — when a user clicks "Claim" on an ACE request, call back into the API
-//!      as a service account; the backend resolves the Discord user to the linked OIS account.
+//!      Discord side-effect (post or edit a message, DM a user, open a thread, send the guild's
+//!      channels and roles back to the API), and ack the job with any ids it produced.
+//!   2. **Handle interactions** — ACE claim buttons, TMI and advisory "View structured" buttons and
+//!      event-availability buttons call back into the API as a service account. For an ACE claim or
+//!      an availability answer the backend resolves the Discord user to the linked OIS account.
 //!
-//! Config (env / `.env`): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN` (an `ois_sa_…`
-//! service-account token holding the BOT role), optional `OIS_POLL_SECS` (default 5).
+//! Config (env / `.env`): `DISCORD_BOT_TOKEN`, `OIS_API_BASE`, `OIS_API_TOKEN` (an `ois_sa_…` token
+//! for a service account keyed `discord` holding the BOT role; any other key gets 403 on every
+//! lease), optional `OIS_POLL_SECS` (default 5 when unset or blank; any other value that is not a
+//! whole number of seconds above 0 fails startup).
 
 mod config;
 mod discord;
@@ -42,7 +46,13 @@ async fn main() {
         }
     };
 
-    let api = OisClient::new(config.api_base.clone(), config.api_token.clone());
+    let api = match OisClient::new(config.api_base.clone(), config.api_token.clone()) {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build the OIS API client");
+            std::process::exit(1);
+        }
+    };
 
     // No privileged intents needed — component interactions arrive regardless.
     let mut client = match serenity::Client::builder(&config.discord_token, GatewayIntents::empty())

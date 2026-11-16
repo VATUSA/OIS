@@ -25,8 +25,6 @@ const DEMAND_YELLOW: i32 = 4;
 const DEMAND_RED: i32 = 6;
 /// A runway with at most this many in a bin can absorb a rebalanced arrival.
 const DEMAND_OPEN: i32 = 2;
-/// Preset activates ends whose heading is within this of the approach direction.
-const PRESET_TOL: f64 = 65.0;
 
 /// A manually-added runway end (for fields the bundled dataset lacks).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -164,6 +162,9 @@ pub struct Arrival {
 }
 
 /// STAR base name — strip the trailing revision (`CAMRN4` → `CAMRN`, `DOTSS2A` → `DOTSS`).
+///
+/// Mirrored by hand in `starBase` (`web/src/lib/runway.ts`), which keys the STAR rules the Runway
+/// Balancer saves; `assign` matches those keys exactly, so the two must move together.
 pub fn star_base(name: &str) -> String {
     let up = name.trim().to_ascii_uppercase();
     let b = up.as_bytes();
@@ -177,30 +178,8 @@ pub fn star_base(name: &str) -> String {
     up
 }
 
-fn angle_diff(a: f64, b: f64) -> f64 {
-    (((a - b) + 540.0) % 360.0 - 180.0).abs()
-}
-
-/// Activate the ends facing a preset approach direction (`W`/`E`/`N`/`S`), or clear all
-/// (`OFF`/anything else). WEST = landing westbound (heading ~270 ± 65°).
-pub fn apply_preset(ends: &mut [RunwayEnd], preset: &str) {
-    let target = match preset {
-        "W" => 270.0,
-        "E" => 90.0,
-        "N" => 360.0,
-        "S" => 180.0,
-        _ => {
-            ends.iter_mut().for_each(|e| e.active = false);
-            return;
-        }
-    };
-    for e in ends.iter_mut() {
-        e.active = angle_diff(e.hdg as f64, target) <= PRESET_TOL;
-    }
-}
-
 /// Collect airborne arrivals to `icao` within the window, with accurate along-route ETAs from the
-/// shared predictor (`predict::arrival_eta` — the same one `flow::compute` and FCA metering use)
+/// shared predictor (`predict::trajectory` — the same one `flow::compute` and FCA metering use)
 /// and their detected STAR.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_arrivals(
@@ -222,47 +201,34 @@ pub fn collect_arrivals(
     else {
         return Vec::new();
     };
+    let inp = predict::Inputs {
+        nav,
+        airports,
+        winds,
+        profiles,
+        locked: &predict::NO_LOCKS,
+    };
     let mut out = Vec::new();
     for p in &data.pilots {
         let Some(fp) = &p.flight_plan else { continue };
         if fp.arrival.to_ascii_uppercase() != icao {
             continue;
         }
-        if p.groundspeed < 50 {
+        if !predict::is_airborne(p.groundspeed) {
             continue; // airborne only
         }
         if gc_dist(p.latitude, p.longitude, alat, alon) < 3.0 {
             continue; // on the field / rolling out
         }
-        let (ty, wake) = fp.aircraft_type_wake();
-        let profile = profiles.resolve(&ty, &wake);
-        let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let cruise_tas =
-            trajectory::capped_cruise_tas(fp.cruise_tas.parse().unwrap_or(0.0), cruise, profile);
         // Time the remaining along-route distance to the field through the shared predictor, so
         // the ladder slot lines up with the aircraft's drawn route on the map.
-        let pred = predict::arrival_eta(
-            nav,
-            airports,
-            winds,
-            profile,
-            &predict::ArrivalInput {
-                dep: &fp.departure,
-                arr: &fp.arrival,
-                route: &fp.route,
-                pos: [p.latitude, p.longitude],
-                alt_ft: p.altitude as f64,
-                gs: p.groundspeed,
-                hdg: p.heading,
-                arr_ll: [alat, alon],
-                cruise_ft: cruise,
-                cruise_tas,
-            },
-            // Airborne-only caller (`groundspeed < 50` filtered above) — `arrival_eta` only
-            // applies the ground allowance on its ground branch, so any value here is inert.
-            0.0,
-            now,
-        );
+        let Some(traj) = predict::trajectory(&inp, predict::Flight::Pilot(p), None, now) else {
+            continue;
+        };
+        let pred = predict::ArrivalPrediction {
+            eta: traj.eta_at_field(),
+            route_nm: traj.route_nm(),
+        };
         if (pred.eta - now).num_minutes() > window_min {
             continue;
         }
@@ -473,16 +439,6 @@ pub fn recommendations(
 mod tests {
     use super::*;
 
-    fn end(id: &str, hdg: i32) -> RunwayEnd {
-        RunwayEnd {
-            id: id.into(),
-            hdg,
-            len: 10000,
-            active: false,
-            pair: format!("{id}/x"),
-        }
-    }
-
     fn arr(cs: &str, star: Option<&str>, eta_ms: i64) -> Arrival {
         Arrival {
             cs: cs.into(),
@@ -500,18 +456,14 @@ mod tests {
         assert_eq!(star_base("DOTSS2A"), "DOTSS");
         assert_eq!(star_base("lendy6"), "LENDY");
         assert_eq!(star_base("PARCH"), "PARCH");
-    }
-
-    #[test]
-    fn preset_activates_facing_ends() {
-        // KJFK-ish: 04L (044°) and 22R (224°). WEST (270°) activates 22R, not 04L.
-        let mut ends = vec![end("04L", 44), end("22R", 224), end("31L", 314)];
-        apply_preset(&mut ends, "W");
-        assert!(!ends[0].active, "04L faces east, not active for WEST");
-        assert!(ends[1].active, "22R faces west");
-        assert!(ends[2].active, "31L (314°) within 65° of 270");
-        apply_preset(&mut ends, "OFF");
-        assert!(ends.iter().all(|e| !e.active));
+        // The same cases as the web's `starBase` (web/src/lib/runway.test.ts), which writes the key.
+        assert_eq!(star_base("BAMBI3"), "BAMBI");
+        assert_eq!(star_base("ANJLL4A"), "ANJLL");
+        assert_eq!(star_base("  camrn4  "), "CAMRN");
+        assert_eq!(star_base("CAMRN44A"), "CAMRN4");
+        assert_eq!(star_base("CAMRN44"), "CAMRN4");
+        assert_eq!(star_base("CAMRN4AB"), "CAMRN4AB");
+        assert_eq!(star_base("CAMRNA"), "CAMRNA");
     }
 
     #[test]
@@ -666,11 +618,108 @@ mod tests {
                 cruise_ft: 35_000.0,
                 cruise_tas: 440.0,
             },
-            0.0,
             now,
         );
         assert_eq!(eta(&shear), direct.eta.timestamp_millis());
         let delay_ms = eta(&shear) - eta(&Winds::default());
         assert!(delay_ms > 30_000, "{delay_ms} ms");
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#818)
+//
+// Requirement                                | Test
+// -------------------------------------------|----------------------------------------------------------------
+// AC1 family tier reaches runway ETE (feed)  | collect_arrivals_times_a_jet_with_no_type_row_on_its_family_row
+#[cfg(test)]
+mod family_profile_tests {
+    use std::collections::HashMap;
+
+    use chrono::DateTime;
+
+    use super::collect_arrivals;
+    use crate::feed::{
+        airports::{Airport, AirportDb},
+        nav::NavData,
+        predict,
+        trajectory::{AircraftProfile, ProfileTable},
+        vatsim::{FlightPlan, Pilot, VatsimData},
+        winds::Winds,
+    };
+
+    /// `collect_arrivals` (runway ETE) times a B772, a jet in `ENGINE_REF` with no type row, on the
+    /// jet family row its table holds.
+    #[test]
+    fn collect_arrivals_times_a_jet_with_no_type_row_on_its_family_row() {
+        let ap: AirportDb = HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.6413, -73.7781)),
+            ("KDCA".to_string(), Airport::at(38.8521, -77.0377)),
+        ]);
+        let data = VatsimData {
+            pilots: vec![Pilot {
+                callsign: "AAL1".into(),
+                latitude: 40.2,
+                longitude: -74.0,
+                altitude: 24_000,
+                groundspeed: 400,
+                heading: 220,
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    altitude: "35000".into(),
+                    cruise_tas: "440".into(),
+                    aircraft: "B772".into(),
+                    aircraft_short: "B772".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let nav = NavData::load();
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let family = AircraftProfile {
+            desc_fpm: 3_000.0,
+            ..AircraftProfile::default()
+        };
+        let with = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::from([("jet".to_string(), family.clone())]),
+            HashMap::new(),
+        );
+        let eta = |t: &ProfileTable| {
+            collect_arrivals("KDCA", &data, &ap, &nav, &Winds::default(), t, now, 600)
+                .into_iter()
+                .find(|a| a.cs == "AAL1")
+                .expect("AAL1 is inbound")
+                .eta_ms
+        };
+        let direct = predict::arrival_eta(
+            &nav,
+            &ap,
+            &Winds::default(),
+            &family,
+            &predict::ArrivalInput {
+                dep: "KJFK",
+                arr: "KDCA",
+                route: "",
+                pos: [40.2, -74.0],
+                alt_ft: 24_000.0,
+                gs: 400,
+                hdg: 220,
+                arr_ll: [38.8521, -77.0377],
+                cruise_ft: 35_000.0,
+                cruise_tas: 440.0,
+            },
+            now,
+        );
+
+        assert_eq!(eta(&with), direct.eta.timestamp_millis());
+        assert_ne!(
+            eta(&with),
+            eta(&ProfileTable::default()),
+            "the family row moves the ETA"
+        );
     }
 }

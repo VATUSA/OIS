@@ -79,20 +79,22 @@ jobs:
       # Dependabot vulnerability alerts aren't enabled on this repo yet, so this is the active
       # JS-side advisory gate (see #89) rather than a passive GitHub setting.
       #
-      # Advisories fixed by forcing a version are `pnpm.overrides` in root package.json. JSON takes no
-      # comments and pnpm rejects a "//" key as a selector, so the reasons live here:
-      #   * `minimatch@5>brace-expansion: ^2.1.6` — GHSA-qhr7-859c-m2p7 / GHSA-6j4f-fj2g-mc7p, DoS by
-      #     stack exhaustion. Patched is >=2.1.6, *not* 2.1.5: the first advisory still lists 2.1.5 as
-      #     vulnerable. Scoped to minimatch@5 because that is the only copy ever flagged
-      #     (openapi-typescript > @redocly/openapi-core > minimatch@5.1.9); minimatch@3 declares
-      #     ^1.1.7 and minimatch@10 declares ^5.0.8, neither is affected, and an unscoped override
-      #     bumped one a major and downgraded the other three (#449).
+      # JSON takes no comments and pnpm rejects a "//" key as a selector, so every entry in root
+      # package.json's `pnpm.overrides` and `pnpm.auditConfig` has its reason here: the package and
+      # path, why, the tracking issue, and when to revisit. Ignores go in package.json's
+      # `pnpm.auditConfig`: pnpm 9.12 rejects `pnpm audit --ignore` ("Unknown option") and does not
+      # apply an `auditConfig` in pnpm-workspace.yaml. The "N vulnerabilities found" summary counts
+      # ignored advisories too; `pnpm audit --json` lists only the ones still reported.
       #
-      # Advisories ignored
-      # pending real fixes are tracked in root package.json's `pnpm.auditConfig`, not here — pnpm
-      # 9.12's documented `pnpm audit --ignore <GHSA>` flag errors ("Unknown option") despite its
-      # own --help describing it, and a `pnpm-workspace.yaml`-level auditConfig is silently not
-      # applied either; only the package.json `pnpm` field form actually takes effect.
+      # Overrides:
+      #   * `vitepress>vite: ^6.4.4` (docs-site > vitepress@1.6.4 > vite, which @vitejs/plugin-vue
+      #     shares as its peer). vitepress 1.6.4 declares vite ^5.4.14, and the last vite 5 (5.4.21)
+      #     still carries GHSA-587h-7wmj-h5pm (high, launch-editor), seven lower vite advisories and
+      #     esbuild 0.21.5's GHSA-67mh-4wv8-2f99; vite 6.4.5 is patched and plugin-vue 5.2.4 accepts
+      #     it. Origin #894. Revisit when vitepress 2.0.0 ships stable (2.0.0-alpha.21 declares vite
+      #     ^8.3.4), then drop the override.
+      #
+      # Ignores: none.
       - run: pnpm audit --audit-level=high
 
   desktop:
@@ -164,3 +166,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: OIS_OPENAPI_URL=/tmp/ois-openapi.json pnpm --filter @ois/api-client codegen
       - run: git diff --exit-code -- packages/api-client/src/generated/schema.d.ts
+
+  shell-tests:
+    # Every bin/lib/*.test.sh suite: the tests for the git hooks, the Claude Code gates in
+    # .claude/hooks/ and the bin/ scripts (#909). bin/run-shell-suites.sh finds them by glob,
+    # names each failing suite and prints its log; `just test` runs the same script as its
+    # `shell suites` step. A suite that cannot run here says SKIP from a check of its own.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash bin/run-shell-suites.sh

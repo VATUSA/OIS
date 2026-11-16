@@ -23,6 +23,7 @@ use crate::{
     },
     errors::ApiError,
     feed,
+    handlers::flow::require_fca_write_scope,
     models::{
         AddPackageItemRequest, AirportRateBody, AirportStatBody, CombinedStatBody,
         CreateAdvisoryRequest, CreateGroundStopRequest, CreatePackageRequest, CreateTmiRequest,
@@ -1337,16 +1338,25 @@ pub(crate) async fn activate_package(
                 // Activation goes live: create then publish so the restriction is active.
                 let tmi_id = tmu_repo::create_tmi(&mut *tx, &req, &by).await?;
                 let tmi = tmu_repo::publish_tmi(&mut tx, &tmi_id, &by).await?;
-                if let (Some(tmi), Some(channel_id)) = (tmi, tmu_channel.clone()) {
-                    let job = crate::handlers::tmu::tmi_publish_job(&channel_id, &tmi);
-                    integration_repo::enqueue_job(
-                        &mut tx,
-                        "tmi_publish",
-                        &job,
-                        Some("tmi"),
-                        Some(tmi.id.as_str()),
-                    )
-                    .await?;
+                // `None` only when the publish matched no draft; the row was created as one just above.
+                if let Some(tmi) = tmi {
+                    if let Some(channel_id) = &tmu_channel {
+                        let job = crate::handlers::tmu::tmi_publish_job(channel_id, &tmi);
+                        integration_repo::enqueue_job(
+                            &mut tx,
+                            "tmi_publish",
+                            &job,
+                            Some("tmi"),
+                            Some(tmi.id.as_str()),
+                        )
+                        .await?;
+                    } else {
+                        crate::handlers::tmu::skipped_post(
+                            crate::handlers::tmu::NTML_CHANNEL,
+                            "publish",
+                            &tmi.id,
+                        );
+                    }
                 }
                 tmi_id
             }
@@ -1394,6 +1404,12 @@ pub(crate) async fn activate_package(
                         Some(adv.id.as_str()),
                     )
                     .await?;
+                } else {
+                    crate::handlers::tmu::skipped_advisory_post(
+                        crate::handlers::tmu::ADV_CHANNEL,
+                        "publish",
+                        &adv.id,
+                    );
                 }
                 adv_id
             }
@@ -1584,6 +1600,10 @@ async fn capture_body(
 
 // --- Event-specific FCAs (planned in the event manager; stored in flow.fca with an event_id) ---
 
+/// The event FCA writes are scoped on this permission at the FCA's `artcc` (#854), as the plain FCA
+/// routes are on `flow.fca.*` (#636): a planner scoped to one facility can't write another's FCA.
+const FCA_PLAN_PERMISSION: &str = "events.plan.update";
+
 /// Fetch an FCA and confirm it belongs to `event_id` — 404 otherwise, so one event can't touch
 /// another's (or a shared) FCA through these routes.
 async fn owned_event_fca(
@@ -1624,7 +1644,7 @@ pub async fn list_event_fcas(
     security(("session" = ["events.plan.update"]), ("api_key" = ["events.plan.update"]), ("service_account" = ["events.plan.update"])),
     params(("id" = i64, Path, description = "VATUSA event id")),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn create_event_fca(
     State(state): State<AppState>,
@@ -1639,6 +1659,7 @@ pub async fn create_event_fca(
     if events_repo::get(pool, id).await?.is_none() {
         return Err(ApiError::NotFound);
     }
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&payload.artcc]).await?;
     flow_repo::create_event_fca(pool, id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1653,7 +1674,7 @@ pub async fn create_event_fca(
         ("fca_id" = String, Path, description = "FCA id")
     ),
     request_body = UpsertFcaRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 400), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn update_event_fca(
     State(state): State<AppState>,
@@ -1665,7 +1686,16 @@ pub async fn update_event_fca(
     let by = principal.attribution(&state).await?;
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     crate::handlers::flow::validate_fca(&payload)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let existing = owned_event_fca(pool, id, &fca_id).await?;
+    // As it is AND where it's headed, so an FCA can't be taken from or moved into a facility the
+    // caller doesn't plan for.
+    require_fca_write_scope(
+        &state,
+        &principal,
+        FCA_PLAN_PERMISSION,
+        &[&existing.artcc, &payload.artcc],
+    )
+    .await?;
     flow_repo::update_fca(pool, &fca_id, &payload, &by).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1679,15 +1709,17 @@ pub async fn update_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn delete_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     flow_repo::delete_fca(pool, &fca_id).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -1701,15 +1733,17 @@ pub async fn delete_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn publish_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     if fca.event_status.as_deref() != Some("planned") {
         return Err(ApiError::Conflict); // only a planned FCA can be published
     }
@@ -1727,15 +1761,17 @@ pub async fn publish_event_fca(
         ("id" = i64, Path, description = "VATUSA event id"),
         ("fca_id" = String, Path, description = "FCA id")
     ),
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404), (status = 409))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404), (status = 409))
 )]
 pub async fn archive_event_fca(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let fca = owned_event_fca(pool, id, &fca_id).await?;
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     if !matches!(fca.event_status.as_deref(), Some("planned" | "published")) {
         return Err(ApiError::Conflict); // already archived
     }
@@ -1754,16 +1790,19 @@ pub async fn archive_event_fca(
         ("fca_id" = String, Path, description = "FCA id")
     ),
     request_body = SetFcaAutoRequest,
-    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 404))
+    responses((status = 200, body = Vec<FcaBody>), (status = 401), (status = 403), (status = 404))
 )]
 pub async fn set_event_fca_auto(
     State(state): State<AppState>,
     _permission: RequirePermission<EventsPlanUpdate>,
+    Actor(principal): Actor,
     Path((id, fca_id)): Path<(i64, String)>,
     Json(payload): Json<SetFcaAutoRequest>,
 ) -> Result<Json<Vec<FcaBody>>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
-    owned_event_fca(pool, id, &fca_id).await?;
+    let fca = owned_event_fca(pool, id, &fca_id).await?;
+    // The lifecycle job publishes an armed FCA with no scope check, so arming is checked here.
+    require_fca_write_scope(&state, &principal, FCA_PLAN_PERMISSION, &[&fca.artcc]).await?;
     flow_repo::set_event_fca_auto(pool, id, &fca_id, payload.auto_publish).await?;
     Ok(Json(flow_repo::list_event_fcas(pool, id).await?))
 }
@@ -2980,6 +3019,11 @@ mod advisory_permission_tests {
             .unwrap();
     }
 
+    /// One pass that is expected to refuse a package, returning what the job registry records.
+    async fn refused_pass(pool: &PgPool) -> Result<String, String> {
+        crate::jobs::event_package_lifecycle_once(pool, &crate::realtime::Events::new(None)).await
+    }
+
     async fn arm(
         state: &crate::state::AppState,
         pkg: &str,
@@ -3095,7 +3139,11 @@ mod advisory_permission_tests {
         .await
         .unwrap();
 
-        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            refused_pass(&pool).await,
+            Err("0 activated, 0 archived, 1 failed".to_string()),
+            "a refused package fails the run"
+        );
         assert_eq!(
             published_count(&pool).await,
             0,
@@ -3146,7 +3194,11 @@ mod advisory_permission_tests {
         .await
         .unwrap();
 
-        run_auto_publish_pass(&pool).await;
+        assert_eq!(
+            refused_pass(&pool).await,
+            Err("0 activated, 0 archived, 1 failed".to_string()),
+            "a refused package fails the run"
+        );
         assert_eq!(
             published_count(&pool).await,
             0,
@@ -3798,5 +3850,910 @@ mod deactivation_correction_tests {
         .unwrap();
 
         assert!(corrections(&pool).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_failure_tests {
+    //! `crate::jobs::event_package_lifecycle_once` finishes the batch and returns
+    //! `Err("{a} activated, {b} archived, {f} failed")` when any package or listing query failed
+    //! (#916).
+    //!
+    //! These drive the pass itself, the entry point the job registry runs. They live here rather than
+    //! in `jobs.rs` because a package item is only built through `normalize_item`, which is private to
+    //! this module.
+    //!
+    //! Every two-package test arranges for the failing package to be listed first (by creation or
+    //! activation order; the listing has no `order by`) and asserts that order, so a pass that stops
+    //! at the first failure leaves the other package untouched and goes red.
+
+    use std::sync::{Arc, Mutex};
+
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::auth::principal::Principal;
+    use crate::realtime::{Events, topic};
+
+    const DUE: i64 = 9160;
+    const ENDED: i64 = 9161;
+
+    async fn pass(pool: &PgPool) -> Result<String, String> {
+        crate::jobs::event_package_lifecycle_once(pool, &Events::new(None)).await
+    }
+
+    /// A user with no permissions: restriction-only packages need none to activate.
+    async fn seed(pool: &PgPool) -> String {
+        let user = crate::scope_test_support::seed_user(pool).await;
+        for id in [DUE, ENDED] {
+            sqlx::query(
+                "insert into events.event (id, title, start_time, end_time, facility) \
+                 values ($1, 'T916', now(), now() + interval '2 hours', 'ZDC')",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        user
+    }
+
+    /// A draft package on `event` holding one ZDC→ZNY restriction reading `restriction`.
+    async fn package(
+        pool: &PgPool,
+        event: i64,
+        name: &str,
+        user: &str,
+        restriction: &str,
+    ) -> String {
+        let by = Attribution::for_user_id(pool, user).await.unwrap();
+        let pkg = events_repo::create_package(pool, event, name, &by)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let item = normalize_item(
+            "restriction",
+            json!({"requesting": "ZDC", "providing": "ZNY", "restriction": restriction,
+                   "start_time": now, "stop_time": now + Duration::hours(2)}),
+        )
+        .unwrap();
+        events_repo::add_package_item(pool, &pkg, "restriction", &item)
+            .await
+            .unwrap();
+        pkg
+    }
+
+    async fn arm(pool: &PgPool, pkg: &str, by: &Attribution) {
+        assert!(
+            events_repo::set_package_auto(pool, pkg, true, by)
+                .await
+                .unwrap()
+        );
+    }
+
+    async fn activate_as(pool: &PgPool, pkg: &str, user: &str) {
+        activate_package(pool, ENDED, pkg, &Principal::for_user_id(pool, user).await)
+            .await
+            .unwrap();
+    }
+
+    /// Move the `ENDED` event into the past, after its packages were activated.
+    async fn end_the_event(pool: &PgPool) {
+        sqlx::query(
+            "update events.event set start_time = now() - interval '3 hours', \
+             end_time = now() - interval '1 minute' where id = $1",
+        )
+        .bind(ENDED)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn status(pool: &PgPool, pkg: &str) -> String {
+        sqlx::query_scalar("select status from events.tmi_package where id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// `(restriction, status)` of the TMI the package's one item points at, or `None` when its
+    /// `live_ref` is null.
+    async fn live_tmi(pool: &PgPool, pkg: &str) -> Option<(String, String)> {
+        sqlx::query_as(
+            "select t.restriction, t.status from events.tmi_package_item i \
+             join tmu.tmis t on t.id = i.live_ref where i.package_id = $1",
+        )
+        .bind(pkg)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn tmi_status(pool: &PgPool, restriction: &str) -> Option<String> {
+        sqlx::query_scalar("select status from tmu.tmis where restriction = $1")
+            .bind(restriction)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn due_ids(pool: &PgPool) -> Vec<String> {
+        let rows = events_repo::auto_due_packages(pool).await.unwrap();
+        rows.into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    async fn ended_ids(pool: &PgPool) -> Vec<String> {
+        let rows = events_repo::ended_activated_packages(pool).await.unwrap();
+        rows.into_iter().map(|(id, _, _)| id).collect()
+    }
+
+    /// Refuse the TMI insert for a restriction reading `BOOM`, inside `activate_package`'s transaction.
+    async fn fail_tmi_insert(pool: &PgPool) {
+        sqlx::raw_sql(
+            "create function t916_tmi() returns trigger language plpgsql as $$ \
+             begin if new.restriction = 'BOOM' then raise exception 'injected'; end if; return new; end $$; \
+             create trigger t916_tmi before insert on tmu.tmis \
+             for each row execute function t916_tmi();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Refuse archiving the package named `BOOM`, inside `deactivate_package`.
+    async fn fail_archive(pool: &PgPool) {
+        sqlx::raw_sql(
+            "create function t916_archive() returns trigger language plpgsql as $$ \
+             begin if new.status = 'archived' and old.name = 'BOOM' then raise exception 'injected'; \
+             end if; return new; end $$; \
+             create trigger t916_archive before update on events.tmi_package \
+             for each row execute function t916_archive();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn topics(rx: &mut tokio::sync::broadcast::Receiver<crate::realtime::WsEvent>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok().map(|e| e.topic)).collect()
+    }
+
+    /// AC1, the success half: a run with no failure keeps today's `Ok` strings.
+    #[sqlx::test]
+    async fn a_clean_pass_returns_ok_with_its_change_count(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let due = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &due, &by).await;
+        let ended = package(&pool, ENDED, "Plan", &user, "30 MIT").await;
+        activate_as(&pool, &ended, &user).await;
+        end_the_event(&pool).await;
+
+        assert_eq!(pass(&pool).await, Ok("2 changed".to_string()));
+        assert_eq!(status(&pool, &due).await, "activated");
+        assert_eq!(
+            live_tmi(&pool, &due).await,
+            Some(("20 MIT".into(), "published".into()))
+        );
+        assert_eq!(status(&pool, &ended).await, "archived");
+        assert_eq!(live_tmi(&pool, &ended).await, None);
+        assert_eq!(
+            tmi_status(&pool, "30 MIT").await.as_deref(),
+            Some("cancelled")
+        );
+
+        assert_eq!(pass(&pool).await, Ok("no changes".to_string()));
+    }
+
+    /// AC2: two due packages, one failing on its TMI insert; the other still activates.
+    #[sqlx::test]
+    async fn a_failed_activation_fails_the_pass_and_the_other_activates(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let bad = package(&pool, DUE, "Plan", &user, "BOOM").await;
+        let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &bad, &by).await;
+        arm(&pool, &good, &by).await;
+        assert_eq!(due_ids(&pool).await, vec![bad.clone(), good.clone()]);
+        fail_tmi_insert(&pool).await;
+
+        let events = Events::new(None);
+        let mut rx = events.subscribe();
+        let result = crate::jobs::event_package_lifecycle_once(&pool, &events).await;
+
+        assert_eq!(result, Err("1 activated, 0 archived, 1 failed".to_string()));
+        assert_eq!(status(&pool, &good).await, "activated");
+        assert_eq!(
+            live_tmi(&pool, &good).await,
+            Some(("20 MIT".into(), "published".into()))
+        );
+        assert_eq!(status(&pool, &bad).await, "draft");
+        assert_eq!(live_tmi(&pool, &bad).await, None);
+        assert_eq!(tmi_status(&pool, "BOOM").await, None);
+        assert_eq!(
+            topics(&mut rx),
+            vec![topic::PROGRAM, topic::TMI, topic::GROUND_STOP],
+            "something changed, so clients are nudged despite the Err"
+        );
+    }
+
+    /// AC3: two ended packages, one failing to archive; the other still archives.
+    #[sqlx::test]
+    async fn a_failed_archive_fails_the_pass_and_the_other_archives(pool: PgPool) {
+        let user = seed(&pool).await;
+        let bad = package(&pool, ENDED, "BOOM", &user, "30 MIT").await;
+        let good = package(&pool, ENDED, "Plan", &user, "20 MIT").await;
+        // The listing has no `order by`; an updated row moves to the end, so activate `bad` last
+        // to list it first.
+        activate_as(&pool, &good, &user).await;
+        activate_as(&pool, &bad, &user).await;
+        end_the_event(&pool).await;
+        assert_eq!(ended_ids(&pool).await, vec![bad.clone(), good.clone()]);
+        fail_archive(&pool).await;
+
+        let events = Events::new(None);
+        let mut rx = events.subscribe();
+        let result = crate::jobs::event_package_lifecycle_once(&pool, &events).await;
+
+        assert_eq!(result, Err("0 activated, 1 archived, 1 failed".to_string()));
+        assert_eq!(status(&pool, &good).await, "archived");
+        assert_eq!(live_tmi(&pool, &good).await, None);
+        assert_eq!(
+            tmi_status(&pool, "20 MIT").await.as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(status(&pool, &bad).await, "activated");
+        assert_eq!(
+            topics(&mut rx),
+            vec![topic::PROGRAM, topic::TMI, topic::GROUND_STOP]
+        );
+
+        // AC4 on the archive arm: the same package fails again on the next pass, logged.
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 0 archived, 1 failed".to_string()));
+        let failure = line(&log, "auto-archive package failed");
+        assert!(failure.contains(&format!("package_id={bad}")), "{failure}");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+    }
+
+    /// D68: a due package whose armer's credential no longer works counts as a failure.
+    #[sqlx::test]
+    async fn a_package_whose_armer_lost_their_credential_fails_the_pass(pool: PgPool) {
+        let user = seed(&pool).await;
+        let sa: String = sqlx::query_scalar(
+            "insert into access.service_accounts (key, name, status) \
+             values ('t916', 'T916', 'disabled') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let machine = crate::repos::audit::resolve_service_account_actor_id(&pool, &sa, "T916")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            Principal::from_actor(&pool, &machine)
+                .await
+                .unwrap()
+                .is_none(),
+            "a disabled service account rebuilds as nobody"
+        );
+        let bad = package(&pool, DUE, "Plan", &user, "30 MIT").await;
+        let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        let as_machine = Attribution {
+            user_id: None,
+            actor_id: Some(machine),
+        };
+        arm(&pool, &bad, &as_machine).await;
+        arm(
+            &pool,
+            &good,
+            &Attribution::for_user_id(&pool, &user).await.unwrap(),
+        )
+        .await;
+        assert_eq!(due_ids(&pool).await, vec![bad.clone(), good.clone()]);
+
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("1 activated, 0 archived, 1 failed".to_string()));
+        let skipped = line(&log, "the armer's credential no longer works");
+        assert!(skipped.contains(&format!("package_id={bad}")), "{skipped}");
+        assert_eq!(status(&pool, &good).await, "activated");
+        assert_eq!(
+            tmi_status(&pool, "20 MIT").await.as_deref(),
+            Some("published")
+        );
+        assert_eq!(status(&pool, &bad).await, "draft");
+        assert_eq!(tmi_status(&pool, "30 MIT").await, None);
+    }
+
+    /// AC1: a lost activation race is not a failure. Another replica (here a second connection)
+    /// flips the package to `activated` after this pass listed it; the pass blocks on the row in
+    /// `mark_package_activated`, updates nothing once the other commits, and rolls back.
+    #[sqlx::test]
+    async fn a_package_activated_elsewhere_mid_pass_is_not_a_failure(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let pkg = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &pkg, &by).await;
+        assert_eq!(due_ids(&pool).await, vec![pkg.clone()]);
+
+        let mut other = pool.begin().await.unwrap();
+        sqlx::query("update events.tmi_package set status = 'activated' where id = $1")
+            .bind(&pkg)
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let pool = pool.clone();
+            async move { capturing_pass(&pool).await }
+        });
+        // Wait until the pass is blocked on the row this transaction holds.
+        let mut waiting = 0;
+        for _ in 0..200 {
+            waiting = sqlx::query_scalar::<_, i64>(
+                "select count(*) from pg_stat_activity \
+                 where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(waiting, 1, "the pass never reached the status fence");
+        other.commit().await.unwrap();
+
+        let (result, log) = task.await.unwrap();
+        assert_eq!(result, Ok("no changes".to_string()));
+        assert!(!log.contains("auto-activate package failed"), "{log}");
+        assert_eq!(status(&pool, &pkg).await, "activated");
+        assert_eq!(
+            tmi_status(&pool, "20 MIT").await,
+            None,
+            "the losing attempt rolled its TMI back"
+        );
+    }
+
+    /// AC1: the auto-due listing fails and the archive half still runs. Only `auto_due_packages`
+    /// reads `auto_publish` on this pass's path.
+    #[sqlx::test]
+    async fn a_failed_due_listing_fails_the_pass_and_still_archives(pool: PgPool) {
+        let user = seed(&pool).await;
+        let ended = package(&pool, ENDED, "Plan", &user, "20 MIT").await;
+        activate_as(&pool, &ended, &user).await;
+        end_the_event(&pool).await;
+        sqlx::query(
+            "alter table events.tmi_package rename column auto_publish to auto_publish_gone",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 1 archived, 1 failed".to_string()));
+        let failure = line(&log, "auto-due package query failed");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        assert_eq!(status(&pool, &ended).await, "archived");
+        assert_eq!(
+            tmi_status(&pool, "20 MIT").await.as_deref(),
+            Some("cancelled")
+        );
+    }
+
+    /// AC1, "either listing query": both listings read `updated_by_actor`, so breaking it fails each
+    /// once. Dropping either arm's count gives `1 failed`.
+    #[sqlx::test]
+    async fn both_failed_listings_count_as_two_failures(pool: PgPool) {
+        let user = seed(&pool).await;
+        let due = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(
+            &pool,
+            &due,
+            &Attribution::for_user_id(&pool, &user).await.unwrap(),
+        )
+        .await;
+        let ended = package(&pool, ENDED, "Plan", &user, "30 MIT").await;
+        activate_as(&pool, &ended, &user).await;
+        end_the_event(&pool).await;
+        assert_eq!(due_ids(&pool).await, vec![due.clone()]);
+        assert_eq!(ended_ids(&pool).await, vec![ended.clone()]);
+        sqlx::query(
+            "alter table events.tmi_package rename column updated_by_actor to updated_by_actor_gone",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("0 activated, 0 archived, 2 failed".to_string()));
+        for message in [
+            "auto-due package query failed",
+            "ended-package query failed",
+        ] {
+            let failure = line(&log, message);
+            assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        }
+        assert_eq!(status(&pool, &due).await, "draft");
+        assert_eq!(status(&pool, &ended).await, "activated");
+    }
+
+    /// AC1: rebuilding the armer failing counts on the activate side and on the archive side's
+    /// attribution, and the loop moves on to the next package on both sides.
+    ///
+    /// `find_current_user_by_actor` left-joins `access.v_user_primary_role`; the replacement view
+    /// raises a division by zero for `bad_user`'s row only, so only that user's lookups fail. The
+    /// divisor is not a constant, or the planner would fold it and fail every lookup.
+    #[sqlx::test]
+    async fn a_failed_armer_lookup_fails_only_that_package_on_both_sides(pool: PgPool) {
+        let good_user = seed(&pool).await;
+        let bad_user = crate::scope_test_support::seed_user(&pool).await;
+        let as_good = Attribution::for_user_id(&pool, &good_user).await.unwrap();
+        let as_bad = Attribution::for_user_id(&pool, &bad_user).await.unwrap();
+        let bad_due = package(&pool, DUE, "Plan", &bad_user, "40 MIT").await;
+        let good_due = package(&pool, DUE, "Plan", &good_user, "20 MIT").await;
+        arm(&pool, &bad_due, &as_bad).await;
+        arm(&pool, &good_due, &as_good).await;
+        let good_ended = package(&pool, ENDED, "Plan", &good_user, "30 MIT").await;
+        let bad_ended = package(&pool, ENDED, "Plan", &bad_user, "50 MIT").await;
+        // An updated row moves to the end of the unordered listing, so activate `bad_ended` last.
+        activate_as(&pool, &good_ended, &good_user).await;
+        activate_as(&pool, &bad_ended, &bad_user).await;
+        end_the_event(&pool).await;
+        assert_eq!(
+            due_ids(&pool).await,
+            vec![bad_due.clone(), good_due.clone()]
+        );
+        assert_eq!(
+            ended_ids(&pool).await,
+            vec![bad_ended.clone(), good_ended.clone()]
+        );
+        sqlx::raw_sql(&format!(
+            "alter view access.v_user_primary_role rename to v_user_primary_role_real; \
+             create view access.v_user_primary_role as \
+             select u.id as user_id, \
+                    case when u.id = '{bad_user}' \
+                         then (1 / (length(u.id) - length(u.id)))::text end as primary_role \
+             from identity.users u;"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            Principal::from_actor(&pool, as_bad.actor_id.as_deref().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            Principal::from_actor(&pool, as_good.actor_id.as_deref().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let (result, log) = capturing_pass(&pool).await;
+        assert_eq!(result, Err("1 activated, 1 archived, 2 failed".to_string()));
+        for (message, pkg) in [
+            ("auto-activate: cannot load the armer", &bad_due),
+            ("auto-archive: cannot attribute the package", &bad_ended),
+        ] {
+            let failure = line(&log, message);
+            assert!(failure.contains(&format!("package_id={pkg}")), "{failure}");
+            assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        }
+        assert_eq!(status(&pool, &bad_due).await, "draft");
+        assert_eq!(status(&pool, &good_due).await, "activated");
+        assert_eq!(status(&pool, &bad_ended).await, "activated");
+        assert_eq!(status(&pool, &good_ended).await, "archived");
+    }
+
+    /// A `MakeWriter` that keeps everything the fmt layer writes.
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the buffer's mutex is only held for a write")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run the pass with every WARN line it logs captured, as plain text.
+    async fn capturing_pass(pool: &PgPool) -> (Result<String, String>, String) {
+        use tracing::instrument::WithSubscriber;
+
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let result = pass(pool).with_subscriber(subscriber).await;
+        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        (result, log)
+    }
+
+    /// The one captured line carrying `message`; panics unless exactly one does.
+    fn line<'a>(log: &'a str, message: &str) -> &'a str {
+        let hits: Vec<&str> = log.lines().filter(|l| l.contains(message)).collect();
+        assert_eq!(hits.len(), 1, "one `{message}` line expected in:\n{log}");
+        hits[0]
+    }
+
+    /// `ApiError::Internal`'s `Display`; its `Debug` would print `Internal`.
+    const INTERNAL_DISPLAY: &str = "error=internal server error";
+
+    /// AC4: the failure arm logs the error's `Display` beside `package_id`.
+    #[sqlx::test]
+    async fn a_failed_activation_logs_the_errors_display_and_package(pool: PgPool) {
+        let user = seed(&pool).await;
+        let by = Attribution::for_user_id(&pool, &user).await.unwrap();
+        let bad = package(&pool, DUE, "Plan", &user, "BOOM").await;
+        let good = package(&pool, DUE, "Plan", &user, "20 MIT").await;
+        arm(&pool, &bad, &by).await;
+        arm(&pool, &good, &by).await;
+        assert_eq!(due_ids(&pool).await, vec![bad.clone(), good.clone()]);
+        fail_tmi_insert(&pool).await;
+
+        let (result, log) = capturing_pass(&pool).await;
+
+        assert_eq!(result, Err("1 activated, 0 archived, 1 failed".to_string()));
+        let failure = line(&log, "auto-activate package failed");
+        assert!(failure.contains(&format!("package_id={bad}")), "{failure}");
+        assert!(failure.contains(INTERNAL_DISPLAY), "{failure}");
+        assert!(
+            !log.contains(&good),
+            "the good package logs no failure: {log}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unmapped_channel_tests {
+    //! Activating an event package with a Discord channel unmapped logs the same skip WARN a direct
+    //! publish logs (`handlers::tmu::skipped_post` / `skipped_advisory_post`), once per item, and
+    //! still activates with nothing enqueued (#883). Both callers of `activate_package` are driven: the
+    //! Activate route and the auto-publish pass.
+    //!
+    //! The expected messages are literals copied from the direct-publish WARN text, not rebuilt from
+    //! the helpers, so a reworded or swapped helper goes red here.
+
+    use std::collections::{BTreeSet, HashMap};
+
+    use axum::http;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::log_capture::{Captured, capturing, saw_the_request, skip_warnings};
+    use crate::scope_test_support::{grant, seed_user, send, session_cookie, test_state};
+    use crate::state::AppState;
+
+    const EVENT: i64 = 883;
+    const NTML: &str = "900000000000000883";
+    const ADV: &str = "900000000000000884";
+    const NTML_SKIP: &str = "tmu: no Discord channel mapped for `tmu-ntml`; TMI publish not posted";
+    const ADV_SKIP: &str =
+        "tmu: no Discord channel mapped for `tmu-advisories`; advisory publish not posted";
+
+    struct Fixture {
+        state: AppState,
+        cookie: String,
+        pkg: String,
+    }
+
+    /// A ZDC event and a ZDC-scoped planner holding a draft package with two restrictions and two
+    /// advisories. `start` places the event relative to now (the auto-publish window is 30 minutes).
+    async fn seed(pool: &PgPool, start: Duration) -> Fixture {
+        let user = seed_user(pool).await;
+        for permission in ["events.plan.update", "tmu.adv.create", "tmu.adv.publish"] {
+            grant(pool, &user, permission, Some("ZDC")).await;
+        }
+        let cookie = session_cookie(pool, &user).await;
+        let now = Utc::now();
+        sqlx::query(
+            "insert into events.event (id, title, start_time, end_time, facility) \
+             values ($1, 'Unmapped Test', $2, $3, 'ZDC')",
+        )
+        .bind(EVENT)
+        .bind(now + start)
+        .bind(now + Duration::hours(2))
+        .execute(pool)
+        .await
+        .unwrap();
+        let pkg = events_repo::create_package(
+            pool,
+            EVENT,
+            "Plan",
+            &Attribution::for_user_id(pool, &user).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        for mit in ["20 MIT", "30 MIT"] {
+            let item = json!({
+                "requesting": "ZDC", "providing": "ZNY", "restriction": mit,
+                "start_time": now, "stop_time": now + Duration::hours(2),
+            });
+            let canonical = normalize_item("restriction", item).unwrap();
+            events_repo::add_package_item(pool, &pkg, "restriction", &canonical)
+                .await
+                .unwrap();
+        }
+        for body in ["vATCSCC ADVZY ONE", "vATCSCC ADVZY TWO"] {
+            let item = json!({
+                "facility": "ZDC", "kind": "reroute", "body": body,
+                "valid_from": now, "valid_to": now + Duration::hours(2),
+            });
+            let canonical = normalize_item("advisory", item).unwrap();
+            events_repo::add_package_item(pool, &pkg, "advisory", &canonical)
+                .await
+                .unwrap();
+        }
+        Fixture {
+            state: test_state(pool.clone(), HashMap::new()),
+            cookie,
+            pkg,
+        }
+    }
+
+    /// One guild mapping each named logical channel to its id.
+    async fn map(pool: &PgPool, channels: &[(&str, &str)]) {
+        let config: String = sqlx::query_scalar(
+            "insert into integration.discord_configs (name, guild_id) values ('g', '1') returning id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        for (name, channel) in channels {
+            sqlx::query(
+                "insert into integration.discord_channels (config_id, name, channel_id) \
+                 values ($1, $2, $3)",
+            )
+            .bind(&config)
+            .bind(name)
+            .bind(channel)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn activate(f: &Fixture) -> (http::StatusCode, Vec<Captured>) {
+        capturing(send(
+            &f.state,
+            http::Method::POST,
+            &format!("/api/v1/events/{EVENT}/packages/{}/activate", f.pkg),
+            &f.cookie,
+            None,
+        ))
+        .await
+    }
+
+    async fn status(pool: &PgPool, pkg: &str) -> String {
+        sqlx::query_scalar("select status from events.tmi_package where id = $1")
+            .bind(pkg)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn ids(pool: &PgPool, sql: &str) -> BTreeSet<String> {
+        sqlx::query_scalar::<_, String>(sql)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    async fn published_tmis(pool: &PgPool) -> BTreeSet<String> {
+        ids(pool, "select id from tmu.tmis where status = 'published'").await
+    }
+
+    async fn published_advisories(pool: &PgPool) -> BTreeSet<String> {
+        ids(
+            pool,
+            "select id from tmu.advisories where status = 'published'",
+        )
+        .await
+    }
+
+    /// `(channel_id, subject id in the payload, subject_id column)` for each job of `job_type`.
+    async fn jobs(pool: &PgPool, job_type: &str, id_key: &str) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "select payload->>'channel_id', payload->>$2, subject_id \
+             from integration.outbound_jobs where job_type = $1",
+        )
+        .bind(job_type)
+        .bind(id_key)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn job_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from integration.outbound_jobs")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The `field` values of the WARNs whose message is exactly `message` on logical `channel`.
+    fn skipped(events: &[Captured], message: &str, channel: &str, field: &str) -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e.message == message)
+            .map(|e| {
+                assert_eq!(e.level, tracing::Level::WARN, "{e:?}");
+                // The direct-publish helper's target, so an inlined copy of the `warn!` fails.
+                assert_eq!(e.target, "ois_backend::handlers::tmu", "{e:?}");
+                assert_eq!(e.fields.get("channel").map(String::as_str), Some(channel));
+                e.fields
+                    .get(field)
+                    .cloned()
+                    .expect("the skip names its subject")
+            })
+            .collect()
+    }
+
+    /// Exactly one WARN per item, naming each live item once.
+    fn assert_one_per_item(warned: Vec<String>, live: &BTreeSet<String>, what: &str) {
+        assert_eq!(
+            warned.len(),
+            live.len(),
+            "one {what} skip per item: {warned:?}"
+        );
+        let warned: BTreeSet<String> = warned.into_iter().collect();
+        assert_eq!(&warned, live, "each live {what} is named once");
+    }
+
+    #[sqlx::test]
+    async fn activating_with_nothing_mapped_warns_once_per_item_and_enqueues_nothing(pool: PgPool) {
+        let f = seed(&pool, Duration::zero()).await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        let tmis = published_tmis(&pool).await;
+        let advisories = published_advisories(&pool).await;
+        assert_eq!(
+            (tmis.len(), advisories.len()),
+            (2, 2),
+            "every item went live"
+        );
+        assert_eq!(
+            job_count(&pool).await,
+            0,
+            "nothing is mapped, so nothing is queued"
+        );
+        assert_one_per_item(skipped(&events, NTML_SKIP, "tmu-ntml", "tmi"), &tmis, "TMI");
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &advisories,
+            "advisory",
+        );
+    }
+
+    #[sqlx::test]
+    async fn activating_with_both_channels_mapped_warns_nothing_and_enqueues_each_item(
+        pool: PgPool,
+    ) {
+        let f = seed(&pool, Duration::zero()).await;
+        map(
+            &pool,
+            &[
+                (crate::handlers::tmu::NTML_CHANNEL, NTML),
+                (crate::handlers::tmu::ADV_CHANNEL, ADV),
+            ],
+        )
+        .await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert!(
+            skip_warnings(&events).is_empty(),
+            "a mapped activation posts, so it must not report a skip: {events:?}"
+        );
+        let tmi_jobs = jobs(&pool, "tmi_publish", "tmi_id").await;
+        assert_eq!(tmi_jobs.len(), 2, "{tmi_jobs:?}");
+        for (channel, id, subject) in &tmi_jobs {
+            assert_eq!(channel, NTML);
+            assert_eq!(id, subject);
+        }
+        let queued: BTreeSet<String> = tmi_jobs.into_iter().map(|j| j.1).collect();
+        assert_eq!(queued, published_tmis(&pool).await);
+        let adv_jobs = jobs(&pool, "adv_publish", "advisory_id").await;
+        assert_eq!(adv_jobs.len(), 2, "{adv_jobs:?}");
+        for (channel, id, subject) in &adv_jobs {
+            assert_eq!(channel, ADV);
+            assert_eq!(id, subject);
+        }
+        let queued: BTreeSet<String> = adv_jobs.into_iter().map(|j| j.1).collect();
+        assert_eq!(queued, published_advisories(&pool).await);
+    }
+
+    /// Each `else` follows its own channel: with only NTML mapped, only the advisories warn.
+    #[sqlx::test]
+    async fn activating_with_only_ntml_mapped_warns_only_for_advisories(pool: PgPool) {
+        let f = seed(&pool, Duration::zero()).await;
+        map(&pool, &[(crate::handlers::tmu::NTML_CHANNEL, NTML)]).await;
+
+        let (code, events) = activate(&f).await;
+
+        assert_eq!(code, http::StatusCode::OK);
+        assert!(saw_the_request(&events), "capture was not live");
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert!(
+            skipped(&events, NTML_SKIP, "tmu-ntml", "tmi").is_empty(),
+            "the NTML channel is mapped: {events:?}"
+        );
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &published_advisories(&pool).await,
+            "advisory",
+        );
+        let tmi_jobs = jobs(&pool, "tmi_publish", "tmi_id").await;
+        assert_eq!(tmi_jobs.len(), 2, "{tmi_jobs:?}");
+        assert!(tmi_jobs.iter().all(|(channel, ..)| channel == NTML));
+        assert!(jobs(&pool, "adv_publish", "advisory_id").await.is_empty());
+    }
+
+    /// The auto-publish job is the other caller of `activate_package`.
+    #[sqlx::test]
+    async fn auto_publish_with_nothing_mapped_warns_once_per_item(pool: PgPool) {
+        let f = seed(&pool, Duration::minutes(10)).await;
+        let armed = send(
+            &f.state,
+            http::Method::PUT,
+            &format!("/api/v1/events/{EVENT}/packages/{}/auto", f.pkg),
+            &f.cookie,
+            Some(json!({ "auto_publish": true })),
+        )
+        .await;
+        assert_eq!(armed, http::StatusCode::OK);
+
+        let (pass, events) = capturing(crate::jobs::event_package_lifecycle_once(
+            &pool,
+            &crate::realtime::Events::new(None),
+        ))
+        .await;
+
+        assert!(pass.is_ok(), "{pass:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message == "auto-activate package failed"),
+            "{events:?}"
+        );
+        assert_eq!(status(&pool, &f.pkg).await, "activated");
+        assert_eq!(job_count(&pool).await, 0);
+        assert_one_per_item(
+            skipped(&events, NTML_SKIP, "tmu-ntml", "tmi"),
+            &published_tmis(&pool).await,
+            "TMI",
+        );
+        assert_one_per_item(
+            skipped(&events, ADV_SKIP, "tmu-advisories", "advisory"),
+            &published_advisories(&pool).await,
+            "advisory",
+        );
     }
 }

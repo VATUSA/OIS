@@ -525,3 +525,251 @@ async fn every_get_example_reaches_a_handler(pool: sqlx::PgPool) {
         );
     }
 }
+
+// ---- #814 AC1, AC7: the prediction design doc cites its constants and its sources -------------
+
+const PREDICTION_DOC: &str = "docs/architecture/prediction.md";
+
+fn prediction_doc() -> String {
+    let path = repo_root().join(PREDICTION_DOC);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+fn is_constant_name(s: &str) -> bool {
+    s.len() > 2
+        && s.starts_with(|c: char| c.is_ascii_uppercase())
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Every constant the doc cites as `` `NAME` (`path.rs:line`) ``, whitespace (a line break included)
+/// allowed between the two: `(name, path, line)`.
+fn constant_citations(doc: &str) -> Vec<(String, String, usize)> {
+    let mut out = Vec::new();
+    let parts: Vec<&str> = doc.split('`').collect();
+    // Odd indices are inside backticks: `NAME`, then " (" or "\n  (", then `path:line`, then ")".
+    let mut i = 1;
+    while i + 2 < parts.len() {
+        let (name, between, cite) = (parts[i], parts[i + 1], parts[i + 2]);
+        let after = parts.get(i + 3).copied().unwrap_or("");
+        if is_constant_name(name)
+            && between.trim() == "("
+            && after.starts_with(')')
+            && let Some((path, line)) = cite.rsplit_once(':')
+            && path.ends_with(".rs")
+            && let Ok(line) = line.parse::<usize>()
+        {
+            out.push((name.to_string(), path.to_string(), line));
+        }
+        i += 2;
+    }
+    out
+}
+
+/// Whether `line` declares `name` as a `const` or `static`.
+fn declares(line: &str, name: &str) -> bool {
+    ["const ", "static "].iter().any(|kw| {
+        line.split(kw)
+            .nth(1)
+            .is_some_and(|rest| rest.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
+    })
+}
+
+/// Each citation whose line does not declare its constant, as `NAME path:line: why`.
+fn miscited(root: &Path, citations: &[(String, String, usize)]) -> Vec<String> {
+    citations
+        .iter()
+        .filter_map(|(name, path, line)| {
+            let src = match std::fs::read_to_string(root.join(path)) {
+                Ok(s) => s,
+                Err(e) => return Some(format!("{name} {path}:{line}: {e}")),
+            };
+            match src.lines().nth(line - 1) {
+                Some(l) if declares(l, name) => None,
+                Some(l) => Some(format!("{name} {path}:{line}: `{}`", l.trim())),
+                None => Some(format!("{name} {path}:{line}: past the end")),
+            }
+        })
+        .collect()
+}
+
+/// Every `const`/`static` name declared in Rust source under `dir`.
+fn declared_constants(dir: &Path, out: &mut BTreeSet<String>) {
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            declared_constants(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let src = std::fs::read_to_string(&path).unwrap();
+            for line in src.lines() {
+                for kw in ["const ", "static "] {
+                    if let Some(rest) = line.split(kw).nth(1) {
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        if is_constant_name(&name) && rest[name.len()..].starts_with(':') {
+                            out.insert(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The backticked constant names in `doc` that are declared in the code but carry no citation.
+fn uncited(doc: &str, declared: &BTreeSet<String>) -> Vec<String> {
+    let cited: BTreeSet<String> = constant_citations(doc).into_iter().map(|c| c.0).collect();
+    let named: BTreeSet<&str> = doc.split('`').skip(1).step_by(2).collect();
+    named
+        .into_iter()
+        .filter(|n| declared.contains(*n) && !cited.contains(*n))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The line `name` is declared on in `path`, read from the source rather than typed.
+fn declaring_line(path: &str, name: &str) -> usize {
+    let src = std::fs::read_to_string(repo_root().join(path)).unwrap();
+    src.lines().position(|l| declares(l, name)).unwrap() + 1
+}
+
+#[test]
+fn the_prediction_doc_cites_each_constant_where_it_is_defined() {
+    let doc = prediction_doc();
+    let citations = constant_citations(&doc);
+    assert!(citations.len() >= 15, "the scanner is live: {citations:?}");
+    let names: BTreeSet<&str> = citations.iter().map(|c| c.0.as_str()).collect();
+    for name in [
+        "PROPOSED_WHEELS_UP_MIN",
+        "AIRBORNE_GS_KT",
+        "GROUND_ROUTE_FACTOR",
+        "ANCHOR_MAX_BIAS",
+        "ANCHOR_MIN_GS_KT",
+        "ANCHOR_ALT_TOLERANCE_FT",
+        "RELEASE_MARGIN_MS",
+    ] {
+        assert!(names.contains(name), "{name} is cited");
+    }
+    let wrong = miscited(&repo_root(), &citations);
+    assert!(
+        wrong.is_empty(),
+        "cited to a line that does not define it:\n{wrong:#?}"
+    );
+}
+
+#[test]
+fn a_constant_cited_to_the_wrong_line_is_caught() {
+    let path = "backend/src/feed/predict.rs";
+    let right = declaring_line(path, "PROPOSED_WHEELS_UP_MIN");
+    let airborne = declaring_line(path, "AIRBORNE_GS_KT");
+    let page = format!(
+        "`PROPOSED_WHEELS_UP_MIN` (`{path}:{right}`) and\n`AIRBORNE_GS_KT`\n  (`{path}:{}`).",
+        airborne + 1
+    );
+    let citations = constant_citations(&page);
+    assert_eq!(
+        citations.len(),
+        2,
+        "both found, the wrapped one too: {citations:?}"
+    );
+    let wrong = miscited(&repo_root(), &citations);
+    assert_eq!(wrong.len(), 1, "{wrong:?}");
+    assert!(wrong[0].starts_with("AIRBORNE_GS_KT "), "{wrong:?}");
+}
+
+#[test]
+fn every_constant_the_prediction_doc_names_is_cited() {
+    let mut declared = BTreeSet::new();
+    declared_constants(&backend_dir().join("src"), &mut declared);
+    declared_constants(&repo_root().join("crates"), &mut declared);
+    assert!(declared.len() > 100, "the scan is live: {}", declared.len());
+    assert!(declared.contains("PROPOSED_WHEELS_UP_MIN"));
+    let missing = uncited(&prediction_doc(), &declared);
+    assert!(missing.is_empty(), "named without a citation: {missing:?}");
+    // The check, on a planted page: a declared constant with no citation is caught, an abbreviation
+    // that declares nothing is not.
+    let planted = "`PROPOSED_WHEELS_UP_MIN` is ten minutes. `RDY` means ready.";
+    assert_eq!(uncited(planted, &declared), vec!["PROPOSED_WHEELS_UP_MIN"]);
+}
+
+/// The section of `doc` under `## heading`, to the next `## `.
+fn section<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .find(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("no `## {heading}` section"));
+    let body = &doc[start + heading.len() + 5..];
+    body.find("\n## ").map_or(body, |end| &body[..end])
+}
+
+/// The cells of the comparison table's row whose first cell is `topic`.
+fn comparison_row<'a>(doc: &'a str, topic: &str) -> Vec<&'a str> {
+    let line = section(doc, "How TBFM and vTBFM differ")
+        .lines()
+        .find(|l| l.starts_with(&format!("| {topic} |")))
+        .unwrap_or_else(|| panic!("no `{topic}` row"));
+    line.trim_matches('|').split('|').map(str::trim).collect()
+}
+
+#[test]
+fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
+    let doc = prediction_doc();
+    for heading in [
+        "What the model reads",
+        "Wheels-up",
+        "Climb, cruise and descent",
+        "Winds",
+        "Groundspeed anchoring",
+        "Freeze horizons",
+        "The release time",
+        "How TBFM and vTBFM differ",
+        "Sources",
+    ] {
+        assert_eq!(
+            doc.matches(&format!("\n## {heading}\n")).count(),
+            1,
+            "{heading}"
+        );
+    }
+    let freeze = section(&doc, "Freeze horizons");
+    assert!(freeze.contains("There is no freeze horizon"), "{freeze}");
+    assert!(freeze.contains("an FCA release"), "{freeze}");
+
+    // Columns: topic, OIS, TBFM, vTBFM. Each TBFM claim sits beside its source.
+    let freeze_row = comparison_row(&doc, "Freeze");
+    assert!(freeze_row[2].contains("STA freezes") && freeze_row[2].contains("ETA keeps updating"));
+    assert!(freeze_row[2].contains("ATC-364 §2,"), "{freeze_row:?}");
+    let perf = comparison_row(&doc, "Performance");
+    assert!(perf[2].contains("trajectory synthesizer") && perf[2].contains("Swenson §2.1"));
+    let departure = comparison_row(&doc, "Departure");
+    assert!(
+        departure[2].contains("depart the runway") && departure[2].contains("NTRS 20180006743 §II")
+    );
+
+    // AC7: OIS's anchoring and vTBFM's bias, each in its own column.
+    let anchoring = comparison_row(&doc, "Anchoring");
+    for part in ["±15 %", "≥250 kt", "300 ft", "whole remaining flight"] {
+        assert!(anchoring[1].contains(part), "OIS {part}: {anchoring:?}");
+    }
+    for part in ["0.85 to 1.15", "≥250 kt", "500 ft", "whole integration"] {
+        assert!(anchoring[3].contains(part), "vTBFM {part}: {anchoring:?}");
+    }
+
+    // vTBFM by manual section and commit, the same commit `PROPOSED_WHEELS_UP_MIN` cites.
+    let predict = std::fs::read_to_string(backend_dir().join("src/feed/predict.rs")).unwrap();
+    let sha = predict
+        .split("`zla-artcc/vTBFM` `")
+        .nth(1)
+        .and_then(|r| r.split('`').next())
+        .expect("predict.rs cites a vTBFM commit");
+    let sources = section(&doc, "Sources");
+    assert!(
+        sources.contains(&format!("`zla-artcc/vTBFM` at `{sha}`")),
+        "the doc cites vTBFM at {sha}: {sources}"
+    );
+    assert!(
+        sources.contains("§17.2") && sources.contains("§18.2"),
+        "{sources}"
+    );
+}

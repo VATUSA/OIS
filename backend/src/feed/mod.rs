@@ -35,8 +35,6 @@ pub mod sector_tracks;
 pub mod sectors;
 pub mod stats;
 pub mod taxi;
-pub mod taxi_estimate;
-pub mod taxi_observations;
 pub mod tracon;
 pub mod trajectory;
 pub mod vatsim;

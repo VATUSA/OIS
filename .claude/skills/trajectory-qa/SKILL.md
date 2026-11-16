@@ -1,6 +1,6 @@
 ---
 name: trajectory-qa
-description: How to check, test and QA a change to OIS's trajectory/ETA model and everything that times against it (FCA metering, airport-flow demand and the GDP and CFR code built on it, runway ETE, sector occupancy, projected traffic, flight advisories), its inputs (route path, taxi allowance, aircraft profiles, winds, nav) and the feed caches behind them. Use before reporting any such change as done, when reviewing one (/code-review Phase 6), or when an operator says an ETA, a metering order or a demand count looks wrong. Covers the caller map, targeted test runs, hand-worked numbers, parity against next through the historical replay and the live feed, and where the model is documented.
+description: How to check, test and QA a change to OIS's trajectory/ETA model and everything that times against it (FCA metering, airport-flow demand and the GDP and CFR code built on it, runway ETE, sector occupancy, projected traffic, flight advisories), its inputs (route path, a ground flight's wheels-up, aircraft profiles, winds, nav) and the feed caches behind them. Use before reporting any such change as done, when reviewing one (/code-review Phase 6), or when an operator says an ETA, a metering order or a demand count looks wrong. Covers the caller map, targeted test runs, hand-worked numbers, parity against next through the historical replay and the live feed, and where the model is documented.
 ---
 
 # Trajectory QA
@@ -20,9 +20,9 @@ A green nextest run proves the predictor agrees with its fixtures. It does not p
  feed snapshot ─────────────► AppState caches behind ArcSwap (state.rs)
                                     ▲  force-reload on write (handlers/aircraft_profiles.rs)
                                     │
-   feed/fca.rs route_path ──┐       │       feed/taxi_estimate.rs ground allowance
+   feed/fca.rs route_path ──┐       │       TimingTables::live wheels-up locks
                             ▼       │                  │
-                feed/predict.rs  profile_from_here · arrival_eta ◄──┘ (via feed/flow.rs)
+                feed/predict.rs  profile_from_here · arrival_eta ◄──┘ (predict::Inputs.locked)
                             │
                             ▼
                 feed/trajectory.rs  VerticalProfile · AircraftProfile · capped_cruise_tas
@@ -58,7 +58,7 @@ git grep -n -e 'flow::compute' -e 'collect_arrivals(' -e 'project_tracks(' -e 'r
 
 When two sources disagree, the one higher in this list wins, and the lower one is a defect to fix.
 
-1. **Code.** `backend/src/feed/trajectory.rs` (the model, `AircraftProfile`, `ProfileTable`, `MAX_PLAUSIBLE_TAS`), `feed/predict.rs` (the shared prediction service), `feed/fca.rs`, `feed/taxi_estimate.rs`, and each caller in section 1. Print a resolved value rather than reading its default: the loaded aircraft profiles come from `GET /api/v1/flow/aircraft-profiles`, the nav cycle and winds freshness from `GET /api/v1/flow/data-status`.
+1. **Code.** `backend/src/feed/trajectory.rs` (the model, `AircraftProfile`, `ProfileTable`, `MAX_PLAUSIBLE_TAS`), `feed/predict.rs` (the shared prediction service), `feed/fca.rs`, `TimingTables` in `handlers/feed.rs`, and each caller in section 1. Print a resolved value rather than reading its default: the loaded aircraft profiles come from `GET /api/v1/flow/aircraft-profiles`, the nav cycle and winds freshness from `GET /api/v1/flow/data-status`.
 2. **`.claude/rules/feed-and-trajectory.md`** and **`.claude/rules/domain-lessons.md`**.
 3. **Public docs** (`docs-site/`): `planning/aircraft-profiles.md`, `tmu/fcas.md`, `tmu/releases.md`, `tmu/idst.md`, `tmu/restrictions.md`, `dashboard/boards.md`. These are what operators read. A number you change in code that appears here must change here too.
 4. **Internal docs** (`docs/features/flow.md`, `aadc.md`, `stats-replay.md`). Use them for intent, never for current behavior: a module doc comment can lag the code it heads.
@@ -68,7 +68,7 @@ When two sources disagree, the one higher in this list wins, and the lower one i
 | Tier | Required when the change touches |
 | --- | --- |
 | A. Targeted tests | always |
-| B. Every caller, named | `trajectory.rs`, `predict.rs`, `fca.rs`'s route path, `taxi_estimate.rs`, `AircraftProfile` or the profile table, winds or nav inputs |
+| B. Every caller, named | `trajectory.rs`, `predict.rs`, `fca.rs`'s route path, the wheels-up locks, `AircraftProfile` or the profile table, winds or nav inputs |
 | C. Hand-worked numbers | a formula, a constant, a clamp, a threshold, a default |
 | D. Same results as `next` on recorded traffic | anything reaching airport flow (and GDP or CFR) or runway ETE |
 | E. Same results as `next` on the live feed | anything reaching FCA metering, sector demand, projected traffic or flight advisories |
@@ -80,7 +80,7 @@ Report which tiers ran and which you skipped and why. A tier you did not run is 
 ### A. Targeted tests
 
 ```bash
-cargo nextest run -p ois-backend -E 'test(/^feed::(trajectory|predict|fca|taxi_estimate)::/)'
+cargo nextest run -p ois-backend -E 'test(/^feed::(trajectory|predict|fca)::/)'
 cargo nextest run -p ois-backend -E 'test(/^feed::(flow|runway|sector_tracks|sector_load|gdp)::/)'
 cargo nextest run -p ois-backend -E 'test(/^handlers::(flow|feed|gdp|runway|stats|sector_demand_tests|flow_event_fca_visibility_tests)::/)'
 ```
@@ -89,7 +89,7 @@ The `handlers::` set holds `#[sqlx::test]`s, so it needs `DATABASE_URL` pointing
 
 ### B. Every caller, named
 
-Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or the taxi allowance moves every ETA built on them without touching `trajectory.rs`.
+Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or to a ground flight's wheels-up (its latest lock or now, whichever is later, else `predict::proposed_wheels_up`; every lock reader goes through `repos::flow::locks`: `TimingTables::live`, sector demand, the GDP draft and the FCA release and clear handlers) moves every ETA built on them without touching `trajectory.rs`.
 
 ### C. Hand-worked numbers
 

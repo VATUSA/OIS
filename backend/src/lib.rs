@@ -1,6 +1,4 @@
 pub mod advisory;
-#[cfg(test)]
-mod alloc_probe;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -12,6 +10,8 @@ pub mod feed;
 pub mod handlers;
 pub mod job_registry;
 pub mod jobs;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod metrics;
 pub mod models;
 pub mod openapi;
@@ -42,6 +42,12 @@ pub const VERSION: &str = match option_env!("OIS_VERSION") {
 pub async fn run() -> color_eyre::Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
+
+    // Before anything connects: a bad hop count would key rate limits and audit IPs on a forgeable
+    // `X-Forwarded-For` entry (#923).
+    let hops = config::trusted_proxy_hops().map_err(|problem| color_eyre::eyre::eyre!(problem))?;
+    repos::audit::set_trusted_proxy_hops(hops)
+        .map_err(|_| color_eyre::eyre::eyre!("the trusted proxy hop count was stored twice"))?;
 
     let state = state::AppState::from_env().await?;
     run_startup_migrations(&state).await?;
@@ -81,6 +87,7 @@ pub async fn run() -> color_eyre::Result<()> {
         jobs::spawn_outbound_job_reaper(state.jobs.clone(), pool.clone());
         jobs::spawn_audit_log_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_diagnostics_report_prune(state.jobs.clone(), pool.clone());
+        jobs::spawn_vatusa_reset_run_prune(state.jobs.clone(), pool.clone());
         jobs::spawn_departure_runway_prune(state.jobs.clone(), pool.clone());
         // Predict a departure runway for pending departures (#511). After the gates refresh above, so
         // the first pass has a catalog to match stands against.
@@ -95,6 +102,7 @@ pub async fn run() -> color_eyre::Result<()> {
             state.jobs.clone(),
             pool.clone(),
             state.aircraft_profiles.clone(),
+            state.aircraft_profiles_loaded.clone(),
         );
         // ATC sector volumes (#594); kept as a dataset when the Monitor went (#719).
         jobs::spawn_airspace_sectors_refresh(
@@ -118,7 +126,7 @@ pub async fn run() -> color_eyre::Result<()> {
             pool.clone(),
             state.sector_consolidations.clone(),
         );
-        // Airport surface gates, for feed::taxi_observations's gate matching (kept DB-less).
+        // Airport surface gates, for the departure-runway derive's gate matching (kept DB-less).
         jobs::spawn_airport_gates_refresh(state.jobs.clone(), pool.clone(), state.gates.clone());
         // Manually excluded ("bogus") flights, for the DB-less flow surfaces (#342). Also runs the
         // auto-clear once a callsign leaves the feed.
@@ -134,30 +142,18 @@ pub async fn run() -> color_eyre::Result<()> {
         // spawn_airport_gates_refresh above, so a seed's own cache reload is not immediately
         // overwritten by a poll that started before the rows landed.
         jobs::spawn_xplane_gate_seed(state.jobs.clone(), pool.clone(), state.gates.clone());
-        // Learned taxi-observation samples, for feed::flow's ground-allowance estimate (#164
-        // sub-issue E, kept DB-less).
-        jobs::spawn_taxi_estimate_samples_refresh(
-            state.jobs.clone(),
-            pool.clone(),
-            state.taxi_estimate_samples.clone(),
-        );
         feed::events::spawn_sync(pool.clone());
         // Persistent stats collection off the shared feed snapshot + its retention compaction.
         feed::stats::spawn_collector(pool.clone(), state.feed.clone(), state.airspace.clone());
         // Per-flight delay legs (taxi-out + arrival transit) for the average-delay page.
         feed::delays::spawn_collector(pool.clone(), state.feed.clone(), state.runways.clone());
-        // Per-gate/type/runway pushback+taxi-out observations (#164 sub-issue C).
-        feed::taxi_observations::spawn_collector(
-            pool.clone(),
-            state.feed.clone(),
-            state.runways.clone(),
-            state.gates.clone(),
-        );
         jobs::spawn_stats_compaction(state.jobs.clone(), pool.clone());
         jobs::spawn_capture_scheduler(state.jobs.clone(), pool.clone());
         // Event FCAs + TMI packages: auto-publish 30 min before start, auto-archive at end.
         jobs::spawn_event_fca_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
         jobs::spawn_event_package_lifecycle(state.jobs.clone(), pool.clone(), state.events.clone());
+        // Freeze-horizon STAs for every enabled FCA (#817).
+        jobs::spawn_fca_hold_sync(state.jobs.clone(), state.clone());
         // ACE-claim reminder DMs at T-24h/T-6h before the event.
         jobs::spawn_ace_reminder_scheduler(state.jobs.clone(), pool.clone(), state.events.clone());
         // VATUSA: register the division webhook, and pull the whole division daily (#605).
@@ -270,6 +266,28 @@ mod tests {
             pass[call..].contains("tracing::error!("),
             "a failed pass is logged"
         );
+    }
+
+    /// Startup checks `TRUSTED_PROXY_HOPS` and stores it for `client_ip` before building state (#923).
+    /// `tests/startup_config.rs` boots the binary to prove the refusal; the store is pinned here
+    /// because seeing its effect needs a serving backend. Comments stripped, as above.
+    #[test]
+    fn startup_stores_the_checked_proxy_hop_count_before_building_state() {
+        let code: String = include_str!("lib.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code.find("pub async fn run()").unwrap();
+        let run = &code[start..start + code[start..].find("\n}\n").unwrap()];
+        let check = run
+            .find("let hops = config::trusted_proxy_hops()")
+            .expect("run() reads the hop count");
+        let store = run
+            .find("repos::audit::set_trusted_proxy_hops(hops)")
+            .expect("run() stores the checked hop count");
+        let state = run.find("state::AppState::from_env()").unwrap();
+        assert!(check < store && store < state);
     }
 
     /// Every version claimed by more than one migration file, with the files that claim it.

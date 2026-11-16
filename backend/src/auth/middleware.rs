@@ -1,7 +1,7 @@
 use axum::{
     extract::{Request, State},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::{
@@ -88,6 +88,37 @@ fn parse_ws_protocol_token(header: Option<&http::HeaderValue>) -> Option<String>
         .map(str::to_owned)
 }
 
+/// The kind of presented credential whose lookup failed, for the log line; never the token (#922).
+#[derive(Debug, Clone, Copy)]
+enum CredentialKind {
+    SessionCookie,
+    DesktopSession,
+    ApiKey,
+    ServiceAccount,
+}
+
+impl CredentialKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionCookie => "session_cookie",
+            Self::DesktopSession => "desktop_session",
+            Self::ApiKey => "api_key",
+            Self::ServiceAccount => "service_account",
+        }
+    }
+}
+
+/// A presented credential that could not be checked is neither valid nor anonymous: answer 503 on
+/// every route (D70 on #922), and log the cause here, since this response skips the request log.
+fn lookup_failed(kind: CredentialKind, error: &sqlx::Error) -> Response {
+    tracing::error!(
+        credential = kind.as_str(),
+        error = %error,
+        "credential lookup failed; answering 503"
+    );
+    ApiError::ServiceUnavailable.into_response()
+}
+
 /// Resolves the current user (session cookie) and/or service account (bearer token)
 /// and stashes them in request extensions for downstream extractors/handlers.
 pub async fn resolve_current_user(
@@ -96,6 +127,12 @@ pub async fn resolve_current_user(
     next: Next,
 ) -> Response {
     let session_token = parse_cookie(request.headers().get(http::header::COOKIE), SESSION_COOKIE);
+    // Any session token not from the cookie arrived as a desktop token (bearer or subprotocol).
+    let session_kind = if session_token.is_some() {
+        CredentialKind::SessionCookie
+    } else {
+        CredentialKind::DesktopSession
+    };
     // On the websocket upgrade only, a token may ride the subprotocol list instead — the one header a
     // browser `WebSocket` can set. A desktop token is a session (below); an API key or service account
     // is a bearer like any other, so an integrator can open the socket too (#589).
@@ -124,15 +161,15 @@ pub async fn resolve_current_user(
     let session_token = session_token
         .or_else(|| ws_token.filter(|token| token.starts_with(DESKTOP_SESSION_TOKEN_PREFIX)));
 
-    let current_user =
-        if let (Some(pool), Some(token)) = (state.db.as_ref(), session_token.as_deref()) {
-            access_repo::find_current_user_by_session_token(pool, token)
-                .await
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
+    let current_user = match (state.db.as_ref(), session_token.as_deref()) {
+        (Some(pool), Some(token)) => {
+            match access_repo::find_current_user_by_session_token(pool, token).await {
+                Ok(user) => user,
+                Err(error) => return lookup_failed(session_kind, &error),
+            }
+        }
+        _ => None,
+    };
 
     // A bearer token is either a user API key (`ois_pat_…`) or a service account (`ois_sa_…`); the
     // prefix routes it to the right resolver so at most one table is queried, and none for neither.
@@ -140,22 +177,22 @@ pub async fn resolve_current_user(
     let bearer = bearer_route(bearer_token.as_deref());
     let (current_service_account, current_api_key) = match (state.db.as_ref(), bearer) {
         (Some(pool), Some((token, BearerKind::ApiKey))) => {
-            let key = access_repo::find_current_api_key_by_bearer_token(
+            match access_repo::find_current_api_key_by_bearer_token(
                 pool,
                 token,
                 client_ip.as_deref(),
             )
             .await
-            .ok()
-            .flatten();
-            (None, key)
+            {
+                Ok(key) => (None, key),
+                Err(error) => return lookup_failed(CredentialKind::ApiKey, &error),
+            }
         }
         (Some(pool), Some((token, BearerKind::ServiceAccount))) => {
-            let sa = access_repo::find_current_service_account_by_bearer_token(pool, token)
-                .await
-                .ok()
-                .flatten();
-            (sa, None)
+            match access_repo::find_current_service_account_by_bearer_token(pool, token).await {
+                Ok(sa) => (sa, None),
+                Err(error) => return lookup_failed(CredentialKind::ServiceAccount, &error),
+            }
         }
         // Any other bearer — a desktop session token (`ois_dsk_…`, already taken as the session
         // above), a `METRICS_TOKEN`, or junk — routes to no resolver, so no table is queried (#384).

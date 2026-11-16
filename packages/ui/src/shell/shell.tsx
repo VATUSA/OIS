@@ -321,7 +321,7 @@ export type Crumb = {
   link?: (content: React.ReactNode) => React.ReactNode;
 };
 
-/** Muted parents, bright current crumb with its icon (DESIGN.md "Wayfinding"). */
+/** Muted parents, bright current crumb with its icon (DESIGN.md "The shell"). */
 export function Breadcrumbs({ items, className }: { items: readonly Crumb[]; className?: string }) {
   return (
     <nav aria-label="Breadcrumb" className={cn("flex min-w-0 items-center gap-2 text-[12.5px] text-ink-3", className)}>

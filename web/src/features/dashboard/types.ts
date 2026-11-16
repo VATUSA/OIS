@@ -22,11 +22,14 @@ export type StatMetricId =
   | "gdps"
   | "fcas";
 
+/** The flight statuses the arrival-ladder widget offers as filter chips. */
+export const LADDER_STATUSES = ["airborne", "ground"] as const;
+
 /** Include-filters for the arrival-ladder widget. Each list is an allow-list; empty/undefined = all. */
 export interface LadderFilters {
   /** Arrival gates (STAR group names, e.g. "ROBUC") to keep. */
   gates?: string[];
-  /** Flight statuses to keep: "airborne" | "ground" | "proposed". */
+  /** Flight statuses to keep: "airborne" | "ground". */
   statuses?: string[];
   /** Departure-airport prefixes (uppercased) to keep, matched against each flight's origin. */
   origins?: string[];
@@ -271,4 +274,19 @@ export function defaultCell(w: Widget): { w: number; h: number; minW: number; mi
     default:
       return { w: 6, h: 5, minW: 3, minH: 3 };
   }
+}
+
+/**
+ * The saved status filter, less any status the ladder no longer offers: a widget saved with the
+ * retired `proposed` status (#814) would otherwise hide every flight.
+ */
+export function ladderStatuses(filters: LadderFilters | undefined): string[] {
+  const offered: readonly string[] = LADDER_STATUSES;
+  return (filters?.statuses ?? []).filter((s) => offered.includes(s));
+}
+
+/** How many filter categories narrow the ladder: the filter badge's count, and 0 means unfiltered. */
+export function activeLadderFilters(filters: LadderFilters | undefined): number {
+  return [filters?.gates?.length, ladderStatuses(filters).length, filters?.origins?.length, filters?.types?.length]
+    .filter((n) => (n ?? 0) > 0).length;
 }

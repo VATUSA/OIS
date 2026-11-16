@@ -1,26 +1,17 @@
 import {useNavigate, useSearch} from "@tanstack/react-router";
 import {EmptyState, Tabs} from "@ois/ui";
-import {Calculator, Clock, FileText, Gauge, OctagonPause, ShieldAlert} from "lucide-react";
+import {ShieldAlert} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
 import {useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
+import {TMU_TABS, type TmuTab as Tab} from "@/lib/tmu-tabs";
 import {AdvisoriesTab} from "@/pages/tmu/advisories";
 import {GdpTab} from "@/pages/tmu/gdp";
 import {GroundStopsTab} from "@/pages/tmu/ground-stops";
 import {ProgramsTab} from "@/pages/tmu/programs";
 import {RateCalculatorTab} from "@/pages/tmu/rate-calc";
 import {RestrictionsTab} from "@/pages/tmu/restrictions";
-
-type Tab =
-  | "programs"
-  | "restrictions"
-  | "ground-stops"
-  | "gdp"
-  | "rate-calculator"
-  | "advisories";
-
-type TabDef = { value: Tab; label: string; icon: typeof Gauge };
 
 /**
  * The page title, naming the active tab. It is also what ⌘⇧F stores as a favorite's label, and
@@ -31,20 +22,7 @@ export const tmuTitle = (tabLabel: string | undefined) => (tabLabel ? `TMU · ${
 
 export function TmuPage() {
   const { data: me } = useMe();
-  const canPrograms = hasPermission(me, "tmu.program.read");
-  const canRestrictions = hasPermission(me, "tmu.tmi.read");
-  const canGroundStops = hasPermission(me, "tmu.groundstop.read");
-  const canGdp = hasPermission(me, "tmu.gdp.read");
-  const canAdvisories = hasPermission(me, "tmu.adv.read");
-
-  const tabs = [
-    canPrograms && { value: "programs", label: "Programs", icon: Gauge },
-    canRestrictions && { value: "restrictions", label: "Restrictions", icon: ShieldAlert },
-    canGroundStops && { value: "ground-stops", label: "Ground stops", icon: OctagonPause },
-    canGdp && { value: "gdp", label: "Ground delay", icon: Clock },
-    canPrograms && { value: "rate-calculator", label: "Rate calculator", icon: Calculator },
-    canAdvisories && { value: "advisories", label: "Advisories", icon: FileText },
-  ].filter(Boolean) as TabDef[];
+  const tabs = TMU_TABS.filter((t) => hasPermission(me, t.permission));
 
   const { tab: requestedTab, facility } = useSearch({ strict: false }) as { tab?: Tab; facility?: string };
   const navigate = useNavigate();
