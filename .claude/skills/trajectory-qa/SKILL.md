@@ -1,6 +1,6 @@
 ---
 name: trajectory-qa
-description: How to check, test and QA a change to OIS's trajectory/ETA model and everything that times against it (FCA metering, airport-flow demand and the GDP and CFR code built on it, runway ETE, sector occupancy, projected traffic, flight advisories), its inputs (route path, taxi allowance, aircraft profiles, winds, nav) and the feed caches behind them. Use before reporting any such change as done, when reviewing one (/code-review Phase 6), or when an operator says an ETA, a metering order or a demand count looks wrong. Covers the caller map, targeted test runs, hand-worked numbers, parity against next through the historical replay and the live feed, and where the model is documented.
+description: How to check, test and QA a change to OIS's trajectory/ETA model and everything that times against it (FCA metering, airport-flow demand and the GDP and CFR code built on it, runway ETE, sector occupancy, projected traffic, flight advisories), its inputs (route path, a ground flight's wheels-up, aircraft profiles, winds, nav) and the feed caches behind them. Use before reporting any such change as done, when reviewing one (/code-review Phase 6), or when an operator says an ETA, a metering order or a demand count looks wrong. Covers the caller map, targeted test runs, hand-worked numbers, parity against next through the historical replay and the live feed, and where the model is documented.
 ---
 
 # Trajectory QA
@@ -89,7 +89,7 @@ The `handlers::` set holds `#[sqlx::test]`s, so it needs `DATABASE_URL` pointing
 
 ### B. Every caller, named
 
-Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or the taxi allowance moves every ETA built on them without touching `trajectory.rs`.
+Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or to a ground flight's wheels-up (its latest lock, else filed time + `PROPOSED_WHEELS_UP_MIN`, read through `TimingTables::live`) moves every ETA built on them without touching `trajectory.rs`.
 
 ### C. Hand-worked numbers
 

@@ -939,7 +939,7 @@ pub fn spawn_stats_compaction(reg: Arc<JobRegistry>, pool: PgPool) {
 
 /// One stats-compaction pass: downsample the narrow slice of positions crossing each
 /// `COMPACTION_TIERS` boundary, and prune everything past the unrelated retention horizons (winds,
-/// TM history, flight legs, taxi observations — `stats.position` is never hard-deleted anymore). A
+/// TM history, flight legs — `stats.position` is never hard-deleted anymore). A
 /// failed sub-pass is logged and the others still run; the pass then returns `Err` naming every
 /// failed sub-pass, so the job registry records the run as failed.
 async fn stats_compaction_once(

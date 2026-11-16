@@ -11,10 +11,9 @@
 //! doesn't know, unknown airport), [`arrival_eta`] falls back to a straight-line great circle to
 //! the field so an arrival is never dropped — and for a **not-yet-airborne** flight that fallback
 //! carries the [`GROUND_ROUTE_FACTOR`] allowance, because issue #63 only meant to drop the
-//! historical padding where an actual enroute path *is* resolved. [`arrival_route`] applies that
-//! factor, and the per-fix debug table mirrors it (`handlers/flow.rs::ground_route_scale`); FCA
-//! metering (`handlers/flow.rs::build_candidates`) calls [`eta_along_route`] with the unpadded
-//! length of the resolved path, so for such a flight its ETA is earlier than the ladder's.
+//! historical padding where an actual enroute path *is* resolved. One rule, `route_scale`, applies
+//! that factor for [`arrival_route`] and [`trajectory`] alike, so FCA metering and the per-fix
+//! debug table (both through [`trajectory`]) pad such a flight exactly as the ladder does.
 
 use std::cell::OnceCell;
 use std::collections::HashMap;

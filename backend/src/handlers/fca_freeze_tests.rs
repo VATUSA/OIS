@@ -1005,10 +1005,11 @@ async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
 
 /// A Set two minutes out on a parked flight: its wheels-up is still ahead. The Set's own response and
 /// the next traffic read both keep the release time with no lateness, and the held airborne flight
-/// keeps its STA. A released flight is timed from its release (#814), so its ETA no longer runs past
-/// the release time while it waits.
+/// keeps its STA. A released flight is timed from its release (#814), so its ETA sits at the release
+/// time and this cannot tell the ground-release lateness branch apart from the airborne one; the
+/// `fca::meter` unit tests own that branch.
 #[sqlx::test]
-async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
+async fn a_set_release_waiting_for_its_wheels_up_keeps_its_release_time(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
     let id = corridor_fca(&pool, 30).await;
     // Held a minute after its ETA, so it stays on time while the clock moves (module doc).

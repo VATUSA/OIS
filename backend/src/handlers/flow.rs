@@ -2029,10 +2029,8 @@ async fn metered_flights(
     if fca.points.0.len() < 2 {
         return Ok(Vec::new());
     }
-    let held = match state.db.as_ref() {
-        Some(pool) => held_stas_for(pool, &fca.id, now).await?,
-        None => HeldMap::new(),
-    };
+    let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+    let held = held_stas_for(pool, &fca.id, now).await?;
     meter_fca(state, fca, releases, held, now, debug).await
 }
 
@@ -4584,9 +4582,10 @@ mod release_spacing_tests {
     }
 
     /// A Set beside a ground release still waiting for its wheels-up is spaced from the release's
-    /// time, not its ETA (which counts the whole taxi). Rate 30: 120 s plus the 15 s margin. R is
-    /// released for T0+1000 s, wheels-up T0+300 s, a 10 min allowance, ETA T0+1300 s. A Set asking
-    /// for T0+1050 s goes to T0+1000+135 s. Read at its ETA, R would leave T0+1050 s clear.
+    /// time, not its ETA. Rate 30: 120 s plus the 15 s margin. R is released for T0+1000 s with
+    /// wheels-up T0+300 s; at T0, with no other lock, its ETA is timed from that wheels-up, and its
+    /// ETE has grown to 1000 s, so its ETA is T0+1300 s. A Set asking for T0+1050 s goes to
+    /// T0+1000+135 s. Read at its ETA, R would leave T0+1050 s clear.
     #[test]
     fn a_set_beside_a_waiting_ground_release_is_spaced_from_its_release_time() {
         const T0: i64 = 1_800_000_000_000;
@@ -4594,8 +4593,8 @@ mod release_spacing_tests {
         let metas = vec![
             MeterInput {
                 release_wheels_up_ms: Some(T0 + 300_000),
-                // A 10 min ground allowance inside the ETA, measured at now (T0).
-                wheels_up_ms: T0 + 600_000,
+                // No other lock and now (T0) is before it: timed from the release's wheels-up.
+                wheels_up_ms: T0 + 300_000,
                 ..cand(T0 + 1_300_000, false, Some(T0 + 1_000_000))
             },
             cand(T0 + 900_000, false, None),
@@ -4612,10 +4611,10 @@ mod release_spacing_tests {
     }
 
     /// A Set beside a ground release running late is spaced from where the release can now cross:
-    /// a takeoff now, its ETA less its ground allowance. R is released for T0+1000 s with wheels-up
-    /// T0+300 s, a 10 min allowance and ETA T0+1700 s; at T0+400 s it is 100 s past its wheels-up,
-    /// so it crosses at T0+1100 s. A Set asking for T0+1150 s goes to T0+1100+135 s. Without the
-    /// allowance R would sit at its ETA, T0+1700 s, and leave T0+1150 s clear.
+    /// its ETA, a takeoff now. R is released for T0+1000 s with wheels-up T0+300 s; at T0+400 s it
+    /// is 100 s past that wheels-up and holds no other lock, so its ETA is timed from now: with a
+    /// 700 s ETE, T0+1100 s. A Set asking for T0+1150 s goes to T0+1100+135 s. Held at its release
+    /// time, T0+1000 s, R would leave T0+1150 s clear.
     #[test]
     fn a_set_beside_a_late_ground_release_is_spaced_from_its_takeoff_now() {
         const T0: i64 = 1_800_000_000_000;
@@ -4623,9 +4622,9 @@ mod release_spacing_tests {
         let metas = vec![
             MeterInput {
                 release_wheels_up_ms: Some(T0 + 300_000),
-                // A 10 min ground allowance inside the ETA, measured at now (T0+400 s).
-                wheels_up_ms: T0 + 1_000_000,
-                ..cand(T0 + 1_700_000, false, Some(T0 + 1_000_000))
+                // No other lock and now (T0+400 s) is past it: timed from now.
+                wheels_up_ms: T0 + 400_000,
+                ..cand(T0 + 1_100_000, false, Some(T0 + 1_000_000))
             },
             cand(T0 + 900_000, false, None),
             cand(T0 + 5_000_000, true, None),

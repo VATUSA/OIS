@@ -492,9 +492,9 @@ fn apply_metering(
     // taken takes the delay on its STA. The anchor is the STA the locked wheels-up gives. A CFR is
     // late only once now is past its wheels-up, and then crosses no earlier than a takeoff now
     // would give, so it holds no slot it cannot use. A later lock the row is timed from (an FCA
-    // release, a GDP slot) binds, and a slot it cannot make would sit open (#814). CFRs still on time are placed first, then the late
-    // ones, each in anchor order, so a late CFR never takes an on-time CFR's slot (the FCA tiers
-    // do the same, #817).
+    // release, a GDP slot) binds, and a slot it cannot make would sit open (#814). CFRs still on
+    // time are placed first, then the late ones, each in anchor order, so a late CFR never takes
+    // an on-time CFR's slot (the FCA tiers do the same, #817).
     // (index, late, anchor)
     let mut locked: Vec<(usize, bool, i64)> = ground_issued
         .iter()
@@ -1645,30 +1645,58 @@ mod tests {
     }
 
     /// #817: a CFR past its wheels-up crosses no earlier than a takeoff now would give. G was
-    /// issued wheels-up now - 5 min with a 10 min enroute, so its locked STA is +5; past its
-    /// wheels-up, it is placed at now + enroute, +10, not at +5. AAR 10, a 6 min interval: airborne
-    /// A (ETA +6) goes 6 min behind it to +16 instead of taking a slot ahead of a flight that
-    /// cannot use +5. B, well clear, keeps its ETA.
+    /// issued wheels-up now - 5 min and its row is timed from that wheels-up, with a 10 min enroute
+    /// (ETA +5); past its wheels-up, it is placed at now + enroute, +10, not at its ETA, +5. AAR
+    /// 10, a 6 min interval: airborne A (ETA +6) goes 6 min behind it to +16 instead of taking a
+    /// slot ahead of a flight that cannot use +5. B, well clear, keeps its ETA.
     #[test]
     fn a_cfr_past_its_wheels_up_crosses_no_earlier_than_a_takeoff_now() {
         let now = t0();
         let mut flights = vec![
-            ff("G", "ground", 10, None),
+            ff("G", "ground", 5, None),
             ff("A", "airborne", 6, None),
             ff("B", "airborne", 50, None),
         ];
-        let etd = vec![Some(now.timestamp_millis()), None, None];
         let wheels = now - Duration::minutes(5);
+        let etd = vec![Some(wheels.timestamp_millis()), None, None];
         let issued = HashMap::from([("G".to_string(), wheels)]);
         apply_metering(&mut flights, &etd, &base_program_aar(10), &issued, now);
 
         assert_eq!(min_after(now, flights[0].sta), 10, "now + enroute");
         assert_eq!(flights[0].cfr, Some(wheels), "and keeps its wheels-up");
-        assert_eq!(
-            flights[0].delay_min, 0,
-            "crossing ahead of its ETA is no delay"
-        );
+        assert_eq!(flights[0].delay_min, 5, "5 min past its ETA");
         assert_eq!(min_after(now, flights[1].sta), 16, "A goes behind it");
+        assert_eq!(
+            min_after(now, flights[2].sta),
+            50,
+            "the neighbor keeps its ETA"
+        );
+    }
+
+    /// #814: a CFR held past its wheels-up by a later lock (an FCA release, a GDP slot) is on time
+    /// until now passes its own wheels-up, however late that lock times it. X was issued wheels-up
+    /// +1 min and is timed from a later lock at +2 with a 10 min enroute (ETA +12); Y was issued
+    /// now - 1 min, timed from now with a 10 min enroute (ETA +10), so it is late. AAR 10, a 6 min
+    /// interval: on-time X keeps +12 and late Y goes 6 min behind it, to +18. Judged late by its
+    /// timed departure, X would rank behind Y at +10 and go to +16.
+    #[test]
+    fn a_cfr_held_by_a_later_lock_is_on_time_until_its_own_wheels_up() {
+        let now = t0();
+        let mut flights = vec![
+            ff("X", "ground", 12, None),
+            ff("Y", "ground", 10, None),
+            ff("B", "airborne", 50, None),
+        ];
+        let at = |m: i64| Some((now + Duration::minutes(m)).timestamp_millis());
+        let etd = vec![at(2), at(0), None];
+        let issued = HashMap::from([
+            ("X".to_string(), now + Duration::minutes(1)),
+            ("Y".to_string(), now - Duration::minutes(1)),
+        ]);
+        apply_metering(&mut flights, &etd, &base_program_aar(10), &issued, now);
+
+        assert_eq!(min_after(now, flights[0].sta), 12, "X keeps its STA");
+        assert_eq!(min_after(now, flights[1].sta), 18, "late Y goes behind X");
         assert_eq!(
             min_after(now, flights[2].sta),
             50,

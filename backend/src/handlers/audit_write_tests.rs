@@ -12,12 +12,9 @@ use sqlx::PgPool;
 
 use crate::{
     feed::sectors::{SectorTable, tests::volume},
+    log_capture::{Captured, capturing, saw_the_request},
     repos::access::sha256_hex,
-    scope_test_support::{
-        grant,
-        log_capture::{Captured, capturing, saw_the_request},
-        seed_user, session_cookie, test_state,
-    },
+    scope_test_support::{grant, seed_user, session_cookie, test_state},
     state::AppState,
 };
 

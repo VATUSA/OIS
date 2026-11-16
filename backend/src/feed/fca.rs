@@ -334,10 +334,9 @@ pub struct MeterInput {
     /// The STA stored when this airborne flight entered the freeze horizon (#817). Read only while
     /// the flight is still inside the horizon, widened by [`FREEZE_HYSTERESIS_MS`].
     pub held_ms: Option<i64>,
-    /// The wheels-up `eta_ms` is timed from, epoch millis; now when airborne. Metering reads it only
-    /// for a late ground release. The release math needs it: a release is a wheels-up time, so it
-    /// backs out only the airborne ETE, `eta_ms − wheels_up_ms` (#815); a ground release that runs
-    /// late crosses no earlier than a takeoff now, now plus that ETE (#817).
+    /// The wheels-up `eta_ms` is timed from, epoch millis; now when airborne. Metering does not read
+    /// it. The release math does: a release is a wheels-up time, so it backs out only the airborne
+    /// ETE, `eta_ms − wheels_up_ms` (#815).
     pub wheels_up_ms: i64,
     /// A release's issued wheels-up, epoch millis. A ground release runs late only once now is past
     /// it (#817).
@@ -426,9 +425,9 @@ pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -
         .collect();
     // How far each fixed flight runs past its fixed time, ms, and the earliest it can then cross.
     // Airborne: how far its ETA has run past it, crossing at its ETA. A ground release: how long now
-    // is past its issued wheels-up, crossing no earlier than a takeoff now (now plus its airborne
-    // ETE); before that wheels-up it keeps its time, however far its ETA, which counts the
-    // whole taxi until takeoff, has run past it.
+    // is past its issued wheels-up, crossing no earlier than its ETA, which is timed from the later
+    // of now and any lock it holds (#814); before that wheels-up it keeps its time, however far its
+    // ETA has run past it.
     let (late_ms, anchor): (Vec<i64>, Vec<i64>) = (0..n)
         .map(|i| {
             let c = &cands[i];
@@ -436,11 +435,7 @@ pub fn meter(cands: &[MeterInput], cfg: &MeterConfig, order: Option<&[usize]>) -
                 (None, _) => (0, c.eta_ms),
                 (Some(f), Some(w)) if !c.airborne => {
                     let late = (cfg.now_ms - w).max(0);
-                    let at = if late > 0 {
-                        f.max(cfg.now_ms + c.eta_ms - c.wheels_up_ms)
-                    } else {
-                        f
-                    };
+                    let at = if late > 0 { f.max(c.eta_ms) } else { f };
                     (late, at)
                 }
                 (Some(f), _) => ((c.eta_ms - f).max(0), f.max(c.eta_ms)),
@@ -835,32 +830,35 @@ mod tests {
         assert_eq!(earliest_slot(T0, 0, &[(T0, 0)]), T0, "no spacing at rate 0");
     }
 
-    /// A ground release waiting at the gate or taxiing: its ETA counts the whole 10 min allowance,
-    /// so it passes the release time while the aircraft is still due to make its wheels-up. Rate 30,
-    /// a 120 s gap. R is released for T0+1000 s with wheels-up T0+300 s (a 700 s airborne ETE); held
-    /// H keeps T0+1200 s (ETA T0+1150 s, on time).
-    /// - Waiting at T0: R's ETA is T0+1300 s. R keeps T0+1000 s with no lateness and H keeps its
-    ///   STA. Re-anchored at its ETA, R would push H to T0+1420 s.
-    /// - At T0+290 s, before its wheels-up, with the ETE grown to 790 s (ETA T0+1680 s, a takeoff
-    ///   now at T0+1080 s): still not late, so R keeps T0+1000 s. Measured from the ETA less the
-    ///   allowance it would read 80 s late and cross at T0+1080 s.
-    /// - At T0+400 s, 100 s past its wheels-up (ETA T0+1700 s): R crosses at a takeoff now,
-    ///   T0+1100 s, 100 s late, and H, 100 s behind it, goes to T0+1220 s.
+    /// A ground release waiting at the gate or taxiing keeps its time until now passes its issued
+    /// wheels-up, however far its ETA has run past the release time. Rate 30, a 120 s gap. R is
+    /// released for T0+1000 s with wheels-up T0+300 s (a 700 s airborne ETE); with no other lock its
+    /// ETA is timed from the later of that wheels-up and now. Held H keeps T0+1200 s (ETA T0+1150 s,
+    /// on time).
+    /// - Waiting at T0, the ETE grown to 1000 s: R's ETA is T0+1300 s. R keeps T0+1000 s with no
+    ///   lateness and H keeps its STA. Re-anchored at its ETA, R would push H to T0+1420 s.
+    /// - At T0+290 s, before its wheels-up, the ETE at 790 s (ETA T0+1090 s): still not late, so R
+    ///   keeps T0+1000 s.
+    /// - At T0+400 s, 100 s past its wheels-up, the ETE back at 700 s: its ETA is a takeoff now,
+    ///   T0+1100 s. R crosses there, 100 s late, and H, 100 s behind it, goes to T0+1220 s.
     #[test]
     fn a_ground_release_runs_late_only_once_now_is_past_its_wheels_up() {
         let held = MeterInput {
             held_ms: Some(T0 + 1200 * S),
             ..mk(T0 + 1150 * S, true, 400.0)
         };
-        // A 10 min ground allowance inside the ETA: the airborne ETE is the ETA less now and that.
-        let release = |eta: i64, now: i64| MeterInput {
-            frozen_ms: Some(T0 + 1000 * S),
-            release_wheels_up_ms: Some(T0 + 300 * S),
-            wheels_up_ms: now + 10 * MIN,
-            ..mk(eta, false, 400.0)
+        // No other lock: timed from the later of the release's wheels-up and now.
+        let release = |ete: i64, now: i64| {
+            let wheels_up = (T0 + 300 * S).max(now);
+            MeterInput {
+                frozen_ms: Some(T0 + 1000 * S),
+                release_wheels_up_ms: Some(T0 + 300 * S),
+                wheels_up_ms: wheels_up,
+                ..mk(wheels_up + ete, false, 400.0)
+            }
         };
         let waiting = meter(
-            &[release(T0 + 1300 * S, T0), held.clone()],
+            &[release(1000 * S, T0), held.clone()],
             &freeze_cfg(T0),
             None,
         );
@@ -877,7 +875,7 @@ mod tests {
         assert!(waiting[1].sta_frozen);
 
         let drifted = meter(
-            &[release(T0 + 1680 * S, T0 + 290 * S), held.clone()],
+            &[release(790 * S, T0 + 290 * S), held.clone()],
             &freeze_cfg(T0 + 290 * S),
             None,
         );
@@ -893,7 +891,7 @@ mod tests {
         );
 
         let past = meter(
-            &[release(T0 + 1700 * S, T0 + 400 * S), held],
+            &[release(700 * S, T0 + 400 * S), held],
             &freeze_cfg(T0 + 400 * S),
             None,
         );
@@ -907,17 +905,17 @@ mod tests {
 
     /// A late ground release never crosses before its issued time. Rate 30, a 120 s gap. R is
     /// released for T0+1000 s with wheels-up T0+300 s; at T0+400 s it is 100 s late, but its ETE
-    /// has shrunk to 500 s (ETA T0+1500 s), so a takeoff now would cross at T0+900 s. R stays at
-    /// T0+1000 s. Held H keeps T0+1200 s, and unheld U (ETA T0+1050 s) is spaced clear of R and H
-    /// at T0+1320 s; placed at a takeoff now, R would leave U at its ETA.
+    /// has shrunk to 500 s, so its ETA, a takeoff now, is T0+900 s. R stays at T0+1000 s. Held H
+    /// keeps T0+1200 s, and unheld U (ETA T0+1050 s) is spaced clear of R and H at T0+1320 s;
+    /// placed at its ETA, R would leave U at its ETA.
     #[test]
     fn a_late_ground_release_whose_ete_shrank_keeps_its_issued_time() {
         let release = MeterInput {
             frozen_ms: Some(T0 + 1000 * S),
             release_wheels_up_ms: Some(T0 + 300 * S),
-            // A 10 min ground allowance inside the ETA, measured at now (T0+400 s).
-            wheels_up_ms: T0 + 400 * S + 10 * MIN,
-            ..mk(T0 + 1500 * S, false, 400.0)
+            // No other lock: timed from now, past the release's wheels-up.
+            wheels_up_ms: T0 + 400 * S,
+            ..mk(T0 + 900 * S, false, 400.0)
         };
         let held = MeterInput {
             held_ms: Some(T0 + 1200 * S),
@@ -940,6 +938,29 @@ mod tests {
             T0 + 1320 * S,
             "U is spaced clear of R and H"
         );
+    }
+
+    /// A late ground release whose flight holds a later lock crosses at its ETA, timed from that
+    /// lock, not at a takeoff now. Rate 30, a 120 s gap. R is released for T0+1000 s with wheels-up
+    /// T0+300 s; at T0+400 s it is 100 s late, but a later lock (a CFR, another FCA's release, a GDP
+    /// slot) holds it to wheels-up T0+600 s, so with a 700 s ETE its ETA is T0+1300 s. A takeoff now
+    /// would put it at T0+1100 s. Unheld U (ETA T0+1350 s) is spaced 120 s behind R's real crossing.
+    #[test]
+    fn a_late_ground_release_held_by_a_later_lock_crosses_at_its_eta() {
+        let release = MeterInput {
+            frozen_ms: Some(T0 + 1000 * S),
+            release_wheels_up_ms: Some(T0 + 300 * S),
+            wheels_up_ms: T0 + 600 * S,
+            ..mk(T0 + 1300 * S, false, 400.0)
+        };
+        let unheld = mk(T0 + 1350 * S, true, 400.0);
+        let out = meter(&[release, unheld], &freeze_cfg(T0 + 400 * S), None);
+        assert_eq!(
+            (out[0].sched_ms, out[0].late_sec),
+            (T0 + 1300 * S, 100),
+            "late, crossing at its ETA from the later lock"
+        );
+        assert_eq!(out[1].sched_ms, T0 + 1420 * S, "U is spaced behind R");
     }
 
     /// Rate 30 (120 s) at the default freeze horizon, measured from `now_ms`.

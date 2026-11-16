@@ -31,7 +31,7 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
   airborne flight, how far its ETA has passed it, and it then crosses no earlier than its ETA (in auto mode a late held
   flight crosses at the later of the slot it held while on time and its ETA, moves no release or other held flight, and sets
   `slot_conflict` when that is inside another's gap; in manual mode it keeps its place in the controller's order); for a ground
-  release, how long now is past its wheels-up, and it then crosses no earlier than a takeoff now. In airport flow, an issued CFR's
+  release, how long now is past its wheels-up, and it then crosses no earlier than its ETA, which is a takeoff now unless another lock holds its wheels-up later. In airport flow, an issued CFR's
   `FlowFlight.sta` and `delay_min` now go through the same slot check as every other arrival; a CFR
   is late only once now is past its wheels-up, and then crosses no earlier than a takeoff now would
   give, and a CFR whose slot is taken shows the delay. A repeat RDY and a CFR re-issue search for the

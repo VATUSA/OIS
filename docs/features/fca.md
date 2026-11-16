@@ -220,8 +220,10 @@ it every tick. The margin is bounded rather than permanent: a re-routed flight l
 instead of showing late until it crosses. An airborne fixed flight is anchored at `max(fixed, eta)`
 and reports `late_sec = max(eta - fixed, 0) / 1000`. A ground release carries its issued wheels-up
 (`release_wheels_up_ms`). It is late only once `now_ms` is past that wheels-up, then reports
-`late_sec = (now - release_wheels_up) / 1000` and is anchored at
-`max(fixed, now + eta - wheels_up_ms)`, a takeoff now plus its airborne ETE. `freeze_min` 0 turns holding off.
+`late_sec = (now - release_wheels_up) / 1000` and is anchored at `max(fixed, eta)`. Its ETA is
+timed from the later of now and any other lock it holds (a CFR, another FCA's release, a GDP
+slot), so with no other lock that is a takeoff now, and a later lock that binds is honored.
+`freeze_min` 0 turns holding off.
 
 **Auto mode** (`meter_auto`). Flights sort by tier: releases by anchor; held flights by held STA;
 other airborne, then ground, by anchor. A release is placed at its anchor and never moved. A held

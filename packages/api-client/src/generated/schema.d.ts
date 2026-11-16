@@ -5345,8 +5345,8 @@ export interface components {
              * Format: int64
              * @description Seconds this flight runs past its release or held STA; 0 when on time. Airborne, that is how
              *     far its ETA has run past it; on the ground, how long now is past the release's wheels-up,
-             *     since a ground ETA counts the whole taxi until takeoff. A late flight crosses no earlier
-             *     than that gives. In auto mode a late held flight crosses at the later of the slot it held
+             *     since until then the flight can still take off on time, however far its ETA has moved. A
+             *     late flight crosses no earlier than its ETA. In auto mode a late held flight crosses at the later of the slot it held
              *     while on time and its ETA, and no release or other held flight moves for it; in manual mode
              *     it keeps its place in the controller's order (#817).
              */

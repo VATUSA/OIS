@@ -219,8 +219,3 @@ pub(crate) async fn send_json(
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
 }
-
-/// The log-capture helpers ([`crate::log_capture`]), under the path the router tests import them from.
-pub(crate) mod log_capture {
-    pub(crate) use crate::log_capture::{Captured, capturing, saw_the_request};
-}

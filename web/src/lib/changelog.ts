@@ -47,10 +47,10 @@ export const CHANGELOG: ChangelogEntry[] = [
         highlights: [
           "Every page times a flight the same way, so one aircraft shows the same ETA on the FCA board, airport flow and sector demand.",
           "OIS no longer adds a learned taxi time to any time it predicts. A ground flight with no ready time, release, CFR or GDP EDCT is timed from its filed departure time plus 10 min, and no sooner than now plus 10 min. Those times show a P.",
-          "A CFR, FCA release or GDP slot now moves that flight's times everywhere it is shown, including airport flow, departures, the AADC and the GDP draft.",
+          "A CFR, FCA release or GDP slot now moves that flight's times everywhere it is shown, including airport flow, departures and the AADC. The GDP draft takes every one of them except a slot from that airport's own GDP, so a revise or compress can still move the flight earlier.",
           "RDY means ready at the runway now, and a Set time is a runway time.",
-          "Prefiled flights no longer appear in airport flow, demand, the AADC, the GDP draft or the departures list.",
-          "The taxi insights page is gone. The live Taxi Monitor still shows taxi times.",
+          "Prefiled flights no longer appear in airport flow, the airport's arrival demand, the NAS demand ranking, the AADC, the GDP draft or the departures list. Sector demand still counts a prefile that holds a CFR, release or GDP slot.",
+          "The taxi insights page is gone. The Taxi tab on the Airport page still shows live taxi times.",
           "Each FCA has a freeze horizon, set in the FCA editor as \"Freeze horizon · min\" (30 by default, 0 turns it off). Inside it, a flight's crossing time is held instead of moving on every feed update.",
           "Released and held flights are now checked against each other, so two aircraft no longer sit closer than the FCA's spacing without a warning. A flight inside another crossing's gap shows IN GAP, and a flight running past its release or held time shows how late it is.",
           "Every pair of crossings is spaced by the larger of the two gaps the aircraft need, in auto and manual mode and when Set searches for a slot.",
@@ -60,7 +60,8 @@ export const CHANGELOG: ChangelogEntry[] = [
       {
         heading: "TMU and advisories",
         highlights: [
-          "The public Advisories board and the NAS demand widget update when a ground stop, GDP, restriction or program changes, instead of on their next poll.",
+          "The public Advisories board updates as soon as a ground stop, GDP, restriction or program changes, instead of on its next poll.",
+          "The NAS demand widget updates as soon as a program changes, and on the next feed update after a GDP, CFR, FCA or release change, instead of on its next poll.",
           "The TMU link in the sidebar and the command palette shows for everyone who can open a TMU tab, and only for them.",
         ],
       },
@@ -97,6 +98,7 @@ export const CHANGELOG: ChangelogEntry[] = [
           "The desktop app only sends sign-in and diagnostics requests to the OIS server it was built for.",
           "When OIS cannot check your sign-in because of a database fault, it answers with a temporary error instead of signing you out.",
           "VATUSA access-reset runs, which list the members they reset, are deleted 180 days after they finish.",
+          "The backend refuses to start when TRUSTED_PROXY_HOPS is 0 or not a whole number, and names the variable, instead of quietly falling back to a default. A RATE_LIMIT_* variable or DATABASE_MAX_CONNECTIONS that is 0 or not a whole number still keeps its default, and now logs an error naming the variable.",
         ],
       },
     ],

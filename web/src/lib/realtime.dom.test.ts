@@ -6,7 +6,7 @@ const token = vi.hoisted(() => ({value: undefined as string | undefined}));
 vi.mock("./desktop-token", () => ({getDesktopToken: async () => token.value}));
 vi.mock("./api", () => ({API_BASE: "https://ois.example"}));
 
-import {COALESCE_MS, TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
+import {COALESCED_KEYS, COALESCE_MS, TICK_SILENCE_MS, connectRealtime, isRealtimeLive, pollUnlessLive} from "./realtime";
 
 /** Records how each socket was opened, and lets a test push frames through it. */
 class FakeSocket {
@@ -149,40 +149,53 @@ describe("public board and NAS demand topics (VATUSA/OIS#954)", () => {
   // dropped key and a key mapped onto the wrong topic both fail.
   it.each([
     ["tmu.groundstop", [["ground-stops"], ["departures"], ["public-board"]]],
-    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["aircraft-route"]]],
     ["tmu.tmi", [["tmis"], ["public-board"]]],
     ["tmu.program", [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]]],
   ])("a %s nudge refetches exactly its keys", async (topic, keys) => {
     expect(await nudge(topic)).toEqual(keys.map((queryKey) => ({ queryKey })));
   });
 
-  // A CFR burst would otherwise recompute the whole country's demand once per CFR per open widget:
-  // held for the next tick like the sector demand, it costs one refetch per publish.
-  it("a flow.cfr nudge refetches the NAS demand on the next tick, whatever its age, not at once", async () => {
-    const dispose = connectRealtime(qc);
-    const socket = await opened();
-    socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
-    invalidated.length = 0;
-    socket.onmessage?.({ data: JSON.stringify({ topic: "flow.cfr" }) });
-    expect(invalidated).toEqual(
-      [["departures"], ["flow"], ["fca-traffic"], ["idst"], ["aadc"], ["aircraft-route"], ["gdp-board"]].map((queryKey) => ({ queryKey })),
-    );
-
-    const demandOnTick = () => {
-      invalidated.length = 0;
-      socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
-      const calls = invalidated.filter((q) => (q as { queryKey: string[] }).queryKey[0] === "tmu-demand") as {
-        predicate: (q: { state: { dataUpdatedAt: number } }) => boolean;
-      }[];
-      expect(calls.length, "one tmu-demand refetch per tick").toBe(1);
-      return calls[0].predicate({ state: { dataUpdatedAt: Date.now() - 1_000 } });
-    };
-    // Fresh data (a second old) refetches on the tick after the CFR, where the minute's gap would skip it.
-    expect(demandOnTick()).toBe(true);
-    // Held once: the tick after keeps the gap again.
-    expect(demandOnTick()).toBe(false);
-    dispose();
+  // Literals, not the module's own table read back, so a key moved between the two lists fails here.
+  it("holds the sector and NAS demand for the tick on every lock topic, and nothing else", () => {
+    expect(COALESCED_KEYS).toEqual({
+      "flow.release": [["sector-demand"], ["tmu-demand"]],
+      "flow.fca": [["sector-demand"], ["tmu-demand"]],
+      "tmu.gdp": [["sector-demand"], ["tmu-demand"]],
+      "flow.cfr": [["sector-demand"], ["tmu-demand"]],
+    });
   });
+
+  // A burst of locks would otherwise recompute the whole country's demand once per nudge per open
+  // widget: held for the next tick like the sector demand, it costs one refetch per publish.
+  it.each(["flow.release", "flow.fca", "tmu.gdp", "flow.cfr"])(
+    "a %s nudge refetches the NAS demand on the next tick, whatever its age, not at once",
+    async (topic) => {
+      const dispose = connectRealtime(qc);
+      const socket = await opened();
+      socket.onmessage?.({ data: JSON.stringify({ subscribed: ["feed.tick"] }) });
+      invalidated.length = 0;
+      socket.onmessage?.({ data: JSON.stringify({ topic }) });
+      const now = invalidated.map((q) => (q as { queryKey: string[] }).queryKey[0]);
+      expect(now.length, "the topic's immediate keys ran").toBeGreaterThan(0);
+      expect(now, "no immediate tmu-demand refetch").not.toContain("tmu-demand");
+
+      const demandOnTick = () => {
+        invalidated.length = 0;
+        socket.onmessage?.({ data: JSON.stringify({ topic: "feed.tick" }) });
+        const calls = invalidated.filter((q) => (q as { queryKey: string[] }).queryKey[0] === "tmu-demand") as {
+          predicate: (q: { state: { dataUpdatedAt: number } }) => boolean;
+        }[];
+        expect(calls.length, "one tmu-demand refetch per tick").toBe(1);
+        return calls[0].predicate({ state: { dataUpdatedAt: Date.now() - 1_000 } });
+      };
+      // Fresh data (a second old) refetches on the tick after the nudge, where the minute's gap would skip it.
+      expect(demandOnTick()).toBe(true);
+      // Held once: the tick after keeps the gap again.
+      expect(demandOnTick()).toBe(false);
+      dispose();
+    },
+  );
 });
 
 describe("sector demand topics (VATUSA/OIS#725)", () => {
@@ -216,10 +229,10 @@ describe("sector demand topics (VATUSA/OIS#725)", () => {
   // refetch waits for the next tick, so a burst costs the server one projection per ARTCC, not one per
   // nudge per client. The topic's other keys still refetch at once.
   it.each([
-    ["flow.release", [["idst"], ["fca-traffic"], ["departures"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"], ["gdp-board"]]],
+    ["flow.release", [["idst"], ["fca-traffic"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
     ["flow.cfr", [["departures"], ["flow"], ["fca-traffic"], ["idst"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
-    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"]]],
-    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["departures"], ["flow"], ["aadc"], ["tmu-demand"], ["aircraft-route"], ["gdp-board"]]],
+    ["tmu.gdp", [["gdps"], ["gdp-board"], ["departures"], ["public-board"], ["fca-traffic"], ["idst"], ["flow"], ["aadc"], ["aircraft-route"]]],
+    ["flow.fca", [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"], ["departures"], ["flow"], ["aadc"], ["aircraft-route"], ["gdp-board"]]],
   ])("%s refreshes the sector demand on the next tick, whatever its age, and its other keys at once", async (topic, others) => {
     const { dispose, send } = await connected();
     send(topic);
