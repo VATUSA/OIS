@@ -715,8 +715,10 @@ pub async fn hist_flow(
     let data = reconstruct_at(p, at).await?;
     let winds = winds_for(p, at).await?;
     let snap = Arc::new(crate::feed::Snapshot::of(data));
+    // Departure-runway assignments are live state, so the replay times ground flights without them.
+    let tables = feed_handlers::TimingTables::load(&state, Arc::new(winds), Arc::default()).await;
     Ok(Json(
-        feed_handlers::flow_from_data(&state, p, &icao, snap, Arc::new(winds), at).await?,
+        feed_handlers::flow_from_data(&state, p, &icao, snap, Arc::new(tables), at).await?,
     ))
 }
 
@@ -743,8 +745,10 @@ pub async fn hist_departures(
     let data = reconstruct_at(p, at).await?;
     let winds = winds_for(p, at).await?;
     let snap = Arc::new(crate::feed::Snapshot::of(data));
+    // Departure-runway assignments are live state, so the replay times ground flights without them.
+    let tables = feed_handlers::TimingTables::load(&state, Arc::new(winds), Arc::default()).await;
     Ok(Json(
-        feed_handlers::departures_response(&state, p, &dep, snap, Arc::new(winds), at).await?,
+        feed_handlers::departures_response(&state, p, &dep, snap, Arc::new(tables), at).await?,
     ))
 }
 

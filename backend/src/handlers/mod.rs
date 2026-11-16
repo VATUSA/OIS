@@ -66,6 +66,8 @@ mod auth_annotation_tests;
 #[cfg(test)]
 mod credential_db_error_tests;
 #[cfg(test)]
+mod eta_input_wiring_tests;
+#[cfg(test)]
 mod event_fca_scope_tests;
 #[cfg(test)]
 mod fca_freeze_tests;
