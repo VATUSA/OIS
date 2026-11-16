@@ -469,9 +469,14 @@ mod tests {
         assert_eq!(star_base("DOTSS2A"), "DOTSS");
         assert_eq!(star_base("lendy6"), "LENDY");
         assert_eq!(star_base("PARCH"), "PARCH");
-        // The same cases pin the web's `starBase` (web/src/lib/runway.test.ts), which writes the key.
+        // The same cases as the web's `starBase` (web/src/lib/runway.test.ts), which writes the key.
         assert_eq!(star_base("BAMBI3"), "BAMBI");
         assert_eq!(star_base("ANJLL4A"), "ANJLL");
+        assert_eq!(star_base("  camrn4  "), "CAMRN");
+        assert_eq!(star_base("CAMRN44A"), "CAMRN4");
+        assert_eq!(star_base("CAMRN44"), "CAMRN4");
+        assert_eq!(star_base("CAMRN4AB"), "CAMRN4AB");
+        assert_eq!(star_base("CAMRNA"), "CAMRNA");
     }
 
     #[test]
