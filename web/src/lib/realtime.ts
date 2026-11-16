@@ -38,6 +38,8 @@ const FEED_KEYS: { key: string[]; minGapMs: number }[] = [
   // every viewer (`AppState::sector_demand`): a miss costs one projection, 179–540 ms of CPU per ARTCC
   // in release on the live feed; a hit costs a copy of the rows. Its cells are quarter-hour peaks, so once a minute.
   { key: ["sector-demand"], minGapMs: 60_000 },
+  // Every airport's arrival demand against its rate (#954): its old 60 s poll.
+  { key: ["tmu-demand"], minGapMs: 60_000 },
 ];
 
 export const TOPIC_KEYS: Record<string, string[][]> = {
@@ -46,10 +48,12 @@ export const TOPIC_KEYS: Record<string, string[][]> = {
   "flow.release": [["idst"], ["fca-traffic"], ["departures"]],
   // Enabling, disabling or deleting an FCA changes which releases hold a wheels-up (#721).
   "flow.fca": [["fcas"], ["fca-traffic"], ["fca-counts"], ["idst"], ["event-fcas"]],
-  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"]],
-  "tmu.tmi": [["tmis"]],
-  "tmu.groundstop": [["ground-stops"], ["departures"]],
-  "tmu.program": [["tmu-programs"], ["departures"], ["flow"]],
+  // The public advisories board lists active ground stops, GDPs, restrictions and programs (#954).
+  "tmu.gdp": [["gdps"], ["gdp-board"], ["departures"], ["public-board"]],
+  "tmu.tmi": [["tmis"], ["public-board"]],
+  "tmu.groundstop": [["ground-stops"], ["departures"], ["public-board"]],
+  // A program sets the rate the NAS demand ranks against (#954).
+  "tmu.program": [["tmu-programs"], ["departures"], ["flow"], ["public-board"], ["tmu-demand"]],
   "tmu.advisory": [["advisories"]],
   "flow.cfr": [["departures"], ["flow"]],
   "events.availability": [["event-availability"]],
@@ -84,7 +88,9 @@ export const COALESCED_KEYS: Record<string, string[][]> = {
   "flow.release": [["sector-demand"]],
   "flow.fca": [["sector-demand"]],
   "tmu.gdp": [["sector-demand"]],
-  "flow.cfr": [["sector-demand"]],
+  // A CFR moves a wheels-up in the NAS demand too, which recomputes every rated airport per request
+  // and has no server cache (#954).
+  "flow.cfr": [["sector-demand"], ["tmu-demand"]],
 };
 
 /**
