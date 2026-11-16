@@ -1,6 +1,6 @@
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
+import {mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {join, relative, sep} from "node:path";
 import {fileURLToPath} from "node:url";
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
 
@@ -19,9 +19,23 @@ import {afterAll, beforeAll, describe, expect, it} from "vitest";
  * The scan flags any mention of a client-storage API, reads included: there is nothing legitimate for
  * these files to read back. `useLocalStorage` from `@ois/ui` is listed because it writes to
  * `localStorage` without the name appearing at the call site.
+ *
+ * Known limit: the comment pass is lexical, so a `//` in JSX text (`<a>https://x</a>`) blanks the
+ * rest of that line, and a storage call later on the same line would be missed.
  */
 const SRC = fileURLToPath(new URL("..", import.meta.url));
-const FILES = ["pages/api-keys.tsx", "lib/api-keys.ts"];
+const FILES = ["lib/api-keys.ts", "pages/api-keys.tsx"];
+
+/** Every non-test source file under `web/src`, relative to it, with `/` separators. */
+function sources(dir: string): string[] {
+  return readdirSync(dir, {withFileTypes: true}).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return sources(path);
+    return /\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)
+      ? [relative(SRC, path).split(sep).join("/")]
+      : [];
+  });
+}
 
 /**
  * Comments blanked out, newlines kept, so a match's line number is still the real one.
@@ -53,12 +67,17 @@ describe("the personal API-key token never reaches client storage (#955)", () =>
     expect(storageAccess(join(SRC, file)), `${file} must not persist the shown-once token`).toEqual([]);
   });
 
-  // A scan of the wrong file, or of none, finds nothing and passes: pin that each path is the module
-  // the token flows through, and that an unreadable path fails instead of scanning empty.
-  it("reads both API-key files and fails on a missing one", () => {
-    for (const file of FILES) {
-      expect(readFileSync(join(SRC, file), "utf8"), file).toContain("ApiKeyToken");
-    }
+  // A scan of the wrong file, or of none, finds nothing and passes. The token's type is the trace of
+  // where it flows: the list must be exactly the source files that name `ApiKeyToken`, so a dropped
+  // entry or a new file the token reaches fails here until it is scanned.
+  it("scans exactly the source files the token's type reaches", () => {
+    const carriers = sources(SRC).filter((file) =>
+      readFileSync(join(SRC, file), "utf8").includes("ApiKeyToken"),
+    );
+    expect(carriers.sort()).toEqual(FILES);
+  });
+
+  it("fails on a file it cannot read instead of scanning it empty", () => {
     expect(() => storageAccess(join(SRC, "lib/api-keys-missing.ts"))).toThrow(/ENOENT/);
   });
 });
@@ -83,6 +102,7 @@ describe("the storage scan flags a write planted in a throwaway file", () => {
     ['const req = indexedDB.open("ois");', "1:indexedDB"],
     ['openDatabase("ois", "1", "", 1024);', "1:openDatabase"],
     ["document.cookie = `t=${token.token}`;", "1:document.cookie"],
+    ["document . cookie = token.token;", "1:document.cookie"],
     ['await cookieStore.set("t", token.token);', "1:cookieStore"],
     ['const [, keep] = useLocalStorage("k", token.token);', "1:useLocalStorage"],
     // The key is a variable, not a literal.
@@ -111,6 +131,8 @@ describe("the storage scan flags a write planted in a throwaway file", () => {
   it.each([
     ['const glob = "../assets/*.svg";\nlocalStorage.setItem(key, token.token);\n/** doc */', "2:localStorage"],
     ['const url = "https://example.org/a"; sessionStorage.setItem(key, token.token);', "1:sessionStorage"],
+    ["const glob = '../assets/*.svg';\nlocalStorage.setItem(key, token.token);\n/** doc */", "2:localStorage"],
+    ["const u = `https://ois/${id}`; localStorage.setItem(key, token.token);", "1:localStorage"],
   ])("still scans code after a comment opener inside a string: %s", (src, expected) => {
     expect(scanPlanted(src)).toEqual([expected]);
   });
