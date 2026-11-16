@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Guard: rust-toolchain.toml names a dated nightly, and every dtolnay/rust-toolchain step in
+# Guard: rust-toolchain.toml names a dated nightly (or the stable fallback), and every dtolnay/rust-toolchain step in
 # .github/workflows/*.yml installs that same toolchain (#1044).
 #
 #   bash bin/lib/toolchain-pin.test.sh
@@ -27,8 +27,9 @@ bad() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 check() {
     local dir="$1" channel steps=0
     channel="$(sed -nE 's/^channel = "([^"]*)"$/\1/p' "$dir/rust-toolchain.toml")"
-    [[ "$channel" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
-        || echo "rust-toolchain.toml channel '$channel' is not a dated nightly"
+    # `stable` is the documented fallback; any other channel moves under CI between runs.
+    [[ "$channel" =~ ^(nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}|stable)$ ]] \
+        || echo "rust-toolchain.toml channel '$channel' is not a dated nightly or stable"
     for wf in "$dir"/.github/workflows/*.yml; do
         while IFS='|' read -r line ref tc; do
             steps=$((steps + 1))
@@ -68,8 +69,14 @@ plant() {
 echo "planted mismatches:"
 plant rolling
 sed -i -E 's/^channel = ".*"$/channel = "nightly"/' "$COPY/rust-toolchain.toml"
-grep -q "is not a dated nightly" <<<"$(check "$COPY")" \
+grep -q "is not a dated nightly or stable" <<<"$(check "$COPY")" \
     && ok "a rolling nightly channel is refused" || bad "a rolling channel passed"
+
+plant stable
+sed -i -E 's/^channel = ".*"$/channel = "stable"/' "$COPY/rust-toolchain.toml"
+sed -i -E 's/^( +)toolchain: nightly-.*/\1toolchain: stable/' "$COPY"/.github/workflows/*.yml
+[[ "$(check "$COPY")" =~ ^steps=[0-9]+$ ]] \
+    && ok "the stable fallback passes when every step installs stable" || bad "the stable fallback was refused: $(check "$COPY")"
 
 plant stale-release
 sed -i -E '0,/^( +)toolchain: nightly-.*/s//\1toolchain: nightly-2000-01-01/' "$COPY/.github/workflows/release.yml"
