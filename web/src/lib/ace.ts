@@ -3,11 +3,13 @@ import type {components} from "@ois/api-client";
 
 import {useToast} from "@ois/ui";
 import {ois} from "./api";
+import {SOCKET_FALLBACK_MS} from "./realtime";
 
 export type AceRequest = components["schemas"]["AceRequestBody"];
 export type AceClaim = components["schemas"]["AceClaimBody"];
 export type CreateAceRequest = components["schemas"]["CreateAceRequestRequest"];
 export type ClaimAceRequest = components["schemas"]["ClaimAceRequest"];
+export type MyAceClaim = components["schemas"]["MyAceClaim"];
 
 /** The ACE support requests for one event (optionally filtered by status). Needs `ace.requests.read`. */
 export function useEventAce(eventId: number, status?: string) {
@@ -27,6 +29,25 @@ export function useEventAce(eventId: number, status?: string) {
     // The realtime topic is the fast path (#645/#646); this poll is the fallback for a signed-out
     // viewer, a dropped socket, or a second replica (#649), so it is relaxed from 30s, not removed.
     refetchInterval: 60_000,
+  });
+}
+
+/**
+ * The signed-in user's own upcoming ACE claims. Needs `ace.requests.claim`; the caller passes
+ * `enabled: false` for anyone without it, or every mount is a refused request. A refused or failed
+ * fetch throws, so it reads as an error and never as "no claims" (#958).
+ */
+export function useMyAceClaims(enabled: boolean) {
+  return useQuery({
+    queryKey: ["my-ace-claims"],
+    queryFn: async (): Promise<MyAceClaim[]> => {
+      const { data, error } = await ois.GET("/api/v1/me/ace-claims");
+      if (error || !data) throw new Error("failed to load your ACE claims");
+      return data;
+    },
+    enabled,
+    // The `events.reminder` and `events.ace` topics are the fast path; this is the socket's fallback.
+    refetchInterval: SOCKET_FALLBACK_MS,
   });
 }
 
