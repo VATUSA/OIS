@@ -3,9 +3,9 @@
 # nightly added a lint CI saw and local gates did not (#1044). Bump it on purpose, in its own PR,
 # with the same date in .github/workflows/ci.yml and release.yml (bin/lib/toolchain-pin.test.sh
 # checks they agree). We DON'T use nightly-only language features, so `stable` remains a valid
-# fallback: if a nightly regression bites, temporarily set `channel = "stable"`, the workflows'
-# `toolchain:` to `stable`, and remove `-Zthreads` from `.cargo/config.toml` (MSRV is 1.92, see
-# the workspace `rust-version`).
+# fallback: if a nightly regression bites, temporarily set the channel and the workflows'
+# `toolchain:` to a pinned release (MSRV is 1.92, see the workspace `rust-version`), never the
+# rolling `stable`, and remove `-Zthreads` from `.cargo/config.toml`.
 [toolchain]
 channel = "nightly-2026-11-10"
 components = ["rustfmt", "clippy"]
