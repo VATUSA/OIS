@@ -1,9 +1,9 @@
 ---
 paths:
   - "backend/src/feed/**"
-  - "backend/src/handlers/{flow,feed,gdp,runway,sector_demand,sector_demand_cache,flight_exclusions,aircraft_profiles,airport_configs,sector_limits,sector_consolidations,tmu,restriction_artcc,taxi_insights}.rs"
+  - "backend/src/handlers/{flow,feed,gdp,runway,sector_demand,sector_demand_cache,flight_exclusions,aircraft_profiles,airport_configs,sector_limits,sector_consolidations,tmu,restriction_artcc}.rs"
   - "backend/src/handlers/{flow_event_fca_visibility,sector_demand,sector_limits,sector_consolidations}_tests.rs"
-  - "backend/src/repos/{flow,gdp,tmu,runway,aircraft_profiles,flight_exclusions,sector_limits,sector_consolidations,departure_runway,taxi_insights,airport_configs}.rs"
+  - "backend/src/repos/{flow,gdp,tmu,runway,aircraft_profiles,flight_exclusions,sector_limits,sector_consolidations,departure_runway,airport_configs}.rs"
   - "backend/src/{tmi,advisory,state}.rs"
   - "fixtures/**"
   - "backend/src/auth/**"
@@ -83,22 +83,6 @@ the departure like every other prefile caller and skip one that cannot be resolv
 9f72fceb; `a_prefile_is_timed_from_its_departure_and_matches_the_real_arrival_eta`
 (`handlers/flow.rs`).
 
-## Not measured is not zero
-
-A `NULL` pushback meant both "did not push" and "push not detected", and only ~45 % of real pushes are
-detected at the feed's cadence. Counting `NULL` as zero would have taught a hub a 0 s pushback; dropping
-it made a no-tug field unrepresentable (#287). The observer now stores `0` only for a departure that
-taxied off the stand with no push, and `NULL` for unmeasured. Proof: commits 616bef62, a7a6a7f0;
-`a_missed_push_and_a_real_no_push_are_recorded_differently` (`feed/taxi_observations.rs`).
-
-## A stationary aircraft's heading is its parking orientation
-
-Runway matching for the ground allowance read live heading on aircraft still at the gate, so a parked
-heading within ±30° of an unrelated runway pulled that runway's taxi samples into metering (found in
-#181's review). Match on heading only once groundspeed reaches `TAXI_ROLL_GS_KT`. Proof: commit
-595f3482; `resolve_ground_allowance_sec_ignores_a_coincidental_heading_match_while_stationary`
-(`feed/flow.rs`).
-
 ## A predicate applied at nine sites is tested at the sites
 
 Manual flight exclusions were applied at ~9 production sites with only the predicate tested:
@@ -173,6 +157,12 @@ release and swap routes later skipped the event-FCA guard the edit routes had, a
 missing id answers 404 (#746). Proof: commits e1cc68c8, 2cafd030;
 `an_anonymous_caller_sees_only_what_the_public_list_shows` (`handlers/flow.rs`),
 `hidden_fcas_404_out_of_scope_like_a_missing_id` (`handlers/flow_event_fca_visibility_tests.rs`).
+
+A lock read by every timing surface is a route too. `repos::flow::locked_wheels_up` lacked
+`list_fcas`'s `NOT_HIDDEN_EVENT` filter, so a release on a planned or archived event FCA held a
+departure's wheels-up in sector demand and the departures list (#845), and after #814, on every
+surface reading `TimingTables::live`, public routes among them. Proof: PR #1031;
+`a_hidden_event_fcas_release_locks_nothing` (`repos/flow.rs`).
 
 ## A renamed logical key strands every deployed mapping
 

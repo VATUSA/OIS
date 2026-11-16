@@ -140,8 +140,10 @@ is reused wherever it is needed.
   ```bash
   gh api repos/VATUSA/OIS/commits/<sha>/check-runs --jq '.check_runs[] | "\(.conclusion) \(.name)"'
   ```
-  An empty list straight after a push means CI has not started, not green. Run `just test` only
-  when neither exists, and never re-run the full suite on a SHA that already has one. Targeted runs
+  An empty list straight after a push means CI has not started, not green. A failed step ends its
+  job, so the steps after it never ran: a `rust` job red in clippy has no nextest result for that
+  SHA. Read each step's summary line in the job log before counting CI as the gate. Run
+  `just test` only when neither exists, and never re-run the full suite on a SHA that already has one. Targeted runs
   (a mutation's one test, an isolated failure) are always fine.
 - **Use nextest for the full Rust suite**, as CI does, never `cargo test -- --test-threads=1`.
 
@@ -243,7 +245,9 @@ Around it:
 effect reaches *many* rows but written `assert!(!rows.is_empty())` still passes on a single-row
 fixture; a test named for a boundary that only asserts "non-empty" never exercises the boundary.
 Assert the exact property the behavior depends on (the count, the ordering, the boundary value)
-so a plausible mutation makes it red.
+so a plausible mutation makes it red. A test named for a source (a lock, a CFR) asserts the value
+equals that source, never a relation that holds whatever fed it: on #814 a test asserting
+`EDCT = cross time - ETE` stayed green when IDST stopped reading the CFR.
 
 **A test that reimplements the code's own arithmetic has tested the arithmetic twice.** Reading a
 constant in a test is ordinary; recomputing the formula under test from it is not, because then
@@ -305,6 +309,9 @@ whose live and historical paths read different sources.
   count.
 - **Pin the direction that occurs, with a case that fires beside it.** The direction real data
   takes needs its own test, next to a control that does fire.
+- **A max or min of two inputs is the same shape.** One fixture per ordering, each input the
+  binding one. On #814 every fixture put one lock later than the other, so `here.or(locked)` passed
+  for `.max(here)`.
 - **Prove it by reinstating the old signal.** OR the old input back into the predicate. The test
   that pins the shipped direction must go red, not only the test for the direction nobody hits.
 

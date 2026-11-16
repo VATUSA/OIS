@@ -141,7 +141,7 @@ An operation must never report success on a path that failed.
 OIS has no shared cache store. Its caches are in-process, per replica:
 
 - **Feed-visible config** (aircraft profiles, sector limits and consolidations, gates, flight
-  exclusions, taxi samples, airspace sectors, nav, winds): an `AppState` field behind `ArcSwap`,
+  exclusions, airspace sectors, nav, winds): an `AppState` field behind `ArcSwap`,
   loaded by a `jobs.rs` refresh pass, and **force-reloaded by the write handler** so an edit applies
   at once. A new feed-visible config mirrors that pattern: cache + refresh job + force-reload on
   write. The feed reads the cache and never queries.
@@ -187,8 +187,7 @@ and every route that reads the same table and confirm each goes through the filt
 - CPU-heavy work (route resolution, metering, projection) runs under `tokio::task::spawn_blocking`,
   never inline on an async worker and never `block_in_place`, which still ties up the worker (#63).
 - Clone the `Arc<Snapshot>` and drop the feed lock before the CPU work (`FeedInner::snapshot`).
-- Stream a large result with `.fetch(pool)` instead of `fetch_all` (`repos/stats.rs` taxi samples,
-  #776).
+- Stream a large result with `.fetch(pool)` instead of `fetch_all` (#776).
 - **No synchronous third-party call on a request a user is waiting for** unless the response needs
   its answer. A Discord post is an outbound job, never a call from the handler.
 
@@ -303,6 +302,11 @@ Grep the old column, field or function across `backend/`, `discord/`, `crates/`,
 `tmu_national` came from one permission resolver and its permission tree from another, so one
 response could say a user held a permission nationally beside a tree that omitted it. One resolver
 now answers both.
+
+**Derive a quantity from its own inputs** (ETE = ETA - ETD), never from two other fields that equal
+it only under today's rules. `ready_time_slot` took the airborne ETE as `sta - cfr`, true only while
+the CFR was the wheels-up; when #814 let a later lock bind, it inflated by the gap. When a change
+moves a field, grep for every expression that backs a quantity out of it.
 
 **A flag that is only ever set is latched**, so one earned under the old basis stands for the life
 of the record. Tell: a pass whose every write is `= true`.

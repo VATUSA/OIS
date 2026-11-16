@@ -1,9 +1,9 @@
 ---
 paths:
   - "backend/src/feed/**"
-  - "backend/src/handlers/{flow,feed,gdp,runway,sector_demand,sector_demand_cache,flight_exclusions,aircraft_profiles,airport_configs,sector_limits,sector_consolidations,tmu,restriction_artcc,taxi_insights}.rs"
+  - "backend/src/handlers/{flow,feed,gdp,runway,sector_demand,sector_demand_cache,flight_exclusions,aircraft_profiles,airport_configs,sector_limits,sector_consolidations,tmu,restriction_artcc}.rs"
   - "backend/src/handlers/{flow_event_fca_visibility,sector_demand,sector_limits,sector_consolidations}_tests.rs"
-  - "backend/src/repos/{flow,gdp,tmu,runway,aircraft_profiles,flight_exclusions,sector_limits,sector_consolidations,departure_runway,taxi_insights,airport_configs}.rs"
+  - "backend/src/repos/{flow,gdp,tmu,runway,aircraft_profiles,flight_exclusions,sector_limits,sector_consolidations,departure_runway,airport_configs}.rs"
   - "backend/src/{tmi,advisory,state}.rs"
   - "fixtures/**"
 ---
@@ -20,20 +20,23 @@ every surface that times an aircraft. These rules capture what no single file sh
 ## The paths every change must exercise
 
 1. **Each trajectory caller is its own path.** A change to the model, its inputs or a shared helper
-   is verified at every caller below, not reasoned about from one.
-2. **Airborne and not-yet-airborne are two paths.** `predict::arrival_eta` treats `gs >= 50` as
-   airborne: timed from its position along the trimmed remaining route, anchored to its observed
-   groundspeed. A ground or prefiled flight is timed from its departure field over the whole route,
-   with `GROUND_TAXI_SEC` (8 min) or the learned ground allowance added, and `GROUND_ROUTE_FACTOR`
-   (1.12) when its route does not resolve. Prefiles need their departure resolved
-   (`prefile_position`); a `(0, 0)` placeholder once timed KJFK→KDCA as ~4,900 nm (#225).
+   is verified at every caller ("Every caller of the model"), not reasoned about from one.
+2. **Airborne and not-yet-airborne are two paths.** `predict::trajectory` treats a groundspeed of
+   `AIRBORNE_GS_KT` (50 kt) or more as airborne: timed from its position along the remaining route,
+   anchored at cruise to its observed groundspeed. A ground flight, or a prefile holding a lock, is
+   timed from its departure field over the whole route from its wheels-up: its latest lock (CFR, FCA
+   release, published GDP slot), else its filed time plus `PROPOSED_WHEELS_UP_MIN` (10 min). No taxi
+   time is added (#814). `GROUND_ROUTE_FACTOR` (1.12) pads a ground route that resolves to its two
+   endpoints only (`docs/architecture/prediction.md` → "Wheels-up").
 3. **A national-scope and a facility-scope principal are two paths** for every write here
    (`secure-coding.md` → "Access Control").
 
 ## The feed subsystem
-- The poller (`feed::spawn_poller`) fetches the VATSIM data feed every `FAST_POLL_SECS` (2 s) and
-  backs off to `STALE_POLL_BACKOFF_SECS` (30 s) after `MAX_CONSECUTIVE_STALE_POLLS` polls with no new
-  publish. It installs a new `Arc<Snapshot>` in `FeedInner` behind a tokio `RwLock`.
+- The poller (`feed::spawn_poller`) fetches the VATSIM data feed `REFRESH_BUFFER_SECS` (10 s) after
+  each publish's `update_timestamp`, retries every `FAST_POLL_SECS` (2 s) once that target has
+  passed, and backs off to `STALE_POLL_BACKOFF_SECS` (30 s) after `MAX_CONSECUTIVE_STALE_POLLS` (30)
+  polls with no new publish (`next_poll_delay`). It installs a new `Arc<Snapshot>` in `FeedInner`
+  behind a tokio `RwLock`.
 - A reader clones the `Arc<Snapshot>` and drops the lock before any CPU work, then runs the work under
   `spawn_blocking`. Holding the read guard across route resolution stalls the poller's writes.
 - **The publish is the clock.** `Snapshot::source_timestamp` changes only on a new VATSIM publish; a
@@ -45,7 +48,7 @@ every surface that times an aircraft. These rules capture what no single file sh
   `runway`, `sector_tracks` and `gdp` take tables, never a `PgPool`. Anything they need from the
   database is an `AppState` cache behind `ArcSwap`, loaded by a `jobs.rs` refresh pass and
   force-reloaded by its write handler (`code-quality.md` → "Caching"). The collectors that live
-  under `feed/` (`stats`, `delays`, `taxi_observations`, `events`, `vatusa`) hold a pool and write;
+  under `feed/` (`stats`, `delays`, `events`, `vatusa`) hold a pool and write;
   they are not on a request's prediction path.
 - Per-request inputs that are not cached (excluded callsigns, locked wheels-up times) are read by
   the handler before the blocking task and passed in.
@@ -75,32 +78,27 @@ calls to resolve a route and time it.
 ## Every caller of the model
 
 When adding or changing ANYTHING the model reads (a profile field, a speed rule, wind, the route
-resolver, the ground allowance), verify every caller in the same change. Silent drift between surfaces
+resolver, the wheels-up locks), verify every caller in the same change. Silent drift between surfaces
 is the default failure mode: one aircraft showing two ETAs.
 
-1. **Airport-flow demand**: `feed::flow::compute` (via `predict::arrival_eta`), behind
-   `handlers/feed.rs` and `handlers/gdp.rs`; `feed::flow::ground_estimate` for proposed departures
-2. **Runway ETE**: `feed::runway::collect_arrivals`
-3. **Sector occupancy and demand**: `feed::sector_tracks::project_tracks`, cached per publish by
-   `handlers/sector_demand_cache.rs`
-4. **FCA metering**: `handlers::flow::build_candidates`, connected pilots only (#834), airborne and
-   ground, feeding `MeterInput.cross_speed` from `predict::eta_along_route`
-5. **Map traffic and the per-fix debug table**: `handlers::flow::project_traffic`, `fix_predictions`,
-   `prefile_fix_predictions`
-6. **Inputs, not callers**: `fca::route_path` (the route every surface times along) and
-   `feed/taxi_estimate.rs` via `feed::flow::resolve_ground_allowance_sec` (the ground allowance). A
-   change to them moves every ETA built on them.
-7. **Carry the `ProfileTable` only**: `state.rs`, `jobs.rs` (its refresh), `repos/aircraft_profiles.rs`,
-   `handlers/aircraft_profiles.rs` (reload on write), `handlers/sector_demand_cache.rs` (a cache key),
-   `scope_test_support.rs`
+Every surface times through one entry point, `feed::predict::trajectory` (#813). The callers, their
+surfaces and the command that re-derives them are `docs/features/flow.md` → "The ETA model and its
+callers"; the model's design is `docs/architecture/prediction.md`. Re-derive the list before relying
+on it. Beyond the callers:
 
-The list goes stale. Re-derive it before relying on it with `git grep 'trajectory::' -- backend/src`
-and `git grep 'predict::' -- backend/src`, keeping only non-test call sites.
+- **Inputs, not callers**: `fca::route_path` (the route every surface times along) and
+  `repos::flow::locked_wheels_up` (the locks, read through `TimingTables` and direct `flow_repo::locked_wheels_up*` calls). A
+  change to them moves every ETA built on them.
+- **Carry the `ProfileTable` only**: `state.rs`, `jobs.rs` (its refresh), `repos/aircraft_profiles.rs`,
+  `handlers/aircraft_profiles.rs` (reload on write), `handlers/sector_demand_cache.rs` (a cache key),
+  `scope_test_support.rs`
 
 **Each site gets its own wiring test, and each is mutated on its own.** On #355 the wiring test seeded
 only live pilots, so reverting the prefile site alone passed the whole suite;
 `handlers::flow::mit_cross_speed_wiring_tests` now covers an airborne and a ground pilot (#834 removed
-the prefile site).
+the prefile site). Every place that reads the locks is a site
+(`git grep -n -e 'TimingTables::' -e 'flow_repo::locked_wheels_up' -- backend/src`): on #814 a `live` to `load` mutant was run at
+three of them, and `list_idst`'s had no test.
 
 ## Metering
 
@@ -142,7 +140,7 @@ the prefile site).
 **Verifying any change here is the `trajectory-qa` skill.** Load it before reporting a feed,
 trajectory, metering, flow or TMI change as done. At minimum:
 
-- Every caller above has a test that fails when the change is reverted at that site.
+- Every caller has a test that fails when the change is reverted at that site.
 - A behavior change states its measured effect in the PR: the ETA shift at named distances, the
   spacing at a named fix, before and after (#361's commit message is the model).
 - A run of the real stack against the live feed, on a throwaway database, with the surfaces that

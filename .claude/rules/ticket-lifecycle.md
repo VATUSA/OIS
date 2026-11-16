@@ -388,6 +388,10 @@ points above, nothing more:
   and `review-attestation.sh check`, which passes with `REVIEW_LENSES_MAP` pointed at an LF copy of
   `.claude/review-lenses.tsv`. `codegen` fails under cmd.exe; in `packages/api-client` run
   `pnpm exec openapi-typescript <spec> -o src/generated/schema.d.ts`.
+- **Write a multi-line edit script or test body with the Write tool** to the scratchpad and run it
+  by path; never inline it in a Bash heredoc. Heredoc passing here turned a Python `'\n'` into a real
+  newline inside a Rust format string, and an apostrophe in a quoted heredoc failed to parse, so
+  inline scripts broke source files silently (#814).
 - **Stopping a backgrounded web server leaves its node processes holding the port.** Find the port's
   owner (`Get-NetTCPConnection -LocalPort 5173`) and stop it after the task.
 - **After `git worktree move`, run `pnpm install --frozen-lockfile --force`**: `node_modules` junctions
