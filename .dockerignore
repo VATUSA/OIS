@@ -8,7 +8,7 @@
 .claude
 docs
 *.md
-# Local dev-speed toolchain config: rolling nightly + rustc parallel front-end (`-Zthreads`) + the
+# Local dev-speed toolchain config: a dated nightly + rustc parallel front-end (`-Zthreads`) + the
 # mold linker. These are nightly-only and need clang/mold on PATH, which the runtime image doesn't
 # have — and the cargo-chef `cook` stage runs before rust-toolchain.toml would be copied, so it would
 # hit stable and reject `-Z`. The code uses no nightly-only features, so the image builds cleanly on
