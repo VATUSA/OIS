@@ -1,7 +1,6 @@
 import * as React from "react";
-import {useQuery} from "@tanstack/react-query";
 
-import {ois} from "@/lib/api";
+import {useMyAceClaims} from "@/lib/ace";
 import {useMe, type Me} from "@/lib/auth";
 import {notifyDesktop, type NotifyCategory} from "@/lib/desktop-notify";
 import {useFcas, useFcaTraffic} from "@/lib/fca";
@@ -9,7 +8,6 @@ import {hasPermission} from "@/lib/permissions";
 import {can} from "@/lib/platform";
 import {hhmmZulu} from "@/lib/time";
 import {useSetting} from "@/lib/settings";
-import {SOCKET_FALLBACK_MS} from "@/lib/realtime";
 
 /**
  * The notification detectors that don't already have one (#348).
@@ -35,6 +33,9 @@ import {SOCKET_FALLBACK_MS} from "@/lib/realtime";
  * query is not pending either, and seeding from its empty data made the first successful poll look
  * like every entry was new — one native notification per flight already holding an EDCT
  * (VATUSA/OIS#348 review). Pass `query.isSuccess`.
+ *
+ * `hold` freezes the diff after seeding: nothing fires and no key is forgotten, so what arrived
+ * while held fires once when it lifts, and nothing already notified fires again.
  */
 type Entry = {title: string; body: string; route: string};
 
@@ -43,8 +44,14 @@ function useNewKeys(
   settled: boolean,
   category: NotifyCategory,
   enabled: boolean,
-  /** Fold everything that arrived together into one notification, instead of one per key. */
-  collapse?: (fresh: Map<string, Entry>) => Entry,
+  {
+    collapse,
+    hold = false,
+  }: {
+    /** Fold everything that arrived together into one notification, instead of one per key. */
+    collapse?: (fresh: Map<string, Entry>) => Entry;
+    hold?: boolean;
+  } = {},
 ) {
   // Sound settings live beside the notification ones, so a category can notify silently or make a
   // noise without a banner (#353).
@@ -57,6 +64,7 @@ function useNewKeys(
       if (settled) known.current = new Set(entries.keys());
       return;
     }
+    if (hold) return;
     const fresh = new Map<string, Entry>();
     for (const [key, entry] of entries) {
       if (!known.current.has(key)) {
@@ -71,7 +79,7 @@ function useNewKeys(
     const sound = {enabled: soundOn, volume};
     if (collapse && fresh.size) void notifyDesktop({category, ...collapse(fresh)}, enabled, sound);
     else for (const entry of fresh.values()) void notifyDesktop({category, ...entry}, enabled, sound);
-  }, [entries, settled, category, enabled, collapse, soundOn, volume]);
+  }, [entries, settled, category, enabled, collapse, hold, soundOn, volume]);
 }
 
 /** EDCT releases and heavy metering delay, for one FCA. Both read the same traffic list. */
@@ -247,7 +255,7 @@ export function AccessNotifier() {
     return m;
   }, [me?.role_names, me?.permissions]);
 
-  useNewKeys(held, !!me, "access", enabled, summarizeGrants);
+  useNewKeys(held, !!me, "access", enabled, {collapse: summarizeGrants});
   return null;
 }
 
@@ -280,22 +288,15 @@ export function EventReminderNotifier() {
   const {value: soundOn} = useSetting<boolean>("sounds.eventReminders", false);
   const {data: me} = useMe();
 
-  const claims = useQuery({
-    queryKey: ["my-ace-claims"],
-    // Opened only for someone who asked for reminders — by banner or by sound — and who can hold a
-    // claim: the endpoint is gated on `ace.requests.claim`, so for everyone else it was a 403 on
-    // every mount, swallowed, and a request nobody opted into (VATUSA/OIS#348 review).
-    enabled:
-      !!me &&
+  // Opened only for someone who asked for reminders — by banner or by sound — and who can hold a
+  // claim: the endpoint is gated on `ace.requests.claim`, so for everyone else it is a 401 on every
+  // mount and a request nobody opted into (VATUSA/OIS#348 review).
+  const claims = useMyAceClaims(
+    !!me &&
       (can("notifications") || can("audioAlerts")) &&
       (enabled || soundOn) &&
       hasPermission(me, "ace.requests.claim"),
-    queryFn: async () => {
-      const {data} = await ois.GET("/api/v1/me/ace-claims");
-      return data ?? [];
-    },
-    refetchInterval: SOCKET_FALLBACK_MS,
-  });
+  );
 
   // Whether a claim is due depends on the clock as much as on the data, and a refetch that returns
   // the same claims hands back the *same* `data` object — so keyed on `data` alone, crossing T-24h
@@ -324,7 +325,9 @@ export function EventReminderNotifier() {
     return m;
   }, [claims.data, now]);
 
-  useNewKeys(due, claims.isSuccess, "eventReminders", enabled);
+  // A failed fetch keeps the last claims it had; held, a stale claim (released meanwhile, say) fires
+  // nothing, and the reminders already sent are not forgotten and repeated on recovery (#958).
+  useNewKeys(due, claims.isSuccess, "eventReminders", enabled, {hold: claims.isError});
   return null;
 }
 
