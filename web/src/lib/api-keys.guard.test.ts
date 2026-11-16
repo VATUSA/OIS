@@ -54,7 +54,7 @@ function stripComments(text: string): string {
 }
 
 const STORAGE =
-  /\b(?:localStorage|sessionStorage|indexedDB|openDatabase|cookieStore|useLocalStorage)\b|\bdocument\s*\.\s*cookie\b/g;
+  /\b(?:localStorage|sessionStorage|indexedDB|openDatabase|cookieStore|caches|useLocalStorage)\b|\bdocument\s*\.\s*cookie\b|\bnavigator\s*\.\s*storage\b/g;
 
 /** `line:api` for every client-storage access in the file. A file that cannot be read throws. */
 function storageAccess(path: string): string[] {
@@ -105,6 +105,8 @@ describe("the storage scan flags a write planted in a throwaway file", () => {
     ["document.cookie = `t=${token.token}`;", "1:document.cookie"],
     ["document . cookie = token.token;", "1:document.cookie"],
     ['await cookieStore.set("t", token.token);', "1:cookieStore"],
+    ['await (await caches.open("ois")).put("/t", new Response(token.token));', "1:caches"],
+    ["const root = await navigator.storage.getDirectory();", "1:navigator.storage"],
     ['const [, keep] = useLocalStorage("k", token.token);', "1:useLocalStorage"],
     // The key is a variable, not a literal.
     ["localStorage.setItem(key, token.token);", "1:localStorage"],
