@@ -35,7 +35,9 @@ import {useSetting} from "@/lib/settings";
  * (VATUSA/OIS#348 review). Pass `query.isSuccess`.
  *
  * `hold` freezes the diff after seeding: nothing fires and no key is forgotten, so what arrived
- * while held fires once when it lifts, and nothing already notified fires again.
+ * while held fires once when it lifts, and nothing already notified fires again. A query reports
+ * an error only once its retries are spent (three by default), so during those retries it still
+ * reads as a success and is not held.
  */
 type Entry = {title: string; body: string; route: string};
 
@@ -290,7 +292,7 @@ export function EventReminderNotifier() {
 
   // Opened only for someone who asked for reminders — by banner or by sound — and who can hold a
   // claim: the endpoint is gated on `ace.requests.claim`, so for everyone else it is a 401 on every
-  // mount and a request nobody opted into (VATUSA/OIS#348 review).
+  // mount and a request nobody opted into (#348).
   const claims = useMyAceClaims(
     !!me &&
       (can("notifications") || can("audioAlerts")) &&

@@ -6,23 +6,40 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
 
 const notifyDesktop = vi.hoisted(() => vi.fn(async (_n: {title: string}, _enabled: boolean) => true));
 const claims = vi.hoisted(() => ({rows: [] as unknown[], calls: 0, fail: false}));
-const perm = vi.hoisted(() => ({claim: true}));
+// Each input of the notifier's `enabled` condition, switchable per test.
+const env = vi.hoisted(() => ({
+  claim: true,
+  notifications: true,
+  audioAlerts: true,
+  signedIn: true,
+  banner: true,
+  sound: false,
+}));
 
 vi.mock("@/lib/desktop-notify", () => ({notifyDesktop}));
 // The claims query also polls as the socket's fallback (#649). These tests pin that a reminder fires
 // on the clock alone — with no nudge and no refetch — so that poll is switched off here; it is pinned
 // for the other socket-only queries in `lib/socket-fallback.test.ts`.
 vi.mock("@/lib/realtime", () => ({SOCKET_FALLBACK_MS: false}));
-vi.mock("@/lib/platform", () => ({can: () => true}));
-vi.mock("@/lib/permissions", () => ({
-  hasPermission: (_me: unknown, p: string) => p === "ace.requests.claim" && perm.claim,
+vi.mock("@/lib/platform", () => ({
+  can: (c: string) => (c === "notifications" ? env.notifications : c === "audioAlerts" ? env.audioAlerts : false),
 }));
-vi.mock("@/lib/auth", () => ({useMe: () => ({data: {id: "u1", role_names: [], permissions: {}}})}));
+vi.mock("@/lib/permissions", () => ({
+  hasPermission: (_me: unknown, p: string) => p === "ace.requests.claim" && env.claim,
+}));
+const ME = vi.hoisted(() => ({id: "u1", role_names: [], permissions: {}}));
+vi.mock("@/lib/auth", () => ({useMe: () => ({data: env.signedIn ? ME : undefined})}));
 vi.mock("@/lib/settings", () => ({
   useSetting: (key: string, fallback: unknown) => ({
-    value: key === "notifications.eventReminders" ? true : fallback,
+    value:
+      key === "notifications.eventReminders" ? env.banner : key === "sounds.eventReminders" ? env.sound : fallback,
   }),
 }));
+// The real hook, spied on, so a test can see the notifier reads its claims through it.
+vi.mock("@/lib/ace", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/ace")>();
+  return {...real, useMyAceClaims: vi.fn(real.useMyAceClaims)};
+});
 // A fresh copy per response, as the network gives — so identical claims are equal but not the same
 // object, which is exactly what TanStack's structural sharing collapses back to the old reference.
 vi.mock("@/lib/api", () => ({
@@ -36,6 +53,7 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+import {useMyAceClaims} from "@/lib/ace";
 import {EventReminderNotifier} from "./desktop-notifiers";
 
 declare global {
@@ -55,7 +73,8 @@ beforeEach(() => {
   notifyDesktop.mockClear();
   claims.calls = 0;
   claims.fail = false;
-  perm.claim = true;
+  Object.assign(env, {claim: true, notifications: true, audioAlerts: true, signedIn: true, banner: true, sound: false});
+  vi.mocked(useMyAceClaims).mockClear();
   claims.rows = [
     {
       claim_id: "c1",
@@ -230,13 +249,38 @@ describe("EventReminderNotifier when the claims fetch fails (VATUSA/OIS#958)", (
     expect(titles()).toEqual(["Fly-In in 24 hours", "Overload in 24 hours"]);
   });
 
-  it("without ace.requests.claim the claims query never runs and nothing fires", async () => {
-    perm.claim = false;
-    const qc = await mount();
-    await advance(1.5 * HOUR);
+  it("reads its claims through useMyAceClaims, passing its enabled condition", async () => {
+    await mount();
+    expect(vi.mocked(useMyAceClaims).mock.calls.at(-1)).toEqual([true]);
+    expect(claims.calls).toBe(1);
 
-    expect(claims.calls).toBe(0);
-    expect(qc.getQueryState(KEY)?.status).toBe("pending");
-    expect(notifyDesktop).not.toHaveBeenCalled();
+    act(() => root?.unmount());
+    root = undefined;
+    env.claim = false;
+    vi.mocked(useMyAceClaims).mockClear();
+    await mount();
+    expect(vi.mocked(useMyAceClaims).mock.calls.at(-1)).toEqual([false]);
+  });
+
+  // Each clause of the condition, with the others passing: a case that must not fetch beside one
+  // that must, so a dropped clause shows as a fetch where none was allowed.
+  it.each([
+    ["without ace.requests.claim", {claim: false}, false],
+    ["signed out", {signedIn: false}, false],
+    ["with neither notifications nor audio alerts on this platform", {notifications: false, audioAlerts: false}, false],
+    ["with audio alerts only on this platform", {notifications: false, audioAlerts: true}, true],
+    ["with notifications only on this platform", {notifications: true, audioAlerts: false}, true],
+    ["with the reminder banner and its sound both off", {banner: false, sound: false}, false],
+    ["with only the reminder sound on", {banner: false, sound: true}, true],
+  ])("%s, the claims query fetches: %s", async (_case, overrides, fetches) => {
+    Object.assign(env, overrides);
+    const qc = await mount();
+
+    expect(claims.calls).toBe(fetches ? 1 : 0);
+    expect(qc.getQueryState(KEY)?.status).toBe(fetches ? "success" : "pending");
+    if (!fetches) {
+      await advance(1.5 * HOUR); // c1 inside T-24h: still nothing, because nothing was fetched
+      expect(notifyDesktop).not.toHaveBeenCalled();
+    }
   });
 });
