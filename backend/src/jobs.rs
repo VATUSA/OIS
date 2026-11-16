@@ -2131,18 +2131,22 @@ mod stats_compaction_tests {
 
     use super::stats_compaction_once;
 
-    async fn seed_taxi_observation(pool: &PgPool, age: &str) {
+    /// A published TMI that ended `age` ago: the TM-history prune deletes it past 14 days.
+    async fn seed_ended_tmi(pool: &PgPool, id: &str, age: &str) {
         sqlx::query(&format!(
-            "insert into stats.taxi_observation (airport, taxi_sec, observed_at) \
-             values ('KIAD', 600, now() - interval '{age}')"
+            "insert into tmu.tmis \
+             (id, requesting, providing, restriction, status, start_time, published_at, ended_at) \
+             values ($1, 'N90', 'ZNY', 'JFK arrivals via CAMRN 20MIT', 'expired', \
+                     now() - interval '{age}', now() - interval '{age}', now() - interval '{age}')"
         ))
+        .bind(id)
         .execute(pool)
         .await
         .unwrap();
     }
 
-    async fn taxi_observation_count(pool: &PgPool) -> i64 {
-        sqlx::query_scalar("select count(*) from stats.taxi_observation")
+    async fn tmi_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("select count(*) from tmu.tmis")
             .fetch_one(pool)
             .await
             .unwrap()
@@ -2152,8 +2156,8 @@ mod stats_compaction_tests {
     /// not stop the sub-passes after them.
     #[sqlx::test]
     async fn a_failed_sub_pass_fails_the_run_and_the_rest_still_prune(pool: PgPool) {
-        seed_taxi_observation(&pool, "40 days").await;
-        seed_taxi_observation(&pool, "1 day").await;
+        seed_ended_tmi(&pool, "old", "40 days").await;
+        seed_ended_tmi(&pool, "recent", "1 day").await;
         // Contained to this test's own database (test-writing.md: DDL inside #[sqlx::test]).
         for table in ["stats.winds", "stats.flight_leg"] {
             sqlx::query(&format!("drop table {table}"))
@@ -2170,24 +2174,24 @@ mod stats_compaction_tests {
             "every failed sub-pass is named, and only those"
         );
         assert_eq!(
-            taxi_observation_count(&pool).await,
+            tmi_count(&pool).await,
             1,
-            "the taxi-observation prune after the failed winds prune still ran"
+            "the TM-history prune after the failed winds prune still ran"
         );
     }
 
     /// Positive control: with every sub-pass healthy the run succeeds.
     #[sqlx::test]
     async fn a_healthy_run_succeeds_and_prunes(pool: PgPool) {
-        seed_taxi_observation(&pool, "40 days").await;
-        seed_taxi_observation(&pool, "1 day").await;
+        seed_ended_tmi(&pool, "old", "40 days").await;
+        seed_ended_tmi(&pool, "recent", "1 day").await;
 
         let summary = stats_compaction_once(&pool, &AtomicI64::new(0))
             .await
             .expect("a healthy run succeeds");
 
         assert_eq!(summary, "1 rows removed");
-        assert_eq!(taxi_observation_count(&pool).await, 1);
+        assert_eq!(tmi_count(&pool).await, 1);
     }
 
     /// Each downsample tier is named on its own, so a failed run says which age boundary failed.

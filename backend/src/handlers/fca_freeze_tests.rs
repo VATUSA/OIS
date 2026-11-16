@@ -974,11 +974,17 @@ async fn held_at_ground_eta(state: &AppState, pool: &PgPool, id: &str) -> i64 {
     eta_g
 }
 
+/// RDY is ready at the runway now (#814): GND1 (no filed time) is timed from a proposed wheels-up
+/// `PROPOSED_WHEELS_UP_MIN` out, so its ready crossing is its ETA less that. AIR1 is held there, so
+/// a release that reads the held STA must space GND1 behind it.
 #[sqlx::test]
 async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
     let id = corridor_fca(&pool, 30).await;
-    let held = held_at_ground_eta(&state, &pool, &id).await;
+    let g = row(&traffic(&state, &id).await, "GND1").clone();
+    assert_eq!(g["wheels_up_proposed"], true, "positive control: {g}");
+    let held = ms(&g["eta"]) - crate::feed::predict::PROPOSED_WHEELS_UP_MIN * 60_000;
+    seed_held(&pool, &id, "AIR1", held).await;
     let cookie = national(&pool, "flow.fca.update").await;
 
     let rows = release(&state, &cookie, &id, "GND1", json!({})).await;
@@ -987,7 +993,7 @@ async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
     assert_eq!(
         ms(&g["cross_time"]),
         held + 135_000,
-        "rate 30's 120 s gap plus RDY's 15 s margin behind AIR1's held STA, not GND1's ETA: {g}"
+        "rate 30's 120 s gap plus RDY's 15 s margin behind AIR1's held STA, not GND1's ready crossing: {g}"
     );
     assert_eq!(ms(&row(&rows, "AIR1")["cross_time"]), held);
     assert_eq!(
@@ -997,10 +1003,10 @@ async fn rdy_spaces_a_departure_behind_a_held_airborne_sta(pool: PgPool) {
     );
 }
 
-/// A Set two minutes out on a parked flight: its release time is the first legal slot from its
-/// ETA less the whole ground allowance (pushback, start-up and taxi) plus 2 min, so the ETA, which
-/// counts that allowance, is already past it, while the wheels-up is still ahead. The Set's own response and the next traffic read both keep the release time with no
-/// lateness, and the held airborne flight keeps its STA.
+/// A Set two minutes out on a parked flight: its wheels-up is still ahead. The Set's own response and
+/// the next traffic read both keep the release time with no lateness, and the held airborne flight
+/// keeps its STA. A released flight is timed from its release (#814), so its ETA no longer runs past
+/// the release time while it waits.
 #[sqlx::test]
 async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
     let state = state_with(pool.clone(), vec![airborne("AIR1"), parked("GND1")]).await;
@@ -1030,10 +1036,7 @@ async fn a_set_release_waiting_for_its_wheels_up_is_not_late(pool: PgPool) {
         ("traffic read", traffic(&state, &id).await),
     ] {
         let g = row(&rows, "GND1");
-        assert!(
-            ms(&g["eta"]) > cta,
-            "{label}: the scenario needs the ETA past the release: {g}"
-        );
+        assert_eq!(g["released"], true, "{label}: positive control: {g}");
         assert_eq!(
             ms(&g["cross_time"]),
             cta,

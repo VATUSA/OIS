@@ -37,16 +37,16 @@ And four tables the feed caches, so the model never queries the database:
 
 The entry point decides each input once:
 
-- **Airborne** means a groundspeed of at least `AIRBORNE_GS_KT` (`backend/src/feed/predict.rs:277`)
+- **Airborne** means a groundspeed of at least `AIRBORNE_GS_KT` (`backend/src/feed/predict.rs:279`)
   knots, at any altitude.
 - **The route** is the filed route resolved from where the flight is. When it does not resolve,
   the model flies the great circle to the arrival field. A flight not yet airborne on a route that
   resolves to its two endpoints only is padded by `GROUND_ROUTE_FACTOR`
-  (`backend/src/feed/predict.rs:41`), since no airway routing flies the direct line. A ground or
+  (`backend/src/feed/predict.rs:43`), since no airway routing flies the direct line. A ground or
   prefiled flight with no path to fly, a prefile from an unknown field or a route that does not
   resolve to an unknown arrival field, is timed over `NOMINAL_ROUTE_NM`
-  (`backend/src/feed/predict.rs:289`) nautical miles. A connected ground pilot within `ARRIVED_NM`
-  (`backend/src/feed/predict.rs:480`) of an arrival field it did not depart from has arrived: it
+  (`backend/src/feed/predict.rs:291`) nautical miles. A connected ground pilot within `ARRIVED_NM`
+  (`backend/src/feed/predict.rs:482`) of an arrival field it did not depart from has arrived: it
   gets no great circle to that field, and airport flow labels it arrived.
 - **The filed altitude** is the first run of digits in the filing, so `FL350/370` is 35,000 ft; an
   unreadable filing is timed at 35,000 ft (`trajectory::parse_alt_ft`).
@@ -70,7 +70,7 @@ Every trajectory starts at wheels-up and flies from the runway. No taxi time is 
   lock, so its delay column shows only delay added after the lock; the delay it took on the ground
   is in its release time.
 - A connected ground pilot with no scheduler time is wheels-up at its proposed time: its filed
-  departure time plus `PROPOSED_WHEELS_UP_MIN` (`backend/src/feed/predict.rs:35`) minutes. The
+  departure time plus `PROPOSED_WHEELS_UP_MIN` (`backend/src/feed/predict.rs:37`) minutes. The
   filed time is read as its nearest occurrence within 12 hours (vTBFM manual §8.6). A filed time
   that has passed, a blank one, or a malformed or `0000` time counts as pushing now
   (`predict::proposed_wheels_up`).
@@ -97,18 +97,18 @@ itself proposed; the FCA board, airport flow and the departures list mark it wit
   from a top of descent the profile computes. A route too short to reach cruise flies a climb and
   a descent that meet at the altitude that fills it.
 
-Altitude is stepped every `VERT_STEP_FT` (`backend/src/feed/trajectory.rs:407`) feet to build the
+Altitude is stepped every `VERT_STEP_FT` (`backend/src/feed/trajectory.rs:432`) feet to build the
 climb and descent curves, and time is integrated every `HORIZ_STEP_NM`
-(`backend/src/feed/trajectory.rs:409`) nautical miles along them. No step flies slower than
-`GS_FLOOR_KT` (`backend/src/feed/trajectory.rs:405`) knots of groundspeed. The default profile
+(`backend/src/feed/trajectory.rs:434`) nautical miles along them. No step flies slower than
+`GS_FLOOR_KT` (`backend/src/feed/trajectory.rs:430`) knots of groundspeed. The default profile
 (no type or wake match) climbs at 250 KIAS and 2,000 fpm below 10,000 ft, 290 KIAS and 1,500 fpm
 above, and descends at 290 then 250 KIAS and 1,800 fpm (`AircraftProfile::default`).
 
 ## Winds
 
 The winds are NOAA's Rapid Refresh (RAP) model on a regular grid (#836), refreshed every
-`WINDS_REFRESH_INTERVAL` (`backend/src/jobs.rs:143`) and replaced by still air once older than
-`WINDS_MAX_AGE_SECS` (`backend/src/jobs.rs:150`) seconds. `Winds::along` samples the field along
+`WINDS_REFRESH_INTERVAL` (`backend/src/jobs.rs:147`) and replaced by still air once older than
+`WINDS_MAX_AGE_SECS` (`backend/src/jobs.rs:154`) seconds. `Winds::along` samples the field along
 the flight's path no more than `KNOT_SPACING_NM` (`backend/src/feed/winds.rs:20`) nautical miles
 apart, and the profile reads each sample at its own altitude there, so a climb meets the low-level
 wind and the cruise the jet stream. Groundspeed is the true airspeed less the headwind, held
@@ -118,11 +118,11 @@ field is still air.
 ## Groundspeed anchoring
 
 An airborne flight established at cruise, at least `ANCHOR_MIN_GS_KT`
-(`backend/src/feed/trajectory.rs:412`) knots and within `ANCHOR_ALT_TOLERANCE_FT`
-(`backend/src/feed/trajectory.rs:414`) feet of its cruise altitude, is anchored to what it is
+(`backend/src/feed/trajectory.rs:437`) knots and within `ANCHOR_ALT_TOLERANCE_FT`
+(`backend/src/feed/trajectory.rs:439`) feet of its cruise altitude, is anchored to what it is
 flying: every predicted groundspeed for the rest of the flight is scaled by its observed
 groundspeed over the predicted one, a ratio clamped to ±`ANCHOR_MAX_BIAS`
-(`backend/src/feed/trajectory.rs:417`), so 0.85 to 1.15 (#313). The ratio is taken fresh from each
+(`backend/src/feed/trajectory.rs:442`), so 0.85 to 1.15 (#313). The ratio is taken fresh from each
 poll; nothing is carried between polls. A climbing or ground flight is not anchored.
 
 ## Freeze horizons
@@ -155,10 +155,10 @@ trajectory's ETA there less its wheels-up (`release_ms` in `handlers/flow.rs`, `
   airborne flight, which has left, is not floored.
 - **A CFR issued without a ready time** locks the program's metered CFR, else the flight's locked
   or proposed wheels-up (`FlowFlight.etd`).
-- **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:482`) milliseconds on
+- **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:515`) milliseconds on
   top of the separation, so a release never takes a slot that only just fits. Miles-in-trail turns
   into a time gap at the crossing speed, floored at `MIN_CROSS_SPEED_KT`
-  (`backend/src/feed/predict.rs:286`) knots; airport-flow MIT reads that speed `MIT_CROSSING_NM`
+  (`backend/src/feed/predict.rs:288`) knots; airport-flow MIT reads that speed `MIT_CROSSING_NM`
   (`backend/src/feed/flow.rs:24`) nautical miles short of the field.
 
 The FAA holds a CFR release to an airborne window from 2 minutes before to 1 minute after the

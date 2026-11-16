@@ -40,11 +40,17 @@ export const CHANGELOG: ChangelogEntry[] = [
   {
     id: "2026-11-15-fca-freeze-horizon",
     date: "2026-11-15",
-    title: "FCA freeze horizon, engine-family profiles and scoped event FCAs",
+    title: "One ETA per flight, no taxi time, and the FCA freeze horizon",
     sections: [
       {
         heading: "Flow and FCAs",
         highlights: [
+          "Every page times a flight the same way, so one aircraft shows the same ETA on the FCA board, airport flow and sector demand.",
+          "OIS no longer adds a learned taxi time to any time it predicts. A ground flight with no ready time, release, CFR or GDP EDCT is timed from its filed departure time plus 10 min, and no sooner than now plus 10 min. Those times show a P.",
+          "A CFR, FCA release or GDP slot now moves that flight's times everywhere it is shown, including airport flow, departures, the AADC and the GDP draft.",
+          "RDY means ready at the runway now, and a Set time is a runway time.",
+          "Prefiled flights no longer appear in airport flow, demand, the AADC, the GDP draft or the departures list.",
+          "The taxi insights page is gone. The live Taxi Monitor still shows taxi times.",
           "Each FCA has a freeze horizon, set in the FCA editor as \"Freeze horizon · min\" (30 by default, 0 turns it off). Inside it, a flight's crossing time is held instead of moving on every feed update.",
           "Released and held flights are now checked against each other, so two aircraft no longer sit closer than the FCA's spacing without a warning. A flight inside another crossing's gap shows IN GAP, and a flight running past its release or held time shows how late it is.",
           "Every pair of crossings is spaced by the larger of the two gaps the aircraft need, in auto and manual mode and when Set searches for a slot.",
@@ -52,10 +58,18 @@ export const CHANGELOG: ChangelogEntry[] = [
         ],
       },
       {
+        heading: "TMU and advisories",
+        highlights: [
+          "The public Advisories board and the NAS demand widget update when a ground stop, GDP, restriction or program changes, instead of on their next poll.",
+          "The TMU link in the sidebar and the command palette shows for everyone who can open a TMU tab, and only for them.",
+        ],
+      },
+      {
         heading: "Events",
         highlights: [
           "Creating, editing, deleting, publishing, archiving or auto-publishing an event FCA now needs event-planning access at that FCA's facility. A planner scoped to one ARTCC can no longer change another ARTCC's event FCAs.",
           "Deleting, deciding or releasing a claim on an ACE request only works on a request that belongs to the event in the address.",
+          "If the desktop app cannot load your ACE claims, it keeps the claims it already had for reminders instead of dropping them.",
         ],
       },
       {
@@ -65,6 +79,7 @@ export const CHANGELOG: ChangelogEntry[] = [
           "ACE request posts and claim DMs can no longer ping @everyone or a role from the text they carry.",
           "Backticks in an advisory's remarks no longer break the \"View structured\" reply's formatting.",
           "The bot gives up on a call to OIS that hangs, so one stuck request no longer stops the queue until a restart.",
+          "The bot refuses to start when OIS_POLL_SECS is not a whole number of seconds above 0, and names the variable, instead of quietly polling every 5 seconds.",
         ],
       },
       {

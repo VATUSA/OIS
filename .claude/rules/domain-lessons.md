@@ -89,7 +89,8 @@ A `NULL` pushback meant both "did not push" and "push not detected", and only ~4
 detected at the feed's cadence. Counting `NULL` as zero would have taught a hub a 0 s pushback; dropping
 it made a no-tug field unrepresentable (#287). The observer now stores `0` only for a departure that
 taxied off the stand with no push, and `NULL` for unmeasured. Proof: commits 616bef62, a7a6a7f0;
-`a_missed_push_and_a_real_no_push_are_recorded_differently` (`feed/taxi_observations.rs`).
+`a_missed_push_and_a_real_no_push_are_recorded_differently` (`feed/taxi_observations.rs`). #814
+removed the observer and the learned taxi model with it; the rule stands for any measured input.
 
 ## A stationary aircraft's heading is its parking orientation
 
@@ -97,7 +98,7 @@ Runway matching for the ground allowance read live heading on aircraft still at 
 heading within ±30° of an unrelated runway pulled that runway's taxi samples into metering (found in
 #181's review). Match on heading only once groundspeed reaches `TAXI_ROLL_GS_KT`. Proof: commit
 595f3482; `resolve_ground_allowance_sec_ignores_a_coincidental_heading_match_while_stationary`
-(`feed/flow.rs`).
+(`feed/flow.rs`). #814 removed the ground allowance; the rule stands for any heading match.
 
 ## A predicate applied at nine sites is tested at the sites
 

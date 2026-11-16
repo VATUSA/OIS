@@ -1464,8 +1464,9 @@ mod tests {
     }
 
     /// #817: airborne arrivals take the first clear slot, not the slot after the last one placed.
-    /// A1 and A2 on CAMRN are 200 s apart (60 s and 260 s). A3, with no gate and ETA 150 s, is
-    /// clear of both by the 60 s runway interval and keeps its ETA.
+    /// A1 and A2 on CAMRN cross at 360 kt, so 20 MIT is 200 s (#813) and they sit 200 s apart (60 s
+    /// and 260 s). A3, with no gate and ETA 150 s, is clear of both by the 60 s runway interval and
+    /// keeps its ETA.
     #[test]
     fn an_airborne_arrival_takes_a_clear_gap_between_two_others() {
         let now = t0();
@@ -1478,9 +1479,13 @@ mod tests {
             }],
             ..base_program()
         };
+        let at_360 = |f: FlowFlight| FlowFlight {
+            mit_cross_kt: 360.0,
+            ..f
+        };
         let mut flights = vec![
-            ff("A1", "airborne", 1, Some("CAMRN")),
-            ff("A2", "airborne", 2, Some("CAMRN")),
+            at_360(ff("A1", "airborne", 1, Some("CAMRN"))),
+            at_360(ff("A2", "airborne", 2, Some("CAMRN"))),
             FlowFlight {
                 eta: Some(now + Duration::seconds(150)),
                 ..ff("A3", "airborne", 0, None)
@@ -3198,8 +3203,8 @@ mod tests {
 
     // ---- #818: airport-flow demand times a jet with no type row on its engine-family row ----
 
-    /// `compute` resolves each pilot's and each prefile's profile through the table it is given
-    /// (`feed::flow::compute`, both resolve sites): a B772 (a jet in `ENGINE_REF`, no type row here)
+    /// `compute` resolves each pilot's profile through the table it is given (airport flow lists no
+    /// prefiles, #814): a B772 (a jet in `ENGINE_REF`, no type row here)
     /// is timed on the jet family row, a QQQQ (no engine family) is not.
     #[test]
     fn compute_times_a_jet_with_no_type_row_on_its_family_row() {
@@ -3213,11 +3218,6 @@ mod tests {
                 pilot("AIR1", 40.0, -73.7781, 15_000, 300, typed("B772", "PARCH4")),
                 pilot("CTL1", 42.36, -71.0, 0, 0, typed("QQQQ", "DCT CAMRN KJFK")),
             ],
-            prefiles: vec![Prefile {
-                callsign: "PRE1".into(),
-                flight_plan: Some(typed("B772", "DCT LENDY KJFK")),
-                ..Default::default()
-            }],
             ..Default::default()
         };
         let jet = trajectory::ProfileTable::new(
@@ -3251,7 +3251,7 @@ mod tests {
                 .collect::<HashMap<_, _>>()
         };
         let (without, with) = (etas(&trajectory::ProfileTable::default()), etas(&jet));
-        for cs in ["GRD1", "AIR1", "PRE1"] {
+        for cs in ["GRD1", "AIR1"] {
             assert_ne!(
                 with[cs], without[cs],
                 "{cs}: the jet family row must move its ETA"
