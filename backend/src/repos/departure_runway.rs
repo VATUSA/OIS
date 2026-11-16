@@ -137,13 +137,12 @@ pub async fn get(
     .map_err(|_| ApiError::Internal)
 }
 
-/// Every stored assignment, keyed `(icao, callsign)` with `(runway, source)`: the map the live timing
-/// surfaces hand the predictor through `TimingTables::live`, so a ground flight's taxi allowance reads the same runway on the FCA
-/// ladder, IDST, airport flow and the per-fix table (#813). The table holds at most
-/// `jobs::DEPARTURE_RUNWAY_RETAIN_HOURS` of departures.
-pub async fn assignment_map(
-    pool: &PgPool,
-) -> Result<crate::feed::predict::AssignedRunways, ApiError> {
+/// Departure runways already assigned, keyed `(departure ICAO, callsign)` with `(runway, source)`.
+pub type AssignedRunways = std::collections::HashMap<(String, String), (String, String)>;
+
+/// Every stored assignment: the runway column IDST shows beside each departure (`list_idst`). The
+/// table holds at most `jobs::DEPARTURE_RUNWAY_RETAIN_HOURS` of departures.
+pub async fn assignment_map(pool: &PgPool) -> Result<AssignedRunways, ApiError> {
     let rows = sqlx::query_as::<_, DepartureRunwayAssignment>(
         "select icao, callsign, runway, source, updated_at from flow.departure_runway_assignment",
     )

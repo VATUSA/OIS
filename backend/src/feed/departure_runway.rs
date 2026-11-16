@@ -8,17 +8,17 @@
 //!
 //! # Why a prediction is needed at all
 //!
-//! A runway is inferred today only once an aircraft is *rolling*:
-//! `feed::flow::resolve_ground_allowance` refuses a heading match below
-//! [`crate::feed::flow::TAXI_ROLL_GS_KT`], because a parked aircraft's heading says nothing about which
-//! runway it will use. So every parked and every prefiled departure falls to the airport/default taxi
-//! tier — exactly the flights IDST sequences, and the taxi estimate is what the EDCT is built from.
+//! The feed carries no departure runway, and a parked aircraft's heading says nothing about which
+//! runway it will use. IDST shows each departure's runway beside its release
+//! (`handlers::flow::list_idst`), and a release swap is refused unless both departures hold the same
+//! stored runway (`handlers::flow::same_departure_slot`). The runway does not enter any ETA (#814).
 //!
 //! # `None` is an answer
 //!
-//! Every rung can decline, and declining is correct. A plausible-looking wrong runway would narrow the
-//! learned taxi estimate to the wrong bucket and therefore move the EDCT; having no runway merely
-//! leaves the estimate where it already is. So there is no guess of last resort here.
+//! Every rung can decline, and declining is correct. A plausible-looking wrong runway would show the
+//! controller the wrong runway and let a swap through between departures that use different ones;
+//! having no runway shows nothing and refuses the swap (`runway_unassigned`). So there is no guess of
+//! last resort here.
 
 use crate::models::AirportConfigBody;
 use crate::repos::departure_runway::RunwaySource;
@@ -294,7 +294,7 @@ mod tests {
     }
 
     /// #511 AC2, fallback 2: a gate that matches no rule, at a config with no departure runways. A wrong
-    /// runway would move the EDCT; no runway leaves the taxi estimate where it already was.
+    /// runway would show the controller the wrong runway; no runway shows none.
     #[test]
     fn no_matching_rule_and_no_default_predicts_nothing() {
         let c = config(&[], &[("CAMRN", "31L")], &[("A1", "22R")]);

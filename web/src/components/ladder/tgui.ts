@@ -25,6 +25,8 @@ export interface TguiItem {
   /** The time is committed — a release (FCA) or an issued CFR (airport). OIS has no freeze horizon,
    * so this is what stands in for vTBFM's "frozen". */
   committed: boolean;
+  /** Its times rest on the flight's proposed wheels-up: it holds no ready time, release, CFR or EDCT (#814). */
+  proposed?: boolean;
   /** Wake category (`L`/`M`/`H`/`J`), when the stream carries one. */
   wake?: string | null;
 }

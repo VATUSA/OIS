@@ -40,7 +40,6 @@ pub(crate) fn test_state(pool: PgPool, facilities: HashMap<String, Facility>) ->
         runways: Arc::new(RunwayDb::load()),
         gates: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         flight_exclusions: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-        taxi_estimate_samples: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
         aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
         aircraft_profiles_loaded: Arc::new(AtomicBool::new(false)),

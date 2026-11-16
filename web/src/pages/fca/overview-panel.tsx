@@ -5,7 +5,7 @@ import {ChevronDown, ChevronRight} from "lucide-react";
 import {swatchCss} from "@/components/map/lib/colors";
 import {type Fca, type FcaFlight} from "@/lib/fca";
 import {FLIGHT_STATE_LABEL, toneOf} from "@/lib/status";
-import {hhmmZulu} from "@/lib/time";
+import {ProposedTime} from "@/components/proposed-time";
 
 type Filter = "all" | "air" | "cfr";
 
@@ -74,7 +74,11 @@ const STRIP_COLUMNS: DataColumn<FcaFlight>[] = [
       const delayed = f.delay_sec >= 30;
       return (
         <span className="whitespace-nowrap">
-          <span className={delayed ? "text-ink" : toneText[statusOf(f.status).tone]}>{hhmmZulu(f.cross_time)}</span>
+          <ProposedTime
+            className={delayed ? "text-ink" : toneText[statusOf(f.status).tone]}
+            iso={f.cross_time}
+            proposed={f.wheels_up_proposed}
+          />
           <span className={`block text-[10px] ${delayed ? "text-danger" : "text-success"}`}>
             {delayed ? `+${Math.round(f.delay_sec / 60)}m` : "on time"}
           </span>

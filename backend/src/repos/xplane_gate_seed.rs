@@ -12,25 +12,20 @@
 //! facility that deliberately deleted every imported stand at their field would have them all come
 //! back on the next restart.
 //!
-//! ## Why gates cannot copy the FAA re-pull
+//! ## A re-pull keeps gate ids
 //!
-//! `stats.taxi_observation.gate_id` is `references flow.airport_gate(id) on delete set null`
-//! (migration `0070`). The FAA tables have no such foreign key, so its re-pull is free to delete its
-//! own rows and re-insert them. Doing that to gates would mint fresh uuids and **silently null every
-//! learned observation at that airport**, destroying the taxi history that the `gate_type_runway`
-//! estimate tier is built from — the exact thing #431 exists to make reachable.
-//!
-//! So [`seed_for_icao`] matches on `(icao, name)` and updates in place: positions and kinds are
-//! refreshed, ids survive, and observations stay attached. The importer guarantees names are unique
-//! within an airport so that match is unambiguous.
+//! [`seed_for_icao`] matches on `(icao, name)` and updates in place: positions and kinds are
+//! refreshed and ids survive, where the FAA re-pull deletes its own rows and re-inserts them. No table
+//! references a gate id since #814 dropped `stats.taxi_observation`, but a stand keeps one id across
+//! re-pulls. The importer guarantees names are unique within an airport so that match is
+//! unambiguous.
 //!
 //! ## Retiring the osm gates
 //!
 //! KDCA carries 57 hand-committed `osm` gates from migration `0067` and the extract has 75 stands for
 //! the same airport. Keeping both would put two rows at nearly the same position for one physical
-//! stand, and `feed::flow::nearest_gate` would split that stand's observations across two ids —
-//! halving the samples counted against `MIN_SAMPLES`, which delays the very tier this unblocks. So the
-//! seed retires `osm` gates at the airports it covers, exactly as
+//! stand, and `feed::flow::nearest_gate` would match it to either. So the seed retires `osm` gates at
+//! the airports it covers, exactly as
 //! `faa_surface_seed::retire_osm` retires `osm` taxiways and ramps. `manual` and `crc` rows are never
 //! touched.
 
@@ -154,8 +149,8 @@ pub async fn seed(pool: &PgPool) -> Result<GateSeedSummary, ApiError> {
 
 /// Re-pulls one airport's stands from the extract, on operator request.
 ///
-/// Matches existing `xplane` rows on `(icao, name)` and updates them in place, so gate ids — and the
-/// `stats.taxi_observation` rows pointing at them — survive. New stands are inserted; `xplane` rows
+/// Matches existing `xplane` rows on `(icao, name)` and updates them in place, so gate ids survive.
+/// New stands are inserted; `xplane` rows
 /// the extract no longer lists are deleted. `manual` and `crc` rows are left alone entirely.
 ///
 /// `NotFound` when the extract does not cover `icao`, touching nothing: clearing an uncovered
@@ -177,7 +172,7 @@ pub async fn seed_for_icao(pool: &PgPool, icao: &str) -> Result<GateSeedSummary,
     .await
     .map_err(db_err)?;
 
-    // Refresh the ones we already have, by name, so their ids (and observations) survive.
+    // Refresh the ones we already have, by name, so their ids survive.
     let (mut u_name, mut u_lat, mut u_lon, mut u_kind) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut d = StandDetail::with_capacity(stands.len());
@@ -524,7 +519,7 @@ mod tests {
     }
 
     /// KDCA's 57 hand-committed osm gates (migration `0067`) describe the same physical stands the
-    /// extract does; keeping both would split that stand's taxi observations across two ids.
+    /// extract does; keeping both would put two rows at one stand.
     #[sqlx::test]
     async fn kdcas_osm_gates_are_retired_in_favour_of_the_import(pool: PgPool) {
         assert_eq!(gate_count(&pool, "KDCA", "osm").await, 57, "0067's seed");
@@ -574,11 +569,9 @@ mod tests {
         assert_eq!(gate_count(&pool, &icao, "xplane").await, 0);
     }
 
-    /// **The test that matters most.** `stats.taxi_observation.gate_id` is
-    /// `on delete set null` (migration `0070`), so a re-pull that deleted and re-inserted stands would
-    /// mint new ids and silently wipe the learned taxi history this issue exists to make reachable.
+    /// A re-pull updates stands in place: the stand keeps its id and is not inserted twice.
     #[sqlx::test]
-    async fn a_repull_preserves_gate_ids_and_their_observations(pool: PgPool) {
+    async fn a_repull_preserves_gate_ids(pool: PgPool) {
         let icao = a_covered_icao();
         seed(&pool).await.unwrap();
 
@@ -590,31 +583,8 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "insert into stats.taxi_observation \
-             (airport, gate_id, aircraft, runway, taxi_sec, observed_at) \
-             values ($1, $2, 'B738', '27', 600, now())",
-        )
-        .bind(&icao)
-        .bind(&gate_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
         seed_for_icao(&pool, &icao).await.unwrap();
 
-        let still: Option<String> = sqlx::query_scalar(
-            "select gate_id from stats.taxi_observation where airport = $1 limit 1",
-        )
-        .bind(&icao)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            still.as_deref(),
-            Some(gate_id.as_str()),
-            "the re-pull must keep the gate's id so its learned observations stay attached"
-        );
         let surviving: i64 = sqlx::query_scalar(
             "select count(*) from flow.airport_gate where id = $1 and name = $2",
         )
@@ -759,48 +729,7 @@ mod tests {
         );
     }
 
-    /// AC6 — the point of the whole issue. Tier 1 keys on `(gate_id, aircraft, runway)` and needs
-    /// `MIN_SAMPLES` observations, so an import cannot *populate* it; what it does is make it
-    /// **reachable**, which before this change it was not at 184 of 185 airports. This walks the real
-    /// chain: seeded stand -> its id on observations -> `feed::taxi_estimate` returning the top tier.
-    #[sqlx::test]
-    async fn a_seeded_stand_makes_the_gate_type_runway_tier_reachable(pool: PgPool) {
-        use crate::feed::taxi_estimate::{EstimateTier, TaxiSample, estimate};
-
-        let icao = a_covered_icao();
-        seed(&pool).await.unwrap();
-
-        let gate_id: String = sqlx::query_scalar(
-            "select id from flow.airport_gate where icao = $1 and source = 'xplane' \
-             order by name limit 1",
-        )
-        .bind(&icao)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        let samples: Vec<TaxiSample> = (0..5)
-            .map(|_| TaxiSample {
-                gate_id: Some(gate_id.as_str().into()),
-                aircraft: Some("B738".into()),
-                runway: Some("27".into()),
-                pushback_sec: Some(90),
-                startup_sec: Some(60),
-                taxi_sec: 600,
-            })
-            .collect();
-
-        let est = estimate(&samples, Some(&gate_id), Some("B738"), Some("27"));
-
-        assert_eq!(
-            est.taxi.tier,
-            EstimateTier::GateTypeRunway,
-            "a seeded stand with enough samples must reach tier 1"
-        );
-    }
-
-    /// The imported `kind` is what a future refinement of `feed::taxi_observations::phases_at_stand`
-    /// would key on, so it has to survive the import rather than land as null.
+    /// The imported `kind` has to survive the import rather than land as null.
     #[sqlx::test]
     async fn imported_stands_carry_their_x_plane_kind(pool: PgPool) {
         seed(&pool).await.unwrap();
@@ -941,7 +870,7 @@ mod tests {
             "every stand's heading was refreshed in place"
         );
 
-        // AC4: and the ids survived, which is what keeps stats.taxi_observation.gate_id intact.
+        // AC4: and the ids survived.
         let ids_after: Vec<String> = sqlx::query_scalar(
             "select id::text from flow.airport_gate where icao = $1 and source = 'xplane' order by name",
         )

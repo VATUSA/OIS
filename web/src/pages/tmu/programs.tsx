@@ -45,8 +45,7 @@ function LiveDemand({ icao, aar, compact = false }: { icao: string; aar: number;
       {over && <span className="font-semibold text-danger">over capacity</span>}
       <span className="text-ink-2">
         <span className="font-mono">{d.inbound}</span> inbound — <span className="font-mono">{d.airborne}</span>{" "}
-        airborne · <span className="font-mono">{d.ground}</span> ground ·{" "}
-        <span className="font-mono">{d.proposed}</span> proposed
+        airborne · <span className="font-mono">{d.ground}</span> ground
       </span>
     </div>
   );

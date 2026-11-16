@@ -20,3 +20,19 @@ describe("removed Monitor routes (#719)", () => {
     expect(paths).toContain("/admin/flow/sectors");
   });
 });
+
+/** The taxi insights page went with the learned taxi model (#814). The nav entry is pinned by
+ * nav.test.ts, whose list of required permissions no longer holds the page. */
+describe("removed taxi insights route (#814)", () => {
+  const paths = Object.keys(router.routesByPath);
+
+  it("no longer registers the taxi insights page", () => {
+    expect(paths).not.toContain("/admin/historical/taxi");
+    expect(paths).not.toContain("/admin/historical/taxi/");
+  });
+
+  it("keeps the other historical pages", () => {
+    expect(paths).toContain("/admin/historical/delays");
+    expect(paths).toContain("/admin/historical/replay");
+  });
+});

@@ -228,3 +228,35 @@ describe("FcaDetail Set input (VATUSA/OIS#816)", () => {
     expect(input?.getAttribute("aria-label")).toBe("Ready time");
   });
 });
+
+/** VATUSA/OIS#814 AC6: a crossing time that rests on the flight's proposed wheels-up is marked. */
+describe("FcaDetail proposed crossing time (VATUSA/OIS#814)", () => {
+  const as = (f: FcaFlight, patch: Partial<FcaFlight>) => ({ ...f, ...patch }) as FcaFlight;
+  const flights = [
+    as(flight("GRD", false), { wheels_up_proposed: true }),
+    as(flight("REL", true), { wheels_up_proposed: false }),
+    as(flight("AIR", false), { status: "airborne", seq: 3, wheels_up_proposed: false }),
+  ];
+  /** The crossing-time span on `callsign`'s strip. */
+  const crossing = (host: HTMLElement, callsign: string) => {
+    const strip = [...host.querySelectorAll("li")].find((li) => li.textContent?.includes(callsign));
+    // The innermost span whose text starts with the time: the outer ones wrap it with the delay.
+    return [...(strip?.querySelectorAll("span") ?? [])].filter((s) => s.textContent?.startsWith("1200z")).at(-1);
+  };
+
+  it("marks the crossing time of an unreleased ground flight as proposed", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, flights);
+    const grd = crossing(host, "GRD");
+    expect(grd?.textContent).toBe("1200zP proposed");
+    expect(grd?.querySelector(".sr-only")?.textContent).toBe(" proposed");
+  });
+
+  it("leaves a released and an airborne flight's crossing time unmarked", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, flights);
+    expect(crossing(host, "GRD")?.textContent, "positive control").toBe("1200zP proposed");
+    for (const cs of ["REL", "AIR"]) {
+      const span = crossing(host, cs);
+      expect(span?.textContent, cs).toBe("1200z");
+    }
+  });
+});

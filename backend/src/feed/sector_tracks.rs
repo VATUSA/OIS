@@ -144,9 +144,7 @@ impl Ctx<'_> {
             airports: self.airports,
             winds: self.winds,
             profiles: self.profiles,
-            // Every ground flight projected here carries its released wheels-up, which replaces the
-            // ground allowance, so the allowance tables are never read.
-            ground: predict::GroundInputs::unused(),
+            locked: &predict::NO_LOCKS,
         };
         let locked = |cs: &str| {
             wheels_up

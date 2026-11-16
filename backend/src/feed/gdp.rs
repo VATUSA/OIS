@@ -33,10 +33,10 @@ pub struct Inbound {
     pub dep: String,
     /// Departure ARTCC (center) that owns the origin field, if known — for scope filtering.
     pub dep_artcc: Option<String>,
-    /// `airborne` | `ground` | `proposed`.
+    /// `airborne` | `ground`. Prefiles are not inbounds (#814).
     pub status: String,
     pub eta_ms: i64,
-    /// Estimated wheels-up (ground/proposed inbounds); `None` once airborne.
+    /// Estimated wheels-up (ground inbounds); `None` once airborne.
     pub etd_ms: Option<i64>,
 }
 
@@ -285,7 +285,7 @@ pub fn program_stats(assignments: &[Assignment]) -> GdpStats {
 pub struct GdpFlightView {
     pub cs: String,
     pub dep: String,
-    /// Current live status: `airborne` | `ground` | `proposed`.
+    /// Current live status: `airborne` | `ground`.
     pub status: String,
     /// Current estimated time of arrival.
     pub eta: DateTime<Utc>,
@@ -415,7 +415,7 @@ mod tests {
             eta_ms: at(13, 40),
             etd_ms: None,
         };
-        // Wheels-up 13:11 (now 13:00 plus an 11 min allowance), 30 min airborne: ETA 13:41.
+        // Wheels-up 13:11, 30 min airborne: ETA 13:41.
         let gnd = ground("GND", at(13, 41), at(13, 11));
         let out = ration_by_schedule(
             vec![lead, gnd],
