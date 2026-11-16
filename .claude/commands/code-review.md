@@ -57,7 +57,7 @@ When every dispatched lens returns, run:
 bash bin/lib/review-attestation.sh check
 ```
 
-Anything but `attestation complete` means a lens skipped a rule heading, or lens `ac` found an AC unmet, a count short of the section, or wrote no SCOPE, COMMENT, DOC or COPY claim row. Re-dispatch that lens with the printed gaps; never write the rows yourself (a tests-only carry is the one exception). An unmet AC is built on the branch, or taken to the operator to drop or change in the section; never re-attested as met. Keep the tests lens's guard inventory and untouched-path tables for the report, when the tier ran it.
+Anything but `attestation complete` means a lens skipped a rule heading, or lens `ac` found an AC unmet, a count short of the section, or wrote no SCOPE, COMMENT, DOC or COPY claim row. Re-dispatch that lens with the printed gaps; never write the rows yourself (a tests-only carry is the one exception). An unmet AC is built on the branch, or taken to the operator to drop or change in the section; never re-attested as met. An unmet AC that turns on its wording goes to the operator in the same return as the round's findings, before fixing, so the next round is not a full-diff first round again. Keep the tests lens's guard inventory and untouched-path tables for the report, when the tier ran it.
 
 **The verdicts gate the marker.** A **CHANGES REQUESTED** from any lens (a CRITICAL or MAJOR, or a security G1–G4, that is neither DISMISSED nor a non-blocking VARIANCE ("Repeat rounds"), in code this branch added or of `unknown` origin) means Phase 9 does not stamp. Still write the Phase 8 report; stamp only once the findings are resolved and the review re-run against the fixed commit.
 
