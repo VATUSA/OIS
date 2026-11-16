@@ -304,6 +304,11 @@ Grep the old column, field or function across `backend/`, `discord/`, `crates/`,
 response could say a user held a permission nationally beside a tree that omitted it. One resolver
 now answers both.
 
+**Derive a quantity from its own inputs** (ETE = ETA - ETD), never from two other fields that equal
+it only under today's rules. `ready_time_slot` took the airborne ETE as `sta - cfr`, true only while
+the CFR was the wheels-up; when #814 let a later lock bind, it inflated by the gap. When a change
+moves a field, grep for every expression that backs a quantity out of it.
+
 **A flag that is only ever set is latched**, so one earned under the old basis stands for the life
 of the record. Tell: a pass whose every write is `= true`.
 

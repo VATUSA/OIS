@@ -82,6 +82,8 @@ A line you edit is branch-introduced whole: editing it adopts its stale comment 
 
 Fixing a branch-introduced defect or adding a missing killing test needs no question; return one only for scope growth, a behavior change or a rejection. From the third `/code-review` round, before fixing, return the findings and the round count, each finding labeled NEW-CODE or VARIANCE (it sits on a line unchanged since the last attested SHA), recommending: fix the MAJORs that state a failure scenario, ship the rest. A finding the operator leaves unticked is left, not rejected as wrong.
 
+An unmet AC that turns on its wording goes to the operator in the same return as that round's findings, before fixing. An open AC leaves the attestation set incomplete, so `bin/lib/review-attestation.sh prior` finds no prior SHA and the next round reviews the whole diff again.
+
 ## Phase C: Ship
 
 When the records are clean, invoke `/review-before-shipping`, then `/ship`. Remediate only CRITICAL or MAJOR findings; ignore nit-picks. Act on a review agent's FIRST report; every follow-up keeps it alive and the operator pays for it. The stack walk (record 1) runs at the commit you ship when the work has a page or an endpoint in it; a browser-facing change does not ship without it.

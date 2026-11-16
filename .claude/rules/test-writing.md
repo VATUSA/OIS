@@ -58,6 +58,12 @@ comparison is weakened to `len()`; mutate it to `len()` and confirm the swap tes
 - When a guard is simplified, tests for the removed clauses go vacuous, not red. Grep the test file
   for each removed clause and delete what now duplicates a surviving-clause test.
 
+**A fix that patches a read in memory, or exempts one population, needs a test for each.** When a
+fix moves a read before a write and edits the result in memory (`holders.remove` in
+`clear_release`), assert the patched value in the response. When a guard exempts one population
+(airborne flights), test that population, with the other as the positive control. On #814 both
+stayed green under mutation until targeted tests were added.
+
 **Mutate every predicate of a destructive `WHERE`.** List the predicates of a `DELETE` or `UPDATE`
 and delete each in turn; each deletion must fail a test. Start the fixture from the most common
 real row, then seed **one surviving neighbor per predicate** (same ARTCC and another sector; same

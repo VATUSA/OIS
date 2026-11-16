@@ -146,23 +146,23 @@ client could not use it if it wanted to" — not merely "the SPA doesn't call it
 
 `backend/src/feed/trajectory.rs` is the **single** ETA predictor — a vertical-profile integrator
 (climb/cruise/descent schedules, ISA Mach↔TAS, top-of-descent, service-ceiling cap) plus configurable
-per-aircraft `AircraftProfile`s resolved by exact type → wake class → default. Its callers:
+per-aircraft `AircraftProfile`s resolved by exact type → wake class → default. Every surface times
+through one entry point, `feed::predict::trajectory`, which decides each input once: the route and
+its padding, the filed altitude and speed, whether the flight is airborne, and its wheels-up (#813).
+A ground flight's wheels-up is its latest lock, else its filed time plus 10 min; no taxi time is
+added (#814). The callers and the command that re-derives them are `docs/features/flow.md` → "The
+ETA model and its callers"; the design is `docs/architecture/prediction.md`.
 
-- **Run the model:** FCA metering (`handlers/flow.rs`), airport-flow demand (`feed/flow.rs`), runway
-  ETE (`feed/runway.rs`), sector occupancy (`feed/sector_tracks.rs`), and the shared prediction
-  service (`feed/predict.rs`), which builds the `VerticalProfile` the others time against.
 - **Inputs, not callers:** `feed/fca.rs` supplies the route `predict.rs` times along
-  (`fca::route_path`), and `feed/taxi_estimate.rs` supplies the ground allowance `feed/flow.rs` adds
-  before wheels-up. A `trajectory.rs` change does not reach them, but a change to them moves every ETA
-  built on them.
+  (`fca::route_path`), and `repos::flow::locked_wheels_up` the locks, read through
+  `TimingTables::live`. A `trajectory.rs` change does not reach them, but a change to them moves every
+  ETA built on them.
 - **Carry the `ProfileTable` only:** `state.rs` (the cache), `jobs.rs` (its refresh),
   `repos/aircraft_profiles.rs` (loading it), `handlers/aircraft_profiles.rs` (reloading it on write)
   and `scope_test_support.rs` (a test fixture).
 
-A change here reaches every caller above — verify each, don't reason about one. The list goes stale:
-re-derive it with `git grep 'trajectory::' -- backend/src` and `git grep 'predict::' -- backend/src`
-before relying on it, and keep only non-test call sites: both also match doc comments,
-`#[cfg(test)]` code and constant imports.
+A change here reaches every caller — verify each, don't reason about one. Re-derive the caller list
+before relying on it.
 
 ### The live feed subsystem (`feed/`)
 
