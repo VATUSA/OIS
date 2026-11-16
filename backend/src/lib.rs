@@ -12,6 +12,8 @@ pub mod feed;
 pub mod handlers;
 pub mod job_registry;
 pub mod jobs;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod metrics;
 pub mod models;
 pub mod openapi;

@@ -54,7 +54,7 @@ pub(crate) const ADV_CHANNEL: &str = "tmu-advisories";
 ///
 /// Separate from [`skipped_post`] rather than generalised, so the log keeps naming the subject it is
 /// actually about — a grep for `advisory=` finds advisory gaps and nothing else.
-fn skipped_advisory_post(channel: &str, what: &str, advisory_id: &str) {
+pub(crate) fn skipped_advisory_post(channel: &str, what: &str, advisory_id: &str) {
     tracing::warn!(
         channel,
         advisory = advisory_id,
@@ -69,7 +69,7 @@ fn skipped_advisory_post(channel: &str, what: &str, advisory_id: &str) {
 /// typo, a removed mapping or a renamed constant looks like, and the caller still returns 200 either
 /// way. One line here is the difference between a diagnosable gap and a channel nobody notices has
 /// gone quiet (#436 review).
-fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
+pub(crate) fn skipped_post(channel: &str, what: &str, tmi_id: &str) {
     tracing::warn!(
         channel,
         tmi = tmi_id,
@@ -2762,11 +2762,11 @@ mod repost_tests {
         .await
     }
 
-    /// Captures the skip WARN a TMI edit emits, through `scope_test_support::log_capture`.
+    /// The request-shaped wrapper around `crate::log_capture`, so a test can assert on the skip WARN.
     mod capture {
         use sqlx::PgPool;
 
-        pub(super) use crate::scope_test_support::log_capture::{Captured, saw_the_request};
+        pub(super) use crate::log_capture::{Captured, saw_the_request, skip_warnings};
 
         /// `super::patch`, with every event the request emitted.
         pub(super) async fn patch_capturing(
@@ -2774,17 +2774,7 @@ mod repost_tests {
             tmi_id: &str,
             body: serde_json::Value,
         ) -> (http::StatusCode, Vec<Captured>) {
-            crate::scope_test_support::log_capture::capturing(super::patch(pool, tmi_id, body))
-                .await
-        }
-
-        /// The `skipped_post` WARNs among `events`, matched on the message's fixed prefix so a test
-        /// asserting there are none cannot pass on a reworded call.
-        pub(super) fn skip_warnings(events: &[Captured]) -> Vec<&Captured> {
-            events
-                .iter()
-                .filter(|e| e.message.starts_with("tmu: no Discord channel mapped"))
-                .collect()
+            crate::log_capture::capturing(super::patch(pool, tmi_id, body)).await
         }
     }
 
