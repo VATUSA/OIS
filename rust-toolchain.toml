@@ -1,7 +1,9 @@
-# The workspace builds on rolling nightly — for the parallel compiler front-end (`-Zthreads`) and a
-# faster edit/build loop. We DON'T use nightly-only language features, so `stable` remains a valid
-# fallback: if a nightly regression bites, temporarily set `channel = "stable"` (MSRV is 1.92, see the
-# workspace `rust-version`) until the next nightly fixes it.
+# The workspace builds on a dated nightly, for the parallel compiler front-end (`-Zthreads`) and a
+# faster edit/build loop. It is dated so CI and every local gate run the same clippy: a rolling
+# nightly added a lint CI saw and local gates did not (#1044). Bump it on purpose, in its own PR,
+# with the same date in .github/workflows/ci.yml and release.yml. We DON'T use nightly-only language
+# features, so `stable` remains a valid fallback: if a nightly regression bites, temporarily set
+# `channel = "stable"` (MSRV is 1.92, see the workspace `rust-version`).
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-11-10"
 components = ["rustfmt", "clippy"]
