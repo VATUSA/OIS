@@ -126,7 +126,7 @@ against rows that make the aggregate non-empty.
 
 `fetch_all` materializes every row before the first one is used. On a large table that is the whole
 table in memory per replica: the taxi-sample reload OOM-killed the backend until it moved to
-`.fetch(pool)` and `try_next()` (#776, `repos/stats.rs`). Stream anything that grows with network
+`.fetch(pool)` and `try_next()` (#776; the taxi model was removed in #814). Stream anything that grows with network
 traffic or time, and build compact structures as rows arrive.
 
 Paginate a bulk pass by key (`where id > $last order by id limit $n`), never by `offset`, which is

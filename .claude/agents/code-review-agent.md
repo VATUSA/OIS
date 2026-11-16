@@ -75,7 +75,7 @@ OIS gotchas (check every one):
 
 ## Lens: code, domain depth
 
-For `feed-and-trajectory.md` and `domain-lessons.md`, judged on the production code (whether a test covers each path is lens `tests`'s): a diff that reaches no feed, trajectory, prediction, metering, FCA, GDP, ground stop, TMI, runway, sector-demand, taxi-estimate or permission-scope code attests each heading `N/A` with that reason. Otherwise, beyond the headings:
+For `feed-and-trajectory.md` and `domain-lessons.md`, judged on the production code (whether a test covers each path is lens `tests`'s): a diff that reaches no feed, trajectory, prediction, metering, FCA, GDP, ground stop, TMI, runway, sector-demand or permission-scope code attests each heading `N/A` with that reason. Otherwise, beyond the headings:
 
 - **Every path.** Name what the change does for a national-scope and for a facility-scope principal: they are two paths. Each trajectory caller is its own path: FCA metering, airport-flow demand (and the GDP and CFR code built on it), runway ETE and sector occupancy, plus the historical replays that run the same compute. A change correct on one path and wrong or unhandled on another is a finding.
 - **Silent drop.** A new or changed input (a feed field, an `AircraftProfile` field, a winds or nav value) reaches every surface that reads it: the `AppState` cache, its refresh job, the write handler's force-reload, each caller, the response model, the regenerated client and the web view. A surface that drops or ignores it is a finding.
