@@ -13,6 +13,32 @@ export type SavedRunwayConfig = components["schemas"]["SavedRunwayConfig"];
 export type CustomEnd = components["schemas"]["CustomEnd"];
 export type RunwayConfigRequest = components["schemas"]["RunwayConfigRequest"];
 
+/** Approach heading for each flow preset: WEST means landing westbound. */
+export const PRESET_HEADING: Record<string, number> = { W: 270, E: 90, N: 360, S: 180 };
+/** A preset activates every runway end within this many degrees of its heading. */
+export const PRESET_TOLERANCE_DEG = 65;
+
+/** Degrees between two headings, the short way round (0..=180). */
+export function angleDiff(a: number, b: number): number {
+  return Math.abs((((a - b) % 360) + 540) % 360 - 180);
+}
+
+/** Ids of the ends a preset activates; `OFF` or an unknown preset activates none. */
+export function presetEnds(ends: RunwayEnd[], preset: string): string[] {
+  const heading = PRESET_HEADING[preset];
+  if (heading === undefined) return [];
+  return ends.filter((e) => angleDiff(e.hdg, heading) <= PRESET_TOLERANCE_DEG).map((e) => e.id);
+}
+
+/**
+ * STAR base name, the key a STAR rule is saved under: strip the trailing revision (`CAMRN4` →
+ * `CAMRN`, `DOTSS2A` → `DOTSS`). The backend stores rule keys as sent and matches them against
+ * `feed::runway::star_base`, so the two must agree; both are pinned on the same cases.
+ */
+export function starBase(name: string): string {
+  return name.trim().toUpperCase().replace(/\d[A-Z]?$/, "");
+}
+
 /** The shared runway-balancer board for an airport, refreshed every 15s. */
 export function useRunway(icao: string | null) {
   return useQuery({

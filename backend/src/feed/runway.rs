@@ -25,8 +25,6 @@ const DEMAND_YELLOW: i32 = 4;
 const DEMAND_RED: i32 = 6;
 /// A runway with at most this many in a bin can absorb a rebalanced arrival.
 const DEMAND_OPEN: i32 = 2;
-/// Preset activates ends whose heading is within this of the approach direction.
-const PRESET_TOL: f64 = 65.0;
 
 /// A manually-added runway end (for fields the bundled dataset lacks).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -164,6 +162,9 @@ pub struct Arrival {
 }
 
 /// STAR base name — strip the trailing revision (`CAMRN4` → `CAMRN`, `DOTSS2A` → `DOTSS`).
+///
+/// Mirrored by hand in `starBase` (`web/src/lib/runway.ts`), which keys the STAR rules the Runway
+/// Balancer saves; `assign` matches those keys exactly, so the two must move together.
 pub fn star_base(name: &str) -> String {
     let up = name.trim().to_ascii_uppercase();
     let b = up.as_bytes();
@@ -175,28 +176,6 @@ pub fn star_base(name: &str) -> String {
         return up[..n - 1].to_string();
     }
     up
-}
-
-fn angle_diff(a: f64, b: f64) -> f64 {
-    (((a - b) + 540.0) % 360.0 - 180.0).abs()
-}
-
-/// Activate the ends facing a preset approach direction (`W`/`E`/`N`/`S`), or clear all
-/// (`OFF`/anything else). WEST = landing westbound (heading ~270 ± 65°).
-pub fn apply_preset(ends: &mut [RunwayEnd], preset: &str) {
-    let target = match preset {
-        "W" => 270.0,
-        "E" => 90.0,
-        "N" => 360.0,
-        "S" => 180.0,
-        _ => {
-            ends.iter_mut().for_each(|e| e.active = false);
-            return;
-        }
-    };
-    for e in ends.iter_mut() {
-        e.active = angle_diff(e.hdg as f64, target) <= PRESET_TOL;
-    }
 }
 
 /// Collect airborne arrivals to `icao` within the window, with accurate along-route ETAs from the
@@ -473,16 +452,6 @@ pub fn recommendations(
 mod tests {
     use super::*;
 
-    fn end(id: &str, hdg: i32) -> RunwayEnd {
-        RunwayEnd {
-            id: id.into(),
-            hdg,
-            len: 10000,
-            active: false,
-            pair: format!("{id}/x"),
-        }
-    }
-
     fn arr(cs: &str, star: Option<&str>, eta_ms: i64) -> Arrival {
         Arrival {
             cs: cs.into(),
@@ -500,18 +469,9 @@ mod tests {
         assert_eq!(star_base("DOTSS2A"), "DOTSS");
         assert_eq!(star_base("lendy6"), "LENDY");
         assert_eq!(star_base("PARCH"), "PARCH");
-    }
-
-    #[test]
-    fn preset_activates_facing_ends() {
-        // KJFK-ish: 04L (044°) and 22R (224°). WEST (270°) activates 22R, not 04L.
-        let mut ends = vec![end("04L", 44), end("22R", 224), end("31L", 314)];
-        apply_preset(&mut ends, "W");
-        assert!(!ends[0].active, "04L faces east, not active for WEST");
-        assert!(ends[1].active, "22R faces west");
-        assert!(ends[2].active, "31L (314°) within 65° of 270");
-        apply_preset(&mut ends, "OFF");
-        assert!(ends.iter().all(|e| !e.active));
+        // The same cases pin the web's `starBase` (web/src/lib/runway.test.ts), which writes the key.
+        assert_eq!(star_base("BAMBI3"), "BAMBI");
+        assert_eq!(star_base("ANJLL4A"), "ANJLL");
     }
 
     #[test]

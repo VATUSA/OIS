@@ -165,7 +165,7 @@ pub fn in_wind_range(dir: i32, from: i32, to: i32) -> bool {
 
 /// Degrees between two bearings, the short way round — 0..=180.
 ///
-/// Same formula as `feed::runway::angle_diff`, deliberately not shared: a `repos` module reaching into
+/// Same formula as `feed::delays::angle_diff`, deliberately not shared: a `repos` module reaching into
 /// `feed` for arithmetic would be a worse dependency than two copies of one line. Unifying them is
 /// follow-up work, not #510's.
 fn arc_deg(a: i32, b: i32) -> i32 {
@@ -198,11 +198,11 @@ fn distance_to_rule(dir: i32, c: &AirportConfigBody) -> i32 {
 ///
 /// # Why the Runway Balancer's preset is *not* authoritative
 ///
-/// `feed::runway::apply_preset` looks like a second wind rule and is not one: it reads no wind at all.
-/// A controller presses WEST/EAST/NORTH/SOUTH and every runway end within `PRESET_TOL` of that cardinal
-/// becomes active — the human is the wind sensor. It also answers a different question (which ends we
-/// are *landing* on) and its Rust copy is unreachable, the live logic being reimplemented in
-/// `web/src/pages/runway/index.tsx`. So it cannot be the source of truth for a departure runway.
+/// The preset (`presetEnds` in `web/src/lib/runway.ts`) looks like a second wind rule and is not one:
+/// it reads no wind at all. A controller presses WEST/EAST/NORTH/SOUTH and every runway end within
+/// `PRESET_TOLERANCE_DEG` of that cardinal becomes active — the human is the wind sensor. It also
+/// answers a different question (which ends we are *landing* on) and runs only in the browser, so it
+/// cannot be the source of truth for a departure runway.
 ///
 /// # Arrivals and departures may legitimately disagree
 ///
