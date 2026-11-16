@@ -20,8 +20,10 @@ import {afterAll, beforeAll, describe, expect, it} from "vitest";
  * these files to read back. `useLocalStorage` from `@ois/ui` is listed because it writes to
  * `localStorage` without the name appearing at the call site.
  *
- * Known limit: the comment pass is lexical, so a `//` in JSX text (`<a>https://x</a>`) blanks the
- * rest of that line, and a storage call later on the same line would be missed.
+ * Known limits: the comment pass is lexical, so a `//` in JSX text (`<a>https://x</a>`) blanks the
+ * rest of that line, and a storage call later on the same line would be missed. And the file list is
+ * checked against the files that name `ApiKeyToken`, so a file handed `token.token` as a plain string
+ * (a reveal component with a `secret: string` prop) is not found and must be added to `FILES` by hand.
  */
 const SRC = fileURLToPath(new URL("..", import.meta.url));
 const FILES = ["lib/api-keys.ts", "pages/api-keys.tsx"];
@@ -67,10 +69,9 @@ describe("the personal API-key token never reaches client storage (#955)", () =>
     expect(storageAccess(join(SRC, file)), `${file} must not persist the shown-once token`).toEqual([]);
   });
 
-  // A scan of the wrong file, or of none, finds nothing and passes. The token's type is the trace of
-  // where it flows: the list must be exactly the source files that name `ApiKeyToken`, so a dropped
-  // entry or a new file the token reaches fails here until it is scanned.
-  it("scans exactly the source files the token's type reaches", () => {
+  // A scan of the wrong file, or of none, finds nothing and passes. The list must be exactly the
+  // source files that name `ApiKeyToken`, so a dropped entry, or a new file that names it, fails here.
+  it("scans exactly the source files that name ApiKeyToken", () => {
     const carriers = sources(SRC).filter((file) =>
       readFileSync(join(SRC, file), "utf8").includes("ApiKeyToken"),
     );
