@@ -155,7 +155,7 @@ ETA model and its callers"; the design is `docs/architecture/prediction.md`.
 
 - **Inputs, not callers:** `feed/fca.rs` supplies the route `predict.rs` times along
   (`fca::route_path`), and `repos::flow::locked_wheels_up` the locks, read through
-  `TimingTables::live`. A `trajectory.rs` change does not reach them, but a change to them moves every
+  `TimingTables` and direct `flow_repo::locked_wheels_up*` calls. A `trajectory.rs` change does not reach them, but a change to them moves every
   ETA built on them.
 - **Carry the `ProfileTable` only:** `state.rs` (the cache), `jobs.rs` (its refresh),
   `repos/aircraft_profiles.rs` (loading it), `handlers/aircraft_profiles.rs` (reloading it on write)

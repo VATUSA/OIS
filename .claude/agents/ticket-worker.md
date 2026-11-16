@@ -82,7 +82,7 @@ A line you edit is branch-introduced whole: editing it adopts its stale comment 
 
 Fixing a branch-introduced defect or adding a missing killing test needs no question; return one only for scope growth, a behavior change or a rejection. From the third `/code-review` round, before fixing, return the findings and the round count, each finding labeled NEW-CODE or VARIANCE (it sits on a line unchanged since the last attested SHA), recommending: fix the MAJORs that state a failure scenario, ship the rest. A finding the operator leaves unticked is left, not rejected as wrong.
 
-An unmet AC that turns on its wording goes to the operator in the same return as that round's findings, before fixing. An open AC leaves the attestation set incomplete, so `bin/lib/review-attestation.sh prior` finds no prior SHA and the next round reviews the whole diff again.
+An unmet AC that turns on its wording goes to the operator in the same return as that round's findings, before fixing. An open AC leaves that round's attestation set incomplete, so the next round cannot use it as `PRIOR_SHA` (`bin/lib/review-attestation.sh prior`) and re-reviews everything since the last complete set, or the whole diff on a first round.
 
 ## Phase C: Ship
 

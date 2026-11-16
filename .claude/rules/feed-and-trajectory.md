@@ -87,7 +87,7 @@ callers"; the model's design is `docs/architecture/prediction.md`. Re-derive the
 on it. Beyond the callers:
 
 - **Inputs, not callers**: `fca::route_path` (the route every surface times along) and
-  `repos::flow::locked_wheels_up` (the locks, read through `TimingTables::live` and `live_for`). A
+  `repos::flow::locked_wheels_up` (the locks, read through `TimingTables` and direct `flow_repo::locked_wheels_up*` calls). A
   change to them moves every ETA built on them.
 - **Carry the `ProfileTable` only**: `state.rs`, `jobs.rs` (its refresh), `repos/aircraft_profiles.rs`,
   `handlers/aircraft_profiles.rs` (reload on write), `handlers/sector_demand_cache.rs` (a cache key),
@@ -96,8 +96,8 @@ on it. Beyond the callers:
 **Each site gets its own wiring test, and each is mutated on its own.** On #355 the wiring test seeded
 only live pilots, so reverting the prefile site alone passed the whole suite;
 `handlers::flow::mit_cross_speed_wiring_tests` now covers an airborne and a ground pilot (#834 removed
-the prefile site). Every `TimingTables::live` and `live_for` call site is a site
-(`git grep -n 'TimingTables::live' -- backend/src`): on #814 a `live` to `load` mutant was run at
+the prefile site). Every place that reads the locks is a site
+(`git grep -n -e 'TimingTables::' -e 'flow_repo::locked_wheels_up' -- backend/src`): on #814 a `live` to `load` mutant was run at
 three of them, and `list_idst`'s had no test.
 
 ## Metering
