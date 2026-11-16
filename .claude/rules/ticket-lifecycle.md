@@ -441,6 +441,12 @@ for the integration branch a human asks you to prepare.
   web-only one. Test modules collide without a textual conflict: a dropped helper, a duplicated
   `use` prologue, a changed type at a call site far from any hunk. Only an `--all-targets` build
   sees them.
+- **Two branches that give one field different meanings: rename one and port its tests.** Taking
+  one side drops the other's behavior with no conflict left to show it (#1088,
+  `fca::MeterInput.wheels_up_ms`).
+- **A test deleted because the merge seems to make its premise impossible needs every producer of
+  that premise checked first.** #1088 dropped #817's CFR-lateness test as taxi-only; a later lock
+  still produces it, and the lateness predicate was left with no killing test.
 - **Do not resolve an append/append conflict by concatenating hunks.** git factors the shared
   trailing lines (`}`, `.await`) out below the marker, so "ours plus theirs" leaves a function
   unclosed (#607). Diff each side against the merge base and rebuild from whole blobs
