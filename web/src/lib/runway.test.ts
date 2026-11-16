@@ -1,3 +1,4 @@
+import {readFileSync} from "node:fs";
 import {describe, expect, it} from "vitest";
 
 import {angleDiff, presetEnds, type RunwayEnd, starBase} from "./runway";
@@ -33,6 +34,16 @@ describe("presetEnds", () => {
   it("for N keeps ends at 295 and 65 and drops ends at 294 and 66", () => {
     const ends = [end("a", 294), end("b", 295), end("c", 65), end("d", 66)];
     expect(presetEnds(ends, "N")).toEqual(["b", "c"]);
+  });
+
+  it("for E keeps ends at 25 and 155 and drops ends at 24 and 156", () => {
+    const ends = [end("a", 24), end("b", 25), end("c", 155), end("d", 156)];
+    expect(presetEnds(ends, "E")).toEqual(["b", "c"]);
+  });
+
+  it("for S keeps ends at 115 and 245 and drops ends at 114 and 246", () => {
+    const ends = [end("a", 114), end("b", 115), end("c", 245), end("d", 246)];
+    expect(presetEnds(ends, "S")).toEqual(["b", "c"]);
   });
 
   it("for N keeps ends at 0, 5 and 360", () => {
@@ -101,5 +112,24 @@ describe("starBase", () => {
 
   it("keeps a trailing letter with no digit before it", () => {
     expect(starBase("CAMRNA")).toBe("CAMRNA");
+    expect(starBase("CAMRN4AB")).toBe("CAMRN4AB");
+  });
+});
+
+/**
+ * A source scan, because the regression this pins is the page computing the preset or the STAR key
+ * itself again: the helpers above would stay green while the page stopped calling them.
+ */
+describe("RunwayPage uses these helpers", () => {
+  const page = readFileSync(new URL("../pages/runway/index.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+
+  it("applies a preset through presetEnds", () => {
+    expect(page).toMatch(/function applyPreset\(p: string\) \{[^}]*save\(presetEnds\(b\.ends, p\)\);/);
+  });
+
+  it("keys a new STAR rule through starBase", () => {
+    expect(page).toMatch(/function addRule\(\) \{\s*const s = starBase\(newStar\);/);
   });
 });
