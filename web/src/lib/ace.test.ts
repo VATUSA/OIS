@@ -71,7 +71,9 @@ describe("useMyAceClaims (VATUSA/OIS#958)", () => {
     expect(client.paths).toEqual(["/api/v1/me/ace-claims"]);
   });
 
-  it("throws when the client returns neither data nor an error", async () => {
+  // openapi-fetch answers a failed response with an empty body as `{error: undefined}`, so the
+  // `!data` half is what catches it.
+  it("throws when the client returns neither data nor an error (a failed response with no body)", async () => {
     client.response = {};
     await expect(run()).rejects.toThrow("failed to load your ACE claims");
   });

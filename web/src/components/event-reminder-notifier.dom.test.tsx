@@ -163,6 +163,25 @@ describe("EventReminderNotifier when the claims fetch fails (VATUSA/OIS#958)", (
     expect(notifyDesktop).not.toHaveBeenCalled();
   });
 
+  it("recovering from a failed first fetch seeds silently instead of firing every due claim", async () => {
+    claims.rows = [
+      {claim_id: "c1", event_id: 9, event_title: "Fly-In", position: "DCA_APP",
+        start_time: new Date(T0 + 23 * HOUR).toISOString()}, // inside T-24h from the start
+    ];
+    claims.fail = true;
+    const qc = await mount();
+    expect(qc.getQueryState(KEY)?.status).toBe("error");
+
+    claims.fail = false;
+    await refetch(qc);
+    expect(qc.getQueryState(KEY)?.status).toBe("success");
+    expect(notifyDesktop).not.toHaveBeenCalled();
+
+    // Positive control: the seed is live, so a claim crossing a tier after it still fires.
+    await advance(18 * HOUR); // c1 crosses T-6h
+    expect(titles()).toEqual(["Fly-In in 6 hours"]);
+  });
+
   it("a failed refetch after a success leaves the query in error with the last claims kept", async () => {
     const qc = await mount();
     expect(qc.getQueryState(KEY)?.status).toBe("success");
