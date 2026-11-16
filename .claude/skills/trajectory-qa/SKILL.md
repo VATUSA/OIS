@@ -89,7 +89,7 @@ The `handlers::` set holds `#[sqlx::test]`s, so it needs `DATABASE_URL` pointing
 
 ### B. Every caller, named
 
-Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or to a ground flight's wheels-up (its latest lock, else filed time + `PROPOSED_WHEELS_UP_MIN`, read through `TimingTables::live`) moves every ETA built on them without touching `trajectory.rs`.
+Re-derive the callers (section 1). For each one the change reaches, write one line: the caller, the surface an operator sees it on, the test that proves it still behaves (cite `file:line`), or "no test" as a finding. A test of `trajectory.rs` alone does not cover a caller: the regression OIS ships most often is a caller drifting while the unit stays green. Inputs count too: a change to `fca::route_path` or to a ground flight's wheels-up (its latest lock or now, whichever is later, else `predict::proposed_wheels_up`; every lock reader goes through `repos::flow::locks`: `TimingTables::live`, sector demand, the GDP draft and the FCA release and clear handlers) moves every ETA built on them without touching `trajectory.rs`.
 
 ### C. Hand-worked numbers
 
