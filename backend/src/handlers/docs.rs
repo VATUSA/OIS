@@ -34,8 +34,9 @@ const SCALAR_BUNDLE: &[u8] = include_bytes!(concat!(
 
 /// Scalar reads `data-url` and `data-configuration` from the `#api-reference` element, so the page
 /// carries no inline script. `withDefaultFonts: false` stops the font download from
-/// fonts.scalar.com, `agent.disabled` stops the spec upload to api.scalar.com, and `proxyUrl` is left
-/// unset so try-it-out calls go straight to this origin instead of through proxy.scalar.com.
+/// fonts.scalar.com, `agent.disabled` stops the spec upload to api.scalar.com, `hideClientButton`
+/// removes the link to client.scalar.com, and `proxyUrl` is left unset so try-it-out calls go
+/// straight to this origin instead of through proxy.scalar.com.
 const REFERENCE_PAGE: &str = concat!(
     r#"<!doctype html>
 <html lang="en">
@@ -48,7 +49,7 @@ const REFERENCE_PAGE: &str = concat!(
     <script
       id="api-reference"
       data-url="/docs/api/v1/openapi.json"
-      data-configuration='{"withDefaultFonts":false,"agent":{"disabled":true},"showDeveloperTools":"never","telemetry":false,"persistAuth":false}'
+      data-configuration='{"withDefaultFonts":false,"agent":{"disabled":true},"hideClientButton":true,"showDeveloperTools":"never","telemetry":false,"persistAuth":false}'
     ></script>
     <script src="/docs/v1/scalar-"#,
     scalar_version!(),
@@ -129,16 +130,23 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
-    /// Every `src="…"` and `href="…"` value in `html`.
+    /// Every `src` and `href` value in `html`, double- or single-quoted.
     fn linked_urls(html: &str) -> Vec<String> {
         let mut urls = Vec::new();
-        for attr in ["src=\"", "href=\""] {
+        for attr in ["src=", "href="] {
             for (at, _) in html.match_indices(attr) {
                 let rest = &html[at + attr.len()..];
-                urls.push(rest[..rest.find('"').unwrap()].to_string());
+                let quote = rest.chars().next().expect("a value after the attribute");
+                assert!(quote == '"' || quote == '\'', "unquoted {attr} in {html}");
+                let value = &rest[1..];
+                urls.push(value[..value.find(quote).unwrap()].to_string());
             }
         }
         urls
+    }
+
+    fn is_same_origin(url: &str) -> bool {
+        url.starts_with('/') && !url.starts_with("//")
     }
 
     /// The JSON in the page's `data-configuration='…'` attribute.
@@ -165,7 +173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_reference_page_turns_off_every_scalar_feature_that_calls_a_third_party() {
+    async fn the_reference_page_turns_off_the_fonts_agent_client_link_proxy_and_stored_auth() {
         let config = scalar_configuration(&body_text(get(PAGE).await).await);
 
         assert_eq!(
@@ -175,6 +183,10 @@ mod tests {
         assert_eq!(
             config["agent"]["disabled"], true,
             "api.scalar.com: {config}"
+        );
+        assert_eq!(
+            config["hideClientButton"], true,
+            "client.scalar.com: {config}"
         );
         assert_eq!(config["showDeveloperTools"], "never", "{config}");
         assert_eq!(config["telemetry"], false, "{config}");
@@ -195,18 +207,23 @@ mod tests {
 
         assert!(!urls.is_empty(), "the scan found no links at all: {html}");
         for url in &urls {
-            assert!(
-                url.starts_with('/') && !url.starts_with("//"),
-                "off-origin link {url}"
-            );
+            assert!(is_same_origin(url), "off-origin link {url}");
         }
-        // The scan itself catches an absolute and a protocol-relative link.
-        let planted =
-            r#"<script src="https://cdn.example/x.js"></script><link href="//cdn.example/y.css">"#;
+        // The scan finds an absolute, a protocol-relative and a single-quoted link, and the
+        // check refuses each of them.
+        let planted = r#"<script src="https://cdn.example/x.js"></script><link href="//cdn.example/y.css"><link href='https://cdn.example/z.css'>"#;
+        let found = linked_urls(planted);
         assert_eq!(
-            linked_urls(planted),
-            vec!["https://cdn.example/x.js", "//cdn.example/y.css"]
+            found,
+            vec![
+                "https://cdn.example/x.js",
+                "//cdn.example/y.css",
+                "https://cdn.example/z.css"
+            ]
         );
+        for url in &found {
+            assert!(!is_same_origin(url), "{url} passed as same-origin");
+        }
     }
 
     #[tokio::test]

@@ -16,7 +16,9 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 - **Moved:** the interactive API reference is now Scalar at `/docs/v1`. `/docs/swagger` and
   `/docs/swagger/` answer 308 to `/docs/v1`, and `/docs/swagger/openapi.json` answers 308 to
-  `/docs/api/v1/openapi.json`, which is unchanged. No caller change. (#1093)
+  `/docs/api/v1/openapi.json`, which is unchanged. A client that follows redirects needs no change;
+  a tool that fetched the spec from `/docs/swagger/openapi.json` should point at
+  `/docs/api/v1/openapi.json`. (#1093)
 - **Documentation:** `IdstFlight.edct` in `GET /api/v1/flow/idst` now documents what the route already
   returns: before release it carries the proposed EDCT (the wheels-up that would meet `cross_time`), and
   it is null only when an unreleased flight has no metered crossing time or no ETA. The EDCT a release

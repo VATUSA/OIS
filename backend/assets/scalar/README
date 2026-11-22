@@ -14,4 +14,6 @@ To bump it:
      `npm view @scalar/api-reference@<version> dist.integrity`.
   2. Copy package/dist/browser/standalone.js here as api-reference-<version>.js and delete the old file.
   3. Change the scalar_version! macro in backend/src/handlers/docs.rs and the hashes above.
-  4. Load /docs/v1 and check the browser's network log shows only same-origin requests.
+  4. In the same file's tests, change the BUNDLE path and the bundle's byte length.
+  5. Check the new version still reads every key in the page's data-configuration.
+  6. Load /docs/v1 and check the browser's network log shows only same-origin requests.
