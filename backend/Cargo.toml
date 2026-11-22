@@ -55,7 +55,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 utoipa.workspace = true
-utoipa-swagger-ui.workspace = true
 
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true

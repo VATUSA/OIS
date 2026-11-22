@@ -6,8 +6,6 @@ use axum::{
     middleware,
     routing::{delete, get, patch, post, put},
 };
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::middleware::resolve_current_user,
@@ -20,7 +18,6 @@ use crate::{
         public, runway, sector_consolidations, sector_demand, sector_limits, service_accounts,
         stats, tmu, users, webhooks,
     },
-    openapi::ApiDoc,
     rate_limit::{self, RateLimits},
     realtime,
     state::AppState,
@@ -38,12 +35,19 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         // Prometheus scrape target (#382). Intentionally NOT in the OpenAPI spec or the typed
         // client: it is text exposition for Prometheus, not JSON the SPA consumes.
         .route("/metrics", get(metrics_handler::metrics))
-        .route("/docs/api/v1/openapi.json", get(docs::openapi_json))
-        // Interactive API docs (Swagger UI), served from the same generated spec. Try-it-out calls
-        // hit the real endpoints: they carry the same-origin session cookie, or an API-key or
-        // service-account token entered through Authorize (the spec's `api_key` / `service_account`
-        // schemes, offered only on paths that accept them, #587).
-        .merge(SwaggerUi::new("/docs/swagger").url("/docs/swagger/openapi.json", ApiDoc::openapi()))
+        .route(docs::OPENAPI_PATH, get(docs::openapi_json))
+        // Interactive API reference (Scalar), reading the spec above. Try-it-out calls hit the real
+        // endpoints: they carry the same-origin session cookie, or an API-key or service-account
+        // token entered under Authentication (the spec's `api_key` / `service_account` schemes,
+        // offered only on paths that accept them, #587).
+        .route(docs::REFERENCE_PATH, get(docs::api_reference))
+        .route(docs::SCALAR_BUNDLE_PATH, get(docs::scalar_bundle))
+        .route("/docs/swagger", get(docs::swagger_redirect))
+        .route("/docs/swagger/", get(docs::swagger_redirect))
+        .route(
+            "/docs/swagger/openapi.json",
+            get(docs::swagger_openapi_redirect),
+        )
         .route("/api/v1/auth/vatsim/login", get(auth::vatsim_login))
         .route("/api/v1/auth/vatsim/callback", get(auth::vatsim_callback))
         .route("/api/v1/auth/logout", post(auth::logout))

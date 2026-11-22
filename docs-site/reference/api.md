@@ -11,10 +11,12 @@ body and response:
 - **Spec:** `https://<your-ois-host>/docs/api/v1/openapi.json`. Point a client generator at it, or
   import it into Postman or Insomnia.
 
-### Swagger UI
+### API reference
 
-- **Interactive reference:** `https://<your-ois-host>/docs/swagger`. Browse every endpoint, see its
-  parameters and schemas, and try requests from the browser.
+- **Interactive reference:** `https://<your-ois-host>/docs/v1`. Browse every endpoint, see its
+  parameters and schemas, and try requests from the browser. Signed in to OIS in the same browser,
+  a request carries your session; otherwise paste an API key or service-account token under
+  Authentication. The old `/docs/swagger` address redirects here.
 
 ## Authenticating
 

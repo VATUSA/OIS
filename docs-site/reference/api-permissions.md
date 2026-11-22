@@ -9,7 +9,7 @@ How to read it:
   Some endpoints also check the scope against the facility a request touches. The table shows the
   permission, not the scope rule.
 - **"— (no permission marker)"** means the endpoint isn't gated by a specific permission. It may still
-  need a signed-in caller, or decide access itself. Check the endpoint in [Swagger UI](/reference/api#swagger-ui).
+  need a signed-in caller, or decide access itself. Check the endpoint in the [API reference](/reference/api#api-reference).
 - An API key never holds an `api_keys.*` permission, whatever its owner has.
 
 ::: info Generated, not written by hand

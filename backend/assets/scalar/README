@@ -1,0 +1,17 @@
+Vendored Scalar API reference bundle, served by the backend at /docs/v1 (handlers/docs.rs).
+
+  File:     api-reference-1.77.0.js
+  Source:   npm @scalar/api-reference@1.77.0, dist/browser/standalone.js
+  Tarball:  sha512-41DOlbgId6h8XX008AtzmX8EpILmLMk14rHs9RcrdwCTP1HCFgE+m/HnJy4pXi9ffMWgEAnnv4Sh13QmAA+muQ==
+  File:     sha256 4f387c930903fe6b63b3497ebf02ca65005d52016c72dcc8bfc44ac662986cb3
+  License:  MIT, see LICENSE
+
+The page runs on the API origin, where try-it-out requests carry the caller's session, so the
+bundle is served from here rather than a CDN (#1093).
+
+To bump it:
+  1. npm pack @scalar/api-reference@<version> and check the tarball's sha512 against
+     `npm view @scalar/api-reference@<version> dist.integrity`.
+  2. Copy package/dist/browser/standalone.js here as api-reference-<version>.js and delete the old file.
+  3. Change the scalar_version! macro in backend/src/handlers/docs.rs and the hashes above.
+  4. Load /docs/v1 and check the browser's network log shows only same-origin requests.

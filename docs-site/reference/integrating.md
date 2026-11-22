@@ -1,7 +1,7 @@
 # Integrating with OIS
 
 This page takes you from "we'd like to integrate" to a working release, without reading OIS's source.
-It builds on [Using the API](./api.md), which covers the API description and Swagger.
+It builds on [Using the API](./api.md), which covers the API description and the interactive API reference.
 
 ::: tip Examples here are tested
 Every API call on this page is checked against the real API in CI, so a renamed endpoint can't leave
