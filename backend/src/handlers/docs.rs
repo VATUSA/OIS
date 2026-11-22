@@ -78,8 +78,8 @@ pub async fn scalar_bundle() -> impl IntoResponse {
     )
 }
 
-/// The old Swagger UI path; links to it land on the reference.
-pub async fn swagger_redirect() -> Redirect {
+/// `/docs/v1/` and the old Swagger UI paths; links to them land on the reference.
+pub async fn reference_redirect() -> Redirect {
     Redirect::permanent(REFERENCE_PATH)
 }
 
@@ -245,8 +245,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_old_swagger_paths_redirect_permanently_to_their_new_homes() {
+    async fn the_old_swagger_paths_and_a_trailing_slash_redirect_permanently_to_their_new_homes() {
         for (old, new) in [
+            ("/docs/v1/", "/docs/v1"),
             ("/docs/swagger", "/docs/v1"),
             ("/docs/swagger/", "/docs/v1"),
             ("/docs/swagger/openapi.json", "/docs/api/v1/openapi.json"),

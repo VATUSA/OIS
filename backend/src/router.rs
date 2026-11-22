@@ -41,9 +41,10 @@ pub fn build_router_with_limits(state: AppState, limits: Arc<RateLimits>) -> Rou
         // token entered under Authentication (the spec's `api_key` / `service_account` schemes,
         // offered only on paths that accept them, #587).
         .route(docs::REFERENCE_PATH, get(docs::api_reference))
+        .route("/docs/v1/", get(docs::reference_redirect))
         .route(docs::SCALAR_BUNDLE_PATH, get(docs::scalar_bundle))
-        .route("/docs/swagger", get(docs::swagger_redirect))
-        .route("/docs/swagger/", get(docs::swagger_redirect))
+        .route("/docs/swagger", get(docs::reference_redirect))
+        .route("/docs/swagger/", get(docs::reference_redirect))
         .route(
             "/docs/swagger/openapi.json",
             get(docs::swagger_openapi_redirect),
