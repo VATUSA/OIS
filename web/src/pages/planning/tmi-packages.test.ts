@@ -93,6 +93,29 @@ describe("buildItemPayload (VATUSA/OIS#1012)", () => {
     expect(buildItemPayload("program", {...program, aar: ""}, false, EMPTY_NTML)).toEqual({error: "AAR is required"});
   });
 
+  it("builds a program with MINIT and MIT of 0 when neither is typed, as a From-rates pre-fill leaves them", () => {
+    expect(buildItemPayload("program", {icao: "KEWR", aar: "36"}, false, EMPTY_NTML)).toEqual({
+      payload: {icao: "KEWR", aar: 36, trail: 0, mit: 0},
+    });
+  });
+
+  it("refuses a required field holding only spaces, naming it", () => {
+    const cases: [Parameters<typeof buildItemPayload>[0], Record<string, string>, string][] = [
+      ["program", {...program, icao: "  "}, "ICAO is required"],
+      ["program", {...program, aar: " "}, "AAR is required"],
+      ["restriction", {...restriction, requesting: "  "}, "Requesting is required"],
+      ["restriction", {...restriction, providing: "  "}, "Providing is required"],
+      ["restriction", {...restriction, restriction: "   "}, "A restriction is required"],
+      ["ground_stop", {airport: "  "}, "Airport is required"],
+      ["advisory", {...advisory, facility: "  "}, "Facility is required"],
+      ["advisory", {...advisory, advKind: " "}, "Advisory type is required"],
+      ["advisory", {...advisory, body: "   "}, "Advisory text is required"],
+    ];
+    for (const [kind, f, error] of cases) {
+      expect(buildItemPayload(kind, f, false, EMPTY_NTML), `${kind} ${JSON.stringify(f)}`).toEqual({error});
+    }
+  });
+
   it("builds a program payload from ICAO, AAR, MINIT and MIT", () => {
     expect(buildItemPayload("program", program, false, EMPTY_NTML)).toEqual({
       payload: {icao: "KJFK", aar: 40, trail: 10, mit: 20},
@@ -188,6 +211,12 @@ describe("buildItemPayload (VATUSA/OIS#1012)", () => {
 
   it('refuses a ground stop with no airport: "Airport is required"', () => {
     expect(buildItemPayload("ground_stop", {airport: ""}, false, EMPTY_NTML)).toEqual({error: "Airport is required"});
+  });
+
+  it("builds a ground stop payload carrying its scope and until", () => {
+    expect(buildItemPayload("ground_stop", {airport: "KDCA", scope: "ZNY", until: "1800"}, false, EMPTY_NTML)).toEqual({
+      payload: {airport: "KDCA", scope: "ZNY", until: "1800"},
+    });
   });
 
   it("builds a ground stop payload, omitting blank scope and until", () => {

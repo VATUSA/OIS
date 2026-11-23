@@ -17,7 +17,7 @@ vi.mock("@/lib/api", () => ({ois: {GET: get, POST: post, PUT: vi.fn(), DELETE: v
 
 import {TmiPackagesSection} from "./tmi-packages";
 import type {Me} from "@/lib/auth";
-import type {TmiPackage} from "@/lib/events";
+import type {AirportRate, TmiPackage} from "@/lib/events";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -71,7 +71,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mount(me: Me = EDITOR) {
+async function mount(me: Me = EDITOR, rates: AirportRate[] = []) {
   const qc = new QueryClient({
     defaultOptions: {
       queries: {
@@ -85,7 +85,7 @@ async function mount(me: Me = EDITOR) {
   });
   qc.setQueryData(["me"], me);
   qc.setQueryData(["event-packages", EVENT], [PKG]);
-  qc.setQueryData(["event-rates", EVENT], []);
+  qc.setQueryData(["event-rates", EVENT], rates);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -207,6 +207,25 @@ describe("TMI package add-item form (VATUSA/OIS#1012)", () => {
       expect(input("ICAO").value).toBe("KJFK");
     });
 
+    it("saves a program pre-filled from an airport rate, with MINIT and MIT of 0", async () => {
+      const kewr: AirportRate = {
+        icao: "KEWR",
+        aar: 36,
+        adr: 40,
+        artcc: "ZNY",
+        editable: true,
+        source: "override",
+        updated_at: "2026-10-01T00:00:00Z",
+      };
+      await mount(EDITOR, [kewr]);
+      const prefill = [...document.querySelectorAll("button")].find((b) => b.title === "Pre-fill KEWR · AAR 36");
+      if (!prefill) throw new Error("no KEWR pre-fill button");
+      await click(prefill);
+      expect(input("ICAO").value).toBe("KEWR");
+      expect(input("AAR").value).toBe("36");
+      await expectSaved("program", {icao: "KEWR", aar: 36, trail: 0, mit: 0});
+    });
+
     it("saves a valid program", async () => {
       await mount();
       await fill("Program", PROGRAM);
@@ -217,6 +236,7 @@ describe("TMI package add-item form (VATUSA/OIS#1012)", () => {
   describe("restriction", () => {
     it.each([
       ["requesting", "", "Requesting is required"],
+      ["requesting", "   ", "Requesting is required"],
       ["providing", "", "Providing is required"],
       ["restriction (e.g. 20 MIT)", "", "A restriction is required"],
       ["start DD/HHMMz", "1430z", "Start time must be DD/HHMMz (e.g. 12/1430z)"],
@@ -281,6 +301,12 @@ describe("TMI package add-item form (VATUSA/OIS#1012)", () => {
       await mount();
       await fill("Ground stop", {airport: "", "scope (blank=all)": "ZNY"});
       await expectRefused("Airport is required", {"scope (blank=all)": "ZNY"});
+    });
+
+    it("saves a ground stop with its scope and until", async () => {
+      await mount();
+      await fill("Ground stop", {airport: "KDCA", "scope (blank=all)": "ZNY", "until HHMM": "1800"});
+      await expectSaved("ground_stop", {airport: "KDCA", scope: "ZNY", until: "1800"});
     });
 
     it("saves a valid ground stop", async () => {

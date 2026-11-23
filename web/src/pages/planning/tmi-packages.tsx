@@ -104,8 +104,8 @@ function optionalZulu(text: string | undefined): string | undefined | null {
 }
 
 function programPayload(f: Record<string, string>): ItemPayload {
-  if (!f.icao) return { error: "ICAO is required" };
-  if (!f.aar) return { error: "AAR is required" };
+  if (!f.icao?.trim()) return { error: "ICAO is required" };
+  if (!f.aar?.trim()) return { error: "AAR is required" };
   return {
     payload: {
       icao: f.icao,
@@ -117,9 +117,9 @@ function programPayload(f: Record<string, string>): ItemPayload {
 }
 
 function restrictionPayload(f: Record<string, string>, structured: boolean, ntml: Ntml): ItemPayload {
-  if (!f.requesting) return { error: "Requesting is required" };
-  if (!f.providing) return { error: "Providing is required" };
-  if (!structured && !f.restriction) return { error: "A restriction is required" };
+  if (!f.requesting?.trim()) return { error: "Requesting is required" };
+  if (!f.providing?.trim()) return { error: "Providing is required" };
+  if (!structured && !f.restriction?.trim()) return { error: "A restriction is required" };
   if (structured && (!ntml.element.trim() || !ntml.kind.trim())) {
     return { error: "An element and a restriction type are required" };
   }
@@ -142,14 +142,14 @@ function restrictionPayload(f: Record<string, string>, structured: boolean, ntml
 function advisoryPayload(f: Record<string, string>): ItemPayload {
   // The window is required, unlike a restriction's optional start/stop: an advisory with no
   // window is never auto-removed, and the backend rejects one for that reason.
-  if (!f.facility) return { error: "Facility is required" };
-  if (!f.advKind) return { error: "Advisory type is required" };
+  if (!f.facility?.trim()) return { error: "Facility is required" };
+  if (!f.advKind?.trim()) return { error: "Advisory type is required" };
   const from = parseZulu(f.validFrom ?? "");
   if (!from) return { error: "Valid from must be DD/HHMMz (e.g. 12/1430z)" };
   const to = parseZulu(f.validTo ?? "");
   if (!to) return { error: "Valid to must be DD/HHMMz (e.g. 12/1830z)" };
   if (new Date(to) <= new Date(from)) return { error: "Valid to must be after valid from" };
-  if (!f.body) return { error: "Advisory text is required" };
+  if (!f.body?.trim()) return { error: "Advisory text is required" };
   return { payload: { facility: f.facility, kind: f.advKind, body: f.body, valid_from: from, valid_to: to } };
 }
 
@@ -169,7 +169,7 @@ export function buildItemPayload(
     case "restriction":
       return restrictionPayload(f, structured, ntml);
     case "ground_stop":
-      if (!f.airport) return { error: "Airport is required" };
+      if (!f.airport?.trim()) return { error: "Airport is required" };
       return { payload: { airport: f.airport, scope: f.scope || undefined, until: f.until || undefined } };
     case "advisory":
       return advisoryPayload(f);
