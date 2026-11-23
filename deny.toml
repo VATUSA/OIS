@@ -14,11 +14,16 @@ yanked = "deny"
 #
 # Revisit the zbus entries by 2026-11-19, or at the next notify-rust or keyring release, whichever
 # comes first.
+#
+# chrono (0543): unmaintained notice, no known vulnerability and no fixed release. ois-backend uses
+# it directly and through sqlx's chrono feature, so replacing it (jiff or time) is a migration of
+# its own. Revisit by 2027-02-22.
 ignore = [
     "RUSTSEC-2024-0370",  # proc-macro-error
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained (merged into zbus 6), via zbus 5 <- notify-rust / keyring, Linux and BSD only. Revisit by 2026-11-19 or the next notify-rust or keyring release" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no known vulnerability and no fixed release; used directly by ois-backend and via sqlx's chrono feature, so replacing it is its own migration. Revisit by 2027-02-22" },
 ]
 
 [licenses]
