@@ -345,7 +345,7 @@ fn every_gated_handler_declares_the_credentials_and_permission_it_requires() {
 // arm, so the rule still applies if such a handler reappears.
 
 /// A public handler that reads an optional identity (#586) is still public: it declares no security,
-/// or Swagger would ask for a credential the route doesn't need.
+/// or the API reference would ask for a credential the route doesn't need.
 fn optional_identity(h: &Handler) -> bool {
     PUBLIC_WITH_OPTIONAL_IDENTITY
         .iter()
@@ -359,6 +359,6 @@ fn no_public_handler_declares_security() {
         .filter(|h| (!h.takes_auth || optional_identity(h)) && h.security.is_some()));
     assert!(
         claimed.is_empty(),
-        "these take no credential but declare security, so Swagger would ask for one: {claimed:?}"
+        "these take no credential but declare security, so the API reference would ask for one: {claimed:?}"
     );
 }

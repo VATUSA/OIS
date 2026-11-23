@@ -1,7 +1,7 @@
 [package]
 name = "ois-backend"
 # Local/fallback base only; the deployed build version comes from the root VERSION file via build.rs.
-version = "0.4.4"
+version = "0.4.5"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -55,7 +55,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 utoipa.workspace = true
-utoipa-swagger-ui.workspace = true
 
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true

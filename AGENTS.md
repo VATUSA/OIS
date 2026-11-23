@@ -80,8 +80,8 @@ router.rs   every route; openapi.rs registers paths + schemas
 ```
 
 Request flow: **handler → repo → model**. Handlers stay thin; if you write SQL in a handler, move
-it to a repo. Versioned REST under `/api/v1`; OpenAPI at `/docs/api/v1/openapi.json` + Swagger UI at
-`/docs/swagger`.
+it to a repo. Versioned REST under `/api/v1`; OpenAPI at `/docs/api/v1/openapi.json` + the Scalar API reference
+at `/docs/v1` (bundle vendored in `backend/assets/scalar/`; `/docs/swagger` redirects there).
 
 ### Permissions (the heart of the platform)
 

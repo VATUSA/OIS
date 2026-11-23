@@ -44,7 +44,6 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 # --- docs / openapi ---
 utoipa = { version = "6.0.0", features = ["axum_extras", "chrono"] }
-utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # --- metrics / observability ---
 # `default-features = false` drops the exporter's own hyper http-listener + push-gateway; we only
