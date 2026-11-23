@@ -38,6 +38,21 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-11-22-api-reference",
+    date: "2026-11-22",
+    title: "A new API reference at /docs/v1",
+    sections: [
+      {
+        heading: "API",
+        highlights: [
+          "The interactive API reference moved from /docs/swagger to /docs/v1 on the API server, with a new look. Links to /docs/swagger redirect to it, and the OpenAPI document stays at /docs/api/v1/openapi.json.",
+          "\"Test Request\" in the reference sends the call with your signed-in session, or with an API key you paste in. The key is not saved in the browser.",
+          "The reference page loads nothing from other sites.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-11-15-fca-freeze-horizon",
     date: "2026-11-15",
     title: "One ETA per flight, no taxi time, and the FCA freeze horizon",
