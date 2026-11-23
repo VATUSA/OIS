@@ -45,7 +45,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       {
         heading: "API",
         highlights: [
-          "The interactive API reference moved from /docs/swagger to /docs/v1 on the API server, with a new look. Old /docs/swagger links redirect to it, and the OpenAPI document stays at /docs/api/v1/openapi.json.",
+          "The interactive API reference moved from /docs/swagger to /docs/v1 on the API server, with a new look. Links to /docs/swagger redirect to it, and the OpenAPI document stays at /docs/api/v1/openapi.json.",
           "\"Test Request\" in the reference sends the call with your signed-in session, or with an API key you paste in. The key is not saved in the browser.",
           "The reference page loads nothing from other sites.",
         ],
