@@ -384,8 +384,8 @@ export function AircraftProfilesPage() {
   return (
     <div className="flex flex-col gap-6">
       <p className="text-sm text-ink-2">
-        ERAM&apos;s performance tables are built in for 2,692 types. A type profile here replaces them for that type;
-        the other profiles are for types with neither.
+        ERAM&apos;s performance tables are built in for 2,692 types. A type profile here replaces them for that type.
+        The other profiles are for types ERAM doesn&apos;t have.
       </p>
       {edit && (
         <ProfileForm
