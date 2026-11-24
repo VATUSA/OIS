@@ -5408,7 +5408,7 @@ export interface components {
             cross_speed: number;
             /**
              * Format: int64
-             * @description Filed cruise altitude (ft) used.
+             * @description Cruise altitude (ft) as filed, 35,000 when none was readable; the flight may be flown lower.
              */
             cruise_alt: number;
             /**

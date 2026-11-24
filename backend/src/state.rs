@@ -34,13 +34,13 @@ pub struct AppState {
     /// Winds aloft, for ETA correction. Starts empty (still air) and is hot-swapped by
     /// `jobs::spawn_winds_refresh`, so it sits behind an `ArcSwap` for lock-free reads.
     pub winds: Arc<ArcSwap<Winds>>,
-    /// Configurable per-aircraft performance profiles for the trajectory model. Starts as the
-    /// legacy default table and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
+    /// Configurable per-aircraft performance profiles for the trajectory model. Starts as
+    /// [`ProfileTable::built_in`] and is reloaded from the DB by `jobs::spawn_aircraft_profiles_refresh`,
     /// so it sits behind an `ArcSwap` for lock-free reads (incl. from the DB-less feed subsystem).
     pub aircraft_profiles: Arc<ArcSwap<ProfileTable>>,
     /// Set by the first successful load from the DB (`jobs::refresh_aircraft_profiles_once`, or the
-    /// profile write handler's reload), never cleared: until then `aircraft_profiles` is the legacy
-    /// default table, so the held-STA pass waits on it (#817).
+    /// profile write handler's reload), never cleared: until then `aircraft_profiles` holds no
+    /// stored row, so the held-STA pass waits on it (#817).
     pub aircraft_profiles_loaded: Arc<AtomicBool>,
     /// ATC sector volumes (#594), the dataset kept when the Monitor was removed (#719). Starts empty and is reloaded from the DB
     /// by `jobs::spawn_airspace_sectors_refresh`, which the `airspace_sector_seed` job triggers when it

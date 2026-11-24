@@ -18,14 +18,16 @@ aircraft does. This page says what the prediction assumes, so you can tell when 
 ## Climb, cruise and descent
 
 A flight on the ground leaves at its release or EDCT, or 10 minutes after its filed departure time (or after now,
-once that has passed), and climbs at its type's rate to its filed altitude. No taxi time is added.
+once that has passed), and climbs at its type's rate to its filed altitude. No taxi time is added. The climb
+starts at sea level whatever the field, so a departure from a high field reads low on its way up.
 
 In cruise it flies its filed true airspeed through the wind.
 
 The descent is 1,000 feet for every 3 miles, down to the field's elevation: 30 miles out it is at 10,000
 feet above the field. Descent speeds start about 10 miles before the type's own descent would, or where that path
 reaches the cruise altitude if that is farther out. An aircraft
-below that path stays level until the path comes down to it, and is never predicted climbing back up. One
+below that path stays level until the path comes down to it, unless it is still nearer its departure than its
+destination. One
 above it is put on the path straight away.
 
 On a trip too short to reach its filed altitude, the aircraft climbs until it meets the descent path and

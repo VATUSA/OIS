@@ -78,6 +78,10 @@
 //! AC 4 implausible altitudes           | a_filing_above_100_000_ft_is_unfiled_for_a_type_with_no_ceiling
 //! AC 9 a ceiling, not a target         | a_ceiling_never_speeds_up_a_slower_schedule
 //! AC 9 the field's temperature         | the_assigned_speed_is_judged_in_the_fields_temperature
+//! AC 3, 9 the predicted descent's cap  | a_flight_at_its_capped_descent_speed_is_not_held
+//! AC 4, 8 the 60 kt floor              | the_anchor_compares_against_no_less_than_60_kt
+//! AC 4, 7 inside 40 nm, warm air       | descent_ground_speed_at_reads_the_fields_temperature
+//! AC 4 a junk route                    | a_route_past_25_000_nm_is_flown_in_longer_steps
 
 use super::super::performance::{EramRecord, EramTable};
 use super::*;
@@ -1233,6 +1237,113 @@ fn a_ceiling_never_speeds_up_a_slower_schedule() {
     let vp = f.fly();
     assert!((vp.ground_speed_at(59.5) - 270.0).abs() < 1e-6);
     assert_eq!(vp.ground_speed_at(20.0), 180.0);
+}
+
+// AC 8. A 100 kt record, level at cruise doing 51 kt with 60 kt on its nose by its heading, on a route in calm
+// air: predicted 40 is taken as 60, so the scale is 0.85 and it is flown at 85 (115 if 40 were compared).
+// Red when: the predicted groundspeed is not floored.
+#[test]
+fn the_anchor_compares_against_no_less_than_60_kt() {
+    let mut f = air(30_000.0, 200.5, 480.0, Some(300.0));
+    f.rec = record(300.0, (2_000.0, 100.0), (100.0, 100.0));
+    f.gs = Some((51.0, Some(60.0)));
+    assert!((f.fly().ground_speed_at(200.0) - 85.0).abs() < 1e-9);
+}
+
+// AC 4, AC 7. FLAT 40 nm out in air 1.21 times the standard temperature: 240 x 1.1 = 264. A row cruising at
+// Mach 0.84, 150 nm out, 15 K warm: 500.5, not the 484.2 of standard air.
+// Red when: either speed is read in standard air.
+#[test]
+fn descent_ground_speed_at_reads_the_fields_temperature() {
+    let filed = |cruise_ft: f64, tas_kt: f64| Filed {
+        cruise_ft,
+        tas_kt,
+        arr_elev_ft: 0.0,
+    };
+    let rec = record(300.0, (2_000.0, 240.0), (400.0, 500.0));
+    let gs = descent_ground_speed_at(
+        40.0,
+        &filed(30_000.0, 480.0),
+        Performance::Eram(&rec),
+        &air_at(1.21),
+    );
+    assert!((gs - 264.0).abs() < 0.1, "{gs}");
+    let mach = AircraftProfile {
+        cruise_mach: Some(0.84),
+        ..AircraftProfile::default()
+    };
+    let warm = RouteWind::new(vec![WindKnot {
+        d_nm: 0.0,
+        levels: vec![(35_000.0, 0.0, Some(233.808))],
+    }]);
+    let gs = descent_ground_speed_at(
+        150.0,
+        &filed(35_000.0, 520.0),
+        Performance::Row(&mach),
+        &warm,
+    );
+    assert!((gs - 500.5).abs() < 0.1, "{gs}");
+    // A field below sea level is read as 0, and a filing under the field as the field: 40 nm out of a 6,000 ft
+    // field, filed 4,000, the default row cruises (its own descent is 10 nm).
+    let row = AircraftProfile::default();
+    let at = |cruise_ft: f64, arr_elev_ft: f64| {
+        let filed = Filed {
+            cruise_ft,
+            tas_kt: 440.0,
+            arr_elev_ft,
+        };
+        descent_ground_speed_at(40.0, &filed, Performance::Row(&row), &RouteWind::still())
+    };
+    assert_eq!(at(35_000.0, -200.0), at(35_000.0, 0.0));
+    assert_eq!(at(4_000.0, 6_000.0), 440.0);
+}
+
+// AC 3, AC 9. The default row at FL350 doing its 440 kt, 110 nm out: its descent schedule there is 521 kt, but it
+// is held to its cruise, so 440 is not slow: gs 440 at 109, and it is not held below it later.
+// Red when: the comparison reads the uncapped schedule (an 81 kt slow flight, held to 440's CAS).
+#[test]
+fn a_flight_at_its_capped_descent_speed_is_not_held() {
+    let row = AircraftProfile::default();
+    let fly = |gs_kt: f64| {
+        let start = FlightStart {
+            alt_ft: 35_000.0,
+            to_go_nm: 110.0,
+            airborne: Some(Airborne {
+                gs_kt,
+                headwind_kt: None,
+                from_departure_nm: Some(500.0),
+            }),
+        };
+        let filed = Filed {
+            cruise_ft: 35_000.0,
+            tas_kt: 440.0,
+            arr_elev_ft: 0.0,
+        };
+        VerticalProfile::build(&start, &filed, Performance::Row(&row), RouteWind::still())
+    };
+    assert_eq!(fly(440.0).ground_speed_at(109.0), 440.0);
+    // 290 KIAS at the path's 20,000 ft, not 440's 244 KCAS.
+    let gs = fly(440.0).ground_speed_at(60.0);
+    assert!((gs - ias_to_tas(290.0, 20_000.0)).abs() < 5.0, "{gs}");
+}
+
+// AC 4. A 1,517,512 nm route at 60 kt is six million 15 s steps; it is flown in at most 100,001 longer ones, in
+// the time 60 kt takes. A 24,000 nm route keeps its 15 s steps. A reported altitude under the ground is 0.
+// Red when: the number of steps follows the route.
+#[test]
+fn a_route_past_25_000_nm_is_flown_in_longer_steps() {
+    let slow = |d: f64| {
+        let mut f = ground(d);
+        f.rec = record(60.0, (2_000.0, 60.0), (60.0, 60.0));
+        f.fly()
+    };
+    let junk = slow(1_517_512.0);
+    assert!(junk.samples.len() <= 100_002, "{}", junk.samples.len());
+    let hours = junk.time_between(1_517_512.0, 0.0) / 3600.0;
+    assert!((hours - 1_517_512.0 / 60.0).abs() < 1.0, "{hours}");
+    assert_eq!(slow(24_000.0).samples.len(), 96_001);
+    let buried = air(-200.0, 200.5, 300.0, Some(10.0)).fly();
+    assert_eq!(buried.alt_at(200.5), 0.0);
 }
 
 // AC 9. FLAT, 60 nm out at 20,000 ft in air 1.1 times the standard temperature: its descent speed there is

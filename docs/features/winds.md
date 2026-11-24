@@ -20,7 +20,7 @@ after:
      ─▶ jobs.rs install_winds: RAP, else the last field within 3 h, else still air
      ─▶ AppState.winds + stats.winds
      ─▶ each caller: winds.along(path, route_len) ─▶ RouteWind (wind + temperature by distance and altitude)
-     ─▶ VerticalProfile::build: every integration step and every query reads its own point
+     ─▶ VerticalProfile::build: every step reads the wind at its own point, and every query the step that flew it
 ```
 
 ## Review of the FB-only model

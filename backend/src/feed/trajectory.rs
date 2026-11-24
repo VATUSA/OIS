@@ -466,6 +466,9 @@ pub(crate) fn phase_tas(
 const GS_FLOOR_KT: f64 = 60.0;
 /// Length (s) of one integration step; the last one is cut short at the field.
 const STEP_SEC: f64 = 15.0;
+/// A route longer than this (nm), over once around the earth, is flown in steps longer in proportion, so
+/// a junk route cannot set how many there are.
+const MAX_STEPPED_NM: f64 = 25_000.0;
 /// Descent gradient: 1,000 ft for every 3 nm to the field.
 const DESCENT_FT_PER_NM: f64 = 1000.0 / 3.0;
 /// Descent speeds start this far (nm) outside the type's own descent distance.
@@ -527,7 +530,7 @@ struct Sample {
     headwind_kt: f64,
 }
 
-/// A flight flown forward from where it is to the field, in [`STEP_SEC`] steps. Built once per flight,
+/// A flight flown forward from where it is to the field, in steps of [`STEP_SEC`]. Built once per flight,
 /// then queried by distance to the field (`d`): `d = 0` is the field, increasing back along the route.
 ///
 /// Every query reads the one track, so a time, the speed it was flown at and the altitude there always
@@ -547,14 +550,15 @@ impl VerticalProfile {
         let plan = Plan::new(start, filed, perf, &wind);
         let mut samples = plan.fly();
         samples.reverse();
+        let (_, temp) = wind.air(start.to_go_nm, plan.level_ft);
         Self {
             still: wind.is_still(),
-            cruise_tas: plan.cruise_tas,
+            cruise_tas: perf.cruise_in(plan.cruise_tas, plan.level_ft, temp),
             samples,
         }
     }
 
-    /// The cruise true airspeed (kt) the flight is predicted at.
+    /// The cruise true airspeed (kt) the flight is predicted at from where it starts.
     pub fn cruise_tas(&self) -> f64 {
         self.cruise_tas
     }
@@ -766,6 +770,7 @@ impl<'a> Plan<'a> {
     fn fly(&self) -> Vec<Sample> {
         let mut out = Vec::new();
         let (mut d, mut alt, mut sec) = (self.start.to_go_nm.max(0.0), self.alt0(), 0.0);
+        let full_step_sec = STEP_SEC * (d / MAX_STEPPED_NM).max(1.0);
         let mut climbing = self.climbing;
         let (mut gs, mut headwind) = (self.cruise_tas, 0.0);
         while d > 0.0 {
@@ -782,7 +787,7 @@ impl<'a> Plan<'a> {
                 gs_kt: gs,
                 headwind_kt: headwind,
             });
-            let step_nm = (gs * STEP_SEC / 3600.0).min(d);
+            let step_nm = (gs * full_step_sec / 3600.0).min(d);
             let step_sec = step_nm / gs * 3600.0;
             d -= step_nm;
             sec += step_sec;
@@ -1651,8 +1656,7 @@ mod tests {
         }
     }
 
-    // The cruise leg carries a sample at each knot, so a temperature change mid-cruise changes
-    // the Mach TAS there (not a ramp between top of climb and top of descent).
+    // Each step reads the temperature where it is, so a change mid-cruise changes the Mach TAS there.
     #[test]
     fn the_cruise_leg_changes_speed_where_the_temperature_changes() {
         let wind = RouteWind::new(
@@ -1677,27 +1681,6 @@ mod tests {
             "{}",
             vp.ground_speed_at(250.0)
         );
-    }
-
-    // Anchoring (#313) compares the observed groundspeed with the prediction where the aircraft
-    // is, not with a route mean.
-    #[test]
-    fn anchoring_reads_the_headwind_where_the_aircraft_is() {
-        let p = AircraftProfile::default();
-        let wind = flat(&[
-            (0.0, 100.0, None),
-            (200.0, 100.0, None),
-            (300.0, 0.0, None),
-            (400.0, 0.0, None),
-        ]);
-        let vp = anchored(400.0, 450.0, &p, wind.clone(), 450.0);
-        assert!(
-            (vp.ground_speed_at(400.0) - 450.0).abs() < 1e-6,
-            "{}",
-            vp.ground_speed_at(400.0)
-        );
-        let fast = anchored(400.0, 450.0, &p, wind, 495.0);
-        assert!((fast.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
     }
 
     // Into a headwind stronger than the climb and descent speeds, each step is flown at the
@@ -2027,19 +2010,6 @@ mod tests {
         let (warm_start, isa_air) = (build(wind), build(RouteWind::still()));
         let gained = isa_air.time_between(300.0, 150.0) - warm_start.time_between(300.0, 150.0);
         assert!(gained.abs() < 0.05, "the Mach climb is on ISA: {gained} s");
-    }
-
-    // A wind knot inside the descent leaves the descent path alone.
-    #[test]
-    fn a_wind_knot_inside_the_descent_keeps_the_descent_shape() {
-        let p = AircraftProfile::default();
-        let wind = flat(&[(0.0, 10.0, None), (30.0, 10.0, None), (300.0, 10.0, None)]);
-        let vp = cruise(300.0, 440.0, &p, wind);
-        assert!(
-            vp.alt_at(30.0) < 20_000.0,
-            "30 nm out reads {} ft",
-            vp.alt_at(30.0)
-        );
     }
 
     // A temperature at or below absolute zero is clamped to 1 K rather than taking a square root

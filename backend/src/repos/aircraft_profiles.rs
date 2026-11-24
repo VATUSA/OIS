@@ -515,7 +515,7 @@ mod eram_tests {
         };
         seed_0059(&pool).await;
         sqlx::raw_sql(
-            "update flow.aircraft_profile set desc_fpm = 2000 where key = 'B738';              insert into flow.aircraft_profile (kind, key) values ('type', 'A321')",
+            "update flow.aircraft_profile set desc_fpm = 2000 where key = 'B738';              insert into flow.aircraft_profile (kind, key) values ('type', 'A321'), ('wake', 'A320')",
         )
         .execute(&pool)
         .await
@@ -668,7 +668,7 @@ mod eram_tests {
     }
 
     // AC 11. Before and after the file, over the default, the four wake rows, a family row, PA28 and an
-    // operator's A321 type row: identical rows, `updated_at` included. A seeded row saved with no number
+    // operator's A321 type row: identical rows, `updated_at` included. An A320 renamed and saved with no number
     // changed goes: the numbers decide.
     #[sqlx::test]
     async fn the_migration_leaves_every_other_row_untouched(pool: PgPool) {
@@ -676,6 +676,12 @@ mod eram_tests {
         sqlx::query(
             "insert into flow.aircraft_profile (kind, key, desc_fpm) \
              values ('family', 'jet', 4444), ('type', 'A321', 3333)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "update flow.aircraft_profile set name = 'Ours' where kind = 'type' and key = 'A320'",
         )
         .execute(&pool)
         .await
@@ -696,5 +702,10 @@ mod eram_tests {
         run_0138(&pool).await;
         assert_eq!(others().await, before);
         assert_eq!(type_keys(&pool).await, ["A321", "PA28"], "the ten went");
+        assert_eq!(
+            load_all(&pool).await.unwrap().row("pa28", "").desc_fpm,
+            600.0,
+            "a row is found whatever the type's case"
+        );
     }
 }

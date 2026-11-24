@@ -470,8 +470,8 @@ async fn the_historical_replays_time_a_flight_in_the_winds_of_its_instant(pool: 
 // AC 4, 5 sector demand route             | sector_demand_counts_a_released_departure_on_its_eram_climb
 // AC 4, 5 replays                         | the_historical_replays_time_a_flight_on_eram
 //
-// Each stores a table holding the bundled ERAM records in state.aircraft_profiles and compares the route's
-// answer before and after with predict::trajectory's own shift, as the B738-profile test above does.
+// Each stores a table holding the bundled ERAM records in state.aircraft_profiles and holds the route's answer
+// against predict::trajectory's, or against its shift from the default table.
 // STEP1 is `feed::predict::march_input_tests`'.
 
 use crate::feed::predict::march_input_tests::{eram_profiles, jfk_mia, step1};
@@ -513,8 +513,8 @@ async fn step1_state(pool: PgPool) -> AppState {
 }
 
 // AC 4, 5. GND1 (KJFK->KDCA via RBV WHITE SIE): GET /tmu/flow/KDCA, /flow/fcas/{id}/traffic and
-// /flow/aircraft/GND1/route each move by the trajectory's own shift (at least 20 s, positive control) when the
-// ERAM table is installed. Red when: TimingTables::load reads another table.
+// /flow/aircraft/GND1/route: the two ETAs at the field move by the trajectory's own shift (at least 20 s, positive
+// control) when the ERAM table is installed, the FCA crossing by the climb's part of it. Red when: TimingTables::load reads another table.
 #[sqlx::test]
 async fn airport_flow_the_fca_board_and_the_fix_table_time_gnd1_on_eram(pool: PgPool) {
     let state = state(pool.clone()).await;

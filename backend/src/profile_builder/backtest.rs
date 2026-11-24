@@ -1421,8 +1421,8 @@ mod eram_backtest_tests {
     }
 
     // AC 13. A scored B738's `a.arrival_sec` is predict::trajectory's ETA for the same snapshot position,
-    // altitude, groundspeed, heading and plan, less the touchdown. Use a snapshot past 1.5 climb distances
-    // under a crosswind, so a dropped departure distance or heading headwind moves it.
+    // altitude, groundspeed, heading and plan, less the touchdown. The snapshot is past 1.5 climb distances and in
+    // a crosswind, so a dropped departure distance or heading headwind moves it.
     #[sqlx::test]
     async fn run_scores_the_trajectory_the_live_model_flies(pool: PgPool) {
         // First seen airborne, and replayed at STEP1: 492 nm from KJFK and level under its filed level.

@@ -175,14 +175,12 @@ pub struct ArrivalInput<'a> {
     pub filed_tas: f64,
 }
 
-/// The route an arrival is timed along: the resolved path, its length, and whether the aircraft is
-/// airborne ([`is_airborne`]).
+/// The route an arrival is timed along: the resolved path and its length.
 pub struct ArrivalRoute {
     pub path: Vec<[f64; 2]>,
     /// Along-route distance to the field, nm. A ground flight whose route does not resolve past its
     /// endpoints carries [`GROUND_ROUTE_FACTOR`].
     pub route_nm: f64,
-    pub airborne: bool,
 }
 
 /// Resolve the route [`arrival_eta`] times an aircraft along: the filed route via
@@ -192,7 +190,6 @@ pub struct ArrivalRoute {
 /// great circle here. Public so the offline profile backtest (`profile_builder::backtest`) times a
 /// point short of the field on exactly this route.
 pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> ArrivalRoute {
-    let airborne = is_airborne(ac.gs);
     let (path, resolved) = resolve_path(
         nav,
         airports,
@@ -202,12 +199,8 @@ pub fn arrival_route(nav: &NavData, airports: &AirportDb, ac: &ArrivalInput) -> 
         false,
     )
     .unwrap_or_else(|| (vec![ac.pos, ac.arr_ll], false));
-    let route_nm = path_len_nm(&path) * route_scale(airborne, resolved);
-    ArrivalRoute {
-        path,
-        route_nm,
-        airborne,
-    }
+    let route_nm = path_len_nm(&path) * route_scale(is_airborne(ac.gs), resolved);
+    ArrivalRoute { path, route_nm }
 }
 
 /// Predict when an aircraft reaches its destination field, and how far along its route that is.
@@ -224,7 +217,7 @@ pub fn arrival_eta(
     ac: &ArrivalInput,
     now: DateTime<Utc>,
 ) -> ArrivalPrediction {
-    let ArrivalRoute { path, route_nm, .. } = arrival_route(nav, airports, ac);
+    let ArrivalRoute { path, route_nm } = arrival_route(nav, airports, ac);
     let wind = winds.along(&path, route_nm);
     let from = arrival_from(winds, airports, ac, route_nm);
     let eta = eta_along_route(&from, route_nm, airports, perf, wind, now).eta;
@@ -1877,7 +1870,7 @@ mod tests {
     /// The calls into the model that produce a time, a speed or a position along a route. Outside
     /// the model's own files, only [`trajectory`] and its [`Trajectory`] make them
     /// (and the offline profile backtest, which feeds no surface).
-    const TIMING_CALLS: [&str; 10] = [
+    const TIMING_CALLS: [&str; 13] = [
         "VerticalProfile::build",
         "descent_ground_speed_at(",
         "profile_from_here(",
@@ -1886,6 +1879,9 @@ mod tests {
         "capped_cruise_tas(",
         ".descent_tas(",
         ".cruise_in(",
+        ".climb(",
+        "climb_distance_nm(",
+        "descent_distance_nm(",
         ".time_between(",
         ".distance_after(",
     ];
@@ -2083,7 +2079,7 @@ mod tests {
         let shear = Winds::test_shear();
         let ac = coastal("RBV WHITE SIE");
         let (r, eta) = composed(&nav, &shear, &ac);
-        assert!(r.airborne && r.path.len() > 2);
+        assert!(is_airborne(ac.gs) && r.path.len() > 2);
         assert_eq!(r.route_nm, path_len_nm(&r.path));
         let live = arrival_eta(
             &nav,
@@ -2105,7 +2101,7 @@ mod tests {
         let shear = Winds::test_shear();
         let ac = coastal("");
         let (r, eta) = composed(&nav, &shear, &ac);
-        assert!(r.airborne);
+        assert!(is_airborne(ac.gs));
         assert!((r.route_nm - gc_dist(40.2, -74.0, 38.85, -77.04)).abs() < 1e-9);
         assert_eq!(eta, eta_in(&nav, &shear, &ac));
     }
@@ -2124,7 +2120,7 @@ mod tests {
             ..coastal("")
         };
         let (r, eta) = composed(&nav, &shear, &ac);
-        assert!(!r.airborne);
+        assert!(!is_airborne(ac.gs));
         assert_eq!(r.path, vec![[40.64, -73.78], [38.85, -77.04]]);
         let gc = gc_dist(40.64, -73.78, 38.85, -77.04);
         assert!((r.route_nm - gc * GROUND_ROUTE_FACTOR).abs() < 1e-9);
@@ -2142,18 +2138,16 @@ mod tests {
             ..coastal("RBV WHITE SIE")
         };
         let r = arrival_route(&nav, &jfk_dca(), &ac);
-        assert!(!r.airborne && r.path.len() > 2);
+        assert!(!is_airborne(ac.gs) && r.path.len() > 2);
         assert_eq!(r.route_nm, path_len_nm(&r.path));
     }
 
-    /// The airborne flag flips at 50 kt, the boundary `arrival_eta` times a flight from its
-    /// position rather than its departure on.
+    /// A flight is airborne from 50 kt, so its unresolved route is padded at 49 and not at 50.
     #[test]
-    fn arrival_route_calls_a_flight_airborne_from_50_kt() {
+    fn arrival_route_pads_an_unresolved_route_below_50_kt() {
         let nav = NavData::default();
-        let at = |gs| arrival_route(&nav, &jfk_dca(), &ArrivalInput { gs, ..coastal("") }).airborne;
-        assert!(!at(49));
-        assert!(at(50));
+        let at = |gs| arrival_route(&nav, &jfk_dca(), &ArrivalInput { gs, ..coastal("") }).route_nm;
+        assert!((at(49) - at(50) * GROUND_ROUTE_FACTOR).abs() < 1e-9);
     }
 
     // ---- #814: the proposed wheels-up at its edges, and a ready time as an absolute fixture ------

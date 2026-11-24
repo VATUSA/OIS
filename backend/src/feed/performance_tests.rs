@@ -37,7 +37,10 @@
 use std::collections::HashMap;
 
 use super::super::trajectory::{AircraftProfile, ProfileTable, ias_to_tas, isa_temp_k, tas_to_cas};
-use super::{EramRecord, EramTable, Performance};
+use super::{EramRecord, EramTable, Performance, RateRow, SpeedRow};
+
+/// The sum of every number in the bundled file's four tables, summed from the JSON outside this crate.
+const FILE_SUM: f64 = 2_520_966_547.0;
 
 /// ISA at 10,000 ft (K): 288.15 - 19.812.
 const ISA_10K: f64 = 268.338;
@@ -118,6 +121,14 @@ fn the_bundled_file_holds_2692_types_each_with_all_four_tables() {
             "{ty}"
         );
     }
+    // Every number in the file, so none is edited unnoticed.
+    let pairs = |rows: &[SpeedRow]| rows.iter().flatten().sum::<f64>();
+    let triples = |rows: &[RateRow]| rows.iter().flatten().sum::<f64>();
+    let sum: f64 = types
+        .values()
+        .map(|r| triples(&r.climb) + triples(&r.descent) + pairs(&r.min_tas) + pairs(&r.max_tas))
+        .sum();
+    assert_eq!(sum, FILE_SUM);
 }
 
 // AC 5. Input: every record of `EramTable::bundled()`. Expected: altitudes strictly increase in all four
@@ -501,6 +512,12 @@ fn a_rows_distances_integrate_its_schedule() {
     assert!(close(down, 118.80, 0.1), "{down}");
     let up = p.climb_distance_nm(35_000.0);
     assert!(close(up, 139.00, 0.1), "{up}");
+    // Air at or below absolute zero, and an altitude under the ground, still have a speed.
+    let eram = flat(300.0, 240.0);
+    for (alt, temp) in [(10_000.0, Some(0.0)), (-500.0, Some(288.0))] {
+        let (tas, _) = Performance::Eram(&eram).climb(alt, temp);
+        assert!(tas > 0.0 && tas.is_finite(), "{tas}");
+    }
     // A stored rate of 0 is a long way, not an infinite one.
     let stuck = AircraftProfile {
         climb_fpm_lo: 0.0,

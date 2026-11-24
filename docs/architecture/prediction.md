@@ -42,7 +42,7 @@ And four tables the feed caches, so the model never queries the database:
 
 The entry point decides each input once:
 
-- **Airborne** means a groundspeed of at least `AIRBORNE_GS_KT` (`backend/src/feed/predict.rs:277`)
+- **Airborne** means a groundspeed of at least `AIRBORNE_GS_KT` (`backend/src/feed/predict.rs:270`)
   knots, at any altitude.
 - **The route** is the filed route resolved from where the flight is. When it does not resolve,
   the model flies the great circle to the arrival field. A flight not yet airborne on a route that
@@ -50,8 +50,8 @@ The entry point decides each input once:
   (`backend/src/feed/predict.rs:43`), since no airway routing flies the direct line. A ground or
   prefiled flight with no path to fly, a prefile from an unknown field or a route that does not
   resolve to an unknown arrival field, is timed over `NOMINAL_ROUTE_NM`
-  (`backend/src/feed/predict.rs:289`) nautical miles. A connected ground pilot within `ARRIVED_NM`
-  (`backend/src/feed/predict.rs:479`) of an arrival field it did not depart from has arrived: it
+  (`backend/src/feed/predict.rs:282`) nautical miles. A connected ground pilot within `ARRIVED_NM`
+  (`backend/src/feed/predict.rs:472`) of an arrival field it did not depart from has arrived: it
   gets no great circle to that field, and airport flow labels it arrived.
 - **The filed altitude** is the first run of digits in the filing, so `FL350/370` is 35,000 ft; an
   unreadable filing is timed at `UNFILED_CRUISE_FT` (`backend/src/feed/trajectory.rs:27`) feet
@@ -99,9 +99,11 @@ itself proposed; the FCA board, airport flow and the departures list mark it wit
 
 ## Climb, cruise and descent
 
-`VerticalProfile::build` settles what the flight is doing once (`Plan`), then flies it from where it is
-to the field in steps of `STEP_SEC` (`backend/src/feed/trajectory.rs:468`) seconds, the last one cut short
-at the field. Every surface reads that one track: a time, the groundspeed it was flown at and the
+`VerticalProfile::build` settles what the flight is doing once (`Plan`), then flies it to the field from where it
+is, or from 0 ft at its departure when it is on the ground, whatever that field's elevation, in steps of
+`STEP_SEC` (`backend/src/feed/trajectory.rs:468`) seconds, the last one cut short
+at the field. A route over `MAX_STEPPED_NM` (`backend/src/feed/trajectory.rs:471`) nautical miles is flown in longer
+steps. Every surface reads that one track: a time, the groundspeed it was flown at and the
 altitude there describe the same step. One read is off it: the miles-in-trail speed of a flight already inside
 40 nm, whose point 40 nm out is behind it (The release time, below).
 
@@ -116,14 +118,14 @@ flight is. An ERAM record gives no ceiling: its maximum altitudes are not perfor
 is 45,000 ft).
 
 **Descent start** is the larger of two distances: the type's own still-air descent distance from cruise
-to the field's elevation plus `DESCENT_MARGIN_NM` (`backend/src/feed/trajectory.rs:472`) nautical miles, and
+to the field's elevation plus `DESCENT_MARGIN_NM` (`backend/src/feed/trajectory.rs:475`) nautical miles, and
 where the descent path reaches cruise. The descent distance is summed in steps of `DISTANCE_STEP_FT`
 (`backend/src/feed/performance.rs:24`) feet.
 
 **The phase of each step**, decided again every step:
 
 1. Descent, inside the descent start, unless the flight is still climbing under the rule below.
-2. Cruise, within `CRUISE_BAND_FT` (`backend/src/feed/trajectory.rs:474`) feet of the level it flies, or above it.
+2. Cruise, within `CRUISE_BAND_FT` (`backend/src/feed/trajectory.rs:477`) feet of the level it flies, or above it.
 3. Climb, otherwise.
 
 **A short trip.** A flight on the ground, or an airborne one whose straight-line distance from its departure is less than
@@ -134,7 +136,7 @@ these.
 **Level below the filed altitude.** One VATSIM position carries no vertical rate, so level is read from
 where the flight is. An airborne flight outside its descent start, more than 500 ft below its
 cruise altitude, and farther from its departure than `LEVEL_CLIMB_DISTANCES`
-(`backend/src/feed/trajectory.rs:477`) times its type's still-air climb distance, stays at its present
+(`backend/src/feed/trajectory.rs:480`) times its type's still-air climb distance, stays at its present
 altitude until the descent path reaches it. Nearer than that, or from an unknown departure, it climbs.
 
 **Speeds and altitudes:**
@@ -145,7 +147,7 @@ altitude until the descent path reaches it. Nearer than that, or from an unknown
 | Cruise | The cruise speed above, held down to a row's cruise Mach | The level it flies, which a climb caught within 500 ft goes on to; held where it is when above that |
 | Descent | The ERAM descent table, or the row's schedule, never faster than the cruise speed | The descent path, or the present altitude while that is lower |
 
-The **descent path** rises `DESCENT_FT_PER_NM` (`backend/src/feed/trajectory.rs:470`) feet a nautical mile, 1,000 ft
+The **descent path** rises `DESCENT_FT_PER_NM` (`backend/src/feed/trajectory.rs:473`) feet a nautical mile, 1,000 ft
 in 3 nm, from the arrival field's elevation. A flight above it is on it at the next step; a flight below it
 stays level until it gets there. A descent rate never moves the altitude: it only sets the type's own descent
 distance.
@@ -177,12 +179,12 @@ field is still air.
 
 An airborne flight within 500 ft of the level it flies, or above it, is anchored to what it is flying:
 every predicted groundspeed for the rest of the flight is scaled by its observed groundspeed over the
-predicted one, held within `ANCHOR_MAX_BIAS` (`backend/src/feed/trajectory.rs:482`) of 1, so 0.85 to 1.15
+predicted one, held within `ANCHOR_MAX_BIAS` (`backend/src/feed/trajectory.rs:485`) of 1, so 0.85 to 1.15
 (#313). The predicted one is its cruise speed at its altitude, less the headwind along its reported
 heading. A flight read as level below its filed altitude is anchored at that level.
 
 A flight that starts inside its descent start and is not climbing to meet the path may be slower than
-predicted by more than `ASSIGNED_SPEED_DEADBAND_KT` (`backend/src/feed/trajectory.rs:479`) knots of calibrated
+predicted by more than `ASSIGNED_SPEED_DEADBAND_KT` (`backend/src/feed/trajectory.rs:482`) knots of calibrated
 airspeed. It is then taken to be on an assigned speed: its observed calibrated airspeed is a ceiling to the
 end of the route, and it is not scaled as well. A faster reading changes nothing.
 
@@ -199,9 +201,9 @@ freeze. What freezes is the schedule, in three places:
   flight is held to, plus the airborne ETE;
 - a published GDP: its slots are frozen at publish.
 
-There is no freeze horizon, a distance or time inside which an unreleased flight's slot stops
-moving. #817 [The metering scheduler never re-checks a fixed slot and has no freeze horizon, so
-released and late flights sit inside the required gap] tracks adding one for FCA metering.
+An FCA also has a freeze horizon (#817): an airborne flight within its `freeze_min` minutes of the crossing,
+`DEFAULT_FREEZE_MIN` (`backend/src/feed/fca.rs:375`) unless set, 0 for none, keeps the first crossing time stored for
+it. Airport flow and a GDP draft have none.
 
 ## The release time
 
@@ -222,7 +224,7 @@ trajectory's ETA there less its wheels-up (`release_ms` in `handlers/flow.rs`, `
 - **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:515`) milliseconds on
   top of the separation, so a release never takes a slot that only just fits. Miles-in-trail turns
   into a time gap at the crossing speed, floored at `MIN_CROSS_SPEED_KT`
-  (`backend/src/feed/predict.rs:286`) knots; airport-flow MIT reads that speed `MIT_CROSSING_NM`
+  (`backend/src/feed/predict.rs:279`) knots; airport-flow MIT reads that speed `MIT_CROSSING_NM`
   (`backend/src/feed/flow.rs:24`) nautical miles short of the field. A flight already inside that has the point behind it, so its speed is read off
   the descent path there, unscaled and not held (`trajectory::descent_ground_speed_at`, #813).
 
@@ -239,7 +241,7 @@ does not enforce the window.
 | Winds | RAP grid, read at each point's altitude | 13 km RUC winds, hourly (ATC-364 §3.2.4) | RAP, headwind component only, groundspeed floored at 80 kt (manual §13.2, §16.5) |
 | Integration | 15 s steps to the field | Re-predicted on each track or flight-plan update (Swenson §2.1) | 15 s steps, one jump per waypoint at cruise (manual §12.1, §16.5) |
 | Anchoring | 0.85 to 1.15 within 500 ft of its level or above it, whole remaining flight; a slowed descent is held to its observed CAS | Not covered by the sources cited here | 0.85 to 1.15 within 500 ft of its level or above it, whole integration; a slowed descent is held to its observed CAS (`server/src/trajectory/integrator.ts:666-726`; manual §16.2 still names an older 250 kt gate) |
-| Freeze | Releases, issued CFRs, published GDP slots; no horizon | The STA freezes at a site-adapted freeze horizon, 95 to 390 nm in the 2010 survey; the ETA keeps updating (ATC-364 §2, §3.2.1) | Per stream, in minutes: 20 by default on a fix stream, 0 on an EDC stream (manual §6.4.10) |
+| Freeze | Releases, issued CFRs, published GDP slots, and an FCA's held crossing times inside its `freeze_min` | The STA freezes at a site-adapted freeze horizon, 95 to 390 nm in the 2010 survey; the ETA keeps updating (ATC-364 §2, §3.2.1) | Per stream, in minutes: 20 by default on a fix stream, 0 on an EDC stream (manual §6.4.10) |
 | Departure | Wheels-up at a ready time, else filed time + 10 min | The tower supplies the time the flight will be ready to depart the runway (NTRS 20180006743 §II) | ETE from the parking spot with no taxi (manual §18.3); unscheduled drawn at filed time + 10 min (§17.2) |
 
 Where OIS's model departs from vTBFM's:
@@ -252,11 +254,16 @@ Where OIS's model departs from vTBFM's:
 - Above its filed altitude a flight's descent starts from where it is; vTBFM's starts from the filed altitude, then
   snaps down.
 - The speed range of a type is read once, at the level flown; vTBFM reads it at each step's altitude.
-- The descent path ends at the field's elevation; vTBFM's ends at sea level (manual §18.5).
+- The descent path ends at the field's elevation; vTBFM's ends at sea level (manual §18.5). The type's own descent
+  distance is summed to the field; vTBFM's to the surface (`server/src/trajectory/performance.ts:178-193`).
+- A ground flight's climb starts at 0 ft; vTBFM's at its reported altitude
+  (`server/src/trajectory/integrator.ts:731`).
 - Descent is never faster than cruise (#361).
 - ERAM's climb and descent speeds are scaled for temperature; vTBFM flies them standard-day.
 - A type with neither a row nor a record flies the family, wake or default row.
-- A filed speed is believed from 60 kt; vTBFM ignores 100 kt or less (`server/src/trajectory/performance.ts:133`).
+- A filed speed is believed from 60 to 700 kt; vTBFM ignores 100 kt or less and has no upper bound
+  (`server/src/trajectory/performance.ts:133`, `integrator.ts:326-329`).
+- A junk route is flown in longer steps; vTBFM stops at a step budget and flags the track.
 - A filing above 100,000 ft on a type with no ceiling is unfiled; vTBFM flies it.
 - Cruise is stepped like the rest of the flight, and groundspeed is held to 0.4 to 1.6 times true
   airspeed with a 60 kt floor.

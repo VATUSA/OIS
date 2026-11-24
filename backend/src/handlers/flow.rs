@@ -7964,6 +7964,24 @@ mod eram_wiring_tests {
             let f = flights.iter().find(|f| f.callsign == cs).unwrap();
             assert_eq!(f.debug.as_ref().unwrap().cruise_tas, kt, "{cs}");
         }
+        // A type on a row with a cruise Mach is shown the Mach it flies: 0.74 at FL350 is 427 kt, under the 440.
+        let wake_m = AircraftProfile {
+            cruise_tas: Some(440.0),
+            cruise_mach: Some(0.74),
+            ..AircraftProfile::default()
+        };
+        let rows = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::from([("M".to_string(), wake_m)]),
+            HashMap::new(),
+            HashMap::new(),
+            Some(EramTable::bundled()),
+        );
+        let mut e175 = parked("E175", "E175");
+        e175.flight_plan.as_mut().unwrap().aircraft = "M/E175/L".into();
+        let (flights, _) = candidates(&corridor(), &jfk_dca(), &rows, vec![e175]);
+        let debug = flights[0].debug.as_ref().unwrap();
+        assert_eq!((debug.profile.as_str(), debug.cruise_tas), ("wake:M", 427));
     }
 
     // AC 4, 8, 10. STEP1 projected 900 s: 100 nm along the great circle at 30,000 ft (climbing unscaled: about
@@ -8027,7 +8045,7 @@ mod eram_wiring_tests {
     }
 
     // AC 4, 8, 10. STEP1 with an enroute fix about 200 nm ahead: its row reads 400 kt, 30,000 ft and an ETA
-    // along / 400 h out; the arrival row is 4,368 s +/- 2 out (recompute for the fix's own route length).
+    // along / 400 h out; the arrival row is 4,368 s +/- 3 out.
     // Red when: fix_predictions drops an input.
     #[test]
     fn a_stepped_down_flights_fix_table_reads_its_observed_speed_and_level() {

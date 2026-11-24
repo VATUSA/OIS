@@ -386,7 +386,7 @@ describe("Engine-family rows on the aircraft profiles page (#818 AC2)", () => {
 // AC 12 copy, with no type row        | still says it when no type row is stored
 // AC 12 the copy and the form         | keeps saying it while a row is being edited
 describe("What the built-in tables cover (#985 AC 12)", () => {
-  // Mount [DEFAULT, B738]; the page text (or the subtitle handed to the header) names 2,692 types and says a type row
+  // Mount [DEFAULT, B738]; the page text names 2,692 types and says a type row
   // overrides them, and which types the rest are for. Red when: any of the three sentences is dropped.
   const copy =
     "ERAM's performance tables are built in for 2,692 types. A type profile here replaces them for that type. " +
@@ -396,7 +396,7 @@ describe("What the built-in tables cover (#985 AC 12)", () => {
     expect(host.textContent).toContain(copy);
     expect(host.textContent).toContain("B738");
   });
-  // Mount [DEFAULT]: after the migration most installs hold no type row but PA28.
+  // Mount [DEFAULT]: a page with no type row.
   it("still says it when no type row is stored", async () => {
     const {host} = await mount([{...B738, kind: "default", key: ""}]);
     expect(host.textContent).not.toContain("Aircraft types");

@@ -731,7 +731,7 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
         );
     }
     let freeze = section(&doc, "Freeze horizons");
-    assert!(freeze.contains("There is no freeze horizon"), "{freeze}");
+    assert!(freeze.contains("`freeze_min`"), "{freeze}");
     assert!(freeze.contains("an FCA release"), "{freeze}");
 
     // Columns: topic, OIS, TBFM, vTBFM. Each TBFM claim sits beside its source.
@@ -811,7 +811,7 @@ fn the_aircraft_profiles_docs_page_names_the_built_in_tables() {
 }
 
 // AC 12, 14. In ApiDoc::openapi(), FcaFlightDebug.profile's description contains "eram:", and the schema's
-// property names are exactly the ones on next. Red when: the doc comment is not updated, or a field is
+// property names are these six. Red when: the doc comment is not updated, or a field is
 // added. The regenerated client itself is checked by CI's client-drift job.
 #[test]
 fn the_fca_debug_profile_description_names_the_eram_source() {
@@ -864,10 +864,8 @@ fn the_prediction_doc_cites_each_march_constant() {
     assert!(seen >= 15, "the scan is live: {seen}");
 }
 
-// AC 15. The doc has the inputs, each step, the differences from vTBFM and from the climbs measured on VATSIM
-// (20 to 45 % longer for most airliners, B738 within 3 %), cites `zla-artcc/vTBFM` at b6bc6c5d, and its
-// comparison table's Performance, Integration and Anchoring rows say what OIS now does (15 s, 500 ft, no
-// 250 kt).
+// AC 15. The doc has each step, the list of differences from vTBFM, and the climbs measured on VATSIM, and its
+// comparison table's Performance, Integration and Anchoring rows say what OIS does (15 s, 500 ft, no 250 kt).
 #[test]
 fn the_prediction_doc_covers_the_march_and_where_it_differs_from_vtbfm() {
     let doc = prediction_doc().replace("\r\n", "\n");
@@ -962,6 +960,6 @@ fn every_special_case_row_names_its_line_and_leaves_its_decision_empty() {
     for row in &decided {
         assert_ne!(row[6], "", "decided: {row:?}");
     }
-    let want: BTreeSet<String> = (0..=48).map(|n| format!("S{n}")).collect();
+    let want: BTreeSet<String> = (0..=77).map(|n| format!("S{n}")).collect();
     assert_eq!(ids, want, "every case is on the list once");
 }

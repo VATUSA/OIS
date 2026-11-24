@@ -2647,7 +2647,7 @@ pub struct FcaFlightDebug {
     /// function of cruise: without this the debug view can't explain the gap it exists to explain
     /// (e.g. ~282 kt at a low arrival fix against a 440 kt cruise).
     pub cross_speed: i64,
-    /// Filed cruise altitude (ft) used.
+    /// Cruise altitude (ft) as filed, 35,000 when none was readable; the flight may be flown lower.
     pub cruise_alt: i64,
     /// Mean headwind (kt) over the remaining route, each point read at the profile's altitude there
     /// (+ head / − tail); the ETA itself uses the wind point by point. Null = still air.
