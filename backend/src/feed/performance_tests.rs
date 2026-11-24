@@ -39,11 +39,13 @@
 
 use std::collections::HashMap;
 
-use super::super::trajectory::{AircraftProfile, ProfileTable, ias_to_tas, isa_temp_k, tas_to_cas};
-use super::{EramRecord, EramTable, Performance, RateRow, SpeedRow};
+use sha2::{Digest, Sha256};
 
-/// The sum of every number in the bundled file's four tables, summed from the JSON outside this crate.
-const FILE_SUM: f64 = 2_520_966_547.0;
+use super::super::trajectory::{AircraftProfile, ProfileTable, ias_to_tas, isa_temp_k, tas_to_cas};
+use super::{EramRecord, EramTable, Performance};
+
+/// SHA-256 of the bundled file with LF line endings, taken with `sha256sum`.
+const FILE_SHA256: &str = "7164e6720fa6e9b6a0291d4850eb286ae2cb6c10d8bad0b8d28af268cc42c71c";
 
 /// ISA at 10,000 ft (K): 288.15 - 19.812.
 const ISA_10K: f64 = 268.338;
@@ -124,14 +126,9 @@ fn the_bundled_file_holds_2692_types_each_with_all_four_tables() {
             "{ty}"
         );
     }
-    // Every number in the file, so none is edited unnoticed.
-    let pairs = |rows: &[SpeedRow]| rows.iter().flatten().sum::<f64>();
-    let triples = |rows: &[RateRow]| rows.iter().flatten().sum::<f64>();
-    let sum: f64 = types
-        .values()
-        .map(|r| triples(&r.climb) + triples(&r.descent) + pairs(&r.min_tas) + pairs(&r.max_tas))
-        .sum();
-    assert_eq!(sum, FILE_SUM);
+    // The whole file, so no number is edited unnoticed.
+    let file = include_str!("../../data/aircraft-performance.json").replace('\r', "");
+    assert_eq!(hex::encode(Sha256::digest(file)), FILE_SHA256);
 }
 
 // AC 5. Input: every record of `EramTable::bundled()`. Expected: altitudes strictly increase in all four
@@ -475,7 +472,7 @@ fn without_a_temperature_the_tables_are_read_as_written() {
 }
 
 // AC 3. A flat record (descent 2,000 fpm, 240 kt; envelope 400 to 500): from 30,000 ft to sea level
-// 15 min x 4 nm/min = 60 nm; to a 6,000 ft field 12 min = 48 nm; from 0 to 0 = 0. Bundled B738 FL350 to 0:
+// 15 min x 4 nm/min = 60 nm; to a 6,000 ft field 12 min = 48 nm; to one at 5,431 ft 49.138; from 0 to 0 = 0. Bundled B738 FL350 to 0:
 // 130.884 nm. Red when: the field elevation is ignored (60, not 48).
 #[test]
 fn the_descent_distance_integrates_the_descent_table_to_the_field() {
@@ -484,6 +481,7 @@ fn the_descent_distance_integrates_the_descent_table_to_the_field() {
     for (from, to, want) in [
         (30_000.0, 0.0, 60.0),
         (30_000.0, 6_000.0, 48.0),
+        (30_000.0, 5_431.0, 49.138),
         (0.0, 0.0, 0.0),
     ] {
         let nm = p.descent_distance_nm(from, to, 480.0);
@@ -510,7 +508,7 @@ fn the_climb_distance_integrates_the_climb_table_from_the_surface() {
 }
 
 // AC 3, AC 10. The default row (250/290 KIAS, 2,000/1,500 fpm up, 1,800 down, cruise 440 at FL350):
-// descent distance 118.80 nm (the 440 kt cap applies above ~26,600 ft), climb distance 139.00 nm, in
+// descent distance 118.80 nm (the 440 kt cap applies above ~25,900 ft), climb distance 139.00 nm, in
 // 500 ft steps on ISA; allow 0.1. Both are still-air distances: wind moves neither.
 #[test]
 fn a_rows_distances_integrate_its_schedule() {

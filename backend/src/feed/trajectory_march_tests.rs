@@ -64,7 +64,7 @@
 //! AC 9 faster changes nothing          | a_faster_descent_changes_nothing
 //! AC 9 wind along the heading          | the_observed_cas_adds_the_headwind_along_the_heading
 //! AC 9 not a climbing flight           | a_short_trip_still_climbing_is_not_capped
-//! AC 9 not outside top of descent      | a_slow_climb_outside_top_of_descent_is_not_capped
+//! AC 9 not outside top of descent      | a_slow_flight_outside_top_of_descent_is_not_capped
 //! AC 10 1.5x climb distance, both sides | a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is
 //! AC 10 departure unknown              | a_low_flight_with_no_known_departure_climbs
 //! AC 10 only outside top of descent    | a_low_flight_inside_top_of_descent_is_not_made_level
@@ -385,7 +385,7 @@ fn a_short_trip_climbs_until_it_meets_the_descent_path() {
 // AC 2. The 60 nm ground flight and the 60 nm airborne flight with departure 40, sampled every 0.25 nm from
 // start to field: the altitude rises, then never rises again (one sign change), and never exceeds the path
 // by more than one climb step (500 ft). LONG from the ground over 120 nm (inside its 130) does the same: it
-// meets the path 55 nm out at about 21,700 ft, total 1,635 s.
+// meets the path 65 nm out at about 21,800 ft, total 1,635 s.
 // Red when: the climbing flag is not cleared once the path is reached.
 #[test]
 fn a_short_trip_climbs_once_and_then_only_descends() {
@@ -545,7 +545,7 @@ fn a_c208_like_row_flies_a_flat_cruise_leg() {
 }
 
 // AC 3. The bundled C208 (descent table 188 kt at 10,000 ft, above its envelope) at 12,000 ft unfiled:
-// cruise (149 + 178) / 2 = 163.5, descent_start 48.3 + 10 = 58.3, 250.5 nm out. gs 163.5 at 200, 100 and 60,
+// cruise (149 + 178) / 2 = 163.5, descent_start 52.3 + 10 = 62.3, 250.5 nm out. gs 163.5 at 200, 100 and 60,
 // and no sample to the field above 163.5. Red when: the faster descent table is flown uncapped.
 #[test]
 fn the_bundled_c208_flies_a_flat_cruise_leg_and_never_descends_faster() {
@@ -570,8 +570,7 @@ fn the_bundled_c208_flies_a_flat_cruise_leg_and_never_descends_faster() {
     }
 }
 
-// AC 3, in place of a_low_level_tailwind_moves_top_of_descent_further_out and
-// a_headwind_on_the_upper_descent_moves_top_of_descent_in: the altitude is geometric. The default row at
+// AC 3. The altitude is geometric, whatever the wind. The default row at
 // FL350, 300 nm, in still air, in 60 kt on the tail below 10,000 ft, in 80 kt on the nose from 60 nm out, and
 // with desc_fpm 3,000: altitude 20,000 +/- 1 at 60 and 10,000 +/- 1 at 30 in all four.
 // Control: the headwind case is later than still air.
@@ -738,7 +737,8 @@ fn the_groundspeed_limits_hold_after_the_scale() {
 }
 
 // AC 4. FLAT at cruise in a uniform 40 kt headwind: Some(40) over the whole route. In 80 kt beyond 150 nm and
-// 0 inside it, over 200 to 100 at cruise: 40 +/- 1.5 (a 2 nm step of edge). Still air: None.
+// 0 inside it, over 200 to 100 at cruise: 40 +/- 1.5 (a 2 nm step of edge), whichever end is given first. In 80 kt
+// beyond 199.5 only, the one step from 200.5 is the only one in it: 80 over 200 to 199. Still air: None.
 // Red when: it is weighted by time (the slower windward half reads above 43).
 #[test]
 fn mean_headwind_is_weighted_by_distance() {
@@ -759,6 +759,17 @@ fn mean_headwind_is_weighted_by_distance() {
     );
     let mean = f.fly().mean_headwind(200.0, 100.0).unwrap();
     assert!((mean - 40.0).abs() <= 1.5, "{mean}");
+    assert_eq!(f.fly().mean_headwind(100.0, 200.0), Some(mean));
+    f.wind = RouteWind::new(
+        [(199.4, 0.0), (199.5, 80.0)]
+            .into_iter()
+            .map(|(d_nm, hw)| WindKnot {
+                d_nm,
+                levels: vec![(0.0, hw, None)],
+            })
+            .collect(),
+    );
+    assert_eq!(f.fly().mean_headwind(200.0, 199.0), Some(80.0));
     f.wind = RouteWind::still();
     assert_eq!(f.fly().mean_headwind(200.0, 100.0), None);
 }
@@ -766,7 +777,8 @@ fn mean_headwind_is_weighted_by_distance() {
 // AC 4. descent_ground_speed_at: FLAT, sea level, 30,000 / 480: 240 at 40 nm, 480 at 95. Default row FL350 /
 // 440: 290 KIAS at the path's 13,333.3 ft = 355.8 kt at 40 nm, 440 at 150; into 30 kt 325.8
 // (the path does not move); 80 kt from FL300 up and calm below 20,000 ft: 355.8 at 40, 360 at 150. Into a
-// 5,000 ft field, 40 nm is 18,333.3 ft: 386.3. A 100 kt record into 80 kt: the 60 kt floor, not 40.
+// 5,000 ft field, 40 nm is 18,333.3 ft: 386.3. Into 60 kt at 100 nm and calm at the field, 40 nm out it is 24: 331.8.
+// A 100 kt record into 80 kt: the 60 kt floor, not 40.
 // Red when: it integrates a rate descent (363.4).
 #[test]
 fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
@@ -810,6 +822,16 @@ fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
     assert_eq!(row(150.0, 0.0, &still), 440.0);
     near(row(40.0, 0.0, &RouteWind::uniform(30.0)), 325.8);
     near(row(40.0, 5_000.0, &still), 386.3);
+    let along = RouteWind::new(
+        [(0.0, 0.0), (100.0, 60.0)]
+            .into_iter()
+            .map(|(d_nm, hw)| WindKnot {
+                d_nm,
+                levels: vec![(0.0, hw, None)],
+            })
+            .collect(),
+    );
+    near(row(40.0, 0.0, &along), 331.8);
     let aloft = RouteWind::new(vec![WindKnot {
         d_nm: 0.0,
         levels: vec![
@@ -919,9 +941,9 @@ fn only_a_flight_within_500_ft_of_its_level_or_above_it_is_scaled() {
     secs(&low, 2_178.75);
 }
 
-// AC 8, in place of the 250 kt gate. A record cruising 200 to 260, filed 230 at 20,000 ft, 150.5 nm, gs 240:
+// AC 8. There is no least groundspeed. A record cruising 200 to 260, filed 230 at 20,000 ft, 150.5 nm, gs 240:
 // scale 240 / 230, gs 240 at the start. FLAT at 30,000 ft, gs 240: clamped, 408, not the unscaled 480.
-// Red when: the 250 kt minimum is kept.
+// Red when: a slow flight is not scaled.
 #[test]
 fn a_slow_flight_at_cruise_is_scaled() {
     let mut f = air(20_000.0, 150.5, 240.0, Some(300.0));
@@ -1096,7 +1118,7 @@ fn a_row_with_no_filed_speed_is_read_at_its_filed_altitude() {
 }
 
 // AC 8, AC 12. Mach 0.84 filed 520, level at 30,000 under FL350, in air of 250 K there and 220 K at FL350: the
-// cruise speed is 661.4788 x 0.84 x sqrt(250 / 288.15) = 517.4, not FL350's 485.4. FLAT held level at 20,000 in the
+// cruise speed is 661.4788 x 0.84 x sqrt(250 / 288.15) = 517.4, not FL350's 485.4 nor the field's 220 K. FLAT held level at 20,000 in the
 // sloped range (300 to 400) shows 400. Red when: it is read at the filed level, or in standard air.
 #[test]
 fn the_cruise_speed_is_read_where_the_flight_starts() {
@@ -1104,10 +1126,16 @@ fn the_cruise_speed_is_read_where_the_flight_starts() {
         cruise_mach: Some(0.84),
         ..AircraftProfile::default()
     };
-    let wind = RouteWind::new(vec![WindKnot {
-        d_nm: 0.0,
-        levels: vec![(30_000.0, 0.0, Some(250.0)), (35_000.0, 0.0, Some(220.0))],
-    }]);
+    let wind = RouteWind::new(vec![
+        WindKnot {
+            d_nm: 0.0,
+            levels: vec![(30_000.0, 0.0, Some(220.0)), (35_000.0, 0.0, Some(220.0))],
+        },
+        WindKnot {
+            d_nm: 400.0,
+            levels: vec![(30_000.0, 0.0, Some(250.0)), (35_000.0, 0.0, Some(220.0))],
+        },
+    ]);
     let start = FlightStart {
         alt_ft: 30_000.0,
         to_go_nm: 400.0,
@@ -1617,7 +1645,8 @@ fn a_route_past_25_000_nm_is_flown_in_longer_steps() {
 
 // AC 9. FLAT, 60 nm out at 20,000 ft in air 1.1 times the standard temperature: its descent speed there is
 // 240 x sqrt(1.1) = 251.7, so 228 kt is 17 kt CAS slow and held. In standard air 228 is 9 kt CAS under 240 and is
-// not. Red when: the comparison reads the standard-day speed.
+// not, nor is it with the warm air over the field only. Red when: the comparison reads the standard-day speed, or the
+// field's.
 #[test]
 fn the_assigned_speed_is_judged_in_the_fields_temperature() {
     let mut f = air(20_000.0, 60.0, 228.0, Some(300.0));
@@ -1625,6 +1654,13 @@ fn the_assigned_speed_is_judged_in_the_fields_temperature() {
     f.wind = air_at(1.1);
     let held = f.fly().ground_speed_at(59.5);
     assert!((held - 228.0).abs() < 1e-6, "{held}");
+    let temps = |d_nm: f64, ratio: f64| WindKnot {
+        d_nm,
+        levels: vec![(20_000.0, 0.0, Some(isa_temp_k(20_000.0) * ratio))],
+    };
+    f.wind = RouteWind::new(vec![temps(0.0, 1.1), temps(60.0, 1.0)]);
+    let free = f.fly().ground_speed_at(59.5);
+    assert!((free - 240.0).abs() < 0.5, "{free}");
 }
 
 // AC 10. The same flight with no known departure: climbs, total 2,276.25 s, and its groundspeed is not read

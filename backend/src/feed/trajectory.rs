@@ -916,10 +916,10 @@ mod tests {
         assert_eq!(filed_altitude_ft("A045"), Some(4500.0));
     }
 
-    /// Unknown is unknown for the band and 35,000 ft for the timing; a filing under 1,000 ft is
-    /// unknown on both, at the boundary as well as below it.
+    /// Unknown is unknown to the band and the model, and shown as 35,000 ft; a filing under 1,000 ft is
+    /// unknown, at the boundary as well as below it.
     #[test]
-    fn an_unreadable_filing_is_unknown_to_the_band_and_35000_ft_to_the_model() {
+    fn an_unreadable_filing_is_unknown_and_shown_as_35000_ft() {
         for s in ["", "VFR", "0", "8", "700"] {
             assert_eq!(filed_altitude_ft(s), None, "{s:?}");
             assert_eq!(parse_alt_ft(s), 35000.0, "{s:?}");
@@ -1256,7 +1256,7 @@ mod tests {
 
     /// Regression (#355): anywhere the profile is still at cruise altitude, `ground_speed_at` must
     /// not read above the cruise groundspeed. The *descent* schedule's TAS at cruise altitude is higher
-    /// (~519 kt for this profile at FL350 against a 440 kt cruise). FCA MIT spacing is sized
+    /// (~521 kt for this profile at FL350 against a 440 kt cruise). FCA MIT spacing is sized
     /// from this number, so an un-capped read under-provisions every enroute crossing: a 20 MIT fix
     /// 150 nm out would get `20 / 508 * 3600 = 142 s`, which the aircraft flies at its real 440 kt
     /// for 17.3 nm, not 20.
@@ -1709,8 +1709,8 @@ mod tests {
         assert!((last_ten - 600.0).abs() < 1e-6, "{last_ten}");
     }
 
-    // Anchoring divides by the cruise speed the profile flies in the field's air, not the ISA
-    // speed: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
+    // Anchoring divides by the cruise speed the profile flies in the air where it is, not the ISA speed nor the
+    // arrival field's: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
     #[test]
     fn anchoring_a_mach_cruise_off_isa_lands_on_the_observed_groundspeed() {
         let warm = flat(&[
@@ -1723,6 +1723,12 @@ mod tests {
             "{}",
             vp.ground_speed_at(400.0)
         );
+        let warm_there = flat(&[
+            (0.0, 0.0, Some(ISA_FL350_K)),
+            (400.0, 0.0, Some(ISA_FL350_K + 15.0)),
+        ]);
+        let vp = anchored(400.0, 520.0, &mach_cruiser(), warm_there, 520.0);
+        assert!((vp.ground_speed_at(400.0) - 520.0).abs() < 1e-6);
     }
 
     // RouteWind sampling between and outside knots.

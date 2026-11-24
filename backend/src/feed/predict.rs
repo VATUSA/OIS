@@ -2248,7 +2248,7 @@ pub(crate) mod march_input_tests {
     //! (33.0, -77.5), FL300, 400 kt, heading 199. 492.2 nm great circle from KJFK (past 1.5 x 105.9 =
     //! 158.8), 456.8 nm to go (outside 130.9 + 10 = 140.9): level at FL300 (AC 10), scale 400 / 450
     //! (AC 8), so predicted at 400 kt and FL300 until 140.9 nm out. ETE 4,368 s; climbing back to FL350
-    //! unscaled, which any dropped input gives, 3,888 s.
+    //! unscaled, 3,888 s.
 
     use super::*;
     use crate::feed::airports::Airport;
@@ -2463,7 +2463,28 @@ pub(crate) mod march_input_tests {
         assert_eq!(at_150_nm("B738", "VFR"), 35_000.0);
     }
 
-    // AC 8. The 60 kt from 180 blows north of 34 N and west of 79 W only. At 35 N, 80.29 W on a 180 heading, gs 420 is
+    // AC 4. A BE99 at 5,000 ft, 30 nm out of KMIA, filed "VFR" at 180 kt: the miles-in-trail speed is read off the path at
+    // 12,000 ft, where its cruise-speed tables end, not the path's 13,333: 227.2 kt. Control: filed FL350, 232.0.
+    // Red when: the filing is passed as 35,000 ft.
+    #[test]
+    fn the_miles_in_trail_speed_of_an_unreadable_filing_stops_at_its_types_cruise_speeds() {
+        let still = Winds::default();
+        let speed = |altitude: &str| {
+            let mut p = step1();
+            p.flight_plan = Some(FlightPlan {
+                aircraft_short: "BE99".into(),
+                altitude: altitude.into(),
+                cruise_tas: "180".into(),
+                ..b738("KJFK", "KMIA")
+            });
+            (p.latitude, p.longitude, p.altitude, p.groundspeed) = (26.29, -80.29, 5_000, 180);
+            timed(&jfk_mia(), &still, &p, |t| t.gs_short_of_field(40.0))
+        };
+        assert!((speed("VFR") - 227.2).abs() < 0.05, "{}", speed("VFR"));
+        assert!((speed("FL350") - 232.0).abs() < 0.05, "{}", speed("FL350"));
+    }
+
+    // AC 8. The 60 kt from 180 blows north of 34 N and west of 79 W only. At 35.5 N, 80.5 W on a 180 heading, gs 420 is
     // scaled against 390, as above. Red when: the wind is read anywhere else (against 450, gs_at(0) 364).
     #[test]
     fn the_anchor_reads_the_wind_where_the_aircraft_is() {

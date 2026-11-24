@@ -783,7 +783,7 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
 // AC 15 constants with their lines      | the_prediction_doc_cites_each_march_constant
 // AC 15 steps, differences, climbs      | the_prediction_doc_covers_the_march_and_where_it_differs_from_vtbfm
 // AC 16 controller page                 | the_controller_prediction_page_is_published_without_code
-// AC 17 special-case list               | every_special_case_row_names_its_line_and_leaves_its_decision_empty
+// AC 17 special-case list               | every_special_case_row_names_its_line_and_only_a_decided_one_has_a_decision
 
 /// A repo file, its line endings normalized.
 fn repo_file(path: &str) -> String {
@@ -960,6 +960,6 @@ fn every_special_case_row_names_its_line_and_only_a_decided_one_has_a_decision()
     for row in &decided {
         assert_ne!(row[6], "", "decided: {row:?}");
     }
-    let want: BTreeSet<String> = (0..=79).map(|n| format!("S{n}")).collect();
+    let want: BTreeSet<String> = (0..=80).map(|n| format!("S{n}")).collect();
     assert_eq!(ids, want, "every case is on the list once");
 }

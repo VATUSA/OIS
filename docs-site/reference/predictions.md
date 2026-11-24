@@ -51,8 +51,8 @@ aircraft isn't adjusted.
 
 An aircraft in its descent that is more than 15 knots indicated slower than expected is taken to be on an
 assigned speed, if OIS knows where it left from. It is predicted no faster than that all the way in, so a delay
-you absorb with speed control shows in its ETA. Take the restriction off and the ETA comes forward at the next
-update.
+you absorb with speed control shows in its ETA. Take the restriction off and the ETA comes forward once it has
+sped back up.
 
 ## What it can't see
 
@@ -60,7 +60,6 @@ update.
   position, so a vector shows up as the aircraft moves.
 - **Crossing restrictions.** STAR altitudes and speeds are not flown.
 - **Slow or fast climbs.** Most airliners on VATSIM climb faster than ERAM's tables: the A320 reaches
-  cruise in about 30 percent less distance. A departure's altitude on its way up reads low, and its first ETAs a
-  little late.
+  cruise in about 30 percent less distance. A departure's altitude on its way up reads low.
 - **Shallow descents.** Jets on VATSIM usually come down nearer 250 to 300 feet a mile than 333.
 - **Taxi.** Release times are wheels-up times.

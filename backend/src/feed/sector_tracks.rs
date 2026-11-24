@@ -1238,7 +1238,7 @@ mod eram_wiring_tests {
 
     // AC 4, 8, 10. STEP1 (`predict::march_input_tests`): its +15 min fix is 100 nm along at 30,000 ft and its
     // +30 min fix 200 nm at 30,000, so it never enters a volume based at FL310; climbing back it would be at
-    // 34,721 ft, inside it, by 100 nm. Red when: project_tracks drops an input.
+    // 35,000 ft, inside it, by 100 nm. Red when: project_tracks drops an input.
     #[test]
     fn a_stepped_down_flight_stays_in_the_strata_it_is_in() {
         let level = fixes(&eram_profiles(), step1(), None);
