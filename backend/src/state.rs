@@ -272,7 +272,7 @@ mod eram_wiring_tests {
 
     // AC 5. A source scan, because from_env reads the process environment and opens a pool: the shipped part
     // of state.rs (before its first `#[cfg(test)]`) names ProfileTable::default() nowhere and
-    // EramTable::bundled() at least once (the live anchor). Red when: from_env's site reverts.
+    // ProfileTable::built_in() twice, once per constructor. Red when: either site reverts.
     #[test]
     fn no_shipped_state_starts_on_a_table_without_eram() {
         let src = include_str!("state.rs");

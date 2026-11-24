@@ -5413,7 +5413,7 @@ export interface components {
             cruise_alt: number;
             /**
              * Format: int64
-             * @description Cruise TAS (kt) used for the ETA: the filing, held to what the type flies.
+             * @description Cruise TAS (kt) used for the ETA: the filing, held to ERAM's range for the type or its row's cap.
              */
             cruise_tas: number;
             /**

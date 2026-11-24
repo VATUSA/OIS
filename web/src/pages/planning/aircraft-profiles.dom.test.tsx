@@ -387,8 +387,10 @@ describe("Engine-family rows on the aircraft profiles page (#818 AC2)", () => {
 // AC 12 the copy and the form         | keeps saying it while a row is being edited
 describe("What the built-in tables cover (#985 AC 12)", () => {
   // Mount [DEFAULT, B738]; the page text (or the subtitle handed to the header) names 2,692 types and says a type row
-  // overrides them. Red when: either half of the sentence is dropped.
-  const copy = "ERAM's performance tables are built in for 2,692 types. A type profile here replaces them for that type.";
+  // overrides them, and which types the rest are for. Red when: any of the three sentences is dropped.
+  const copy =
+    "ERAM's performance tables are built in for 2,692 types. A type profile here replaces them for that type. " +
+    "The other profiles are for types ERAM doesn't have.";
   it("says the built-in tables cover 2,692 types and a type row overrides them", async () => {
     const {host} = await mount([{...B738, kind: "default", key: ""}, B738]);
     expect(host.textContent).toContain(copy);

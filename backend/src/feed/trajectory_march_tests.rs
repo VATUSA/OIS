@@ -12,64 +12,71 @@
 //! Starts are 0.5 nm off the step grid (200.5 nm, 300.25 nm) so no step ends exactly on descent_start
 //! and a rounding in 30,000 / (1000 / 3) cannot move a case.
 //!
-//! What the literals assume; each is design text or an open question in the report:
+//! What the literals assume:
 //!   (a) only the last step is partial: a cruise step that starts above descent_start runs its 15 s
-//!   (b) cruise holds the altitude it was captured at; it is not snapped to the filed level
+//!   (b) a climb captured in the 500 ft band goes on to its level in that step, at cruise speed
 //!   (c) TAS, wind and phase are read at the step's start
-//!   (d) the 60 kt floor is applied after the AC 8 scale, as on next
+//!   (d) the 60 kt floor is applied after the AC 8 scale
 //! Totals allow 0.1 s. "Departure" is the straight-line distance from the departure airport.
 //!
 //! Coverage matrix (VATUSA/OIS#985)
 //!
 //! Requirement                          | Test
 //! -------------------------------------|---------------------------------------------------------------------------
-//! AC 1 cruise, then descent            | a_cruising_flight_holds_level_to_descent_start_then_flies_the_path        | OK
-//! AC 1 climb, cruise, descent          | a_ground_departure_climbs_cruises_and_descends                            | OK
-//! AC 1 500 ft band, both sides         | a_flight_500_ft_low_cruises_and_one_501_ft_low_climbs                     | OK
-//! AC 1 above its cruise altitude       | a_flight_above_its_filed_altitude_holds_it_until_the_path_is_below_it     | OK
-//! AC 1 decided each step               | an_airborne_climb_becomes_a_cruise_when_it_reaches_its_level              | OK
-//! AC 2 nearer departure, both sides    | an_airborne_flight_inside_top_of_descent_climbs_only_nearer_its_departure | OK
-//! AC 2 departure unknown               | a_flight_inside_top_of_descent_with_no_known_departure_does_not_climb     | OK
-//! AC 2 ground, short trip              | a_short_trip_climbs_until_it_meets_the_descent_path                       | OK
-//! AC 2 never climbs again              | a_short_trip_climbs_once_and_then_only_descends                           | OK
-//! AC 2 reaches its level first         | a_short_trip_that_reaches_its_level_holds_it_to_the_path                  | OK
-//! AC 3 path to the field's elevation   | the_descent_path_ends_at_the_arrival_fields_elevation                     | OK
-//! AC 3 larger of the two distances     | descent_speeds_start_at_the_larger_of_the_type_and_path_distances         | OK
-//! AC 3 the 10 nm margin                | the_descent_margin_is_ten_miles                                           | OK
-//! AC 3 snaps down when above           | a_flight_above_the_path_is_on_it_at_the_next_step                         | OK
-//! AC 3 descent never above cruise      | no_descent_is_flown_above_the_cruise_speed                                | OK
-//! AC 3 slow type, row                  | a_c208_like_row_flies_a_flat_cruise_leg                                   | OK
-//! AC 3 slow type, ERAM                 | the_bundled_c208_flies_a_flat_cruise_leg_and_never_descends_faster        | OK
-//! AC 3 the path is geometric           | neither_a_rows_descent_rate_nor_the_wind_moves_the_descent_path           | OK
-//! AC 4 exact inverses                  | distance_after_is_the_exact_inverse_of_time_between                       | OK
-//! AC 4 monotonic, additive             | elapsed_time_is_monotonic_and_additive_along_the_route                    | OK
-//! AC 4 speed agrees with time          | ground_speed_at_is_the_speed_time_between_flew                            | OK
-//! AC 4 altitude agrees with distance   | alt_at_is_linear_between_the_steps_it_was_flown_on                        | OK
-//! AC 4 empty and sub-step routes       | a_zero_length_route_and_one_shorter_than_a_step_are_timed                 | OK
-//! AC 4 groundspeed limits              | the_groundspeed_limits_hold_after_the_scale                               | OK
-//! AC 4 mean headwind                   | mean_headwind_is_weighted_by_distance                                     | OK
-//! AC 4 speed inside 40 nm              | descent_ground_speed_at_reads_the_path_and_descent_speeds                 | OK
-//! AC 5 no ERAM ceiling                 | an_eram_type_climbs_past_where_a_row_is_capped                            | OK
-//! AC 7 warm and cold air               | warm_and_cold_air_scale_the_climb_and_descent_not_the_cruise              | OK
-//! AC 8 scale                           | an_established_flight_is_scaled_to_its_observed_groundspeed               | OK
-//! AC 8 clamp, both sides               | the_anchor_is_held_to_fifteen_percent_either_way                          | OK
-//! AC 8 gate                            | only_a_flight_within_500_ft_of_its_level_or_above_it_is_scaled            | OK
-//! AC 8 no 250 kt gate                  | a_slow_flight_at_cruise_is_scaled                                         | OK
-//! AC 8, 9 ground                       | a_ground_flight_is_never_scaled_or_capped                                 | OK
-//! AC 8 wind along the heading          | the_anchor_takes_the_headwind_it_is_given_not_the_routes                  | OK
-//! AC 8 level flight, at its level      | a_stepped_down_flight_is_scaled_at_its_present_level                      | OK
-//! AC 9 15 kt deadband, both sides      | a_descent_slower_by_more_than_15_kt_cas_is_capped_at_its_observed_speed   | OK
-//! AC 9 CAS, to the end                 | the_assigned_speed_is_a_cas_held_to_the_field                             | OK
-//! AC 9 not also scaled                 | a_capped_flight_is_not_also_scaled                                        | OK
-//! AC 9 against the scaled prediction   | a_flight_matching_its_scaled_descent_keeps_the_scale                      | OK
-//! AC 9 faster changes nothing          | a_faster_descent_changes_nothing                                          | OK
-//! AC 9 wind along the heading          | the_observed_cas_adds_the_headwind_along_the_heading                      | OK
-//! AC 9 not a climbing flight           | a_short_trip_still_climbing_is_not_capped                                 | OK
-//! AC 9 not outside top of descent      | a_slow_climb_outside_top_of_descent_is_not_capped                         | OK
-//! AC 10 1.5x climb distance, both sides | a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is        | OK
-//! AC 10 departure unknown              | a_low_flight_with_no_known_departure_climbs                               | OK
-//! AC 10 only outside top of descent    | a_low_flight_inside_top_of_descent_is_not_made_level                      | OK
-//! AC 10 path from the filed altitude   | a_level_flights_top_of_descent_is_still_its_filed_altitudes               | OK
+//! AC 1 cruise, then descent            | a_cruising_flight_holds_level_to_descent_start_then_flies_the_path
+//! AC 1 climb, cruise, descent          | a_ground_departure_climbs_cruises_and_descends
+//! AC 1 500 ft band, both sides         | a_flight_500_ft_low_cruises_and_one_501_ft_low_climbs
+//! AC 1 above its cruise altitude       | a_flight_above_its_filed_altitude_holds_it_until_the_path_is_below_it
+//! AC 1 decided each step               | an_airborne_climb_becomes_a_cruise_when_it_reaches_its_level
+//! AC 2 nearer departure, both sides    | an_airborne_flight_inside_top_of_descent_climbs_only_nearer_its_departure
+//! AC 2 departure unknown               | a_flight_inside_top_of_descent_with_no_known_departure_does_not_climb
+//! AC 2 ground, short trip              | a_short_trip_climbs_until_it_meets_the_descent_path
+//! AC 2 never climbs again              | a_short_trip_climbs_once_and_then_only_descends
+//! AC 2 reaches its level first         | a_short_trip_that_reaches_its_level_holds_it_to_the_path
+//! AC 3 path to the field's elevation   | the_descent_path_ends_at_the_arrival_fields_elevation
+//! AC 3 larger of the two distances     | descent_speeds_start_at_the_larger_of_the_type_and_path_distances
+//! AC 3 the 10 nm margin                | the_descent_margin_is_ten_miles
+//! AC 3 snaps down when above           | a_flight_above_the_path_is_on_it_at_the_next_step
+//! AC 3 descent never above cruise      | no_descent_is_flown_above_the_cruise_speed
+//! AC 3 slow type, row                  | a_c208_like_row_flies_a_flat_cruise_leg
+//! AC 3 slow type, ERAM                 | the_bundled_c208_flies_a_flat_cruise_leg_and_never_descends_faster
+//! AC 3 the path is geometric           | neither_a_rows_descent_rate_nor_the_wind_moves_the_descent_path
+//! AC 4 exact inverses                  | distance_after_is_the_exact_inverse_of_time_between
+//! AC 4 monotonic, additive             | elapsed_time_is_monotonic_and_additive_along_the_route
+//! AC 4 speed agrees with time          | ground_speed_at_is_the_speed_time_between_flew
+//! AC 4 altitude agrees with distance   | alt_at_is_linear_between_the_steps_it_was_flown_on
+//! AC 4 empty and sub-step routes       | a_zero_length_route_and_one_shorter_than_a_step_are_timed
+//! AC 4 groundspeed limits              | the_groundspeed_limits_hold_after_the_scale
+//! AC 4 mean headwind                   | mean_headwind_is_weighted_by_distance
+//! AC 4 speed inside 40 nm              | descent_ground_speed_at_reads_the_path_and_descent_speeds
+//! AC 5 no ERAM ceiling                 | an_eram_type_climbs_past_where_a_row_is_capped
+//! AC 7 warm and cold air               | warm_and_cold_air_scale_the_climb_and_descent_not_the_cruise
+//! AC 8 scale                           | an_established_flight_is_scaled_to_its_observed_groundspeed
+//! AC 8 clamp, both sides               | the_anchor_is_held_to_fifteen_percent_either_way
+//! AC 8 gate                            | only_a_flight_within_500_ft_of_its_level_or_above_it_is_scaled
+//! AC 8 no 250 kt gate                  | a_slow_flight_at_cruise_is_scaled
+//! AC 8 wind along the heading          | the_anchor_takes_the_headwind_it_is_given_not_the_routes
+//! AC 8 level flight, at its level      | a_stepped_down_flight_is_scaled_at_its_present_level
+//! AC 9 15 kt deadband, both sides      | a_descent_slower_by_more_than_15_kt_cas_is_capped_at_its_observed_speed
+//! AC 9 CAS, to the end                 | the_assigned_speed_is_a_cas_held_to_the_field
+//! AC 9 not also scaled                 | a_capped_flight_is_not_also_scaled
+//! AC 9 against the scaled prediction   | a_flight_matching_its_scaled_descent_keeps_the_scale
+//! AC 9 faster changes nothing          | a_faster_descent_changes_nothing
+//! AC 9 wind along the heading          | the_observed_cas_adds_the_headwind_along_the_heading
+//! AC 9 not a climbing flight           | a_short_trip_still_climbing_is_not_capped
+//! AC 9 not outside top of descent      | a_slow_climb_outside_top_of_descent_is_not_capped
+//! AC 10 1.5x climb distance, both sides | a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is
+//! AC 10 departure unknown              | a_low_flight_with_no_known_departure_climbs
+//! AC 10 only outside top of descent    | a_low_flight_inside_top_of_descent_is_not_made_level
+//! AC 10 path from the filed altitude   | a_level_flights_top_of_descent_is_still_its_filed_altitudes
+//! AC 1 goes on to its level            | a_climb_goes_on_to_its_level_and_never_past_it
+//! AC 2, 9 above the path, near its dep | a_short_trip_already_above_the_path_is_not_climbing
+//! AC 3 elevation in the type distance  | the_types_own_descent_distance_ends_at_the_field
+//! AC 3 field below sea level, low plan | a_field_below_sea_level_and_a_filing_below_the_field_are_flown
+//! AC 4 speed inside 40 nm, filed low   | descent_ground_speed_at_is_read_no_higher_than_cruise
+//! AC 4 implausible altitudes           | a_filing_above_100_000_ft_is_unfiled_for_a_type_with_no_ceiling
+//! AC 9 a ceiling, not a target         | a_ceiling_never_speeds_up_a_slower_schedule
+//! AC 9 the field's temperature         | the_assigned_speed_is_judged_in_the_fields_temperature
 
 use super::super::performance::{EramRecord, EramTable};
 use super::*;
@@ -255,7 +262,7 @@ fn a_cruising_flight_holds_level_to_descent_start_then_flies_the_path() {
 // AC 1. FLAT, ground, 300.25 nm, filed 30,000 / 480. Climb: 59 steps -> 29,500 ft, 73.75 nm, 885 s, at
 // 226.5 nm. Cruise: 69 steps x 2 nm -> 88.5 nm, 1,035 s. Descent 1,327.5 s. Total 3,247.5 s.
 // gs 300 at 250 (altitude 20,100: 50.25 nm of climb at 400 ft/nm), 480 at 200, 240 at 30.25.
-// Altitude at 200: 29,500 (assumption (b)). Red when: the climb is flown at cruise speed or never captured.
+// Altitude at 200: 30,000 (assumption (b)). Red when: the climb is flown at cruise speed or never captured.
 #[test]
 fn a_ground_departure_climbs_cruises_and_descends() {
     let vp = ground(300.25).fly();
@@ -263,7 +270,7 @@ fn a_ground_departure_climbs_cruises_and_descends() {
     for (d, gs) in [(250.0, 300.0), (200.0, 480.0), (30.25, 240.0)] {
         assert_eq!(vp.ground_speed_at(d), gs, "{d}");
     }
-    alts(&vp, &[(300.25, 0.0), (250.0, 20_100.0), (200.0, 29_500.0)]);
+    alts(&vp, &[(300.25, 0.0), (250.0, 20_100.0), (200.0, 30_000.0)]);
 }
 
 // AC 1. FLAT, airborne 200.5 nm out, gs 480, departure 100 (under 1.5 x 75 = 112.5, so AC 10 is off).
@@ -281,18 +288,17 @@ fn a_flight_500_ft_low_cruises_and_one_501_ft_low_climbs() {
     secs(&outside, 2_178.75);
 }
 
-// AC 1, AC 3. FLAT filed 30,000 ft, airborne at 31,000 ft, 200.5 nm. Altitude 31,000 at 150 and at 89.5; the
-// first descent step, 88.5 -> 87.5, ends on the path: 29,166.7 at 87.5. Total 2,167.5 s with gs 480.
-// Red when: cruise snaps it to 30,000, or the path only lowers flights already below their filing.
+// AC 1, AC 3. FLAT filed 30,000 ft, airborne at 31,000 ft, 200.5 nm. It cruises at 31,000, so the path meets it
+// at 93 nm: cruise 54 steps -> 92.5 (810 s), descent 92.5 x 15 = 1,387.5 s. Altitude 31,000 at 150 and at 94;
+// the path's 29,166.7 at 87.5. Red when: cruise snaps it to 30,000.
 #[test]
 fn a_flight_above_its_filed_altitude_holds_it_until_the_path_is_below_it() {
     let vp = air(31_000.0, 200.5, 480.0, Some(300.0)).fly();
-    // Cruising at 31,000 ft, the path meets it at 93 nm.
     alts(
         &vp,
         &[(150.0, 31_000.0), (94.0, 31_000.0), (87.5, 29_166.7)],
     );
-    secs(&vp, 840.0 - 30.0 + 92.5 * 15.0 + 0.0);
+    secs(&vp, 2_197.5);
 }
 
 // AC 1. FLAT, airborne 20,000 ft, 200.5 nm, departure 111 (climbing: under 112.5), gs 420. Climb 19 steps to
@@ -391,8 +397,7 @@ fn a_short_trip_climbs_once_and_then_only_descends() {
 
 // AC 2. FLAT with descent at 500 fpm, cruise 8,000 ft (descent distance 16 min x 4 = 64, descent_start 74),
 // ground, 70 nm: 20 nm out the path is at 16,667 ft, so it reaches its level first, flies it at the descent
-// speed (gs 240 at 40) and leaves it on the path (6,666.7 at 20). Altitude at 40 between 7,500 and 8,000
-// (open question: whether the 500 ft band ends this climb). Never above 8,000.
+// speed (gs 240 at 40) and leaves it on the path (6,666.7 at 20).
 #[test]
 fn a_short_trip_that_reaches_its_level_holds_it_to_the_path() {
     let mut f = ground(70.0);
@@ -400,7 +405,7 @@ fn a_short_trip_that_reaches_its_level_holds_it_to_the_path() {
     f.cruise = 8_000.0;
     let vp = f.fly();
     assert_eq!(vp.ground_speed_at(40.0), 240.0);
-    alts(&vp, &[(40.0, 7_500.0), (20.0, 6_666.7)]);
+    alts(&vp, &[(40.0, 8_000.0), (20.0, 6_666.7)]);
     assert!(peak(&vp, 70.0) <= 8_000.0);
 }
 
@@ -709,7 +714,7 @@ fn the_groundspeed_limits_hold_after_the_scale() {
 }
 
 // AC 4. FLAT at cruise in a uniform 40 kt headwind: Some(40) over the whole route. In 80 kt beyond 150 nm and
-// 0 inside it, over 200 to 100 at cruise: 40 +/- 1 (one 2 nm step of edge). Still air: None.
+// 0 inside it, over 200 to 100 at cruise: 40 +/- 1.5 (a 2 nm step of edge). Still air: None.
 // Red when: it is weighted by time (the slower windward half reads above 43).
 #[test]
 fn mean_headwind_is_weighted_by_distance() {
@@ -734,10 +739,10 @@ fn mean_headwind_is_weighted_by_distance() {
 }
 
 // AC 4. descent_ground_speed_at: FLAT, sea level, 30,000 / 480: 240 at 40 nm, 480 at 95. Default row FL350 /
-// 440: 290 KIAS at the path's 13,333.3 ft = 355.8 kt at 40 nm (next: 363.4), 440 at 150; into 30 kt 325.8
+// 440: 290 KIAS at the path's 13,333.3 ft = 355.8 kt at 40 nm, 440 at 150; into 30 kt 325.8
 // (the path does not move); 80 kt from FL300 up and calm below 20,000 ft: 355.8 at 40, 360 at 150. Into a
-// 5,000 ft field, 40 nm is 18,333.3 ft: 386.3. No anchor and no AC 9 ceiling (open question).
-// Red when: it still integrates the rate descent (363.4).
+// 5,000 ft field, 40 nm is 18,333.3 ft: 386.3. A 100 kt record into 80 kt: the 60 kt floor, not 40.
+// Red when: it integrates a rate descent (363.4).
 #[test]
 fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
     let rec = record(300.0, (2_000.0, 240.0), (400.0, 500.0));
@@ -757,6 +762,14 @@ fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
     };
     assert_eq!(at(40.0), 240.0);
     assert_eq!(at(95.0), 480.0);
+    let slow = record(300.0, (2_000.0, 100.0), (100.0, 100.0));
+    let floored = descent_ground_speed_at(
+        40.0,
+        &filed(30_000.0, 480.0, 0.0),
+        Performance::Eram(&slow),
+        &RouteWind::uniform(80.0),
+    );
+    assert_eq!(floored, 60.0);
 
     let default = AircraftProfile::default();
     let row = |d, elev, w: &RouteWind| {
@@ -895,20 +908,6 @@ fn a_slow_flight_at_cruise_is_scaled() {
     assert!((jet.ground_speed_at(198.5) - 408.0).abs() < 1e-9);
 }
 
-// AC 8, AC 9. A ground flight's groundspeed is inert: FLAT ground over 300.25 nm with gs 0 and 45 gives
-// 3,247.5 s, and over 60 nm 817.5 s. A ground start at 6,000 ft filed at 5,000 is not scaled either.
-// Red when: the airborne test is dropped from either rule.
-#[test]
-fn a_ground_flight_is_never_scaled_or_capped() {
-    secs(&ground(300.25).fly(), 3_247.5);
-    secs(&ground(60.0).fly(), 817.5);
-    // On the ground above its filed altitude: still no scale.
-    let mut f = ground(100.5);
-    f.alt = 6_000.0;
-    f.cruise = 5_000.0;
-    assert_eq!(f.fly().ground_speed_at(100.0), 480.0);
-}
-
 // AC 8. FLAT 30,000 ft, 198.5 nm, gs 432, route wind a uniform 48 kt headwind. Headwind along its heading 48
 // -> predicted 432, scale 1, gs 432 at the start. Heading headwind 0 (heading across the wind) -> predicted
 // 480, scale 0.9, gs (480 - 48) x 0.9 = 388.8. Red when: the route's headwind is used for both.
@@ -925,9 +924,8 @@ fn the_anchor_takes_the_headwind_it_is_given_not_the_routes() {
 }
 
 // AC 8 with AC 10. FLAT, 20,000 ft, 200.5 nm, departure 113: gs 420 -> 0.875, gs 420 at 199 and 95, 210 at 61;
-// 199 to 99 takes 100 / 420 h = 857.1 s. gs 300 -> clamped, 408. Open question: with an envelope that differs
-// between 20,000 and 30,000 ft, AC 8's "at that level" reads the 20,000 ft value and AC 6's "cruise altitude"
-// the 30,000. Red when: the gate compares against the filed altitude (unscaled, 480).
+// 199 to 99 takes 100 / 420 h = 857.1 s. gs 300 -> clamped, 408. The speed range is read at the level flown.
+// Red when: the gate compares against the filed altitude (unscaled, 480).
 #[test]
 fn a_stepped_down_flight_is_scaled_at_its_present_level() {
     let vp = air(20_000.0, 200.5, 420.0, Some(113.0)).fly();
@@ -1075,7 +1073,7 @@ fn a_slow_climb_outside_top_of_descent_is_not_capped() {
 
 // AC 10. FLAT, 20,000 ft, 200.5 nm, gs 420, 1.5 x 75 = 112.5. Departure 113: level, altitude 20,000 at 150 and
 // 61, total 2,477.1 s (1.75 nm steps at 420 kt: 64 -> 88.5 nm, 960 s; 88.5 / 210 h = 1,517.1 s). Departure
-// 112.5 (not farther) and 111: climbs, altitude 29,500 at 150, total 2,276.25 s.
+// 112.5 (not farther) and 111: climbs, altitude 30,000 at 150, total 2,276.25 s.
 // Red when: the margin is 1.0 (111 level) or 2.0 (113 climbs), or the test is >= (112.5 level).
 #[test]
 fn a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is() {
@@ -1084,12 +1082,154 @@ fn a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is() {
     secs(&level, 2_477.14);
     for dep in [112.5, 111.0] {
         let vp = air(20_000.0, 200.5, 420.0, Some(dep)).fly();
-        alts(&vp, &[(150.0, 29_500.0)]);
+        alts(&vp, &[(150.0, 30_000.0)]);
         secs(&vp, 2_276.25);
     }
-    // Within 500 ft of its cruise altitude it is at cruise, whatever its distance.
+    // Within 500 ft of its cruise altitude it is at cruise, not level below it, whatever its distance.
     let near = air(29_500.0, 200.5, 480.0, Some(400.0)).fly();
-    alts(&near, &[(150.0, 29_500.0)]);
+    alts(&near, &[(150.0, 30_000.0)]);
+}
+
+// AC 1. A climb of 2,300 fpm is 575 ft a step, so filed 8,000 ft it passes 7,475 and then 7,500: captured, it is
+// at 8,000 and never above. Airborne at 29,700 ft and filed 30,000 it flies 30,000; a flight read as level at
+// 20,000 stays there. Red when: cruise holds the altitude it was captured at, or the climb runs past its level.
+#[test]
+fn a_climb_goes_on_to_its_level_and_never_past_it() {
+    let mut f = ground(300.25);
+    f.cruise = 8_000.0;
+    f.rec = EramRecord::for_test(
+        vec![[0.0, 2_300.0, 300.0]],
+        vec![[0.0, 2_000.0, 240.0]],
+        vec![[0.0, 400.0]],
+        vec![[0.0, 500.0]],
+    );
+    let vp = f.fly();
+    alts(&vp, &[(200.0, 8_000.0)]);
+    assert_eq!(peak(&vp, 300.0), 8_000.0);
+    let near = air(29_700.0, 200.5, 480.0, Some(100.0)).fly();
+    alts(&near, &[(200.5, 29_700.0), (150.0, 30_000.0)]);
+    let level = air(20_000.0, 200.5, 480.0, Some(113.0)).fly();
+    alts(&level, &[(150.0, 20_000.0)]);
+}
+
+// AC 2, AC 9. FLAT, 8,000 ft, 14 nm out (path 4,666.7), departure 12: nearer its departure, but above the path,
+// so it is descending, and 180 kt is slower than 240 by more than 15 kt CAS: gs 180 at 13.9, and on the path
+// after the first step. Red when: being above the path does not end the climb, which leaves it unheld (240).
+#[test]
+fn a_short_trip_already_above_the_path_is_not_climbing() {
+    let vp = air(8_000.0, 14.0, 180.0, Some(12.0)).fly();
+    assert!((vp.ground_speed_at(13.9) - 180.0).abs() < 1e-6);
+    alts(&vp, &[(13.0, 4_333.3)]);
+}
+
+// AC 3. LONG (1,000 fpm, 4 nm a minute) into a 6,000 ft field: 24 min is 96 + 10 = 106 nm, past the path's 72.
+// gs 480 at 120 and 240 at 100. Red when: its own distance is summed to sea level (130).
+#[test]
+fn the_types_own_descent_distance_ends_at_the_field() {
+    let mut f = long();
+    f.elev = 6_000.0;
+    let vp = f.fly();
+    assert_eq!(vp.ground_speed_at(120.0), 480.0);
+    assert_eq!(vp.ground_speed_at(100.0), 240.0);
+}
+
+// AC 3. A field 200 ft below sea level is flown to 0 ft. Filed 4,000 ft into a 6,000 ft field from a lower one:
+// it cruises at 6,000, not 4,000. Red when: the elevation is not floored, or the filing is not raised to it.
+#[test]
+fn a_field_below_sea_level_and_a_filing_below_the_field_are_flown() {
+    let mut low = air(30_000.0, 200.5, 480.0, Some(300.0));
+    low.elev = -200.0;
+    alts(&low.fly(), &[(60.25, 20_083.3), (0.0, 0.0)]);
+    let mut high = ground(100.25);
+    high.cruise = 4_000.0;
+    high.elev = 6_000.0;
+    alts(&high.fly(), &[(60.0, 6_000.0), (0.0, 6_000.0)]);
+}
+
+// AC 4. A record descending at 1,000 fpm at 200 kt on the ground and 400 at 20,000 ft, filed 12,000 (descent
+// starts at 62 nm): 40 nm out the path is at 13,333 ft, above cruise, so its speed there is the 12,000 ft one,
+// 320. Red when: the speed is read at the path's altitude (333).
+#[test]
+fn descent_ground_speed_at_is_read_no_higher_than_cruise() {
+    let rec = EramRecord::for_test(
+        vec![[0.0, 2_000.0, 300.0]],
+        vec![[0.0, 1_000.0, 200.0], [20_000.0, 1_000.0, 400.0]],
+        vec![[0.0, 400.0]],
+        vec![[0.0, 500.0]],
+    );
+    let filed = Filed {
+        cruise_ft: 12_000.0,
+        tas_kt: 480.0,
+        arr_elev_ft: 0.0,
+    };
+    let gs = descent_ground_speed_at(40.0, &filed, Performance::Eram(&rec), &RouteWind::still());
+    assert!((gs - 320.0).abs() < 1e-9, "{gs}");
+}
+
+// AC 4. FLAT, ground, 800 nm. Filed 100,000 ft it climbs; at 100,001, 340,000, 1e20 and infinity it is the flight
+// filed at 35,000 ft, whatever the number. Airborne with a reported altitude of 1e18 ft it cruises at 100,000.
+// The default row keeps its own ceiling (45,000). Red when: the bound is dropped, which does not return.
+#[test]
+fn a_filing_above_100_000_ft_is_unfiled_for_a_type_with_no_ceiling() {
+    let filed = |cruise: f64| {
+        let mut f = ground(800.25);
+        f.cruise = cruise;
+        f.fly()
+    };
+    assert!(peak(&filed(100_000.0), 800.0) > 60_000.0);
+    let unfiled = filed(35_000.0);
+    for junk in [100_001.0, 340_000.0, 1e20, f64::INFINITY] {
+        let vp = filed(junk);
+        assert_eq!(peak(&vp, 800.0), 35_000.0, "{junk}");
+        assert_eq!(
+            vp.time_between(800.25, 0.0),
+            unfiled.time_between(800.25, 0.0)
+        );
+    }
+    let reported = air(1e18, 800.0, 480.0, Some(300.0)).fly();
+    assert_eq!(reported.alt_at(800.0), 100_000.0);
+    let row = build_row(
+        &AircraftProfile::default(),
+        0.0,
+        800.0,
+        340_000.0,
+        440.0,
+        RouteWind::still(),
+    );
+    assert_eq!(peak(&row, 800.0), 45_000.0);
+}
+
+// AC 9. FLAT with a descent of 300 kt above 10,000 ft and 180 below 9,999: 60 nm out at 20,000 ft doing 270 kt
+// is held to 270 kt's CAS, which is 229 kt at 10,000 ft and 197 at sea level, so below 10,000 ft the schedule is
+// the slower and is flown. gs 270 at 59.5, 180 at 20. Red when: the held speed replaces the schedule (about 216).
+#[test]
+fn a_ceiling_never_speeds_up_a_slower_schedule() {
+    let mut f = air(20_000.0, 60.0, 270.0, Some(300.0));
+    f.rec = EramRecord::for_test(
+        vec![[0.0, 2_000.0, 300.0]],
+        vec![
+            [0.0, 2_000.0, 180.0],
+            [9_999.0, 2_000.0, 180.0],
+            [10_000.0, 2_000.0, 300.0],
+        ],
+        vec![[0.0, 400.0]],
+        vec![[0.0, 500.0]],
+    );
+    let vp = f.fly();
+    assert!((vp.ground_speed_at(59.5) - 270.0).abs() < 1e-6);
+    assert_eq!(vp.ground_speed_at(20.0), 180.0);
+}
+
+// AC 9. FLAT, 60 nm out at 20,000 ft in air 1.1 times the standard temperature: its descent speed there is
+// 240 x sqrt(1.1) = 251.7, so 228 kt is 17 kt CAS slow and held. In standard air 228 is 9 kt CAS under 240 and is
+// not. Red when: the comparison reads the standard-day speed.
+#[test]
+fn the_assigned_speed_is_judged_in_the_fields_temperature() {
+    let mut f = air(20_000.0, 60.0, 228.0, Some(300.0));
+    assert_eq!(f.fly().ground_speed_at(59.5), 240.0);
+    f.wind = air_at(1.1);
+    let held = f.fly().ground_speed_at(59.5);
+    assert!((held - 228.0).abs() < 1e-6, "{held}");
 }
 
 // AC 10. The same flight with no known departure: climbs, total 2,276.25 s, and its groundspeed is not read

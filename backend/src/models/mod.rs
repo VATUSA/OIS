@@ -2640,7 +2640,7 @@ pub struct FcaFlightDebug {
     /// The aircraft performance flown: "type:C172" (a stored row), "eram:B738" (ERAM's tables),
     /// "family:jet", "wake:H", or "default".
     pub profile: String,
-    /// Cruise TAS (kt) used for the ETA: the filing, held to what the type flies.
+    /// Cruise TAS (kt) used for the ETA: the filing, held to ERAM's range for the type or its row's cap.
     pub cruise_tas: i64,
     /// Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
     /// sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a

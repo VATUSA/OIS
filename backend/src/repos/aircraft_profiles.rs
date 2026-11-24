@@ -502,6 +502,13 @@ mod eram_tests {
     #[sqlx::test]
     async fn the_0138_audit_names_the_rows_that_go(pool: PgPool) {
         const AUDIT: &str = include_str!("../../audits/0138_profile_rows.sql");
+        // It runs the real file between the blocks, and nothing it does is kept.
+        let lines: Vec<&str> = AUDIT.lines().map(str::trim).collect();
+        let line = |l: &str| lines.iter().position(|x| *x == l).expect(l);
+        let applied = line("\\i backend/migrations/0138_aircraft_profile_eram.sql");
+        assert!(line("begin;") < line("-- BEGIN SETUP") && line("-- END SETUP") < applied);
+        assert!(applied < line("-- BEGIN REPORT"));
+        assert_eq!(lines.iter().rfind(|l| !l.is_empty()), Some(&"rollback;"));
         let block = |name: &str| {
             let from = AUDIT.split_once(&format!("-- BEGIN {name}")).unwrap().1;
             from.split_once(&format!("-- END {name}")).unwrap().0
@@ -661,8 +668,8 @@ mod eram_tests {
     }
 
     // AC 11. Before and after the file, over the default, the four wake rows, a family row, PA28 and an
-    // operator's A321 type row: identical rows, `updated_at` included. Open question: a seeded row an
-    // operator saved with no number changed (updated_by set, or only its name edited) goes, read literally.
+    // operator's A321 type row: identical rows, `updated_at` included. A seeded row saved with no number
+    // changed goes: the numbers decide.
     #[sqlx::test]
     async fn the_migration_leaves_every_other_row_untouched(pool: PgPool) {
         seed_0059(&pool).await;

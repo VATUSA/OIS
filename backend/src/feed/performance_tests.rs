@@ -350,7 +350,6 @@ fn a_filed_speed_outside_60_to_700_kt_cruises_at_the_midpoint() {
 
 // AC 6. REC at a 16,500 ft cruise: f = 0.5 -> min 315, max 375; filed 450 -> 375, unfiled 345. Below the
 // first row, 2,000 ft: 210 to 260, unfiled 235. Red when: the envelope is read at a fixed altitude.
-// Open question in the report: AC 6 says "at its cruise altitude", vTBFM reads the present altitude.
 #[test]
 fn the_envelope_is_read_at_the_cruise_altitude() {
     let r = rec();
@@ -362,8 +361,8 @@ fn the_envelope_is_read_at_the_cruise_altitude() {
     }
 }
 
-// AC 6. Rows, as on next: default row filed 440 -> 440; unfiled at FL350 -> 440, FL160 -> 300, 5,000 ft ->
-// 170; cruise_tas 110 caps 400 to 110 and replaces 0; cruise_mach 0.84 at 218.808 K caps 520 to
+// AC 6. Rows: default row filed 440 -> 440; unfiled at FL350 -> 440, FL160 -> 300, 5,000 ft ->
+// 170; cruise_tas 110 caps 400 to 110, leaves 100 alone and replaces 0; cruise_mach 0.84 at 218.808 K caps 520 to
 // 661.4788 x 0.84 x sqrt(218.808 / 288.15) = 484.2, and at 233.808 K to 500.5.
 // Red when: the ERAM envelope rule reaches rows, or the Mach cap loses the air temperature.
 #[test]
@@ -386,6 +385,10 @@ fn a_rows_cruise_speed_is_unchanged() {
     assert_eq!(
         Performance::Row(&slow).cruise_tas(400.0, 8_000.0, 8_000.0),
         110.0
+    );
+    assert_eq!(
+        Performance::Row(&slow).cruise_tas(100.0, 8_000.0, 8_000.0),
+        100.0
     );
     assert_eq!(
         Performance::Row(&slow).cruise_tas(0.0, 8_000.0, 8_000.0),
@@ -498,6 +501,16 @@ fn a_rows_distances_integrate_its_schedule() {
     assert!(close(down, 118.80, 0.1), "{down}");
     let up = p.climb_distance_nm(35_000.0);
     assert!(close(up, 139.00, 0.1), "{up}");
+    // A stored rate of 0 is a long way, not an infinite one.
+    let stuck = AircraftProfile {
+        climb_fpm_lo: 0.0,
+        desc_fpm: 0.0,
+        ..AircraftProfile::default()
+    };
+    let p = Performance::Row(&stuck);
+    assert!(p.climb_distance_nm(5_000.0).is_finite());
+    assert!(p.climb(5_000.0, None).1 > 0.0);
+    assert!(p.descent_distance_nm(5_000.0, 0.0, 440.0).is_finite());
 }
 
 // AC 3. A flat record with descent 520 kt, cruise filed 480: descent TAS 480 at 13,000 ft. Descent 460 at

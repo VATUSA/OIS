@@ -516,14 +516,14 @@ fn route_scale(airborne: bool, enroute_resolved: bool) -> f64 {
     }
 }
 
-/// The filed cruise speed as a number, `0` when blank or junk; [`trajectory::capped_cruise_tas`]
-/// then replaces an implausible value with the profile's or the altitude default.
+/// The filed cruise speed as a number, `0` when blank or junk; [`Performance::cruise_tas`] then replaces
+/// an implausible value.
 fn filed_tas(raw: &str) -> f64 {
     raw.trim().parse().unwrap_or(0.0)
 }
 
 /// A filed departure time (`deptime`, HHMM Z) as its nearest occurrence within 12 hours of `now`, so
-/// `2350` just after midnight is last night (vTBFM manual §8.6). `None` when it is blank, malformed
+/// `2350` just after midnight is last night (vTBFM manual §8.7). `None` when it is blank, malformed
 /// or `0000`, which a pilot client files when nobody chose a time.
 pub(crate) fn filed_departure(deptime: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let d = deptime.trim();
@@ -1877,13 +1877,15 @@ mod tests {
     /// The calls into the model that produce a time, a speed or a position along a route. Outside
     /// the model's own files, only [`trajectory`] and its [`Trajectory`] make them
     /// (and the offline profile backtest, which feeds no surface).
-    const TIMING_CALLS: [&str; 8] = [
+    const TIMING_CALLS: [&str; 10] = [
         "VerticalProfile::build",
         "descent_ground_speed_at(",
         "profile_from_here(",
         "eta_along_route(",
         "arrival_eta(",
         "capped_cruise_tas(",
+        ".descent_tas(",
+        ".cruise_in(",
         ".time_between(",
         ".distance_after(",
     ];
@@ -2464,6 +2466,9 @@ pub(crate) mod march_input_tests {
         let (slowed, free) = (ete_at(&still, 342), ete_at(&still, 408));
         assert!((slowed - 743.0).abs() <= 3.0, "{slowed}");
         assert!((free - 699.0).abs() <= 3.0, "{free}");
+        // 375 kt (274 KCAS) is held at the top; below 10,000 ft the B738's own schedule is the slower.
+        let held = ete_at(&still, 375);
+        assert!((held - 716.5).abs() <= 3.0, "{held}");
         // 342 kt into 60 kt on the nose is 402 kt true, within 15 kt CAS of the predicted 408.
         let windy = southerly(60);
         assert_eq!(ete_at(&windy, 342), ete_at(&windy, 408));
@@ -2495,7 +2500,7 @@ pub(crate) mod march_input_tests {
             assert_eq!(t.progress_after(0.0).alt_ft, 0.0);
             etes.push(ete(&t));
         };
-        for gs in [0, 30] {
+        for gs in [0, 45] {
             let parked = Pilot {
                 latitude: 40.64,
                 longitude: -73.78,
@@ -2516,9 +2521,9 @@ pub(crate) mod march_input_tests {
     }
 
     // AC 4. 41 nm out, gs_short_of_field(40) is gs_at(route - 40); 39 nm out it is
-    // descent_ground_speed_at(40): default row 355.8 (next 363.4), ERAM B738 at 13,333 ft
-    // 289 + (3,333 / 5,000) x 90 = 349.0. Open question: the 41 nm flight carries its AC 8 scale or AC 9
-    // ceiling and the 39 nm flight neither.
+    // descent_ground_speed_at(40): default row 355.8, ERAM B738 at 13,333 ft
+    // 289 + (3,333 / 5,000) x 90 = 349.0. The 41 nm flight carries its AC 9 ceiling; the 39 nm flight's point
+    // is behind it, so it reads the path.
     #[test]
     fn gs_short_of_field_reads_the_march_outside_and_the_path_inside() {
         let (nav, ap, winds) = (NavData::default(), jfk_mia(), Winds::default());

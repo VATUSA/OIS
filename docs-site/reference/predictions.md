@@ -10,20 +10,21 @@ aircraft does. This page says what the prediction assumes, so you can tell when 
 - **The filed route**, from where the aircraft is now. If it can't be read, the straight line to the
   destination.
 - **The filed altitude and speed.** An altitude it can't read is taken as FL350. A speed outside the type's
-  range is brought into it.
+  range is brought into it, and one it can't use is the middle of that range.
 - **Winds and temperatures aloft**, read at each point of the flight at the altitude the aircraft will be at there.
 - **The aircraft type's performance**: ERAM's own climb and descent tables, unless a planner has entered a
   [profile for that type](/planning/aircraft-profiles).
 
 ## Climb, cruise and descent
 
-A flight on the ground leaves at its release or EDCT, or 10 minutes after its filed departure time, and
-climbs at its type's rate to its filed altitude. No taxi time is added.
+A flight on the ground leaves at its release or EDCT, or 10 minutes after its filed departure time (or after now,
+once that has passed), and climbs at its type's rate to its filed altitude. No taxi time is added.
 
 In cruise it flies its filed true airspeed through the wind.
 
 The descent is 1,000 feet for every 3 miles, down to the field's elevation: 30 miles out it is at 10,000
-feet above the field. Descent speeds start about 10 miles before the type's own descent would. An aircraft
+feet above the field. Descent speeds start about 10 miles before the type's own descent would, or where that path
+reaches the cruise altitude if that is farther out. An aircraft
 below that path stays level until the path comes down to it, and is never predicted climbing back up. One
 above it is put on the path straight away.
 

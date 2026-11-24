@@ -295,9 +295,9 @@ impl Ctx<'_> {
 /// the flight is (the shared model's `progress_after`, the cost of a projection) at most once and
 /// only when asked for.
 ///
-/// The distance flown never decreases from one minute to the next: `distance_after` bisects the same
-/// tree for every elapsed time, and a later time leaves it at or below where an earlier one did. That
-/// is what lets [`Self::first_reaching`] bisect the minutes.
+/// The distance flown never decreases from one minute to the next: `distance_after` reads one track whose
+/// elapsed time rises all the way to the field. That is what lets [`Self::first_reaching`] bisect the
+/// minutes.
 struct Minutes<'a> {
     traj: &'a predict::Trajectory<'a>,
     start_ms: i64,

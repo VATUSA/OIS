@@ -785,9 +785,6 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
 // AC 16 controller page                 | the_controller_prediction_page_is_published_without_code
 // AC 17 special-case list               | every_special_case_row_names_its_line_and_leaves_its_decision_empty
 
-// AC 12. docs-site/planning/aircraft-profiles.md says the built-in tables cover 2,692 types and that a type
-// row overrides them, and no longer says a type without a profile is "metered like a generic jet" or that
-// resolution "falls back in four tiers". The count is read from EramTable::bundled(), not typed.
 /// A repo file, its line endings normalized.
 fn repo_file(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
@@ -795,6 +792,9 @@ fn repo_file(path: &str) -> String {
         .replace("\r\n", "\n")
 }
 
+// AC 12. docs-site/planning/aircraft-profiles.md and the page in the app say the built-in tables cover 2,692
+// types, the count read from the file; the docs page says a type row overrides them, and no longer says a type
+// without a profile is "metered like a generic jet" or that resolution "falls back in four tiers".
 #[test]
 fn the_aircraft_profiles_docs_page_names_the_built_in_tables() {
     let types = crate::feed::performance::EramTable::bundled().type_count();
@@ -839,38 +839,29 @@ fn the_fca_debug_profile_description_names_the_eram_source() {
     );
 }
 
-// AC 15. the_prediction_doc_cites_each_constant_where_it_is_defined requires the march's constants by name:
-// the 15 s step, the 500 ft band, the 10 nm margin, the 1,000 ft / 3 nm gradient, the 15 % bound, the 15 kt
-// deadband and the 1.5 climb-distance margin; and not the constants the port removes.
-// Red when: a citation's line moves (the existing planted-line control).
+// AC 15. Every constant declared in the model's two files is cited, each at its line
+// (the_prediction_doc_cites_each_constant_where_it_is_defined). Red when: a constant is added uncited.
 #[test]
 fn the_prediction_doc_cites_each_march_constant() {
     let cited: BTreeSet<String> = constant_citations(&prediction_doc())
         .into_iter()
         .map(|c| c.0)
         .collect();
-    for name in [
-        "STEP_SEC",
-        "CRUISE_BAND_FT",
-        "DESCENT_MARGIN_NM",
-        "DESCENT_FT_PER_NM",
-        "DISTANCE_STEP_FT",
-        "ANCHOR_MAX_BIAS",
-        "ASSIGNED_SPEED_DEADBAND_KT",
-        "LEVEL_CLIMB_DISTANCES",
-        "GS_FLOOR_KT",
-        "MAX_PLAUSIBLE_TAS",
-    ] {
-        assert!(cited.contains(name), "{name} is cited");
+    let mut seen = 0;
+    for file in ["trajectory.rs", "performance.rs"] {
+        let src = repo_file(&format!("backend/src/feed/{file}"));
+        let model = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for line in model.lines() {
+            let line = line.trim_start_matches("pub ");
+            let Some(rest) = line.strip_prefix("const ") else {
+                continue;
+            };
+            let name = rest.split(':').next().unwrap();
+            assert!(cited.contains(name), "{file}: {name} is not cited");
+            seen += 1;
+        }
     }
-    // Every constant the march is written in is one of the above, by name.
-    let trajectory = repo_file("backend/src/feed/trajectory.rs");
-    let model = trajectory.split("#[cfg(test)]\nmod tests").next().unwrap();
-    let march = &model[model.find("const GS_FLOOR_KT").unwrap()..];
-    for line in march.lines().filter(|l| l.starts_with("const ")) {
-        let name = line["const ".len()..].split(':').next().unwrap();
-        assert!(cited.contains(name), "{name} is declared and not cited");
-    }
+    assert!(seen >= 15, "the scan is live: {seen}");
 }
 
 // AC 15. The doc has the inputs, each step, the differences from vTBFM and from the climbs measured on VATSIM
@@ -931,9 +922,10 @@ fn the_controller_prediction_page_is_published_without_code() {
     }
 }
 
-// AC 17. Every open row of the special-case list has a vTBFM `file:line`, what it does, why, OIS's equivalent, a
-// recommendation and an empty decision cell; every settled row an outcome. The list names commit b6bc6c5d, and
-// every case is on it once. Red when: the build fills in a decision, or a cell is blank.
+// AC 17. Every row of the special-case list has a vTBFM `file:line`, what it does, why, OIS's equivalent, a
+// recommendation and a decision cell: empty under Open, filled under Decided. The list names commit b6bc6c5d, and
+// every case is on it once. Red when: the build fills in an open decision, or a cell is blank. An operator who
+// decides a case moves its row to Decided.
 #[test]
 fn every_special_case_row_names_its_line_and_leaves_its_decision_empty() {
     let doc = repo_file("docs/architecture/trajectory-special-cases.md");
@@ -957,21 +949,19 @@ fn every_special_case_row_names_its_line_and_leaves_its_decision_empty() {
         })
     };
     let mut ids = BTreeSet::new();
-    let (open, settled) = (rows("Open"), rows("Settled before the build"));
-    for (row, width) in open
-        .iter()
-        .map(|r| (r, 7))
-        .chain(settled.iter().map(|r| (r, 5)))
-    {
-        assert_eq!(row.len(), width, "{row:?}");
+    let (open, decided) = (rows("Open"), rows("Decided"));
+    for row in open.iter().chain(&decided) {
+        assert_eq!(row.len(), 7, "{row:?}");
         assert!(cites(&row[1]), "{row:?}");
-        let said = if width == 7 { &row[2..6] } else { &row[2..5] };
-        assert!(said.iter().all(|c| !c.is_empty()), "{row:?}");
+        assert!(row[2..6].iter().all(|c| !c.is_empty()), "{row:?}");
         assert!(ids.insert(row[0].clone()), "listed twice: {row:?}");
     }
     for row in &open {
         assert_eq!(row[6], "", "undecided: {row:?}");
     }
-    let want: BTreeSet<String> = (0..=45).map(|n| format!("S{n}")).collect();
+    for row in &decided {
+        assert_ne!(row[6], "", "decided: {row:?}");
+    }
+    let want: BTreeSet<String> = (0..=48).map(|n| format!("S{n}")).collect();
     assert_eq!(ids, want, "every case is on the list once");
 }

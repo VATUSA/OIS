@@ -3217,20 +3217,15 @@ mod project_traffic_tests {
         assert!(out.is_empty());
     }
 
-    /// #411: `project_traffic` now hands the reported altitude and groundspeed to
-    /// `profile_from_here` as **adjacent** `f64` arguments of one call. Before, they went to two
-    /// different functions (`VerticalProfile::build`'s `start_alt_ft` and
-    /// `anchor_to_observed_gs`'s argument) and could not be transposed; now they can be, and
-    /// transposing them compiles and left the whole suite green. Pin that the projection starts
-    /// from the altitude the pilot reports: a cruising aircraft stays near cruise rather than
-    /// climbing away from its groundspeed read as feet.
+    /// #411: the projection starts from the altitude the pilot reports: a cruising aircraft stays near
+    /// cruise rather than climbing away from its groundspeed read as feet.
     #[test]
     fn a_projection_starts_from_the_reported_altitude_not_the_groundspeed() {
         let ap = crate::feed::airports::AirportDb::from([
             ("KJFK".to_string(), Airport::at(40.64, -73.78)),
             ("KDCA".to_string(), Airport::at(38.85, -77.04)),
         ]);
-        // At cruise and above ANCHOR_MIN_GS_KT, so the anchoring path is live too.
+        // At cruise, so the anchoring path is live too.
         let pilot = Pilot {
             altitude: 35_000,
             groundspeed: 470,
@@ -4130,8 +4125,13 @@ mod prefile_fix_predictions_tests {
                 )
                 .unwrap_or(0.0);
             let slower = (plain.groundspeed_kt - fix.groundspeed_kt) as f64;
+            let low = if plain.altitude_ft < 34_500 {
+                -12.0
+            } else {
+                -5.0
+            };
             assert!(
-                (-12.0..=5.0).contains(&(slower - hw)),
+                (low..=5.0).contains(&(slower - hw)),
                 "{}: {slower} kt slower at {} ft, field {hw:.1}",
                 fix.name,
                 fix.altitude_ft
@@ -7764,6 +7764,7 @@ mod eta_parity_tests {
 // AC 4, 8, 10 per-fix table, live     | a_stepped_down_flights_fix_table_reads_its_observed_speed_and_level
 // AC 4, 5 per-fix table, prefile      | a_locked_prefiles_fix_table_is_timed_on_its_eram_record
 // AC 4 every surface, one trajectory  | every_surface_reads_one_trajectory_on_eram_performance
+// AC 4 implausible filing             | an_implausible_filing_is_projected_like_an_unfiled_one
 #[cfg(test)]
 mod eram_wiring_tests {
     use std::collections::HashMap;
@@ -7995,6 +7996,36 @@ mod eram_wiring_tests {
         assert!(nm > 105.0 && alt > 34_000, "{nm} nm at {alt}");
     }
 
+    // AC 4. A B738 at FL340 filed with 20 digits is projected like one filed FL350, and the projection returns.
+    // Red when: the filing is not bounded for a type with no ceiling (the test does not end).
+    #[test]
+    fn an_implausible_filing_is_projected_like_an_unfiled_one() {
+        let projected = |filed: &str| {
+            let mut p = step1();
+            p.altitude = 34_000;
+            p.flight_plan.as_mut().unwrap().altitude = filed.into();
+            let data = VatsimData {
+                pilots: vec![p],
+                ..Default::default()
+            };
+            let out = super::project_traffic(
+                &data,
+                &NavData::load(),
+                &jfk_mia(),
+                &eram_profiles(),
+                &Winds::default(),
+                &ExclusionSet::new(),
+                600,
+            );
+            (out[0].lat, out[0].lon, out[0].alt)
+        };
+        let unfiled = projected("VFR");
+        assert!(unfiled.2 <= 35_000, "{unfiled:?}");
+        for junk in ["99999999999999999999", "340000"] {
+            assert_eq!(projected(junk), unfiled, "{junk}");
+        }
+    }
+
     // AC 4, 8, 10. STEP1 with an enroute fix about 200 nm ahead: its row reads 400 kt, 30,000 ft and an ETA
     // along / 400 h out; the arrival row is 4,368 s +/- 2 out (recompute for the fix's own route length).
     // Red when: fix_predictions drops an input.
@@ -8028,8 +8059,8 @@ mod eram_wiring_tests {
         assert!((sec - 4_368.0).abs() <= 3.0, "{}: {sec}", last.name);
     }
 
-    // AC 4, 5. A locked B738 prefile KIAD->KJFK direct (the padded path): its arrival row is the trajectory's,
-    // and earlier than on the default table. Red when: the prefile path resolves another table.
+    // AC 4, 5. A locked B738 prefile KJFK->KDCA on the coastal route: its arrival row is the trajectory's, and
+    // earlier than on the default table. Red when: the prefile path resolves another table.
     #[test]
     fn a_locked_prefiles_fix_table_is_timed_on_its_eram_record() {
         let (nav, ap, winds) = (NavData::load(), jfk_dca(), Winds::default());
@@ -8063,8 +8094,8 @@ mod eram_wiring_tests {
     }
 
     // AC 4. eta_parity_tests::every_surface_reads_one_flights_time_off_its_one_trajectory on the bundled table
-    // under test_shear, with STEP1 beside AIR1 and GND1: airport flow, FCA candidates, sector demand, runway
-    // ETE (runway::collect_arrivals), the projected map and the per-fix table agree to the second.
+    // under test_shear: airport flow, FCA candidates, sector demand, runway ETE (runway::collect_arrivals), the
+    // projected map and the per-fix table agree to the second for AIR1 and GND1.
     // Red when: any one of them times a flight apart.
     #[test]
     fn every_surface_reads_one_trajectory_on_eram_performance() {

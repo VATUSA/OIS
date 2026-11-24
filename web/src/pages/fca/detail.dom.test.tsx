@@ -280,7 +280,7 @@ describe("FcaDetail debug performance source (VATUSA/OIS#985)", () => {
     expect(host.textContent).toContain("profile eram:B738");
     expect(host.textContent).toContain("450kt TAS @ FL350");
   });
-  // The same flight with "type:B738"; with debug off neither shows (control).
+  // The same flight with "type:B738"; a flight with no debug detail shows none (control).
   it("shows type:B738 when an operator's row was flown", () => {
     const host = mount(CONTROLLER, fca(null, null), true, [debugged("type:B738"), flight("DAL2", false)]);
     expect(host.textContent).toContain("profile type:B738");

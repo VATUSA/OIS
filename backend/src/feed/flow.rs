@@ -3403,6 +3403,20 @@ mod eram_wiring_tests {
         assert_eq!(eram[1], default[1], "a type ERAM lacks does not move");
     }
 
+    // AC 5. The only types the engine reference knows and ERAM does not: the ones a family row can reach.
+    // Red when: the bundled file loses a type the reference lists, or gains one.
+    #[test]
+    fn eram_lacks_only_four_of_the_engine_references_types() {
+        let eram = crate::feed::performance::EramTable::bundled();
+        let mut lacking: Vec<&str> = ENGINE_REF
+            .keys()
+            .copied()
+            .filter(|ty| eram.get(ty).is_none())
+            .collect();
+        lacking.sort_unstable();
+        assert_eq!(lacking, ["DA20", "E175", "F18", "PA28"]);
+    }
+
     // AC 4, 8, 10. STEP1 (`predict::march_input_tests`): compute's eta - now is 4,368 s +/- 2, not the
     // 3,888 s of a flight climbing back to FL350, and equals predict::trajectory's.
     // Red when: compute times it outside the entry point.

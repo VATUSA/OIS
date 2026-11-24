@@ -10,11 +10,21 @@
 
 use super::performance::{EramTable, Performance};
 
+/// Lower bound (kt) on a believable filed cruise TAS: below it, nothing was filed or it was a Mach number.
+pub const MIN_PLAUSIBLE_TAS: f64 = 60.0;
+
 /// Upper bound on a *believable* filed cruise TAS (kt). Pilots sometimes file garbage (e.g. `4800`),
 /// and since the ETA clamps groundspeed only *relative* to TAS, an absurd value would collapse the
 /// transit time and shoot the aircraft to the front of the sequence. Anything above this is treated
 /// as unfiled and replaced with the altitude-based default. Comfortably above any real airliner.
 pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
+
+/// Upper bound (ft) on a believable altitude, filed or reported, above any aircraft on the network. ERAM
+/// gives no ceiling, so this is what keeps a junk filing from setting the length of a climb.
+const MAX_PLAUSIBLE_ALT_FT: f64 = 100_000.0;
+
+/// The cruise altitude (ft) a flight with no readable filing is timed at.
+const UNFILED_CRUISE_FT: f64 = 35_000.0;
 
 /// The filed cruise altitude in feet, or `None` when it is unfiled or unreadable (#813).
 ///
@@ -38,12 +48,12 @@ pub fn filed_altitude_ft(s: &str) -> Option<f64> {
 /// The cruise altitude the model times a flight at: [`filed_altitude_ft`], or 35,000 ft when the
 /// filing is unknown.
 pub fn parse_alt_ft(s: &str) -> f64 {
-    filed_altitude_ft(s).unwrap_or(35000.0)
+    filed_altitude_ft(s).unwrap_or(UNFILED_CRUISE_FT)
 }
 
 /// Whether a filed TAS (kt) is worth reading: not missing, a Mach number in the wrong field, or garbage.
 pub(crate) fn believable_tas(tas: f64) -> bool {
-    (60.0..=MAX_PLAUSIBLE_TAS).contains(&tas)
+    (MIN_PLAUSIBLE_TAS..=MAX_PLAUSIBLE_TAS).contains(&tas)
 }
 
 /// Filed TAS (kt) with a sane fallback estimated from cruise altitude. A filed value outside the
@@ -61,6 +71,10 @@ pub fn tas_or_default(tas: f64, cruise_alt_ft: f64) -> f64 {
     }
 }
 
+/// The least and the most of a true airspeed that a groundspeed can be, whatever the wind reads.
+const MIN_GS_FRACTION: f64 = 0.4;
+const MAX_GS_FRACTION: f64 = 1.6;
+
 /// Groundspeed from TAS and headwind (`+` = headwind, `-` = tailwind), clamped to a sane
 /// band so a bad wind reading can't produce absurd speeds. Still air when `headwind` is None.
 pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
@@ -69,9 +83,9 @@ pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
         Some(hw) => {
             // Order the bounds so a nonsensical negative TAS can't invert the clamp range.
             let (lo, hi) = if tas >= 0.0 {
-                (tas * 0.4, tas * 1.6)
+                (tas * MIN_GS_FRACTION, tas * MAX_GS_FRACTION)
             } else {
-                (tas * 1.6, tas * 0.4)
+                (tas * MAX_GS_FRACTION, tas * MIN_GS_FRACTION)
             };
             (tas - hw).clamp(lo, hi)
         }
@@ -459,7 +473,7 @@ const DESCENT_MARGIN_NM: f64 = 10.0;
 /// A flight this close (ft) below its cruise level is at cruise.
 const CRUISE_BAND_FT: f64 = 500.0;
 /// A flight below its filed altitude is level there once it is farther from its departure than this
-/// many times its type's climb distance: every departure still climbing is nearer than that.
+/// many times its type's climb distance.
 const LEVEL_CLIMB_DISTANCES: f64 = 1.5;
 /// A descending flight this much (kt CAS) slower than predicted is flying an assigned speed.
 const ASSIGNED_SPEED_DEADBAND_KT: f64 = 15.0;
@@ -474,6 +488,13 @@ pub struct FlightStart {
     pub to_go_nm: f64,
     /// None on the ground.
     pub airborne: Option<Airborne>,
+}
+
+impl FlightStart {
+    /// Its altitude, held to a believable one.
+    fn altitude(&self) -> f64 {
+        self.alt_ft.clamp(0.0, MAX_PLAUSIBLE_ALT_FT)
+    }
 }
 
 /// What an airborne flight is doing.
@@ -637,7 +658,7 @@ impl<'a> Plan<'a> {
         wind: &'a RouteWind,
     ) -> Self {
         let elev_ft = filed.arr_elev_ft.max(0.0);
-        let cruise_ft = cruise_altitude(filed, perf, start.alt_ft.max(elev_ft));
+        let cruise_ft = cruise_altitude(filed, perf, start.altitude().max(elev_ft));
         let filed_cruise_tas = perf
             .cruise_tas(filed.tas_kt, filed.cruise_ft, cruise_ft)
             .max(GS_FLOOR_KT);
@@ -670,7 +691,7 @@ impl<'a> Plan<'a> {
     }
 
     fn alt0(&self) -> f64 {
-        self.start.alt_ft.max(0.0)
+        self.start.altitude()
     }
 
     fn below_level(&self, alt_ft: f64) -> bool {
@@ -691,7 +712,7 @@ impl<'a> Plan<'a> {
     }
 
     /// One VATSIM position carries no vertical rate, so "level" is read from where the flight is: below
-    /// its cruise altitude, not yet descending, and farther from its departure than any climb takes.
+    /// its cruise altitude, outside its descent, and well past where its type's climb would have ended.
     fn is_level_below_cruise(&self) -> bool {
         let from_departure = self
             .start
@@ -748,7 +769,7 @@ impl<'a> Plan<'a> {
         let mut climbing = self.climbing;
         let (mut gs, mut headwind) = (self.cruise_tas, 0.0);
         while d > 0.0 {
-            climbing &= self.below_level(alt) && alt < self.path_ft(d);
+            climbing &= alt < self.level_ft && alt < self.path_ft(d);
             let phase = self.phase(d, alt, climbing);
             let (hw, temp) = self.wind.air(d, alt);
             let (tas, fpm) = self.speed(phase, alt, temp);
@@ -769,7 +790,8 @@ impl<'a> Plan<'a> {
                 Phase::Climb => (alt + fpm * step_sec / 60.0)
                     .min(self.cruise_ft)
                     .min(self.path_ft(d)),
-                Phase::Cruise => alt,
+                // The last of the climb: a flight in the cruise band goes on to its level.
+                Phase::Cruise => alt.max(self.level_ft.min(self.path_ft(d))),
                 Phase::Descent => alt.min(self.path_ft(d)),
             };
         }
@@ -815,10 +837,14 @@ enum Phase {
 }
 
 /// The altitude a flight cruises at: its filing, held to the type's ceiling, never below `at_least_ft`.
+/// A type with no ceiling reads a filing above [`MAX_PLAUSIBLE_ALT_FT`] as unfiled.
 fn cruise_altitude(filed: &Filed, perf: Performance, at_least_ft: f64) -> f64 {
-    perf.ceiling_ft()
-        .map_or(filed.cruise_ft, |c| filed.cruise_ft.min(c))
-        .max(at_least_ft)
+    let cruise_ft = match perf.ceiling_ft() {
+        Some(ceiling) => filed.cruise_ft.min(ceiling),
+        None if filed.cruise_ft > MAX_PLAUSIBLE_ALT_FT => UNFILED_CRUISE_FT,
+        None => filed.cruise_ft,
+    };
+    cruise_ft.max(at_least_ft)
 }
 
 /// Distance to the field (nm) at which descent speeds start: the type's own descent plus its margin, and
@@ -1214,10 +1240,8 @@ mod tests {
     }
 
     /// Regression (#355): anywhere the profile is still at cruise altitude, `ground_speed_at` must
-    /// not read above the cruise groundspeed. `build` lays the descent curve down first and its top
-    /// sample carries the *descent* schedule's TAS at cruise altitude (~519 kt for this profile at
-    /// FL350 against a 440 kt cruise), while the only cruise sample sits at top-of-climb — so the
-    /// raw interpolation ramps TAS across a leg whose altitude is flat. FCA MIT spacing is sized
+    /// not read above the cruise groundspeed. The *descent* schedule's TAS at cruise altitude is higher
+    /// (~519 kt for this profile at FL350 against a 440 kt cruise). FCA MIT spacing is sized
     /// from this number, so an un-capped read under-provisions every enroute crossing: a 20 MIT fix
     /// 150 nm out would get `20 / 508 * 3600 = 142 s`, which the aircraft flies at its real 440 kt
     /// for 17.3 nm, not 20.
@@ -1941,8 +1965,7 @@ mod tests {
     fn a_descent_mach_flies_faster_in_warm_air() {
         let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 520.0, &mach_cruiser(), w);
         let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
-        // The last 150 nm hold the whole descent, which is integrated from the field and does not
-        // depend on the climb.
+        // The last 150 nm hold the whole descent, and the climb is over before them.
         let saved = isa.time_between(150.0, 0.0) - warm.time_between(150.0, 0.0);
         assert!(saved > 0.5, "the warm Mach descent saves {saved} s");
     }
