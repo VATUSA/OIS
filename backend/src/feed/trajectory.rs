@@ -23,7 +23,7 @@ pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
 /// gives no ceiling, so this is what keeps a junk filing from setting the length of a climb.
 const MAX_PLAUSIBLE_ALT_FT: f64 = 100_000.0;
 
-/// The cruise altitude (ft) a flight with no readable filing is timed at.
+/// The cruise altitude (ft) a flight with no readable filing is timed at, if its type cruises that high.
 const UNFILED_CRUISE_FT: f64 = 35_000.0;
 
 /// The filed cruise altitude in feet, or `None` when it is unfiled or unreadable (#813).
@@ -45,8 +45,7 @@ pub fn filed_altitude_ft(s: &str) -> Option<f64> {
     (n >= 1000.0).then_some(n)
 }
 
-/// The cruise altitude a filing is read as: [`filed_altitude_ft`], or 35,000 ft when it is unknown. A type
-/// with no ceiling also flies 35,000 for one it can't believe ([`MAX_PLAUSIBLE_ALT_FT`]).
+/// The cruise altitude a filing is shown as: [`filed_altitude_ft`], or 35,000 ft when it is unknown.
 pub fn parse_alt_ft(s: &str) -> f64 {
     filed_altitude_ft(s).unwrap_or(UNFILED_CRUISE_FT)
 }
@@ -512,10 +511,18 @@ pub struct Airborne {
 
 /// What a flight filed and where it lands.
 pub struct Filed {
-    pub cruise_ft: f64,
+    /// None when no altitude was readable.
+    pub cruise_ft: Option<f64>,
     /// The filed cruise true airspeed (kt) as filed; 0 when none.
     pub tas_kt: f64,
     pub arr_elev_ft: f64,
+}
+
+impl Filed {
+    /// The altitude (ft) a row reads the filing at.
+    fn altitude_ft(&self) -> f64 {
+        self.cruise_ft.unwrap_or(UNFILED_CRUISE_FT)
+    }
 }
 
 /// A point the flight passes: its distance to the field, its altitude there, the time from the start,
@@ -664,7 +671,7 @@ impl<'a> Plan<'a> {
         let elev_ft = filed.arr_elev_ft.max(0.0);
         let cruise_ft = cruise_altitude(filed, perf, start.altitude().max(elev_ft));
         let filed_cruise_tas = perf
-            .cruise_tas(filed.tas_kt, filed.cruise_ft, cruise_ft)
+            .cruise_tas(filed.tas_kt, filed.altitude_ft(), cruise_ft)
             .max(GS_FLOOR_KT);
         let descent_start_nm = descent_start_nm(perf, cruise_ft, elev_ft, filed_cruise_tas);
         let mut plan = Self {
@@ -683,7 +690,7 @@ impl<'a> Plan<'a> {
         if plan.is_level_below_cruise() {
             plan.level_ft = plan.alt0();
             plan.cruise_tas = perf
-                .cruise_tas(filed.tas_kt, filed.cruise_ft, plan.level_ft)
+                .cruise_tas(filed.tas_kt, filed.altitude_ft(), plan.level_ft)
                 .max(GS_FLOOR_KT);
         }
         plan.climbing = plan.nearer_departure()
@@ -844,12 +851,13 @@ enum Phase {
 }
 
 /// The altitude a flight cruises at: its filing, held to the type's ceiling, never below `at_least_ft`.
-/// A type with no ceiling reads a filing above [`MAX_PLAUSIBLE_ALT_FT`] as unfiled.
+/// A type with no ceiling reads a filing above [`MAX_PLAUSIBLE_ALT_FT`] as unfiled, and flies an unfiled one
+/// no higher than it has a cruise speed for.
 fn cruise_altitude(filed: &Filed, perf: Performance, at_least_ft: f64) -> f64 {
+    let believed = filed.cruise_ft.filter(|ft| *ft <= MAX_PLAUSIBLE_ALT_FT);
     let cruise_ft = match perf.ceiling_ft() {
-        Some(ceiling) => filed.cruise_ft.min(ceiling),
-        None if filed.cruise_ft > MAX_PLAUSIBLE_ALT_FT => UNFILED_CRUISE_FT,
-        None => filed.cruise_ft,
+        Some(ceiling) => filed.altitude_ft().min(ceiling),
+        None => believed.unwrap_or_else(|| UNFILED_CRUISE_FT.min(perf.cruise_top_ft())),
     };
     cruise_ft.max(at_least_ft)
 }
@@ -873,7 +881,7 @@ pub fn descent_ground_speed_at(
     let elev = filed.arr_elev_ft.max(0.0);
     let cruise_ft = cruise_altitude(filed, perf, elev);
     let cruise_tas = perf
-        .cruise_tas(filed.tas_kt, filed.cruise_ft, cruise_ft)
+        .cruise_tas(filed.tas_kt, filed.altitude_ft(), cruise_ft)
         .max(GS_FLOOR_KT);
     let alt = (elev + DESCENT_FT_PER_NM * d_nm).min(cruise_ft);
     let (hw, temp) = wind.air(d_nm, alt);
@@ -961,7 +969,7 @@ mod tests {
             airborne: None,
         };
         let filed = Filed {
-            cruise_ft,
+            cruise_ft: Some(cruise_ft),
             tas_kt,
             arr_elev_ft,
         };
@@ -986,7 +994,7 @@ mod tests {
             }),
         };
         let filed = Filed {
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             tas_kt,
             arr_elev_ft: 0.0,
         };

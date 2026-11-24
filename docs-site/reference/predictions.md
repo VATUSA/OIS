@@ -9,9 +9,10 @@ aircraft does. This page says what the prediction assumes, so you can tell when 
 - **Position, altitude, groundspeed and heading** from VATSIM.
 - **The filed route**, from where the aircraft is now. If it can't be read, the straight line to the
   destination.
-- **The filed altitude and speed.** An altitude it can't read is taken as FL350. A speed outside the type's
-  range is brought into it, and one it can't use is the middle of that range. A type flown on a profile instead
-  is held to the profile's cruise speed, which also stands in for one it can't use.
+- **The filed altitude and speed.** An altitude it can't read is taken as FL350, or as the highest altitude ERAM
+  has a cruise speed for that type at, if that is lower: 12,000 feet for a C172. A speed outside the type's range
+  is brought into it, and one it can't use is the middle of that range. A type flown on a profile instead is held
+  to the profile's ceiling and cruise speed, and that speed also stands in for one it can't use.
 - **Winds and temperatures aloft**, read at each point of the flight at the altitude the aircraft will be at there.
 - **The aircraft type's performance**: ERAM's own climb and descent tables, unless a planner has entered a
   [profile for that type](/planning/aircraft-profiles). A type ERAM doesn't have flies the profile for its engine

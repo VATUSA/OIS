@@ -82,6 +82,9 @@
 //! AC 4, 8 the 60 kt floor              | the_anchor_compares_against_no_less_than_60_kt
 //! AC 4, 7 inside 40 nm, warm air       | descent_ground_speed_at_reads_the_fields_temperature
 //! AC 4 a junk route                    | a_route_past_25_000_nm_is_flown_in_longer_steps
+//! AC 4, 5 an unreadable filing         | an_unreadable_filing_flies_no_higher_than_the_types_cruise_speeds
+//! AC 4 its speed 40 nm out             | the_speed_40_nm_out_of_an_unreadable_filing_stops_at_the_types_cruise_speeds
+//! AC 4, 6 a row and no altitude        | a_row_reads_an_unreadable_filing_at_35_000_ft
 //! AC 4 past either end                 | a_query_past_either_end_reads_the_end
 //! AC 4, 6 the 60 kt cruise floor       | a_row_cruising_under_60_kt_is_flown_at_60
 //! AC 6 the filing a row is read by     | a_row_with_no_filed_speed_is_read_at_its_filed_altitude
@@ -106,6 +109,16 @@ fn record(climb_kt: f64, descent: (f64, f64), envelope: (f64, f64)) -> EramRecor
     )
 }
 
+/// FLAT, with cruise speeds up to `ft`.
+fn cruising_to(ft: f64) -> EramRecord {
+    EramRecord::for_test(
+        vec![[0.0, 2_000.0, 300.0]],
+        vec![[0.0, 2_000.0, 240.0]],
+        vec![[0.0, 400.0], [ft, 400.0]],
+        vec![[0.0, 500.0], [ft, 500.0]],
+    )
+}
+
 /// FLAT, cruising 300 to 400 kt at 20,000 ft and 400 to 500 kt at 30,000 ft.
 fn sloped_envelope() -> EramRecord {
     EramRecord::for_test(
@@ -123,7 +136,7 @@ struct Case {
     /// Groundspeed and the headwind along the heading; None on the ground.
     gs: Option<(f64, Option<f64>)>,
     dep: Option<f64>,
-    cruise: f64,
+    cruise: Option<f64>,
     tas: f64,
     elev: f64,
     rec: EramRecord,
@@ -136,7 +149,7 @@ fn ground(d: f64) -> Case {
         d,
         gs: None,
         dep: None,
-        cruise: 30_000.0,
+        cruise: Some(30_000.0),
         tas: 480.0,
         elev: 0.0,
         rec: record(300.0, (2_000.0, 240.0), (400.0, 500.0)),
@@ -202,7 +215,7 @@ fn build_row(
         airborne: None,
     };
     let filed = Filed {
-        cruise_ft,
+        cruise_ft: Some(cruise_ft),
         tas_kt,
         arr_elev_ft: 0.0,
     };
@@ -413,7 +426,7 @@ fn a_short_trip_climbs_once_and_then_only_descends() {
 fn a_short_trip_that_reaches_its_level_holds_it_to_the_path() {
     let mut f = ground(70.0);
     f.rec = record(300.0, (500.0, 240.0), (400.0, 500.0));
-    f.cruise = 8_000.0;
+    f.cruise = Some(8_000.0);
     let vp = f.fly();
     assert_eq!(vp.ground_speed_at(40.0), 240.0);
     alts(&vp, &[(40.0, 8_000.0), (20.0, 6_666.7)]);
@@ -542,7 +555,7 @@ fn the_bundled_c208_flies_a_flat_cruise_leg_and_never_descends_faster() {
         airborne: None,
     };
     let filed = Filed {
-        cruise_ft: 12_000.0,
+        cruise_ft: Some(12_000.0),
         tas_kt: 0.0,
         arr_elev_ft: 0.0,
     };
@@ -734,6 +747,7 @@ fn mean_headwind_is_weighted_by_distance() {
     f.wind = RouteWind::uniform(40.0);
     let mean = f.fly().mean_headwind(200.5, 0.0).unwrap();
     assert!((mean - 40.0).abs() < 1e-9, "{mean}");
+    assert_eq!(f.fly().mean_headwind(100.0, 100.0), None);
     f.wind = RouteWind::new(
         [(0.0, 0.0), (149.9, 0.0), (150.1, 80.0), (201.0, 80.0)]
             .into_iter()
@@ -758,7 +772,7 @@ fn mean_headwind_is_weighted_by_distance() {
 fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
     let rec = record(300.0, (2_000.0, 240.0), (400.0, 500.0));
     let filed = |cruise_ft: f64, tas_kt: f64, arr_elev_ft: f64| Filed {
-        cruise_ft,
+        cruise_ft: Some(cruise_ft),
         tas_kt,
         arr_elev_ft,
     };
@@ -814,7 +828,7 @@ fn descent_ground_speed_at_reads_the_path_and_descent_speeds() {
 #[test]
 fn an_eram_type_climbs_past_where_a_row_is_capped() {
     let mut f = ground(400.0);
-    f.cruise = 43_000.0;
+    f.cruise = Some(43_000.0);
     assert!(peak(&f.fly(), 400.0) >= 42_500.0);
     let capped = AircraftProfile {
         service_ceiling_ft: 14_000.0,
@@ -912,7 +926,7 @@ fn only_a_flight_within_500_ft_of_its_level_or_above_it_is_scaled() {
 fn a_slow_flight_at_cruise_is_scaled() {
     let mut f = air(20_000.0, 150.5, 240.0, Some(300.0));
     f.rec = record(150.0, (1_000.0, 150.0), (200.0, 260.0));
-    f.cruise = 20_000.0;
+    f.cruise = Some(20_000.0);
     f.tas = 230.0;
     assert!((f.fly().ground_speed_at(150.5) - 240.0).abs() < 1e-9);
     let jet = air(30_000.0, 198.5, 240.0, Some(300.0)).fly();
@@ -1009,6 +1023,9 @@ fn a_query_past_either_end_reads_the_end() {
     assert_eq!(vp.time_between(1e9, 0.0), vp.time_between(200.5, 0.0));
     assert_eq!(vp.time_between(200.5, -5.0), vp.time_between(200.5, 0.0));
     assert_eq!(vp.alt_at(-5.0), vp.alt_at(0.0));
+    // One that starts down the path.
+    let down = air(20_000.0, 60.0, 240.0, Some(300.0)).fly();
+    assert_eq!(down.alt_at(1e9), 20_000.0);
 }
 
 // AC 4, AC 6. A row cruising at 40 kt (the least the page stores) with 50 kt on its tail is flown at 60, so 96 kt
@@ -1024,7 +1041,7 @@ fn a_row_cruising_under_60_kt_is_flown_at_60() {
     let cruising = build_row(&row, 10_000.0, 200.0, 10_000.0, 100.0, wind.clone());
     assert_eq!(cruising.ground_speed_at(199.0), 96.0);
     let filed = Filed {
-        cruise_ft: 35_000.0,
+        cruise_ft: Some(35_000.0),
         tas_kt: 100.0,
         arr_elev_ft: 0.0,
     };
@@ -1057,7 +1074,7 @@ fn a_row_with_no_filed_speed_is_read_at_its_filed_altitude() {
     let vp = build_row(&low, 20_000.0, 300.0, 35_000.0, 0.0, still.clone());
     assert_eq!(vp.ground_speed_at(250.0), 440.0);
     let filed = Filed {
-        cruise_ft: 35_000.0,
+        cruise_ft: Some(35_000.0),
         tas_kt: 0.0,
         arr_elev_ft: 0.0,
     };
@@ -1101,7 +1118,7 @@ fn the_cruise_speed_is_read_where_the_flight_starts() {
         }),
     };
     let filed = Filed {
-        cruise_ft: 35_000.0,
+        cruise_ft: Some(35_000.0),
         tas_kt: 520.0,
         arr_elev_ft: 0.0,
     };
@@ -1205,20 +1222,26 @@ fn a_short_trip_still_climbing_is_not_capped() {
     assert!((t - 1_453.3).abs() <= 1.0, "{t}");
     // Nearer its departure but already on its level: not climbing, so an assigned speed holds it.
     let mut level = air(8_000.0, 60.0, 150.0, Some(40.0));
-    level.cruise = 8_000.0;
+    level.cruise = Some(8_000.0);
     level.rec = record(300.0, (300.0, 240.0), (400.0, 500.0));
     assert!(level.fly().ground_speed_at(59.5) < 160.0);
 }
 
 // AC 9. FLAT, 10,000 ft, 200.5 nm, departure 40 or unknown (climbing, outside 90): gs 200 and gs 300 both 2,396.25 s.
-// Control: at 80 nm, departure 300, gs 200 is capped at 171.9 KCAS. Red when: the top-of-descent test is dropped.
+// 95 nm out with its departure 100 nm back, gs 200, it is still climbing, at 300; level at 30,000 ft and 200.5 nm,
+// gs 120, it is scaled to 408. Control: at 80 nm, departure 300, gs 200 is capped at 171.9 KCAS.
+// Red when: the top-of-descent test is dropped (200 and 120).
 #[test]
-fn a_slow_climb_outside_top_of_descent_is_not_capped() {
+fn a_slow_flight_outside_top_of_descent_is_not_capped() {
     for dep in [Some(40.0), None] {
         for gs in [200.0, 300.0] {
             secs(&air(10_000.0, 200.5, gs, dep).fly(), 2_396.25);
         }
     }
+    let climb = air(10_000.0, 95.0, 200.0, Some(100.0)).fly();
+    assert_eq!(climb.ground_speed_at(94.5), 300.0);
+    let cruise = air(30_000.0, 200.5, 120.0, Some(300.0)).fly();
+    assert!((cruise.ground_speed_at(200.0) - 408.0).abs() < 1e-6);
     let vp = air(10_000.0, 80.0, 200.0, Some(300.0)).fly();
     assert!((vp.ground_speed_at(79.5) - 200.0).abs() < 0.5);
 }
@@ -1248,7 +1271,7 @@ fn a_flight_past_one_and_a_half_climb_distances_is_level_where_it_is() {
 #[test]
 fn a_climb_goes_on_to_its_level_and_never_past_it() {
     let mut f = ground(300.25);
-    f.cruise = 8_000.0;
+    f.cruise = Some(8_000.0);
     f.rec = EramRecord::for_test(
         vec![[0.0, 2_300.0, 300.0]],
         vec![[0.0, 2_000.0, 240.0]],
@@ -1270,7 +1293,7 @@ fn a_climb_goes_on_to_its_level_and_never_past_it() {
 #[test]
 fn a_climb_does_not_go_on_to_a_level_above_the_path() {
     let mut f = ground(60.0);
-    f.cruise = 10_900.0;
+    f.cruise = Some(10_900.0);
     let vp = f.fly();
     alts(&vp, &[(33.75, 10_500.0), (31.75, 10_583.3)]);
     assert!(peak(&vp, 60.0) < 10_600.0);
@@ -1305,7 +1328,7 @@ fn a_field_below_sea_level_and_a_filing_below_the_field_are_flown() {
     low.elev = -200.0;
     alts(&low.fly(), &[(60.25, 20_083.3), (0.0, 0.0)]);
     let mut high = ground(100.25);
-    high.cruise = 4_000.0;
+    high.cruise = Some(4_000.0);
     high.elev = 6_000.0;
     alts(&high.fly(), &[(60.0, 6_000.0), (0.0, 6_000.0)]);
 }
@@ -1322,7 +1345,7 @@ fn descent_ground_speed_at_is_read_no_higher_than_cruise() {
         vec![[0.0, 500.0]],
     );
     let filed = Filed {
-        cruise_ft: 12_000.0,
+        cruise_ft: Some(12_000.0),
         tas_kt: 480.0,
         arr_elev_ft: 0.0,
     };
@@ -1330,14 +1353,16 @@ fn descent_ground_speed_at_is_read_no_higher_than_cruise() {
     assert!((gs - 320.0).abs() < 1e-9, "{gs}");
 }
 
-// AC 4. FLAT, ground, 800 nm. Filed 100,000 ft it climbs; at 100,001, 340,000, 1e20 and infinity it is the flight
-// filed at 35,000 ft, whatever the number. Airborne with a reported altitude of 1e18 ft it cruises at 100,000.
+// AC 4. FLAT with cruise speeds to 41,000 ft, ground, 800 nm. Filed 100,000 ft it climbs; at 100,001, 340,000, 1e20
+// and infinity it is the flight filed at 35,000 ft, whatever the number. Airborne with a reported altitude of 1e18 ft
+// it cruises at 100,000.
 // The default row keeps its own ceiling (45,000). Red when: the bound is dropped, which does not return.
 #[test]
 fn a_filing_above_100_000_ft_is_unfiled_for_a_type_with_no_ceiling() {
     let filed = |cruise: f64| {
         let mut f = ground(800.25);
-        f.cruise = cruise;
+        f.cruise = Some(cruise);
+        f.rec = cruising_to(41_000.0);
         f.fly()
     };
     assert!(peak(&filed(100_000.0), 800.0) > 60_000.0);
@@ -1361,6 +1386,105 @@ fn a_filing_above_100_000_ft_is_unfiled_for_a_type_with_no_ceiling() {
         RouteWind::still(),
     );
     assert_eq!(peak(&row, 800.0), 45_000.0);
+}
+
+// AC 4, AC 5. No readable filing, on a type with cruise speeds to 12,000 ft: it climbs to 12,000, on the ground and in
+// the air, filed over 100,000 ft too, and never 100 ft higher. One to 41,000 ft climbs to 35,000. A filing of 20,000
+// is flown at 20,000, over the 12,000. In the air at 14,000 it cruises there. A row is held to its ceiling, not to the
+// 12,000: 14,000 under a 14,000 ft ceiling and 35,000 under the default row's.
+// Red when: the tables' top is dropped, caps a filing, or lowers a flight.
+#[test]
+fn an_unreadable_filing_flies_no_higher_than_the_types_cruise_speeds() {
+    let top = |cruise: Option<f64>, table_ft: f64| {
+        let mut f = ground(400.25);
+        f.cruise = cruise;
+        f.rec = cruising_to(table_ft);
+        peak(&f.fly(), 400.0)
+    };
+    assert_eq!(top(None, 12_000.0), 12_000.0);
+    assert_eq!(top(Some(100_001.0), 12_000.0), 12_000.0);
+    assert_eq!(top(None, 41_000.0), 35_000.0);
+    assert_eq!(top(Some(20_000.0), 12_000.0), 20_000.0);
+    let airborne = |alt: f64| {
+        let mut f = air(alt, 400.0, 300.0, Some(20.0));
+        f.cruise = None;
+        f.rec = cruising_to(12_000.0);
+        f.fly()
+    };
+    assert_eq!(peak(&airborne(3_000.0), 400.0), 12_000.0);
+    assert_eq!(airborne(14_000.0).alt_at(200.0), 14_000.0);
+    let row = |service_ceiling_ft: f64| {
+        let filed = Filed {
+            cruise_ft: None,
+            tas_kt: 440.0,
+            arr_elev_ft: 0.0,
+        };
+        let start = FlightStart {
+            alt_ft: 0.0,
+            to_go_nm: 600.0,
+            airborne: None,
+        };
+        let p = AircraftProfile {
+            service_ceiling_ft,
+            ..AircraftProfile::default()
+        };
+        let vp = VerticalProfile::build(&start, &filed, Performance::Row(&p), RouteWind::still());
+        peak(&vp, 600.0)
+    };
+    assert_eq!(row(14_000.0), 14_000.0);
+    assert_eq!(row(45_000.0), 35_000.0);
+}
+
+// AC 4, AC 6. A row with no cruise speed and no filed speed reads an unreadable altitude as 35,000 ft: 440 kt at cruise
+// and 150 nm out. Red when: it is read as 0 ft (170).
+#[test]
+fn a_row_reads_an_unreadable_filing_at_35_000_ft() {
+    let filed = Filed {
+        cruise_ft: None,
+        tas_kt: 0.0,
+        arr_elev_ft: 0.0,
+    };
+    let row = AircraftProfile::default();
+    let still = RouteWind::still();
+    let start = FlightStart {
+        alt_ft: 35_000.0,
+        to_go_nm: 300.0,
+        airborne: None,
+    };
+    let vp = VerticalProfile::build(&start, &filed, Performance::Row(&row), still.clone());
+    assert_eq!(vp.ground_speed_at(250.0), 440.0);
+    assert_eq!(
+        descent_ground_speed_at(150.0, &filed, Performance::Row(&row), &still),
+        440.0
+    );
+}
+
+// AC 4. The miles-in-trail speed of an unreadable filing, on a type with cruise speeds to 12,000 ft and a descent of
+// 100 kt at the field and 300 at 40,000 ft, at 500 fpm: the path 40 nm out is 13,333 ft, so it is read at 12,000 (160
+// kt), as filed at 12,000, and at 13,333 (166.7) for a type to 41,000 ft. Red when: the tables' top is dropped there.
+#[test]
+fn the_speed_40_nm_out_of_an_unreadable_filing_stops_at_the_types_cruise_speeds() {
+    let at = |cruise_ft: Option<f64>, table_ft: f64| {
+        let rec = EramRecord::for_test(
+            vec![[0.0, 2_000.0, 300.0]],
+            vec![[0.0, 500.0, 100.0], [40_000.0, 500.0, 300.0]],
+            vec![[table_ft, 300.0]],
+            vec![[table_ft, 400.0]],
+        );
+        let filed = Filed {
+            cruise_ft,
+            tas_kt: 400.0,
+            arr_elev_ft: 0.0,
+        };
+        descent_ground_speed_at(40.0, &filed, Performance::Eram(&rec), &RouteWind::still())
+    };
+    assert!(
+        (at(None, 12_000.0) - 160.0).abs() < 1e-6,
+        "{}",
+        at(None, 12_000.0)
+    );
+    assert_eq!(at(None, 12_000.0), at(Some(12_000.0), 12_000.0));
+    assert!((at(None, 41_000.0) - 166.667).abs() < 1e-3);
 }
 
 // AC 9. FLAT with a descent of 300 kt above 10,000 ft and 180 below 9,999: 60 nm out at 20,000 ft doing 270 kt
@@ -1401,7 +1525,7 @@ fn the_anchor_compares_against_no_less_than_60_kt() {
 #[test]
 fn descent_ground_speed_at_reads_the_fields_temperature() {
     let filed = |cruise_ft: f64, tas_kt: f64| Filed {
-        cruise_ft,
+        cruise_ft: Some(cruise_ft),
         tas_kt,
         arr_elev_ft: 0.0,
     };
@@ -1433,7 +1557,7 @@ fn descent_ground_speed_at_reads_the_fields_temperature() {
     let row = AircraftProfile::default();
     let at = |d_nm: f64, cruise_ft: f64, arr_elev_ft: f64| {
         let filed = Filed {
-            cruise_ft,
+            cruise_ft: Some(cruise_ft),
             tas_kt: 440.0,
             arr_elev_ft,
         };
@@ -1460,7 +1584,7 @@ fn a_flight_at_its_capped_descent_speed_is_not_held() {
             }),
         };
         let filed = Filed {
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             tas_kt: 440.0,
             arr_elev_ft: 0.0,
         };

@@ -11,7 +11,8 @@ you want flown differently, or for the types ERAM doesn't have.
   `250/290` climbing, `290/250` descending), plus a climb rate range in feet/minute.
 - **Cruise** — true airspeed or Mach, whichever the type is normally filed with.
 - **Service ceiling** — caps the modeled cruise altitude, so a light aircraft is never timed as if
-  it could reach the flight levels a jet would file. ERAM's tables carry no ceiling.
+  it could reach the flight levels a jet would file. ERAM's tables carry no ceiling, but an
+  altitude OIS can't read stops at the highest one they have a cruise speed for.
 
 The descent rate sets how far out the descent speeds start. The descent itself is always 1,000 feet per 3 miles.
 

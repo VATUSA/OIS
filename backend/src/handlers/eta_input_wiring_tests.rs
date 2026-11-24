@@ -580,16 +580,23 @@ async fn the_gdp_board_times_a_ground_inbound_on_eram(pool: PgPool) {
         .await
         .unwrap();
     let uri = format!("/api/v1/tmu/gdp/{id}/board");
+    let sent = Utc::now();
     let (status, board) = send_json(&state, Method::GET, &uri, &cookie).await;
+    let answered = Utc::now();
     assert_eq!(status, 200, "{board}");
     let row = ["flights", "exempt"]
         .iter()
         .flat_map(|k| board[*k].as_array().unwrap())
         .find(|f| f["cs"] == "GND1")
         .unwrap_or_else(|| panic!("GND1 missing: {board}"));
-    let [_, (eram, _)] = gnd1_on_both(&state, Utc::now()).await;
-    let off = (time(&row["eta"]) - eram).num_seconds().abs();
-    assert!(off <= 3, "{row} against {eram}");
+    // The route's own clock is between the two.
+    let [_, (earliest, _)] = gnd1_on_both(&state, sent).await;
+    let [_, (latest, _)] = gnd1_on_both(&state, answered).await;
+    let (eta, slack) = (time(&row["eta"]), chrono::Duration::seconds(3));
+    assert!(
+        earliest - slack <= eta && eta <= latest + slack,
+        "{row} against {earliest}"
+    );
 }
 
 // AC 4, 5. IDST lists ground flights: GND1's metered crossing moves with the FCA board's when the ERAM table is

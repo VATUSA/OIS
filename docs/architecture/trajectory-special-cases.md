@@ -13,7 +13,6 @@ Decided.
 | # | vTBFM file:line | What it does | Why it is there | OIS today | Recommendation | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
 | S10 | `server/src/trajectory/integrator.ts:72` | Groundspeed never below 80 kt | A headwind must not stall the integration | 60 kt, and 0.4 to 1.6 times true airspeed | Leave out: OIS's floor lets a light aircraft fly its own speed |  |
-| S13 | `server/src/trajectory/integrator.ts:305-321` | No filed altitude flies the higher of its own altitude and FL350; a number under 1,000 is hundreds of feet | A ground flight needs a credible level and one already higher keeps its own | 35,000 ft, raised to where the flight is; a number of 600 or less is hundreds; a step climb reads its first level; a filed 0 is unfiled | Leave out |  |
 | S16 | `server/src/trajectory/verticalPlan.ts:75` | The descent path ends at sea level | Displays read FL180 and above | It ends at the field elevation (#411) | Leave out |  |
 | S17 | `server/src/trajectory/integrator.ts:1000` | One jump per cruise leg, on the wind sampled at its start | CPU | 15 s steps, wind at each | Leave out unless the steps measure slow |  |
 | S18 | `server/src/trajectory/integrator.ts:592` | A step budget, and a flag on a track that used it up | A route with a bad fix can be very long | A route over 25,000 nm is flown in longer steps, and no step is slower than 60 kt | Leave out |  |
@@ -67,11 +66,11 @@ Decided.
 | S67 | `server/src/shared/routeParser.ts:537` | A K is stripped only from a K airport | Stripping any letter sent YMML to Minnesota | An exact ICAO key | Leave out |  |
 | S68 | `server/src/trajectory/integrator.ts:915` | A fix within 0.01 nm is recorded at once; steps are cut short and snapped at each fix | Rounding must not cost 15 s | One distance axis, cut short only at the field | Nothing to take |  |
 | S69 | `server/src/counts/sectorStrata.ts:26` | Sector band edges at 23,500 and 34,500 ft, missing layers worked by another | A level flight flickered between layers | Each volume has its own base and top | Leave out |  |
-| S71 | `server/src/trajectory/performance.ts:154` | A record with a table missing is flown on the ones it has; a bad file stops startup | 280 kt for every flight would be silent | A file missing any table is refused when first read, at startup | Nothing to take |  |
 | S72 | `server/src/trajectory/integrator.ts:326` | Leading digits of the filed speed are read | The field is free text | A number or nothing, which is the midpoint | Take: `450kt` is readable |  |
 | S73 | `server/src/shared/routeParser.ts:559` | A point at the previous position is dropped | No reason stated | The same | Nothing to take |  |
 | S74 | `server/src/shared/routeParser.ts:431` | The first leg of the detour test is measured from the aircraft | The aircraft is the only honest anchor | From the departure field | Leave out |  |
 | S75 | `server/src/trajectory/integrator.ts:1149` | A time outside the track reads its end; a number that is not one fails the flight | Keeps results finite | The same ends; inputs are bounded before the first step | Nothing to take |  |
+| S79 | `server/src/shared/routeParser.ts:501-505` | A route token ends at a `/` with a letter after it | The speed and altitude suffix is not part of the fix | Ends at any `/` | Nothing to take |  |
 
 ## Decided
 
@@ -98,5 +97,7 @@ Answered by the operator during #985. **Decision** quotes the answer. The STAR c
 | S15 | `server/src/trajectory/performance.ts:76` | Standard-day speeds, no temperature | ERAM's tables are standard-day | Climb and descent speeds scaled by the field's temperature | Adapt | "Scale ERAM speed" |
 | S45 | `server/src/trajectory/integrator.ts:117` | Every descent is 1,000 ft per 3 nm, 333 ft a nautical mile | The path pins the profile to the field | The same. Jets recorded on VATSIM on 2026-11-23 flew 243 to 302 ft a nautical mile | Take; look again when the backtest scores a shallower path | "Approve as written" (AC 3) |
 | S64 | `server/src/trajectory/integrator.ts:1102` | Below the path a descending flight stays level until it meets it | Keeps the descent monotonic | The same | Take | "Approve as written" (AC 2 and 3) |
-| S70 | `server/src/trajectory/performance.ts:28` | The type's maximum altitude caps nothing | The tables run to 44,000 ft and more | The same; a row has a ceiling | Take | "No ceiling, keep descent cap" |
+| S70 | `server/src/trajectory/performance.ts:28` | The type's maximum altitude caps nothing | The tables run to 44,000 ft and more | The same, except that an unreadable filed altitude stops at the top of the cruise-speed tables; a row has a ceiling | Take | "No ceiling, keep descent cap" |
 | S78 | `server/src/trajectory/integrator.ts:710` | A slowed descent is held whatever its departure | One rule for every flight inside top of descent | A flight whose departure is unknown is not held: it may be climbing out of it. A slowed arrival with a bad filing loses the hold, and an unheld one is what vTBFM measured reading about 5 min early | Adapt | "Fix, reword AC 9" |
+| S13 | `server/src/trajectory/integrator.ts:305-321` | No filed altitude flies the higher of its own altitude and FL350; a number under 1,000 is hundreds of feet | A ground flight needs a credible level and one already higher keeps its own | 35,000 ft, or on an ERAM type the top of its cruise-speed tables if that is lower, raised to where the flight is; a number of 600 or less is hundreds; a step climb reads its first level; a filed 0 is unfiled | Adapt | "Adapt", then "C: table top" |
+| S71 | `server/src/trajectory/performance.ts:154` | A record with a table missing is flown on the ones it has; a bad file stops startup | 280 kt for every flight would be silent | A file missing any table is refused when first read, at startup | Nothing to take | "Approve as written" (AC 5) |

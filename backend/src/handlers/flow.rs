@@ -3364,7 +3364,7 @@ mod project_traffic_tests {
                 headwind_kt: None,
                 from_departure_nm: Some(crate::feed::flow::gc_dist(40.64, -73.78, 40.2, -74.0)),
             }),
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             filed_tas: 440.0,
             arr: "KDCA",
         };
@@ -3836,7 +3836,7 @@ mod prefile_fix_predictions_tests {
         let dep_ll = ap[&fp.departure];
         let arr_ll = ap[&fp.arrival];
         let profile = AircraftProfile::default();
-        let cruise_ft = crate::feed::trajectory::parse_alt_ft(&fp.altitude);
+        let cruise_ft = crate::feed::trajectory::filed_altitude_ft(&fp.altitude);
         predict::arrival_eta(
             nav,
             ap,
@@ -4007,7 +4007,7 @@ mod prefile_fix_predictions_tests {
         let ap = airports();
         let arr_ll = ap[&fp.arrival];
         let profile = AircraftProfile::default();
-        let cruise_ft = crate::feed::trajectory::parse_alt_ft(&fp.altitude);
+        let cruise_ft = crate::feed::trajectory::filed_altitude_ft(&fp.altitude);
         predict::arrival_eta(
             &NavData::load(),
             &ap,
@@ -5656,7 +5656,7 @@ mod mit_cross_speed_wiring_tests {
                     .get(&fp.departure)
                     .map(|a| crate::feed::flow::gc_dist(a.lat, a.lon, p.latitude, p.longitude)),
             }),
-            cruise_ft: trajectory::parse_alt_ft(&fp.altitude),
+            cruise_ft: trajectory::filed_altitude_ft(&fp.altitude),
             filed_tas: FILED_TAS,
             arr: &fp.arrival,
         };

@@ -4,29 +4,32 @@
 //!
 //! Requirement                                     | Test
 //! ------------------------------------------------|-----------------------------------------------------------------------
-//! AC 5 the committed file, whole                  | the_bundled_file_holds_2692_types_each_with_all_four_tables           | OK
-//! AC 5 its rows ascend and can be flown           | every_bundled_table_ascends_in_altitude_with_usable_rates             | OK
-//! AC 5 B738 as committed                          | the_bundled_b738_reads_its_committed_rows                             | OK
-//! AC 5 C172 as committed                          | the_bundled_c172_reads_its_committed_rows                             | OK
-//! AC 5 a bad file fails at parse                  | a_file_missing_a_table_or_the_type_map_is_refused                     | OK
-//! AC 5 climb and descent tables                   | climb_and_descent_interpolate_between_rows_and_hold_past_the_ends     | OK
-//! AC 5 type row > ERAM > family > wake > default  | a_type_resolves_type_row_then_eram_then_family_then_wake_then_default | OK
-//! AC 5 label agrees at every tier                 | the_label_names_the_source_resolve_returned                           | OK
-//! AC 5 case                                       | an_eram_type_is_matched_whatever_its_case                             | OK
-//! AC 5 a default table has no ERAM                | the_default_table_holds_no_eram_record                                | OK
-//! AC 5 no ceiling from ERAM                       | an_eram_record_has_no_ceiling_and_a_row_keeps_its_own                 | OK
-//! AC 6 filed speed held in the envelope           | an_eram_cruise_is_the_filed_speed_held_inside_the_envelope            | OK
-//! AC 6 60 and 700 kt bounds                       | a_filed_speed_outside_60_to_700_kt_cruises_at_the_midpoint            | OK
-//! AC 6 envelope read at the cruise altitude       | the_envelope_is_read_at_the_cruise_altitude                           | OK
-//! AC 6 rows cruise as today                       | a_rows_cruise_speed_is_unchanged                                      | OK
-//! AC 7 scaling at a non-identity temperature      | eram_climb_and_descent_scale_with_the_root_of_the_temperature_ratio   | OK
-//! AC 7 not cruise, not the rate, not rows         | temperature_scales_neither_cruise_nor_a_rate_nor_a_row                | OK
-//! AC 7 no temperature                             | without_a_temperature_the_tables_are_read_as_written                  | OK
-//! AC 3 the type's own descent distance            | the_descent_distance_integrates_the_descent_table_to_the_field        | OK
-//! AC 10 the type's climb distance                 | the_climb_distance_integrates_the_climb_table_from_the_surface        | OK
-//! AC 3, 10 a row's distances                      | a_rows_distances_integrate_its_schedule                               | OK
-//! AC 3 never faster in descent than cruise        | a_descent_speed_is_held_to_the_cruise_speed                           | OK
-//! AC 9 CAS and TAS                                | tas_to_cas_inverts_ias_to_tas                                         | OK
+//! AC 5 the committed file, whole                  | the_bundled_file_holds_2692_types_each_with_all_four_tables
+//! AC 5 its rows ascend and can be flown           | every_bundled_table_ascends_in_altitude_with_usable_rates
+//! AC 5 B738 as committed                          | the_bundled_b738_reads_its_committed_rows
+//! AC 5 C172 as committed                          | the_bundled_c172_reads_its_committed_rows
+//! AC 5 a bad file fails at parse                  | a_file_missing_a_table_or_the_type_map_is_refused
+//! AC 5 climb and descent tables                   | climb_and_descent_interpolate_between_rows_and_hold_past_the_ends
+//! AC 5 type row > ERAM > family > wake > default  | a_type_resolves_type_row_then_eram_then_family_then_wake_then_default
+//! AC 5 label agrees at every tier                 | the_label_names_the_source_resolve_returned
+//! AC 5 case                                       | an_eram_type_is_matched_whatever_its_case
+//! AC 5 a default table has no ERAM                | the_default_table_holds_no_eram_record
+//! AC 5 no ceiling from ERAM                       | an_eram_record_has_no_ceiling_and_a_row_keeps_its_own
+//! AC 6 filed speed held in the envelope           | an_eram_cruise_is_the_filed_speed_held_inside_the_envelope
+//! AC 6 60 and 700 kt bounds                       | a_filed_speed_outside_60_to_700_kt_cruises_at_the_midpoint
+//! AC 6 envelope read at the cruise altitude       | the_envelope_is_read_at_the_cruise_altitude
+//! AC 6 rows cruise as today                       | a_rows_cruise_speed_is_unchanged
+//! AC 7 scaling at a non-identity temperature      | eram_climb_and_descent_scale_with_the_root_of_the_temperature_ratio
+//! AC 7 not cruise, not the rate, not rows         | temperature_scales_neither_cruise_nor_a_rate_nor_a_row
+//! AC 7 no temperature                             | without_a_temperature_the_tables_are_read_as_written
+//! AC 3 the type's own descent distance            | the_descent_distance_integrates_the_descent_table_to_the_field
+//! AC 10 the type's climb distance                 | the_climb_distance_integrates_the_climb_table_from_the_surface
+//! AC 3, 10 a row's distances                      | a_rows_distances_integrate_its_schedule
+//! AC 3 never faster in descent than cruise        | a_descent_speed_is_held_to_the_cruise_speed
+//! AC 4 an unreadable filing stops at the tables    | an_eram_types_cruise_tables_end_at_its_highest_cruise_row
+//! AC 3, 10 a row with no climb or descent rate    | a_rows_zero_rate_is_flown_at_one_foot_a_minute
+//! AC 7 absolute zero, and under the ground        | a_temperature_and_an_altitude_are_floored_before_they_scale_a_speed
+//! AC 9 CAS and TAS                                | tas_to_cas_inverts_ias_to_tas
 //!
 //! REC, the record the pure cases use (a jet shape, so every segment slopes):
 //!   climb   [0,3000,250] [10000,2500,300] [20000,2000,400] [30000,1000,450]
@@ -588,4 +591,26 @@ fn tas_to_cas_inverts_ias_to_tas() {
     }
     let cas = tas_to_cas(290.9, 10_000.0);
     assert!(close(cas, 250.0, 0.1), "{cas}");
+}
+
+// AC 4. The committed cruise-speed tables end where the type cruises: C172 12,000 ft, SR22 21,000, B738 39,000, and a
+// type whose two tables end apart (B701: 40,000 and 41,000) at the higher. A row's is its service ceiling.
+// Red when: one table is read, or the first row of one.
+#[test]
+fn an_eram_types_cruise_tables_end_at_its_highest_cruise_row() {
+    let eram = EramTable::bundled();
+    let top = |ty: &str| Performance::Eram(eram.get(ty).unwrap()).cruise_top_ft();
+    for (ty, ft) in [
+        ("C172", 12_000.0),
+        ("SR22", 21_000.0),
+        ("B738", 39_000.0),
+        ("B701", 41_000.0),
+    ] {
+        assert_eq!(top(ty), ft, "{ty}");
+    }
+    let row = AircraftProfile {
+        service_ceiling_ft: 14_000.0,
+        ..AircraftProfile::default()
+    };
+    assert_eq!(Performance::Row(&row).cruise_top_ft(), 14_000.0);
 }

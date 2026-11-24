@@ -925,7 +925,7 @@ fn the_controller_prediction_page_is_published_without_code() {
 // every case is on it once. Red when: the build fills in an open decision, or a cell is blank. An operator who
 // decides a case moves its row to Decided.
 #[test]
-fn every_special_case_row_names_its_line_and_leaves_its_decision_empty() {
+fn every_special_case_row_names_its_line_and_only_a_decided_one_has_a_decision() {
     let doc = repo_file("docs/architecture/trajectory-special-cases.md");
     assert!(doc.contains("`zla-artcc/vTBFM` at `b6bc6c5d`"));
     let rows = |heading: &str| -> Vec<Vec<String>> {
@@ -960,6 +960,6 @@ fn every_special_case_row_names_its_line_and_leaves_its_decision_empty() {
     for row in &decided {
         assert_ne!(row[6], "", "decided: {row:?}");
     }
-    let want: BTreeSet<String> = (0..=78).map(|n| format!("S{n}")).collect();
+    let want: BTreeSet<String> = (0..=79).map(|n| format!("S{n}")).collect();
     assert_eq!(ids, want, "every case is on the list once");
 }

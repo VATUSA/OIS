@@ -89,7 +89,7 @@ pub struct Plan<'a> {
     pub dep: &'a str,
     pub arr: &'a str,
     pub route: &'a str,
-    pub cruise_ft: f64,
+    pub cruise_ft: Option<f64>,
     pub filed_tas: f64,
     pub arr_ll: [f64; 2],
 }
@@ -271,7 +271,7 @@ fn score_flight(
         dep: &f.departure,
         arr: &f.arrival,
         route: &route,
-        cruise_ft: trajectory::parse_alt_ft(&cruise_alt.map(|a| a.to_string()).unwrap_or_default()),
+        cruise_ft: cruise_alt.and_then(|a| trajectory::filed_altitude_ft(&a.to_string())),
         filed_tas: f.cruise_tas.unwrap_or(0) as f64,
         arr_ll: [arr.lat, arr.lon],
     };
@@ -458,7 +458,7 @@ mod tests {
             dep: "KJFK",
             arr: "KDCA",
             route,
-            cruise_ft: 24_000.0,
+            cruise_ft: Some(24_000.0),
             filed_tas: 440.0,
             arr_ll: [38.85, -77.04],
         }
@@ -845,7 +845,7 @@ mod tests {
     ) -> f64 {
         let obs = observe(positions, [38.85, -77.04]).unwrap();
         let mut p = plan(route);
-        p.cruise_ft = 24_000.0;
+        p.cruise_ft = Some(24_000.0);
         let pred = predict_case(nav, &airports(), winds, Performance::Row(profile), &p, &obs);
         (pred.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0
     }
@@ -1321,6 +1321,7 @@ mod family_backtest_tests {
 // AC 13 a measured type beats ERAM           | set_b_overlays_only_profiled_types_on_the_profile_set_a_resolves_them_to (tests)
 // AC 13 in_b over ERAM                       | run_marks_in_b_a_flight_set_b_times_on_a_row_where_a_flies_eram
 // AC 13 scores what the live model flies     | run_scores_the_trajectory_the_live_model_flies
+// AC 4, 13 a flight with no altitude         | run_scores_a_flight_with_no_altitude_as_the_live_model_flies_it
 // AC 6, 13 an ERAM type's filed speed        | the_replay_cruises_an_eram_type_inside_its_envelope
 #[cfg(test)]
 mod eram_backtest_tests {
@@ -1337,7 +1338,7 @@ mod eram_backtest_tests {
     use crate::feed::predict::march_input_tests::{eram_profiles, jfk_mia, step1};
     use crate::feed::predict::{self, Flight};
     use crate::feed::trajectory::{AircraftProfile, ProfileTable};
-    use crate::feed::vatsim::Pilot;
+    use crate::feed::vatsim::{FlightPlan, Pilot};
     use crate::feed::winds::Winds;
 
     /// File the flight stored as `session_id` as type `ty`.
@@ -1498,6 +1499,61 @@ mod eram_backtest_tests {
         }
     }
 
+    // AC 4, 13. A C172 recorded with no altitude is scored as predict::trajectory times one filed "", to the second.
+    // Control: filed 35,000 it is not. Red when: the replay gives it one.
+    #[sqlx::test]
+    async fn run_scores_a_flight_with_no_altitude_as_the_live_model_flies_it(pool: PgPool) {
+        let f = flight();
+        seed(&pool, 5, "", &f).await;
+        sqlx::query(
+            "update stats.flight set aircraft_short = 'C172', aircraft_faa = 'C172/G', cruise_alt = null, \
+                cruise_tas = 110 where session_id = 5",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (nav, ap, profiles) = (NavData::default(), airports(), eram_profiles());
+        let replay = Replay {
+            nav: &nav,
+            airports: &ap,
+            set_a: &profiles,
+            set_b: &profiles,
+            b_tiers: &BTreeSet::new(),
+        };
+        let window = (t0() - Duration::hours(1), t0() + Duration::hours(3));
+        let (scored, _) = run(&pool, &replay, window.0, window.1).await.unwrap();
+        let obs = observe(&f, [38.85, -77.04]).unwrap();
+        let sec = |altitude: &str| {
+            let p = Pilot {
+                latitude: obs.snapshot.lat as f64,
+                longitude: obs.snapshot.lon as f64,
+                altitude: obs.snapshot.altitude as i64,
+                groundspeed: obs.snapshot.groundspeed as i64,
+                heading: obs.snapshot.heading as i64,
+                flight_plan: Some(FlightPlan {
+                    departure: "KJFK".into(),
+                    arrival: "KDCA".into(),
+                    aircraft_short: "C172".into(),
+                    altitude: altitude.into(),
+                    cruise_tas: "110".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let inp = predict::Inputs {
+                nav: &nav,
+                airports: &ap,
+                winds: &Winds::default(),
+                profiles: &profiles,
+                locked: &predict::NO_LOCKS,
+            };
+            let t = predict::trajectory(&inp, Flight::Pilot(&p), None, obs.snapshot.ts).unwrap();
+            (t.eta_at_field() - obs.touchdown).num_seconds() as f64
+        };
+        assert_eq!(scored[0].a.arrival_sec, sec(""));
+        assert_ne!(sec(""), sec("35000"));
+    }
+
     // AC 6, 13. The replay's cruise speed for an ERAM B738 filed 600 at FL350: 479.67; filed 0: 458.17; for a
     // row with cruise_tas 450: 450. Red when: capped_cruise_tas (rows only) is applied to ERAM types.
     #[test]
@@ -1507,7 +1563,7 @@ mod eram_backtest_tests {
         let profiles = eram_profiles();
         let arrival = |perf: Performance, filed_tas: f64| {
             let mut p = plan("");
-            (p.cruise_ft, p.filed_tas) = (35_000.0, filed_tas);
+            (p.cruise_ft, p.filed_tas) = (Some(35_000.0), filed_tas);
             predict_case(&nav, &ap, &Winds::default(), perf, &p, &obs).arrival
         };
         let b738 = profiles.resolve("B738", "M");

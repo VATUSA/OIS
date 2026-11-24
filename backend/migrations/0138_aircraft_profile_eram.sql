@@ -6,7 +6,8 @@
 --
 -- The deleted rows are not recoverable from the database. A row wanted back is re-entered on the
 -- aircraft-profiles page. Each replica's profile cache picks the change up at its next refresh. A replica still on
--- the release before this one has no ERAM tables, so until it is replaced it flies these types on their wake rows.
+-- the release before this one has no ERAM tables, so until it is replaced it flies these types on
+-- their family, wake or default rows.
 delete from flow.aircraft_profile p
 using (values
     ('C172',  75::float8,  90::float8, null::float8,  500::float8,  500::float8, 110::float8, null::float8, 14000::float8, null::float8, 110::float8,  90::float8,  500::float8),

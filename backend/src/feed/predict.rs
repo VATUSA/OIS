@@ -72,7 +72,8 @@ pub struct FromHere<'a> {
     pub route_nm: f64,
     pub alt_ft: f64,
     pub airborne: Option<Airborne>,
-    pub cruise_ft: f64,
+    /// The filed cruise altitude (ft); None when none was readable.
+    pub cruise_ft: Option<f64>,
     /// The filed cruise true airspeed (kt) as filed; 0 when none.
     pub filed_tas: f64,
     pub arr: &'a str,
@@ -161,7 +162,7 @@ pub struct ArrivalPrediction {
 /// One aircraft's state for an arrival prediction. `pos` is the current position for an airborne
 /// aircraft, or the departure field for a ground/proposed one; `arr_ll` is the destination field
 /// (the straight-line fallback target). `cruise_ft` / `filed_tas` are the filed cruise altitude
-/// and cruise true airspeed.
+/// (None when none was readable) and cruise true airspeed.
 pub struct ArrivalInput<'a> {
     pub dep: &'a str,
     pub arr: &'a str,
@@ -171,7 +172,7 @@ pub struct ArrivalInput<'a> {
     pub gs: i64,
     pub hdg: i64,
     pub arr_ll: [f64; 2],
-    pub cruise_ft: f64,
+    pub cruise_ft: Option<f64>,
     pub filed_tas: f64,
 }
 
@@ -256,8 +257,8 @@ pub fn arrival_from<'a>(
 //   flight with neither is timed over `NOMINAL_ROUTE_NM` in still air.
 // - **Padding**: `GROUND_ROUTE_FACTOR` for every not-yet-airborne flight whose route does not
 //   resolve past its endpoints, so no surface times a `DCT` filing on a distance no routing flies.
-// - **Filed altitude** (`trajectory::filed_altitude_ft`, unknown timed at 35,000 ft) and **filed
-//   cruise speed** (`filed_tas`), held to what the type flies (`Performance::cruise_tas`).
+// - **Filed altitude** (`trajectory::filed_altitude_ft`; `trajectory::Filed` says what an unknown one flies)
+//   and **filed cruise speed** (`filed_tas`), held to what the type flies (`Performance::cruise_tas`).
 // - **Wheels-up**: now for an airborne flight; the released wheels-up (a ready time, FCA release,
 //   CFR or GDP EDCT) for a ground flight that holds one; otherwise, for a connected pilot, the
 //   proposed wheels-up, its filed `deptime` plus `PROPOSED_WHEELS_UP_MIN` (`proposed_wheels_up`). A
@@ -362,7 +363,6 @@ pub struct Trajectory<'a> {
 
 struct Timing {
     vp: trajectory::VerticalProfile,
-    cruise_ft: f64,
     wheels_up: DateTime<Utc>,
 }
 
@@ -597,7 +597,7 @@ impl Trajectory<'_> {
         trajectory::descent_ground_speed_at(
             nm,
             &Filed {
-                cruise_ft: t.cruise_ft,
+                cruise_ft: trajectory::filed_altitude_ft(&fp.altitude),
                 tas_kt: filed_tas(&fp.cruise_tas),
                 arr_elev_ft: field_elevation_ft(self.inp.airports, &fp.arrival),
             },
@@ -623,8 +623,9 @@ impl Trajectory<'_> {
         self.timing().wheels_up
     }
 
+    /// The cruise altitude (ft) as filed, 35,000 when none was readable.
     pub fn cruise_ft(&self) -> f64 {
-        self.timing().cruise_ft
+        trajectory::parse_alt_ft(&self.fp.altitude)
     }
 
     pub fn cruise_tas(&self) -> f64 {
@@ -683,7 +684,6 @@ impl Trajectory<'_> {
         let (inp, fp) = (self.inp, self.fp);
         let (ty, wake) = fp.aircraft_type_wake();
         let perf = inp.profiles.resolve(&ty, &wake);
-        let cruise_ft = trajectory::parse_alt_ft(&fp.altitude);
         let wind = inp.winds.along(&self.path, self.route_nm);
         let from = FromHere {
             route_nm: self.route_nm,
@@ -692,7 +692,7 @@ impl Trajectory<'_> {
                 let at = (o.pos, o.hdg, o.gs, o.alt_ft);
                 airborne_state(inp.winds, inp.airports, at, &fp.departure)
             }),
-            cruise_ft,
+            cruise_ft: trajectory::filed_altitude_ft(&fp.altitude),
             filed_tas: filed_tas(&fp.cruise_tas),
             arr: &fp.arrival,
         };
@@ -703,11 +703,7 @@ impl Trajectory<'_> {
             // Only a pilot reaches here: `trajectory` refuses a prefile with no lock.
             None => proposed_wheels_up(&fp.deptime, self.now),
         };
-        Timing {
-            vp,
-            cruise_ft,
-            wheels_up,
-        }
+        Timing { vp, wheels_up }
     }
 }
 
@@ -741,7 +737,7 @@ mod tests {
             gs,
             hdg: 190,
             arr_ll: [25.79, -80.29],
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             filed_tas: 440.0,
         }
     }
@@ -756,7 +752,7 @@ mod tests {
                 headwind_kt: headwind,
                 from_departure_nm: None,
             }),
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             filed_tas: 440.0,
             arr: "KMIA",
         }
@@ -1219,7 +1215,7 @@ mod tests {
             .filter_map(|s| {
                 let course = fca::bearing_deg(s[0], s[1]);
                 let (la, lo) = ((s[0][0] + s[1][0]) / 2.0, (s[0][1] + s[1][1]) / 2.0);
-                winds.point_headwind(la, lo, course, ac.cruise_ft)
+                winds.point_headwind(la, lo, course, 35_000.0)
             })
             .collect();
         let mean_hw = mids.iter().sum::<f64>() / mids.len() as f64;
@@ -1601,7 +1597,7 @@ mod tests {
             .unwrap()
             .gs_short_of_field(40.0);
         let filed = |arr_elev_ft: f64| Filed {
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             tas_kt: 440.0,
             arr_elev_ft,
         };
@@ -1877,7 +1873,7 @@ mod tests {
         "eta_along_route(",
         "arrival_eta(",
         "capped_cruise_tas(",
-        "profiles.resolve(",
+        ".cruise_tas(",
         ".descent_tas(",
         ".cruise_in(",
         ".climb(",
@@ -1928,9 +1924,10 @@ mod tests {
         out
     }
 
-    /// The [`TIMING_CALLS`] `src` makes outside its comments and test items.
+    /// The [`TIMING_CALLS`] `src` makes outside its comments and test items. `.cruise_tas()` reads a speed a
+    /// [`Trajectory`] already holds; only the call with arguments works one out.
     fn timing_calls(src: &str) -> Vec<&'static str> {
-        let code = shipped_code(src);
+        let code = shipped_code(src).replace(".cruise_tas()", "");
         TIMING_CALLS
             .into_iter()
             .filter(|call| code.contains(call))
@@ -2040,6 +2037,7 @@ mod tests {
         let descent = "fn f() { trajectory::descent_ground_speed_at(40.0, 0.0, a, b, p, w); }
 ";
         assert_eq!(timing_calls(descent), vec!["descent_ground_speed_at("]);
+        assert!(timing_calls("fn f() { t.cruise_tas(); }\n").is_empty());
         // A comment, a test module and a test-only helper are not shipped code...
         let tests = "// predict::arrival_eta(a)\n#[cfg(test)]\nmod tests {\n    fn t() {\n        vp.time_between(1.0, 0.0);\n    }\n}\n#[cfg(test)]\nfn helper() { vp.distance_after(1.0, 2.0); }\n";
         assert!(timing_calls(tests).is_empty());
@@ -2442,6 +2440,48 @@ pub(crate) mod march_input_tests {
         }
     }
 
+    // AC 4, 5. A C172 at 3,000 ft, 20 nm out of KJFK for KMIA: with nothing readable filed it climbs to 12,000 ft, where its
+    // cruise-speed tables end; filed 9,000, to 9,000; a B738 with nothing filed, to 35,000.
+    // Red when: an unreadable filing reaches the model as 35,000 ft.
+    #[test]
+    fn a_flight_with_no_readable_altitude_climbs_to_the_top_of_its_types_cruise_speeds() {
+        let still = Winds::default();
+        let at_150_nm = |ty: &str, altitude: &str| {
+            let mut p = step1();
+            p.flight_plan = Some(FlightPlan {
+                aircraft_short: ty.into(),
+                altitude: altitude.into(),
+                ..b738("KJFK", "KMIA")
+            });
+            (p.latitude, p.longitude, p.altitude, p.groundspeed) = (40.31, -73.87, 3_000, 100);
+            timed(&jfk_mia(), &still, &p, |t| t.alt_at(150.0))
+        };
+        for filed in ["VFR", "", "0", "8", "100001"] {
+            assert_eq!(at_150_nm("C172", filed), 12_000.0, "{filed:?}");
+        }
+        assert_eq!(at_150_nm("C172", "9000"), 9_000.0);
+        assert_eq!(at_150_nm("B738", "VFR"), 35_000.0);
+    }
+
+    // AC 8. The 60 kt from 180 blows north of 34 N and west of 79 W only. At 35 N, 80.29 W on a 180 heading, gs 420 is
+    // scaled against 390, as above. Red when: the wind is read anywhere else (against 450, gs_at(0) 364).
+    #[test]
+    fn the_anchor_reads_the_wind_where_the_aircraft_is() {
+        let winds = Winds::test_grid(
+            (24.0, -84.0),
+            (14, 8),
+            &[5_000.0, 35_000.0],
+            now(),
+            |_, lat, lon| (0, if lat > 34.0 && lon < -79.0 { -60 } else { 0 }, -54),
+        );
+        let mut p = step1();
+        (p.latitude, p.longitude) = (35.5, -80.5);
+        (p.altitude, p.groundspeed, p.heading) = (35_000, 420, 180);
+        timed(&jfk_mia(), &winds, &p, |t| {
+            assert!((t.gs_at(0.0) - 420.0).abs() < 0.5, "{}", t.gs_at(0.0));
+        });
+    }
+
     // AC 9. A B738 at FL200, 60 nm out, gs 342 (250 KCAS; predicted 297.8): capped, ETE 743 s against 699
     // at gs 408. In 60 kt on the nose along its heading, gs 342 is TAS 402 (293 KCAS): not capped.
     // Red when: the heading headwind is not passed.
@@ -2577,7 +2617,7 @@ pub(crate) mod march_input_tests {
                 gs: 400,
                 hdg: 199,
                 arr_ll: [25.79, -80.29],
-                cruise_ft: 35_000.0,
+                cruise_ft: Some(35_000.0),
                 filed_tas: 450.0,
             };
             let perf = profiles.resolve("B738", "");

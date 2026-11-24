@@ -1014,7 +1014,7 @@ mod tests {
                 headwind_kt: None,
                 from_departure_nm: Some(crate::feed::flow::gc_dist(40.64, -73.78, 40.2, -74.0)),
             }),
-            cruise_ft: 35_000.0,
+            cruise_ft: Some(35_000.0),
             filed_tas: 440.0,
             arr: "KDCA",
         }

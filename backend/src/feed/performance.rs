@@ -199,6 +199,20 @@ impl Performance<'_> {
         }
     }
 
+    /// The highest altitude (ft) the type has a cruise speed for: the top of its ERAM cruise-speed tables, a
+    /// row's service ceiling.
+    pub fn cruise_top_ft(&self) -> f64 {
+        match self {
+            Self::Eram(r) => r
+                .min_tas
+                .iter()
+                .chain(&r.max_tas)
+                .map(|row| row[0])
+                .fold(0.0, f64::max),
+            Self::Row(p) => p.service_ceiling_ft,
+        }
+    }
+
     /// The altitude (ft) the type cannot cruise above: a row's service ceiling. The ERAM file's maximum
     /// altitudes are not performance limits (a C172 reads 45,000 ft), so it gives none.
     pub fn ceiling_ft(&self) -> Option<f64> {
