@@ -70,6 +70,7 @@
 //! AC 10 only outside top of descent    | a_low_flight_inside_top_of_descent_is_not_made_level
 //! AC 10 path from the filed altitude   | a_level_flights_top_of_descent_is_still_its_filed_altitudes
 //! AC 1 goes on to its level            | a_climb_goes_on_to_its_level_and_never_past_it
+//! AC 1, 3 but not through the path     | a_climb_does_not_go_on_to_a_level_above_the_path
 //! AC 2, 9 above the path, near its dep | a_short_trip_already_above_the_path_is_not_climbing
 //! AC 3 elevation in the type distance  | the_types_own_descent_distance_ends_at_the_field
 //! AC 3 field below sea level, low plan | a_field_below_sea_level_and_a_filing_below_the_field_are_flown
@@ -1060,12 +1061,14 @@ fn a_short_trip_still_climbing_is_not_capped() {
     assert!(level.fly().ground_speed_at(59.5) < 160.0);
 }
 
-// AC 9. FLAT, 10,000 ft, 200.5 nm, departure 40 (climbing, outside 90): gs 200 and gs 300 both 2,396.25 s.
+// AC 9. FLAT, 10,000 ft, 200.5 nm, departure 40 or unknown (climbing, outside 90): gs 200 and gs 300 both 2,396.25 s.
 // Control: at 80 nm, departure 300, gs 200 is capped at 171.9 KCAS. Red when: the top-of-descent test is dropped.
 #[test]
 fn a_slow_climb_outside_top_of_descent_is_not_capped() {
-    for gs in [200.0, 300.0] {
-        secs(&air(10_000.0, 200.5, gs, Some(40.0)).fly(), 2_396.25);
+    for dep in [Some(40.0), None] {
+        for gs in [200.0, 300.0] {
+            secs(&air(10_000.0, 200.5, gs, dep).fly(), 2_396.25);
+        }
     }
     let vp = air(10_000.0, 80.0, 200.0, Some(300.0)).fly();
     assert!((vp.ground_speed_at(79.5) - 200.0).abs() < 0.5);
@@ -1110,6 +1113,18 @@ fn a_climb_goes_on_to_its_level_and_never_past_it() {
     alts(&near, &[(200.5, 29_700.0), (150.0, 30_000.0)]);
     let level = air(20_000.0, 200.5, 480.0, Some(113.0)).fly();
     alts(&level, &[(150.0, 20_000.0)]);
+}
+
+// AC 1, AC 3. FLAT, ground, 60 nm, filed 10,900 (descent_start 32.7). Climbing 400 ft a nm it is at 10,500, in the
+// band, 33.75 nm out; its 2 nm cruise step ends where the path is at 10,583.3, so that is where it ends.
+// Red when: it goes on to its level through the path.
+#[test]
+fn a_climb_does_not_go_on_to_a_level_above_the_path() {
+    let mut f = ground(60.0);
+    f.cruise = 10_900.0;
+    let vp = f.fly();
+    alts(&vp, &[(33.75, 10_500.0), (31.75, 10_583.3)]);
+    assert!(peak(&vp, 60.0) < 10_600.0);
 }
 
 // AC 2, AC 9. FLAT, 8,000 ft, 14 nm out (path 4,666.7), departure 12: nearer its departure, but above the path,
