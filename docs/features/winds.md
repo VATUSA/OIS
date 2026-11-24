@@ -68,8 +68,9 @@ These are the four limits the issue named, checked against the code on `next` be
   altitude, so the climb, cruise and descent each see their own wind, and every caller uses the same
   rule. Where the route leaves the field the wind holds to the next sample (at most 50 nm) and is
   still air beyond.
-- **Temperature.** A cruise, climb or descent Mach uses the field's temperature at that point; the IAS
-  schedule and any point without a temperature stay on ISA.
+- **Temperature.** A cruise, climb or descent Mach uses the field's temperature at that point, and an
+  ERAM type's climb and descent speeds are scaled by it (#985); the IAS
+  schedule, an ERAM type's cruise and any point without a temperature stay on ISA.
 - **Snapshots.** `stats.winds` rows written before the change (stations only) still load. A RAP
   snapshot is keyed on its valid time, so replicas loading the same cycle write one row.
 - **What operators see.** `GET /api/v1/flow/data-status` reports `winds_source` and `winds_valid_at`,

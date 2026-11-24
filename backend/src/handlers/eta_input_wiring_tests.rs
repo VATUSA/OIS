@@ -289,6 +289,7 @@ fn slow_b738() -> crate::feed::trajectory::ProfileTable {
         HashMap::new(),
         HashMap::new(),
         HashMap::from([("B738".to_string(), b738)]),
+        None,
     )
 }
 
@@ -453,4 +454,312 @@ async fn the_historical_replays_time_a_flight_in_the_winds_of_its_instant(pool: 
         (eta - eta_shear).num_seconds().abs() <= 1,
         "departures replay ETA {eta}: the stored winds give {eta_shear}, still air {eta_still}"
     );
+}
+
+// ---- #985: `state.aircraft_profiles`, ERAM included, reaches each route that times a flight ----
+//
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                             | Test
+// ----------------------------------------|-------------------------------------------------------------------
+// AC 4, 5 TimingTables routes             | airport_flow_the_fca_board_and_the_fix_table_time_gnd1_on_eram
+// AC 4, 5 GDP                             | the_gdp_board_times_a_ground_inbound_on_eram
+// AC 4, 5 IDST                            | the_idst_list_times_a_ground_flight_on_eram
+// AC 4, 8, 10 projected traffic route     | projected_traffic_holds_a_stepped_down_flight_at_its_level
+// AC 4, 8, 10 runway route                | the_runway_route_times_a_stepped_down_flight_at_its_observed_speed
+// AC 4, 5 sector demand route             | sector_demand_counts_a_released_departure_on_its_eram_climb
+// AC 4, 5 replays                         | the_historical_replays_time_a_flight_on_eram
+//
+// Each stores a table holding the bundled ERAM records in state.aircraft_profiles and compares the route's
+// answer before and after with predict::trajectory's own shift, as the B738-profile test above does.
+// STEP1 is `feed::predict::march_input_tests`'.
+
+use crate::feed::predict::march_input_tests::{eram_profiles, jfk_mia, step1};
+
+/// GND1's ETA and wheels-up on the default table and on the ERAM one, in still air at `now`.
+async fn gnd1_on_both(state: &AppState, now: DateTime<Utc>) -> [(DateTime<Utc>, DateTime<Utc>); 2] {
+    let (default, eram) = (Default::default(), eram_profiles());
+    let winds = Default::default();
+    let mut out = Vec::new();
+    for profiles in [&default, &eram] {
+        let given = Given {
+            profiles,
+            winds: &winds,
+        };
+        out.push(gnd1_times(state, given, now).await);
+    }
+    let [default, eram] = [out[0], out[1]];
+    let shift = (eram.0 - default.0).num_seconds();
+    assert!(
+        shift <= -20,
+        "positive control: ERAM moves GND1 by {shift} s"
+    );
+    [default, eram]
+}
+
+/// A state whose feed holds STEP1 alone, KJFK to KMIA.
+async fn step1_state(pool: PgPool) -> AppState {
+    let state = test_state(pool, HashMap::new());
+    {
+        let mut feed = state.feed.write().await;
+        feed.airports = Arc::new(jfk_mia());
+        feed.snapshot = Some(Arc::new(crate::feed::Snapshot::of(VatsimData {
+            pilots: vec![step1()],
+            ..Default::default()
+        })));
+    }
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    state
+}
+
+// AC 4, 5. GND1 (KJFK->KDCA via RBV WHITE SIE): GET /tmu/flow/KDCA, /flow/fcas/{id}/traffic and
+// /flow/aircraft/GND1/route each move by the trajectory's own shift (at least 20 s, positive control) when the
+// ERAM table is installed. Red when: TimingTables::load reads another table.
+#[sqlx::test]
+async fn airport_flow_the_fca_board_and_the_fix_table_time_gnd1_on_eram(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let [(eta_default, _), (eta_eram, _)] = gnd1_on_both(&state, Utc::now()).await;
+    let shift = (eta_eram - eta_default).num_seconds();
+
+    let id = corridor_fca(&pool).await;
+    let cookie = holder(&pool, "tmu.program.read").await;
+    let board = format!("/api/v1/flow/fcas/{id}/traffic");
+    let read = async || {
+        let (status, flow) = send_json(&state, Method::GET, "/api/v1/tmu/flow/KDCA", &cookie).await;
+        assert_eq!(status, 200, "{flow}");
+        let (_, board) = send_json(&state, Method::GET, &board, "").await;
+        let (_, route) =
+            send_json(&state, Method::GET, "/api/v1/flow/aircraft/GND1/route", "").await;
+        let last = route["fixes"].as_array().unwrap().last().unwrap().clone();
+        [
+            time(&gnd1_in(&flow["flights"])["eta"]),
+            time(&last["eta"]),
+            time(&gnd1_in(&board)["eta"]),
+        ]
+    };
+    let before = read().await;
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    let after = read().await;
+
+    assert_shift(before[0], after[0], shift, "airport flow");
+    assert_shift(before[1], after[1], shift, "per-fix table");
+    // The crossing is before the descent, so it moves by the climb's part of the shift.
+    let moved = (after[2] - before[2]).num_seconds();
+    assert!(moved <= -15, "the FCA crossing moves earlier: {moved} s");
+}
+
+// AC 4, 5. A draft GDP into KDCA: GND1's inbound ETA is the trajectory's on the ERAM table.
+// Red when: the GDP draft's inputs are built without state.aircraft_profiles.
+#[sqlx::test]
+async fn the_gdp_board_times_a_ground_inbound_on_eram(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    let user = seed_user(&pool).await;
+    for perm in ["tmu.gdp.create", "tmu.gdp.read"] {
+        grant(&pool, &user, perm, None).await;
+    }
+    let cookie = session_cookie(&pool, &user).await;
+    let hhmm = |min: i64| {
+        (Utc::now() + chrono::Duration::minutes(min))
+            .format("%H%M")
+            .to_string()
+    };
+    let status = crate::scope_test_support::send(
+        &state,
+        Method::POST,
+        "/api/v1/tmu/gdp",
+        &cookie,
+        Some(json!({
+            "airport": "KDCA", "aar": 60, "start_time": hhmm(-5), "end_time": hhmm(240),
+        })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let id: String = sqlx::query_scalar("select id from tmu.gdp")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let uri = format!("/api/v1/tmu/gdp/{id}/board");
+    let (status, board) = send_json(&state, Method::GET, &uri, &cookie).await;
+    assert_eq!(status, 200, "{board}");
+    let row = ["flights", "exempt"]
+        .iter()
+        .flat_map(|k| board[*k].as_array().unwrap())
+        .find(|f| f["cs"] == "GND1")
+        .unwrap_or_else(|| panic!("GND1 missing: {board}"));
+    let [_, (eram, _)] = gnd1_on_both(&state, Utc::now()).await;
+    let off = (time(&row["eta"]) - eram).num_seconds().abs();
+    assert!(off <= 3, "{row} against {eram}");
+}
+
+// AC 4, 5. IDST lists ground flights: GND1's metered crossing moves with the FCA board's when the ERAM table is
+// installed. Red when: IDST times it apart from the board.
+#[sqlx::test]
+async fn the_idst_list_times_a_ground_flight_on_eram(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    gnd1_on_both(&state, Utc::now()).await;
+    let id = corridor_fca(&pool).await;
+    let cookie = holder(&pool, "flow.fca.read").await;
+    let read = async || {
+        let uri = "/api/v1/flow/idst?airports=KJFK";
+        let (status, idst) = send_json(&state, Method::GET, uri, &cookie).await;
+        assert_eq!(status, 200, "{idst}");
+        let uri = format!("/api/v1/flow/fcas/{id}/traffic");
+        let (_, board) = send_json(&state, Method::GET, &uri, "").await;
+        [&idst["unscheduled"], &board].map(|rows| time(&gnd1_in(rows)["cross_time"]))
+    };
+    let before = read().await;
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    let after = read().await;
+    let moved = (after[1] - before[1]).num_seconds();
+    assert!(moved <= -15, "positive control: the board moves {moved} s");
+    assert_shift(before[0], after[0], moved, "IDST");
+}
+
+// AC 4, 8, 10. The projected-traffic route at +900 s: STEP1 100 nm along at 30,000 ft.
+// Red when: handlers/flow.rs's own state.aircraft_profiles read is replaced by a default table.
+#[sqlx::test]
+async fn projected_traffic_holds_a_stepped_down_flight_at_its_level(pool: PgPool) {
+    let state = step1_state(pool).await;
+    let uri = "/api/v1/flow/traffic/projected?offset_sec=900";
+    let (status, body) = send_json(&state, Method::GET, uri, "").await;
+    assert_eq!(status, 200, "{body}");
+    let row = &body.as_array().unwrap()[0];
+    let (lat, lon) = (row["lat"].as_f64().unwrap(), row["lon"].as_f64().unwrap());
+    let nm = crate::feed::flow::gc_dist(33.0, -77.5, lat, lon);
+    assert!((nm - 100.0).abs() < 0.3, "{nm}");
+    assert_eq!(row["alt"], 30_000);
+}
+
+// AC 4, 8, 10. The runway route: STEP1's ETA is 4,368 s +/- 3 out. Red when: handlers/runway.rs's table is dropped.
+#[sqlx::test]
+async fn the_runway_route_times_a_stepped_down_flight_at_its_observed_speed(pool: PgPool) {
+    let state = step1_state(pool.clone()).await;
+    // A fresh METAR, so the route has nothing to fetch.
+    let metar = crate::feed::metar::MetarInfo {
+        raw: String::new(),
+        category: "VFR".into(),
+        wind: None,
+        wind_obs: None,
+    };
+    let fresh = (metar, Utc::now().timestamp_millis());
+    let cache = state
+        .metar_cache
+        .lock()
+        .map(|mut c| c.insert("KMIA".into(), fresh));
+    assert!(cache.is_ok());
+    let cookie = holder(&pool, "flow.runway.read").await;
+    let now = Utc::now();
+    let (status, body) = send_json(&state, Method::GET, "/api/v1/flow/runway/KMIA", &cookie).await;
+    assert_eq!(status, 200, "{body}");
+    let arrivals = body["arrivals"].as_array().unwrap();
+    assert_eq!(arrivals.len(), 1, "{body}");
+    let sec = (time(&arrivals[0]["eta"]) - now).num_seconds();
+    assert!((sec - 4_368).abs() <= 3, "{sec}");
+}
+
+// AC 4, 5. The sector-demand route with a volume from 2,500 to 3,500 ft over KJFK's first miles: a released B738
+// is in it one minute after wheels-up on ERAM and not on the default row; a new table re-projects once.
+// Red when: handlers/sector_demand.rs's table is dropped, or it leaves the cache key.
+#[sqlx::test]
+async fn sector_demand_counts_a_released_departure_on_its_eram_climb(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    // KJFK's first few miles, from 2,500 to 3,500 ft: a minute after wheels-up GND1 is at about 2,900 ft
+    // on ERAM, and on the default row at 2,000 ft then and 4,000 ft the minute after.
+    state
+        .airspace_sectors
+        .store(Arc::new(crate::feed::sectors::SectorTable {
+            volumes: vec![crate::feed::sectors::SectorVolume {
+                tier: "low".into(),
+                base_alt_ft: 2_500,
+                top_alt_ft: 3_500,
+                rings: vec![vec![
+                    [40.2, -74.4],
+                    [40.2, -73.3],
+                    [40.9, -73.3],
+                    [40.9, -74.4],
+                    [40.2, -74.4],
+                ]],
+                ..crate::feed::sectors::tests::volume("ZNY", "05001")
+            }],
+        }));
+    state
+        .airspace_sectors_loaded
+        .store(true, std::sync::atomic::Ordering::Release);
+    sqlx::query(
+        "insert into tmu.issued_cfrs (callsign, airport, wheels_up) values ('GND1', 'KDCA', $1)",
+    )
+    .bind(Utc::now() + chrono::Duration::minutes(20))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let cookie = holder(&pool, "flow.sectors.read").await;
+    let proposed = async || -> i64 {
+        let uri = "/api/v1/flow/sector-demand/ZNY";
+        let (status, body) = send_json(&state, Method::GET, uri, &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        let row = &body["enroute"]["rows"].as_array().unwrap()[0];
+        row["bins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["proposed"].as_i64().unwrap())
+            .sum()
+    };
+    assert_eq!(
+        proposed().await,
+        0,
+        "the default row passes between minutes"
+    );
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    assert_eq!(proposed().await, 1, "the same cycle, re-projected on ERAM");
+}
+
+// AC 4, 5. /stats/hist/flow/KDCA and /stats/hist/departures/KJFK at a stored instant time GND1 on the ERAM table.
+// Red when: the replay's TimingTables::load reads another table.
+#[sqlx::test]
+async fn the_historical_replays_time_a_flight_on_eram(pool: PgPool) {
+    let state = state(pool.clone()).await;
+    let at = DateTime::parse_from_rfc3339("2026-10-16T01:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let [(default, _), (eram, _)] = gnd1_on_both(&state, at).await;
+    state.aircraft_profiles.store(Arc::new(eram_profiles()));
+    sqlx::query(
+        "insert into stats.flight (session_id, cid, callsign, logon_time, first_seen, last_seen, \
+             status, departure, arrival, aircraft_short, route, cruise_alt, cruise_tas) \
+         values (1, 1000001, 'GND1', $1, $1, $2, 'active', 'KJFK', 'KDCA', 'B738', \
+             'RBV WHITE SIE', 35000, 440)",
+    )
+    .bind(at - chrono::Duration::hours(1))
+    .bind(at + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into stats.position (session_id, ts, lat, lon, altitude, groundspeed, heading) \
+         values (1, $1, 40.64, -73.78, 13, 0, 310)",
+    )
+    .bind(at - chrono::Duration::minutes(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("insert into tmu.programs (icao, aar) values ('KDCA', 60)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cookie = holder(&pool, "stats.data.read").await;
+    for (uri, list) in [
+        ("/api/v1/stats/hist/flow/KDCA", "flights"),
+        ("/api/v1/stats/hist/departures/KJFK", "departures"),
+    ] {
+        let uri = format!("{uri}?at={}", at.timestamp());
+        let (status, body) = send_json(&state, Method::GET, &uri, &cookie).await;
+        assert_eq!(status, 200, "{body}");
+        let eta = time(&gnd1_in(&body[list])["eta"]);
+        assert!(
+            (eta - eram).num_seconds().abs() <= 1,
+            "{uri}: {eta}, ERAM {eram}, default {default}"
+        );
+    }
 }

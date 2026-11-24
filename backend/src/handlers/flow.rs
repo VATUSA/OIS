@@ -3339,7 +3339,12 @@ mod project_traffic_tests {
         wind: Option<crate::feed::trajectory::RouteWind>,
         elapsed_sec: f64,
     ) -> (f64, f64) {
-        use crate::feed::{fca, predict, trajectory::AircraftProfile};
+        use crate::feed::{
+            fca,
+            performance::Performance,
+            predict,
+            trajectory::{Airborne, AircraftProfile},
+        };
         let path = fca::route_path(
             &NavData::load(),
             &airports(),
@@ -3354,18 +3359,23 @@ mod project_traffic_tests {
         .unwrap();
         let len = predict::path_len_nm(&path);
         let wind = wind.unwrap_or_else(|| Winds::test_shear().along(&path, len));
-        let vp = predict::profile_from_here(
-            true,
-            len,
-            24_000.0,
-            400.0,
-            35_000.0,
-            440.0,
-            &airports(),
-            "KDCA",
-            &AircraftProfile::default(),
-            wind,
-        );
+        // Climbing 20 nm off KJFK: below its level and outside its top of descent, so neither its
+        // groundspeed nor its departure is read.
+        let from = predict::FromHere {
+            route_nm: len,
+            alt_ft: 24_000.0,
+            airborne: Some(Airborne {
+                gs_kt: 400.0,
+                headwind_kt: None,
+                from_departure_nm: Some(crate::feed::flow::gc_dist(40.64, -73.78, 40.2, -74.0)),
+            }),
+            cruise_ft: 35_000.0,
+            filed_tas: 440.0,
+            arr: "KDCA",
+        };
+        let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
+        let vp = predict::profile_from_here(&from, &airports(), perf, wind);
         let (pos, _) = fca::point_and_heading_at(&path, len - vp.distance_after(len, elapsed_sec));
         (pos[0], pos[1])
     }
@@ -3432,6 +3442,7 @@ mod project_traffic_tests {
                 },
             )]),
             HashMap::new(),
+            None,
         );
         let alt = |table: &ProfileTable, cs: &str| {
             project_traffic(
@@ -3835,7 +3846,7 @@ mod prefile_fix_predictions_tests {
             nav,
             ap,
             &Winds::default(),
-            &profile,
+            crate::feed::performance::Performance::Row(&profile),
             &predict::ArrivalInput {
                 dep: &fp.departure,
                 arr: &fp.arrival,
@@ -3846,7 +3857,7 @@ mod prefile_fix_predictions_tests {
                 hdg: 0,
                 arr_ll: [arr_ll.lat, arr_ll.lon],
                 cruise_ft,
-                cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
+                filed_tas: 440.0,
             },
             prefile_wheels_up(),
         )
@@ -4006,7 +4017,7 @@ mod prefile_fix_predictions_tests {
             &NavData::load(),
             &ap,
             winds,
-            &profile,
+            crate::feed::performance::Performance::Row(&profile),
             &predict::ArrivalInput {
                 dep: &fp.departure,
                 arr: &fp.arrival,
@@ -4017,7 +4028,7 @@ mod prefile_fix_predictions_tests {
                 hdg,
                 arr_ll: [arr_ll.lat, arr_ll.lon],
                 cruise_ft,
-                cruise_tas: crate::feed::trajectory::capped_cruise_tas(440.0, cruise_ft, &profile),
+                filed_tas: 440.0,
             },
             at,
         )
@@ -4105,7 +4116,8 @@ mod prefile_fix_predictions_tests {
             t.iter().find(|f| f.name == name).cloned().unwrap()
         };
         // Each fix is slower by the field's headwind at that fix's position, altitude and course:
-        // 0 at or below 18,000 ft rising to 80 kt at 30,000 ft for a 225° course.
+        // 0 at or below 18,000 ft rising to 80 kt at 30,000 ft for a 225° course. A climb into the wind
+        // is higher at a fix than one in still air, so it is also up to 12 kt faster true there.
         let mut most = 0.0_f64;
         for fix in &shear {
             let plain = at(&still, &fix.name);
@@ -4119,7 +4131,7 @@ mod prefile_fix_predictions_tests {
                 .unwrap_or(0.0);
             let slower = (plain.groundspeed_kt - fix.groundspeed_kt) as f64;
             assert!(
-                (slower - hw).abs() <= 5.0,
+                (-12.0..=5.0).contains(&(slower - hw)),
                 "{}: {slower} kt slower at {} ft, field {hw:.1}",
                 fix.name,
                 fix.altitude_ft
@@ -4166,6 +4178,7 @@ mod prefile_fix_predictions_tests {
                     },
                 )]),
                 HashMap::new(),
+                None,
             ),
         ));
 
@@ -5619,9 +5632,7 @@ mod mit_cross_speed_wiring_tests {
         .unwrap();
         let profiles = ProfileTable::default();
         let (ty, wake) = fp.aircraft_type_wake();
-        let profile = profiles.resolve(&ty, &wake);
-        let cruise = trajectory::parse_alt_ft(&fp.altitude);
-        let cruise_tas = trajectory::capped_cruise_tas(FILED_TAS, cruise, profile);
+        let perf = profiles.resolve(&ty, &wake);
         // A ground flight on a direct (2-anchor) route is timed over the padded distance (#813).
         let airborne = p.groundspeed >= 50;
         let pad = if !airborne && path.len() <= 2 {
@@ -5630,17 +5641,30 @@ mod mit_cross_speed_wiring_tests {
             1.0
         };
         let route_len = predict::path_len_nm(&path) * pad;
+        let from = predict::FromHere {
+            route_nm: route_len,
+            alt_ft: p.altitude as f64,
+            airborne: airborne.then(|| trajectory::Airborne {
+                gs_kt: p.groundspeed as f64,
+                headwind_kt: cruise_headwind().point_headwind(
+                    p.latitude,
+                    p.longitude,
+                    p.heading as f64,
+                    p.altitude as f64,
+                ),
+                from_departure_nm: ap
+                    .get(&fp.departure)
+                    .map(|a| crate::feed::flow::gc_dist(a.lat, a.lon, p.latitude, p.longitude)),
+            }),
+            cruise_ft: trajectory::parse_alt_ft(&fp.altitude),
+            filed_tas: FILED_TAS,
+            arr: &fp.arrival,
+        };
         let pred = predict::eta_along_route(
-            airborne,
-            route_len,
+            &from,
             cross.along_nm * pad,
-            p.altitude as f64,
-            p.groundspeed as f64,
-            cruise,
-            cruise_tas,
             &ap,
-            &fp.arrival,
-            profile,
+            perf,
             wind(&path, route_len),
             now,
         );
@@ -7374,12 +7398,13 @@ mod family_profile_wiring_tests {
             HashMap::from([(
                 "jet".to_string(),
                 AircraftProfile {
-                    desc_fpm: 3_000.0,
+                    desc_ias_hi: 340.0,
                     climb_fpm_hi: 3_000.0,
                     ..AircraftProfile::default()
                 },
             )]),
             HashMap::new(),
+            None,
         )
     }
 
@@ -7539,7 +7564,7 @@ mod eta_parity_tests {
     }
 
     /// A rate FCA on the JFK->DCA corridor between WHITE and SIE.
-    fn corridor() -> FcaBody {
+    pub(super) fn corridor() -> FcaBody {
         FcaBody {
             id: "t".into(),
             name: "t".into(),
@@ -7570,17 +7595,18 @@ mod eta_parity_tests {
 
     #[test]
     fn every_surface_reads_one_flights_time_off_its_one_trajectory() {
-        let (nav, ap, winds, profiles) = (
-            NavData::load(),
-            airports(),
-            Winds::test_shear(),
-            ProfileTable::default(),
-        );
+        surfaces_agree(&ProfileTable::default());
+    }
+
+    /// Every surface's time, speed and position for AIR1 and GND1 in the sheared wind is their one
+    /// trajectory's on `profiles`.
+    pub(super) fn surfaces_agree(profiles: &ProfileTable) {
+        let (nav, ap, winds) = (NavData::load(), airports(), Winds::test_shear());
         let inp = predict::Inputs {
             nav: &nav,
             airports: &ap,
             winds: &winds,
-            profiles: &profiles,
+            profiles,
             locked: &predict::NO_LOCKS,
         };
         let data = data();
@@ -7614,6 +7640,41 @@ mod eta_parity_tests {
         assert_eq!(row("GND1").eta, Some(gnd.eta_at_field()));
         assert_eq!(row("GND1").etd, Some(gnd.wheels_up()));
         assert_eq!(row("GND1").distance_nm, Some(gnd.route_nm()));
+
+        // Runway ETE: the ETA at the field, airborne flights only.
+        let arrivals = crate::feed::runway::collect_arrivals(
+            "KDCA",
+            &data,
+            &ap,
+            &nav,
+            &winds,
+            profiles,
+            now(),
+            180,
+        );
+        let air_runway = arrivals.iter().find(|a| a.cs == "AIR1").unwrap();
+        assert_eq!(air_runway.eta_ms, air.eta_at_field().timestamp_millis());
+
+        // The per-fix table and the map projection.
+        for (i, t) in [&air, &gnd].into_iter().enumerate() {
+            let flight = predict::Flight::Pilot(&data.pilots[i]);
+            let fixes = super::fix_predictions(&inp, flight, now());
+            assert_eq!(fixes.last().unwrap().eta, t.eta_at_field());
+        }
+        let shown = super::project_traffic(
+            &data,
+            &nav,
+            &ap,
+            profiles,
+            &winds,
+            &ExclusionSet::new(),
+            600,
+        );
+        let at = air.progress_after(600.0);
+        let (pos, _) = crate::feed::fca::point_and_heading_at(air.path(), at.along_nm);
+        let air_map = shown.iter().find(|r| r.callsign == "AIR1").unwrap();
+        assert_eq!((air_map.lat, air_map.lon), (pos[0], pos[1]));
+        assert_eq!(air_map.alt, at.alt_ft.round() as i64);
 
         // FCA metering and IDST: the ETA and speed at the crossing, and the same wheels-up.
         let fca = corridor();
@@ -7666,7 +7727,7 @@ mod eta_parity_tests {
             &data,
             &nav,
             &ap,
-            &profiles,
+            profiles,
             &winds,
             &locked,
             &HashSet::new(),
@@ -7688,5 +7749,325 @@ mod eta_parity_tests {
                 assert_eq!(fix.alt_ft, Some(at.alt_ft), "{cs}");
             }
         }
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                         | Test
+// ------------------------------------|---------------------------------------------------------------------
+// AC 4, 8, 10 FCA metering and IDST   | a_stepped_down_candidate_crosses_at_its_observed_speed
+// AC 4, 5 FCA metering, ground        | a_parked_b738_candidate_is_metered_on_its_eram_record
+// AC 12 debug source                  | the_debug_view_names_the_source_each_candidate_flew
+// AC 6, 12 debug speeds               | the_debug_cruise_speed_is_the_eram_cruise
+// AC 4, 8, 10 map projection          | a_stepped_down_flight_is_projected_level_at_its_observed_speed
+// AC 4, 8, 10 per-fix table, live     | a_stepped_down_flights_fix_table_reads_its_observed_speed_and_level
+// AC 4, 5 per-fix table, prefile      | a_locked_prefiles_fix_table_is_timed_on_its_eram_record
+// AC 4 every surface, one trajectory  | every_surface_reads_one_trajectory_on_eram_performance
+#[cfg(test)]
+mod eram_wiring_tests {
+    use std::collections::HashMap;
+
+    use chrono::{DateTime, Utc};
+
+    use super::eta_parity_tests::{corridor, surfaces_agree};
+    use super::{ExclusionSet, ReleaseMap, build_candidates_with, finalize, fix_predictions};
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::airspace::Boundaries;
+    use crate::feed::flow::gc_dist;
+    use crate::feed::nav::NavData;
+    use crate::feed::performance::EramTable;
+    use crate::feed::predict::march_input_tests::{b738, eram_profiles, jfk_mia, step1};
+    use crate::feed::predict::{self, Flight};
+    use crate::feed::trajectory::{AircraftProfile, ProfileTable};
+    use crate::feed::vatsim::{FlightPlan, Pilot, Prefile, VatsimData};
+    use crate::feed::winds::Winds;
+    use crate::models::{FcaBody, FcaFlight};
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    /// The metered candidates of `fca`, with their debug detail, and their meter inputs.
+    fn candidates(
+        fca: &FcaBody,
+        ap: &AirportDb,
+        profiles: &ProfileTable,
+        pilots: Vec<Pilot>,
+    ) -> (Vec<FcaFlight>, Vec<crate::feed::fca::MeterInput>) {
+        build_candidates_with(
+            fca,
+            &VatsimData {
+                pilots,
+                ..Default::default()
+            },
+            ap,
+            &NavData::load(),
+            &Boundaries::default(),
+            &Winds::default(),
+            profiles,
+            &ReleaseMap::new(),
+            &ExclusionSet::new(),
+            now(),
+            true,
+        )
+    }
+
+    /// A gate across STEP1's route, about 200 nm ahead of it, metered at 20 MIT.
+    fn offshore() -> FcaBody {
+        FcaBody {
+            points: sqlx::types::Json(vec![[29.85, -80.5], [29.85, -77.0]]),
+            mode: "mit".into(),
+            mit: 20,
+            ..corridor()
+        }
+    }
+
+    fn jfk_dca() -> AirportDb {
+        HashMap::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ])
+    }
+
+    fn parked(cs: &str, ty: &str) -> Pilot {
+        Pilot {
+            callsign: cs.into(),
+            latitude: 40.64,
+            longitude: -73.78,
+            altitude: 13,
+            groundspeed: 0,
+            heading: 310,
+            flight_plan: Some(FlightPlan {
+                route: "RBV WHITE SIE".into(),
+                aircraft_short: ty.into(),
+                cruise_tas: "440".into(),
+                ..b738("KJFK", "KDCA")
+            }),
+            ..Default::default()
+        }
+    }
+
+    // AC 4, 8, 10. STEP1 (`predict::march_input_tests`), a gate about 200 nm ahead (any point more than 140.9
+    // nm from KMIA): build_candidates' cross_speed is 400.0 kt and eta_ms - now is along / 400 h, so 20 MIT
+    // sizes a 180 s gap; unscaled at 450 it is 160 s. Equal to predict::trajectory's.
+    // Red when: the candidate loop leaves the entry point or drops an input.
+    #[test]
+    fn a_stepped_down_candidate_crosses_at_its_observed_speed() {
+        let step2 = Pilot {
+            callsign: "STEP2".into(),
+            ..step1()
+        };
+        let fca = offshore();
+        let (flights, metas) = candidates(&fca, &jfk_mia(), &eram_profiles(), vec![step1(), step2]);
+        assert_eq!(flights.len(), 2);
+        assert!(
+            (metas[0].cross_speed - 400.0).abs() < 0.05,
+            "{}",
+            metas[0].cross_speed
+        );
+        let along = gc_dist(33.0, -77.5, flights[0].cross_lat, flights[0].cross_lon);
+        assert!((150.0..250.0).contains(&along), "{along}");
+        let sec = (metas[0].eta_ms - now().timestamp_millis()) as f64 / 1000.0;
+        assert!(
+            (sec - along / 400.0 * 3_600.0).abs() <= 2.0,
+            "{sec} over {along} nm"
+        );
+
+        let metered = finalize(&fca, flights, &metas, now().timestamp_millis());
+        let cross: Vec<_> = metered.iter().map(|f| f.cross_time.unwrap()).collect();
+        let gap = (cross[1] - cross[0]).num_milliseconds() as f64 / 1000.0;
+        assert!((gap - 180.0).abs() < 0.5, "20 MIT at 400 kt: {gap}");
+    }
+
+    // AC 4, 5. A B738 parked at KJFK over the low KDCA gate: wheels-up to crossing is shorter on the bundled
+    // table than on the default by the trajectory's own difference (54 s at the field); a QQQQ does not move.
+    // Red when: candidates resolve from another table.
+    #[test]
+    fn a_parked_b738_candidate_is_metered_on_its_eram_record() {
+        let to_cross = |profiles: &ProfileTable| -> Vec<f64> {
+            let pilots = vec![parked("GND1", "B738"), parked("GND2", "QQQQ")];
+            let (flights, metas) = candidates(&corridor(), &jfk_dca(), profiles, pilots.clone());
+            assert_eq!(flights.len(), 2);
+            let (nav, ap, winds) = (NavData::load(), jfk_dca(), Winds::default());
+            let inp = predict::Inputs {
+                nav: &nav,
+                airports: &ap,
+                winds: &winds,
+                profiles,
+                locked: &predict::NO_LOCKS,
+            };
+            for (i, p) in pilots.iter().enumerate() {
+                let t = predict::trajectory(&inp, Flight::Pilot(p), None, now()).unwrap();
+                let along =
+                    flights[i].distance_nm as f64 * t.route_nm() / t.modeled_nm(t.route_nm());
+                // `distance_nm` is whole miles: a mile is under 15 s.
+                let off = (t.eta_at(along) - flights[i].eta.unwrap())
+                    .num_seconds()
+                    .abs();
+                assert!(off <= 15, "{}: {off}", p.callsign);
+                assert_eq!(metas[i].wheels_up_ms, t.wheels_up().timestamp_millis());
+            }
+            metas
+                .iter()
+                .map(|m| (m.eta_ms - m.wheels_up_ms) as f64 / 1000.0)
+                .collect()
+        };
+        let (eram, default) = (
+            to_cross(&eram_profiles()),
+            to_cross(&ProfileTable::default()),
+        );
+        assert!(default[0] - eram[0] > 20.0, "{default:?} against {eram:?}");
+        assert_eq!(eram[1], default[1], "a type ERAM lacks does not move");
+    }
+
+    // AC 12. Debug on, bundled table with a type row for B77W and a jet family row: B738 "eram:B738", B77W
+    // "type:B77W", E175 "family:jet", QQQQ "default". Red when: the label ignores the ERAM tier.
+    #[test]
+    fn the_debug_view_names_the_source_each_candidate_flew() {
+        let row = AircraftProfile::default;
+        let profiles = ProfileTable::new(
+            row(),
+            HashMap::new(),
+            HashMap::from([("jet".to_string(), row())]),
+            HashMap::from([("B77W".to_string(), row())]),
+            Some(EramTable::bundled()),
+        );
+        let want = [
+            ("B738", "eram:B738"),
+            ("B77W", "type:B77W"),
+            ("E175", "family:jet"),
+            ("QQQQ", "default"),
+        ];
+        let pilots = want.iter().map(|(ty, _)| parked(ty, ty)).collect();
+        let (flights, _) = candidates(&corridor(), &jfk_dca(), &profiles, pilots);
+        assert_eq!(flights.len(), want.len());
+        for (ty, label) in want {
+            let f = flights.iter().find(|f| f.callsign == ty).unwrap();
+            assert_eq!(f.debug.as_ref().unwrap().profile, label);
+        }
+    }
+
+    // AC 6, 12. A B738 filed 600 at FL350: debug cruise_tas is 480 (the envelope's 479.67), not 600; unfiled:
+    // 458. Red when: the debug value is the filed speed or the row cap.
+    #[test]
+    fn the_debug_cruise_speed_is_the_eram_cruise() {
+        let filed = |cs: &str, tas: &str| {
+            let mut p = parked(cs, "B738");
+            p.flight_plan.as_mut().unwrap().cruise_tas = tas.into();
+            p
+        };
+        let pilots = vec![filed("FAST", "600"), filed("NONE", ""), filed("OWN", "440")];
+        let (flights, _) = candidates(&corridor(), &jfk_dca(), &eram_profiles(), pilots);
+        for (cs, kt) in [("FAST", 480), ("NONE", 458), ("OWN", 440)] {
+            let f = flights.iter().find(|f| f.callsign == cs).unwrap();
+            assert_eq!(f.debug.as_ref().unwrap().cruise_tas, kt, "{cs}");
+        }
+    }
+
+    // AC 4, 8, 10. STEP1 projected 900 s: 100 nm along the great circle at 30,000 ft (climbing unscaled: about
+    // 112 nm and above 34,000). Red when: project_traffic drops an input.
+    #[test]
+    fn a_stepped_down_flight_is_projected_level_at_its_observed_speed() {
+        let projected = |ap: &AirportDb| {
+            let data = VatsimData {
+                pilots: vec![step1()],
+                ..Default::default()
+            };
+            let out = super::project_traffic(
+                &data,
+                &NavData::load(),
+                ap,
+                &eram_profiles(),
+                &Winds::default(),
+                &ExclusionSet::new(),
+                900,
+            );
+            (gc_dist(33.0, -77.5, out[0].lat, out[0].lon), out[0].alt)
+        };
+        let (nm, alt) = projected(&jfk_mia());
+        assert!((nm - 100.0).abs() < 0.3, "{nm}");
+        assert_eq!(alt, 30_000);
+        // Positive control: with no known departure it climbs back, unscaled.
+        let mut no_jfk = jfk_mia();
+        no_jfk.remove("KJFK");
+        let (nm, alt) = projected(&no_jfk);
+        assert!(nm > 105.0 && alt > 34_000, "{nm} nm at {alt}");
+    }
+
+    // AC 4, 8, 10. STEP1 with an enroute fix about 200 nm ahead: its row reads 400 kt, 30,000 ft and an ETA
+    // along / 400 h out; the arrival row is 4,368 s +/- 2 out (recompute for the fix's own route length).
+    // Red when: fix_predictions drops an input.
+    #[test]
+    fn a_stepped_down_flights_fix_table_reads_its_observed_speed_and_level() {
+        let (nav, ap, winds, profiles) = (
+            NavData::load(),
+            jfk_mia(),
+            Winds::default(),
+            eram_profiles(),
+        );
+        let inp = predict::Inputs {
+            nav: &nav,
+            airports: &ap,
+            winds: &winds,
+            profiles: &profiles,
+            locked: &predict::NO_LOCKS,
+        };
+        let mut p = step1();
+        p.flight_plan.as_mut().unwrap().route = "HOAGG".into();
+        let fixes = fix_predictions(&inp, Flight::Pilot(&p), now());
+        let fix = fixes.iter().find(|f| f.name == "HOAGG").unwrap();
+        let along = gc_dist(33.0, -77.5, fix.lat, fix.lon);
+        assert!((along - 205.0).abs() < 1.0, "{along}");
+        assert_eq!((fix.groundspeed_kt, fix.altitude_ft), (400, 30_000));
+        let sec = (fix.eta - now()).num_seconds() as f64;
+        assert!((sec - along / 400.0 * 3_600.0).abs() <= 2.0, "{sec}");
+        // HOAGG is 0.02 nm off the direct route, so the arrival is the direct flight's.
+        let last = fixes.last().unwrap();
+        let sec = (last.eta - now()).num_seconds() as f64;
+        assert!((sec - 4_368.0).abs() <= 3.0, "{}: {sec}", last.name);
+    }
+
+    // AC 4, 5. A locked B738 prefile KIAD->KJFK direct (the padded path): its arrival row is the trajectory's,
+    // and earlier than on the default table. Red when: the prefile path resolves another table.
+    #[test]
+    fn a_locked_prefiles_fix_table_is_timed_on_its_eram_record() {
+        let (nav, ap, winds) = (NavData::load(), jfk_dca(), Winds::default());
+        let locked = HashMap::from([("PRE1".to_string(), now())]);
+        let arrival = |profiles: &ProfileTable| {
+            let inp = predict::Inputs {
+                nav: &nav,
+                airports: &ap,
+                winds: &winds,
+                profiles,
+                locked: &locked,
+            };
+            let pf = Prefile {
+                callsign: "PRE1".into(),
+                flight_plan: parked("PRE1", "B738").flight_plan,
+                ..Default::default()
+            };
+            let t = predict::trajectory(&inp, Flight::Prefile(&pf), None, now()).unwrap();
+            let eta = fix_predictions(&inp, Flight::Prefile(&pf), now())
+                .last()
+                .unwrap()
+                .eta;
+            assert_eq!(eta, t.eta_at_field());
+            eta
+        };
+        let (eram, default) = (arrival(&eram_profiles()), arrival(&ProfileTable::default()));
+        assert!(
+            (default - eram).num_seconds() > 20,
+            "{eram} against {default}"
+        );
+    }
+
+    // AC 4. eta_parity_tests::every_surface_reads_one_flights_time_off_its_one_trajectory on the bundled table
+    // under test_shear, with STEP1 beside AIR1 and GND1: airport flow, FCA candidates, sector demand, runway
+    // ETE (runway::collect_arrivals), the projected map and the per-fix table agree to the second.
+    // Red when: any one of them times a flight apart.
+    #[test]
+    fn every_surface_reads_one_trajectory_on_eram_performance() {
+        surfaces_agree(&eram_profiles());
     }
 }

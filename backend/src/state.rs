@@ -118,7 +118,7 @@ impl AppState {
         let airspace = Arc::new(Boundaries::load());
         let runways = Arc::new(RunwayDb::load());
         let winds = Arc::new(ArcSwap::from_pointee(Winds::default()));
-        let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::default()));
+        let aircraft_profiles = Arc::new(ArcSwap::from_pointee(ProfileTable::built_in()));
         let aircraft_profiles_loaded = Arc::new(AtomicBool::new(false));
         let airspace_sectors = Arc::new(ArcSwap::from_pointee(SectorTable::default()));
         let airspace_sectors_loaded = Arc::new(AtomicBool::new(false));
@@ -221,7 +221,7 @@ impl AppState {
             airspace: Arc::new(Boundaries::load()),
             runways: Arc::new(RunwayDb::load()),
             winds: Arc::new(ArcSwap::from_pointee(Winds::default())),
-            aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::default())),
+            aircraft_profiles: Arc::new(ArcSwap::from_pointee(ProfileTable::built_in())),
             aircraft_profiles_loaded: Arc::new(AtomicBool::new(false)),
             airspace_sectors: Arc::new(ArcSwap::from_pointee(SectorTable::default())),
             airspace_sectors_loaded: Arc::new(AtomicBool::new(false)),
@@ -250,4 +250,38 @@ fn metrics_token_from_env() -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                  | Test
+// -----------------------------|-------------------------------------------------------
+// AC 5 table present before DB | a_state_without_a_database_flies_eram_types_on_eram
+// AC 5 both construction sites | no_shipped_state_starts_on_a_table_without_eram
+#[cfg(test)]
+mod eram_wiring_tests {
+    // AC 5 (design). AppState::without_db(): resolve_label("B738", "") is "eram:B738", QQQQ "default".
+    // Red when: the state starts on ProfileTable::default().
+    #[test]
+    fn a_state_without_a_database_flies_eram_types_on_eram() {
+        let state = super::AppState::without_db();
+        let table = state.aircraft_profiles.load();
+        assert_eq!(table.resolve_label("B738", ""), "eram:B738");
+        assert_eq!(table.resolve_label("QQQQ", ""), "default");
+    }
+
+    // AC 5. A source scan, because from_env reads the process environment and opens a pool: the shipped part
+    // of state.rs (before its first `#[cfg(test)]`) names ProfileTable::default() nowhere and
+    // EramTable::bundled() at least once (the live anchor). Red when: from_env's site reverts.
+    #[test]
+    fn no_shipped_state_starts_on_a_table_without_eram() {
+        let src = include_str!("state.rs");
+        let shipped = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!shipped.contains("ProfileTable::default()"));
+        assert_eq!(
+            shipped.matches("ProfileTable::built_in()").count(),
+            2,
+            "both constructors"
+        );
+    }
 }

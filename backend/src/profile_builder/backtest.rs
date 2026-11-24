@@ -24,6 +24,7 @@ use crate::{
         airports::AirportDb,
         flow::gc_dist,
         nav::NavData,
+        performance::{EramTable, Performance},
         predict::{self, ArrivalInput},
         trajectory::{self, AircraftProfile, ProfileTable},
         winds::Winds,
@@ -93,13 +94,8 @@ pub struct Plan<'a> {
     pub arr_ll: [f64; 2],
 }
 
-/// The live predictor's input for an aircraft at `p`, built the way the arrival ladder builds it
-/// (`feed::runway`): the filed cruise TAS capped by the profile.
-pub fn arrival_input<'a>(
-    plan: &Plan<'a>,
-    p: &HistPosition,
-    profile: &AircraftProfile,
-) -> ArrivalInput<'a> {
+/// The live predictor's input for an aircraft at `p`.
+pub fn arrival_input<'a>(plan: &Plan<'a>, p: &HistPosition) -> ArrivalInput<'a> {
     ArrivalInput {
         dep: plan.dep,
         arr: plan.arr,
@@ -110,7 +106,7 @@ pub fn arrival_input<'a>(
         hdg: p.heading as i64,
         arr_ll: plan.arr_ll,
         cruise_ft: plan.cruise_ft,
-        cruise_tas: trajectory::capped_cruise_tas(plan.filed_tas, plan.cruise_ft, profile),
+        filed_tas: plan.filed_tas,
     }
 }
 
@@ -123,31 +119,19 @@ pub fn eta_at_along(
     nav: &NavData,
     airports: &AirportDb,
     winds: &Winds,
-    profile: &AircraftProfile,
+    perf: Performance,
     ac: &ArrivalInput,
     along_nm: f64,
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
     let route = predict::arrival_route(nav, airports, ac);
     let wind = winds.along(&route.path, route.route_nm);
-    predict::eta_along_route(
-        route.airborne,
-        route.route_nm,
-        along_nm.clamp(0.0, route.route_nm),
-        ac.alt_ft,
-        ac.gs as f64,
-        ac.cruise_ft,
-        ac.cruise_tas,
-        airports,
-        ac.arr,
-        profile,
-        wind,
-        now,
-    )
-    .eta
+    let from = predict::arrival_from(winds, airports, ac, route.route_nm);
+    let along = along_nm.clamp(0.0, route.route_nm);
+    predict::eta_along_route(&from, along, airports, perf, wind, now).eta
 }
 
-/// Predicted arrival and top-of-descent times for one observed flight under `profile`.
+/// Predicted arrival and top-of-descent times for one observed flight under one performance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prediction {
     pub arrival: DateTime<Utc>,
@@ -158,19 +142,19 @@ pub fn predict_case(
     nav: &NavData,
     airports: &AirportDb,
     winds: &Winds,
-    profile: &AircraftProfile,
+    perf: Performance,
     plan: &Plan,
     obs: &Observed,
 ) -> Prediction {
     let now = obs.snapshot.ts;
-    let ac = arrival_input(plan, &obs.snapshot, profile);
-    let arrival = predict::arrival_eta(nav, airports, winds, profile, &ac, now).eta;
+    let ac = arrival_input(plan, &obs.snapshot);
+    let arrival = predict::arrival_eta(nav, airports, winds, perf, &ac, now).eta;
     // How far along the route the TOD fix lies: the route still to fly from here, less the route
     // still to fly from the TOD fix, both resolved the way arrival_eta resolves them.
     let here_nm = predict::arrival_route(nav, airports, &ac).route_nm;
-    let at_tod = arrival_input(plan, &obs.tod, profile);
+    let at_tod = arrival_input(plan, &obs.tod);
     let tod_nm = predict::arrival_route(nav, airports, &at_tod).route_nm;
-    let tod = eta_at_along(nav, airports, winds, profile, &ac, here_nm - tod_nm, now);
+    let tod = eta_at_along(nav, airports, winds, perf, &ac, here_nm - tod_nm, now);
     Prediction { arrival, tod }
 }
 
@@ -295,8 +279,8 @@ fn score_flight(
     let still = Winds::default();
     let field = winds.at(obs.snapshot.ts).unwrap_or(&still);
     let (ty, wake) = type_and_wake(f);
-    let err = |profile: &AircraftProfile| {
-        let p = predict_case(replay.nav, replay.airports, field, profile, &plan, &obs);
+    let err = |perf: Performance| {
+        let p = predict_case(replay.nav, replay.airports, field, perf, &plan, &obs);
         CaseError {
             tod_sec: (p.tod - obs.tod.ts).num_milliseconds() as f64 / 1000.0,
             arrival_sec: (p.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0,
@@ -312,9 +296,11 @@ fn score_flight(
     })
 }
 
-/// Set A is the catalog as stored (`flow.aircraft_profile` rows). Set B is set A with each row the
-/// builder profiled laid over it: a type's measurement starts from the profile that type resolves to
-/// in set A, a family's or wake class's from set A's row for it, else set A's default. Returns both
+/// Set A is what the live model flies: the stored catalog (`flow.aircraft_profile` rows) over the bundled
+/// ERAM table. Set B is set A with each row the builder profiled laid over it, a type's row beating
+/// ERAM's record of that type: a type's measurement starts from the row that type falls to in set A
+/// (ERAM's tables are not a schedule a measurement can be laid over), a family's or wake class's from set
+/// A's row for it, else set A's default. Returns both
 /// tables and the tiers set B changed, as `resolve_label` names them, so a flight counts as set B's
 /// when set B times it on one of them.
 pub fn profile_sets(
@@ -331,11 +317,12 @@ pub fn profile_sets(
         stored.by_wake.clone(),
         stored.by_family.clone(),
         stored.by_type.clone(),
+        Some(EramTable::bundled()),
     );
     let mut changed = std::collections::BTreeSet::new();
     let mut b_by_type = stored.by_type;
     for (ty, tp) in built.types.iter().filter(|(_, tp)| tp.profiled) {
-        let base = a.resolve(ty, tp.wake.as_deref().unwrap_or("")).clone();
+        let base = a.row(ty, tp.wake.as_deref().unwrap_or("")).clone();
         let ty = ty.to_ascii_uppercase();
         b_by_type.insert(ty.clone(), tp.apply_to(&base));
         changed.insert(format!("type:{ty}"));
@@ -353,7 +340,13 @@ pub fn profile_sets(
     overlay("wake", &mut b_by_wake, &built.wakes, default, &mut changed);
     (
         a,
-        ProfileTable::new(stored.default, b_by_wake, b_by_family, b_by_type),
+        ProfileTable::new(
+            stored.default,
+            b_by_wake,
+            b_by_family,
+            b_by_type,
+            Some(EramTable::bundled()),
+        ),
         changed,
     )
 }
@@ -429,7 +422,7 @@ mod tests {
         DateTime::from_timestamp(1_790_000_000, 0).unwrap()
     }
 
-    fn pos(sec: i64, lat: f64, lon: f64, alt: i32, gs: i16) -> HistPosition {
+    pub(super) fn pos(sec: i64, lat: f64, lon: f64, alt: i32, gs: i16) -> HistPosition {
         HistPosition {
             ts: t0() + Duration::seconds(sec),
             lat: lat as f32,
@@ -460,7 +453,7 @@ mod tests {
         ])
     }
 
-    fn plan(route: &str) -> Plan<'_> {
+    pub(super) fn plan(route: &str) -> Plan<'_> {
         Plan {
             dep: "KJFK",
             arr: "KDCA",
@@ -482,15 +475,16 @@ mod tests {
         let ap = airports();
         let winds = layered_winds();
         let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
         for route in ["RBV WHITE SIE", ""] {
             let p = plan(route);
             let snap = pos(0, 40.2, -74.0, 18_000, 380);
-            let ac = arrival_input(&p, &snap, &profile);
-            let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, t0());
-            let ours = eta_at_along(&nav, &ap, &winds, &profile, &ac, live.route_nm, t0());
+            let ac = arrival_input(&p, &snap);
+            let live = predict::arrival_eta(&nav, &ap, &winds, perf, &ac, t0());
+            let ours = eta_at_along(&nav, &ap, &winds, perf, &ac, live.route_nm, t0());
             assert_eq!(ours, live.eta, "route {route:?}");
             // Positive control: a point short of the field is earlier.
-            let short = eta_at_along(&nav, &ap, &winds, &profile, &ac, live.route_nm - 50.0, t0());
+            let short = eta_at_along(&nav, &ap, &winds, perf, &ac, live.route_nm - 50.0, t0());
             assert!(short < live.eta);
         }
     }
@@ -502,15 +496,16 @@ mod tests {
         let ap = airports();
         let winds = layered_winds();
         let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
         let p = plan("RBV WHITE SIE");
         let obs = Observed {
             snapshot: pos(0, 40.2, -74.0, 18_000, 380),
             tod: pos(1_200, 39.4, -75.6, 24_000, 450),
             touchdown: t0() + Duration::seconds(2_400),
         };
-        let pred = predict_case(&nav, &ap, &winds, &profile, &p, &obs);
-        let ac = arrival_input(&p, &obs.snapshot, &profile);
-        let live = predict::arrival_eta(&nav, &ap, &winds, &profile, &ac, t0());
+        let pred = predict_case(&nav, &ap, &winds, perf, &p, &obs);
+        let ac = arrival_input(&p, &obs.snapshot);
+        let live = predict::arrival_eta(&nav, &ap, &winds, perf, &ac, t0());
         assert_eq!(pred.arrival, live.eta);
         assert!(pred.tod > t0() && pred.tod < pred.arrival);
     }
@@ -625,21 +620,25 @@ mod tests {
             vec!["type:B77W".to_string(), "wake:H".to_string()]
         );
         assert_eq!(
-            a.resolve("B77W", "H").desc_fpm,
+            a.row("B77W", "H").desc_fpm,
             2_200.0,
             "A: the heavy wake row"
         );
-        let b77w = b.resolve("B77W", "H");
+        assert_eq!(a.resolve_label("B77W", "H"), "eram:B77W");
+        assert_eq!(b.resolve_label("B77W", "H"), "type:B77W");
+        let b77w = b.row("B77W", "H");
         assert_eq!(b77w.desc_fpm, 2_600.0);
         assert_eq!(b77w.climb_fpm_lo, 1_700.0);
         assert_eq!(
             b77w.desc_ias_hi, 310.0,
-            "unmeasured fields come from A's resolution (the H row)"
+            "unmeasured fields come from the row A holds for it (the H row)"
         );
         assert_eq!(b77w.service_ceiling_ft, 41_000.0);
         // E75L has no climb or cruise measurement, so it is not profiled and resolves as in A.
-        assert_eq!(b.resolve("E75L", ""), a.resolve("E75L", ""));
-        assert_eq!(b.resolve("B738", ""), a.resolve("B738", ""));
+        for ty in ["E75L", "B738"] {
+            assert_eq!(b.resolve_label(ty, ""), a.resolve_label(ty, ""));
+            assert_eq!(b.row(ty, ""), a.row(ty, ""));
+        }
     }
 
     #[test]
@@ -675,13 +674,14 @@ mod tests {
         let ap = airports();
         let field = Winds::test_shear();
         let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
         for route in ["RBV WHITE SIE", ""] {
             let p = plan(route);
-            let ac = arrival_input(&p, &pos(0, 40.2, -74.0, 31_000, 450), &profile);
-            let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, t0());
-            let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
+            let ac = arrival_input(&p, &pos(0, 40.2, -74.0, 31_000, 450));
+            let live = predict::arrival_eta(&nav, &ap, &field, perf, &ac, t0());
+            let ours = eta_at_along(&nav, &ap, &field, perf, &ac, live.route_nm, t0());
             assert_eq!(ours, live.eta, "route {route:?}");
-            let still = predict::arrival_eta(&nav, &ap, &Winds::default(), &profile, &ac, t0());
+            let still = predict::arrival_eta(&nav, &ap, &Winds::default(), perf, &ac, t0());
             assert!(
                 (live.eta - still.eta).num_seconds().abs() > 30,
                 "route {route:?}"
@@ -698,10 +698,11 @@ mod tests {
         let ap = airports();
         let field = headwind_field();
         let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
         let p = plan("");
-        let ac = arrival_input(&p, &pos(0, 40.64, -73.78, 20, 0), &profile);
-        let live = predict::arrival_eta(&nav, &ap, &field, &profile, &ac, t0());
-        let ours = eta_at_along(&nav, &ap, &field, &profile, &ac, live.route_nm, t0());
+        let ac = arrival_input(&p, &pos(0, 40.64, -73.78, 20, 0));
+        let live = predict::arrival_eta(&nav, &ap, &field, perf, &ac, t0());
+        let ours = eta_at_along(&nav, &ap, &field, perf, &ac, live.route_nm, t0());
         assert_eq!(ours, live.eta);
     }
 
@@ -735,17 +736,18 @@ mod tests {
         let ap = airports();
         let winds = Winds::default();
         let profile = AircraftProfile::default();
+        let perf = Performance::Row(&profile);
         let p = plan("");
         let obs = Observed {
             snapshot: pos(0, 40.2, -74.0, 18_000, 380),
             tod: pos(1_200, 39.4, -75.6, 24_000, 450),
             touchdown: t0() + Duration::seconds(2_400),
         };
-        let pred = predict_case(&nav, &ap, &winds, &profile, &p, &obs);
+        let pred = predict_case(&nav, &ap, &winds, perf, &p, &obs);
         let to_field = |q: &HistPosition| gc_dist(q.lat as f64, q.lon as f64, 38.85, -77.04);
         let along = to_field(&obs.snapshot) - to_field(&obs.tod);
-        let ac = arrival_input(&p, &obs.snapshot, &profile);
-        let at = |nm: f64| eta_at_along(&nav, &ap, &winds, &profile, &ac, nm, t0());
+        let ac = arrival_input(&p, &obs.snapshot);
+        let at = |nm: f64| eta_at_along(&nav, &ap, &winds, perf, &ac, nm, t0());
         assert!((pred.tod - at(along)).num_milliseconds().abs() < 1_000);
         assert!((at(to_field(&obs.tod)) - pred.tod).num_seconds().abs() > 60);
     }
@@ -790,7 +792,7 @@ mod tests {
         }
     }
 
-    async fn seed_winds(pool: &PgPool, ts: DateTime<Utc>, w: &Winds) {
+    pub(super) async fn seed_winds(pool: &PgPool, ts: DateTime<Utc>, w: &Winds) {
         sqlx::query("insert into stats.winds (ts, data) values ($1, $2)")
             .bind(ts)
             .bind(sqlx::types::Json(w))
@@ -808,6 +810,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            None,
         );
         let none = BTreeSet::new();
         let replay = Replay {
@@ -843,7 +846,7 @@ mod tests {
         let obs = observe(positions, [38.85, -77.04]).unwrap();
         let mut p = plan(route);
         p.cruise_ft = 24_000.0;
-        let pred = predict_case(nav, &airports(), winds, profile, &p, &obs);
+        let pred = predict_case(nav, &airports(), winds, Performance::Row(profile), &p, &obs);
         (pred.arrival - obs.touchdown).num_milliseconds() as f64 / 1000.0
     }
 
@@ -865,12 +868,14 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            None,
         );
         let set_b = ProfileTable::new(
             AircraftProfile::default(),
             HashMap::new(),
             HashMap::new(),
             HashMap::from([("B738".to_string(), fast.clone())]),
+            None,
         );
         let b_tiers = BTreeSet::from(["type:B738".to_string()]);
         let replay = Replay {
@@ -1065,7 +1070,7 @@ mod tests {
 // AC3 in_b attributes by resolve label (through run)   | run_marks_in_b_only_for_a_flight_set_b_times_on_a_changed_tier
 #[cfg(test)]
 mod family_backtest_tests {
-    //! `engine_of` is written out per test; B772 is the jet with no type row.
+    //! `engine_of` is written out per test; E175 and F18 are jets ERAM has no record of.
     use std::collections::{BTreeSet, HashMap};
 
     use chrono::Duration;
@@ -1081,8 +1086,9 @@ mod family_backtest_tests {
         winds::Winds,
     };
 
+    // E175, F18 and DA20 are engine types ERAM has no record of, so the family tier is theirs.
     fn jet(t: &str) -> Option<&'static str> {
-        matches!(t, "B772" | "CRJ2").then_some("jet")
+        matches!(t, "E175" | "F18").then_some("jet")
     }
 
     fn measured(desc_fpm: f64) -> [(Field, f64); 3] {
@@ -1105,12 +1111,12 @@ mod family_backtest_tests {
         acc.finish(src, engine_of)
     }
 
-    /// 10 B772 + 10 CRJ2 flights with no wake: a profiled jet family, no profiled type.
+    /// 10 E175 + 10 F18 flights with no wake: a profiled jet family, no profiled type.
     fn jet_pool(desc_fpm: f64) -> ProfileSet {
         let mut acc = Accumulator::default();
         for _ in 0..10 {
-            acc.add_flight("B772", "", &measured(desc_fpm));
-            acc.add_flight("CRJ2", "", &measured(desc_fpm));
+            acc.add_flight("E175", "", &measured(desc_fpm));
+            acc.add_flight("F18", "", &measured(desc_fpm));
         }
         built(acc, jet)
     }
@@ -1130,18 +1136,18 @@ mod family_backtest_tests {
         let (a, b, changed) = profile_sets(&rows, &jet_pool(2_600.0));
 
         assert_eq!(labels(changed), ["family:jet"]);
-        assert_eq!(a.resolve_label("B772", ""), "default");
-        assert_eq!(a.resolve("B772", "").desc_fpm, 1_800.0);
-        assert_eq!(b.resolve_label("B772", ""), "family:jet");
-        let p = b.resolve("B772", "");
+        assert_eq!(a.resolve_label("E175", ""), "default");
+        assert_eq!(a.row("E175", "").desc_fpm, 1_800.0);
+        assert_eq!(b.resolve_label("E175", ""), "family:jet");
+        let p = b.row("E175", "");
         assert_eq!(
             (p.desc_fpm, p.climb_fpm_lo, p.desc_ias_hi),
             (2_600.0, 1_700.0, 305.0)
         );
         assert_eq!(
-            b.resolve("AT72", ""),
-            a.resolve("AT72", ""),
-            "a turboprop is not moved"
+            b.row("DA20", ""),
+            a.row("DA20", ""),
+            "a piston is not moved"
         );
     }
 
@@ -1157,8 +1163,8 @@ mod family_backtest_tests {
         let (a, b, changed) = profile_sets(&rows, &jet_pool(2_600.0));
 
         assert_eq!(labels(changed), ["family:jet"]);
-        assert_eq!(a.resolve("B772", "").desc_fpm, 2_100.0);
-        let p = b.resolve("B772", "");
+        assert_eq!(a.row("E175", "").desc_fpm, 2_100.0);
+        let p = b.row("E175", "");
         assert_eq!((p.desc_fpm, p.desc_ias_hi), (2_600.0, 315.0));
     }
 
@@ -1172,15 +1178,15 @@ mod family_backtest_tests {
         rows[1].desc_ias_hi = 315.0;
         let mut acc = Accumulator::default();
         for _ in 0..20 {
-            acc.add_flight("B772", "", &measured(2_600.0));
+            acc.add_flight("E175", "", &measured(2_600.0));
         }
 
         let (a, b, changed) = profile_sets(&rows, &built(acc, jet));
 
-        assert_eq!(labels(changed), ["family:jet", "type:B772"]);
-        assert_eq!(a.resolve_label("B772", ""), "family:jet");
-        let p = b.resolve("B772", "");
-        assert_eq!(b.resolve_label("B772", ""), "type:B772");
+        assert_eq!(labels(changed), ["family:jet", "type:E175"]);
+        assert_eq!(a.resolve_label("E175", ""), "family:jet");
+        let p = b.row("E175", "");
+        assert_eq!(b.resolve_label("E175", ""), "type:E175");
         assert_eq!((p.desc_fpm, p.desc_ias_hi), (2_600.0, 315.0));
     }
 
@@ -1203,11 +1209,11 @@ mod family_backtest_tests {
         let (a, b, changed) = profile_sets(&rows, &built(acc, |_| None));
 
         assert_eq!(labels(changed), ["wake:H", "wake:L"]);
-        let h = b.resolve("QQQ1", "H");
+        let h = b.row("QQQ1", "H");
         assert_eq!((h.desc_fpm, h.desc_ias_hi), (2_700.0, 310.0));
-        let l = b.resolve("QQQ2", "L");
+        let l = b.row("QQQ2", "L");
         assert_eq!((l.desc_fpm, l.desc_ias_hi), (900.0, 305.0));
-        assert_eq!(a.resolve("QQQ2", "L").desc_fpm, 1_800.0);
+        assert_eq!(a.row("QQQ2", "L").desc_fpm, 1_800.0);
     }
 
     #[test]
@@ -1218,22 +1224,22 @@ mod family_backtest_tests {
         ];
         let mut acc = Accumulator::default();
         for _ in 0..19 {
-            acc.add_flight("B772", "H", &measured(2_600.0));
+            acc.add_flight("E175", "H", &measured(2_600.0));
         }
         let (a, b, changed) = profile_sets(&rows, &built(acc, jet));
         assert!(changed.is_empty(), "{changed:?}");
-        assert_eq!(a.resolve_label("B772", "H"), "wake:H");
-        assert_eq!(b.resolve_label("B772", "H"), "wake:H");
-        assert_eq!(b.resolve("B772", "H"), a.resolve("B772", "H"));
+        assert_eq!(a.resolve_label("E175", "H"), "wake:H");
+        assert_eq!(b.resolve_label("E175", "H"), "wake:H");
+        assert_eq!(b.row("E175", "H"), a.row("E175", "H"));
 
         let mut acc = Accumulator::default();
         for _ in 0..20 {
-            acc.add_flight("B772", "H", &measured(2_600.0));
+            acc.add_flight("E175", "H", &measured(2_600.0));
         }
         let (_, _, changed) = profile_sets(&rows, &built(acc, jet));
         assert_eq!(
             labels(changed),
-            ["family:jet", "type:B772", "wake:H"],
+            ["family:jet", "type:E175", "wake:H"],
             "positive control: a 20th flight profiles all three"
         );
     }
@@ -1267,12 +1273,14 @@ mod family_backtest_tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            None,
         );
         let set_b = ProfileTable::new(
             AircraftProfile::default(),
             HashMap::new(),
             HashMap::from([("jet".to_string(), fast.clone())]),
             HashMap::new(),
+            None,
         );
         let b_tiers = BTreeSet::from(["family:jet".to_string()]);
         let replay = Replay {
@@ -1302,5 +1310,219 @@ mod family_backtest_tests {
         assert_ne!(b772.a.arrival_sec, b772.b.arrival_sec);
         assert!(!c172.in_b);
         assert_eq!(c172.a.arrival_sec, c172.b.arrival_sec);
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                                | Test
+// -------------------------------------------|-----------------------------------------------------------------
+// AC 13 both sets hold ERAM                  | both_sets_time_an_eram_type_on_its_record
+// AC 13 a measured type beats ERAM           | set_b_overlays_only_profiled_types_on_the_profile_set_a_resolves_them_to (tests)
+// AC 13 in_b over ERAM                       | run_marks_in_b_a_flight_set_b_times_on_a_row_where_a_flies_eram
+// AC 13 scores what the live model flies     | run_scores_the_trajectory_the_live_model_flies
+// AC 6, 13 an ERAM type's filed speed        | the_replay_cruises_an_eram_type_inside_its_envelope
+#[cfg(test)]
+mod eram_backtest_tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use chrono::{DateTime, Duration, Utc};
+    use sqlx::PgPool;
+
+    use super::super::stats::{Accumulator, Source};
+    use super::tests::{airports, expected_on, flight, plan, pos, row, seed, seed_winds, t0};
+    use super::{Replay, observe, predict_case, profile_sets, run};
+    use crate::feed::nav::NavData;
+    use crate::feed::performance::{EramTable, Performance};
+    use crate::feed::predict::march_input_tests::{eram_profiles, jfk_mia, step1};
+    use crate::feed::predict::{self, Flight};
+    use crate::feed::trajectory::{AircraftProfile, ProfileTable};
+    use crate::feed::vatsim::Pilot;
+    use crate::feed::winds::Winds;
+
+    /// File the flight stored as `session_id` as type `ty`.
+    async fn retype(pool: &PgPool, session_id: i64, ty: &str) {
+        sqlx::query(
+            "update stats.flight set aircraft_short = $2, aircraft_faa = $2 || '/L' \
+             where session_id = $1",
+        )
+        .bind(session_id)
+        .bind(ty)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    // AC 13. profile_sets over default and wake H rows, nothing measured: both sets label B738 "eram:B738"
+    // and QQQQ "default"; `changed` is empty. Red when: either set is built without the table.
+    #[test]
+    fn both_sets_time_an_eram_type_on_its_record() {
+        let rows = vec![
+            row("default", "default", 1_800.0),
+            row("wake", "H", 2_200.0),
+        ];
+        let src = Source {
+            from: "a".into(),
+            to: "b".into(),
+            flights_read: 0,
+            training_flights: 0,
+            held_out_flights: 0,
+            held_out_rule: "t".into(),
+        };
+        let (a, b, changed) = profile_sets(&rows, &Accumulator::default().finish(src, |_| None));
+        for set in [&a, &b] {
+            assert_eq!(set.resolve_label("B738", "M"), "eram:B738");
+            assert_eq!(set.resolve_label("QQQQ", ""), "default");
+        }
+        assert!(changed.is_empty(), "{changed:?}");
+    }
+
+    // AC 13. Through run(): a B738 with a measured set B type row is in_b and scores differently under A
+    // (ERAM) and B; a C172 nobody measured is not in_b and scores the same.
+    // Red when: in_b compares against the schedule tier's label.
+    #[sqlx::test]
+    async fn run_marks_in_b_a_flight_set_b_times_on_a_row_where_a_flies_eram(pool: PgPool) {
+        let (nav, ap, f) = (NavData::default(), airports(), flight());
+        for (session_id, ty) in [(5, "B738"), (10, "C172")] {
+            seed(&pool, session_id, "", &f).await;
+            retype(&pool, session_id, ty).await;
+        }
+        let fast = AircraftProfile {
+            climb_fpm_hi: 3_000.0,
+            ..AircraftProfile::default()
+        };
+        let set_b = ProfileTable::new(
+            AircraftProfile::default(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([("B738".to_string(), fast.clone())]),
+            Some(EramTable::bundled()),
+        );
+        let replay = Replay {
+            nav: &nav,
+            airports: &ap,
+            set_a: &eram_profiles(),
+            set_b: &set_b,
+            b_tiers: &BTreeSet::from(["type:B738".to_string()]),
+        };
+        let window = (t0() - Duration::hours(1), t0() + Duration::hours(3));
+        let (scored, _) = run(&pool, &replay, window.0, window.1).await.unwrap();
+
+        let by = |ty: &str| scored.iter().find(|s| s.ty == ty).expect(ty);
+        let (b738, c172) = (by("B738"), by("C172"));
+        assert!(b738.in_b);
+        assert_eq!(
+            b738.b.arrival_sec,
+            expected_on(&nav, &Winds::default(), &fast, "", &f)
+        );
+        assert_ne!(b738.a.arrival_sec, b738.b.arrival_sec);
+        assert!(!c172.in_b);
+        assert_eq!(c172.a.arrival_sec, c172.b.arrival_sec);
+    }
+
+    // AC 13. A scored B738's `a.arrival_sec` is predict::trajectory's ETA for the same snapshot position,
+    // altitude, groundspeed, heading and plan, less the touchdown. Use a snapshot past 1.5 climb distances
+    // under a crosswind, so a dropped departure distance or heading headwind moves it.
+    #[sqlx::test]
+    async fn run_scores_the_trajectory_the_live_model_flies(pool: PgPool) {
+        // First seen airborne, and replayed at STEP1: 492 nm from KJFK and level under its filed level.
+        let f = vec![
+            pos(0, 33.3, -77.38, 28_500, 400),
+            pos(180, 33.0, -77.5, 30_000, 400),
+            pos(3_000, 27.3, -79.7, 30_000, 400),
+            pos(3_060, 27.2, -79.75, 28_000, 380),
+            pos(4_400, 25.8, -80.28, 40, 120),
+            pos(4_415, 25.79, -80.29, 10, 30),
+        ];
+        seed(&pool, 5, "", &f).await;
+        sqlx::query(
+            "update stats.flight set arrival = 'KMIA', cruise_alt = 35000, cruise_tas = 450 \
+             where session_id = 5",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // 60 kt from 310, across the 220 heading every fixture position has.
+        let winds = Winds::test_grid(
+            (24.0, -84.0),
+            (18, 12),
+            &[20_000.0, 35_000.0],
+            t0(),
+            |_, _, _| (-46, 39, -40),
+        );
+        seed_winds(&pool, t0(), &winds).await;
+        let (nav, ap, profiles) = (NavData::default(), jfk_mia(), eram_profiles());
+        let replay = Replay {
+            nav: &nav,
+            airports: &ap,
+            set_a: &profiles,
+            set_b: &profiles,
+            b_tiers: &BTreeSet::new(),
+        };
+        let window = (t0() - Duration::hours(1), t0() + Duration::hours(3));
+        let (scored, _) = run(&pool, &replay, window.0, window.1).await.unwrap();
+        assert_eq!(scored.len(), 1);
+
+        let obs = observe(&f, [25.79, -80.29]).unwrap();
+        let eta = |ap: &crate::feed::airports::AirportDb, heading: i64| -> DateTime<Utc> {
+            let p = Pilot {
+                latitude: obs.snapshot.lat as f64,
+                longitude: obs.snapshot.lon as f64,
+                heading,
+                ..step1()
+            };
+            let inp = predict::Inputs {
+                nav: &nav,
+                airports: ap,
+                winds: &winds,
+                profiles: &profiles,
+                locked: &predict::NO_LOCKS,
+            };
+            predict::trajectory(&inp, Flight::Pilot(&p), None, obs.snapshot.ts)
+                .unwrap()
+                .eta_at_field()
+        };
+        let live = eta(&ap, 220);
+        assert_eq!(
+            scored[0].a.arrival_sec,
+            (live - obs.touchdown).num_seconds() as f64
+        );
+        // Positive controls: the departure and the wind along the heading each move this flight.
+        let mut no_jfk = jfk_mia();
+        no_jfk.remove("KJFK");
+        for other in [eta(&no_jfk, 220), eta(&ap, 310)] {
+            assert!(
+                (other - live).num_seconds().abs() > 30,
+                "{other} against {live}"
+            );
+        }
+    }
+
+    // AC 6, 13. The replay's cruise speed for an ERAM B738 filed 600 at FL350: 479.67; filed 0: 458.17; for a
+    // row with cruise_tas 450: 450. Red when: capped_cruise_tas (rows only) is applied to ERAM types.
+    #[test]
+    fn the_replay_cruises_an_eram_type_inside_its_envelope() {
+        let (nav, ap, f) = (NavData::default(), airports(), flight());
+        let obs = observe(&f, [38.85, -77.04]).unwrap();
+        let profiles = eram_profiles();
+        let arrival = |perf: Performance, filed_tas: f64| {
+            let mut p = plan("");
+            (p.cruise_ft, p.filed_tas) = (35_000.0, filed_tas);
+            predict_case(&nav, &ap, &Winds::default(), perf, &p, &obs).arrival
+        };
+        let b738 = profiles.resolve("B738", "M");
+        assert_eq!(arrival(b738, 600.0), arrival(b738, 479.67));
+        assert_eq!(arrival(b738, 0.0), arrival(b738, 458.17));
+        assert_ne!(
+            arrival(b738, 600.0),
+            arrival(b738, 440.0),
+            "positive control"
+        );
+        let row = AircraftProfile {
+            cruise_tas: Some(450.0),
+            ..AircraftProfile::default()
+        };
+        let row = Performance::Row(&row);
+        assert_eq!(arrival(row, 600.0), arrival(row, 450.0));
     }
 }

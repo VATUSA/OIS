@@ -107,6 +107,7 @@ export default defineConfig({
       {
         text: "Reference",
         items: [
+          { text: "How OIS predicts a flight", link: "/reference/predictions" },
           { text: "Roles & permissions", link: "/reference/permissions" },
           { text: "Using the API", link: "/reference/api" },
           { text: "Integrating with OIS", link: "/reference/integrating" },

@@ -2637,10 +2637,10 @@ pub struct FcaFlight {
 /// ETA, the speeds/wind used, and any filed-route tokens that failed to resolve (issue #37).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FcaFlightDebug {
-    /// The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
-    /// "default".
+    /// The aircraft performance flown: "type:C172" (a stored row), "eram:B738" (ERAM's tables),
+    /// "family:jet", "wake:H", or "default".
     pub profile: String,
-    /// Cruise TAS (kt) used for the ETA, after the profile cap.
+    /// Cruise TAS (kt) used for the ETA: the filing, held to what the type flies.
     pub cruise_tas: i64,
     /// Predicted groundspeed (kt) **at the crossing fix** — the number MIT spacing is actually
     /// sized with since #355. Reported alongside `cruise_tas` because the gap is no longer a

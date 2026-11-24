@@ -583,7 +583,7 @@ pub(crate) async fn refresh_aircraft_profiles_once(
 
 /// Keep the trajectory model's aircraft performance profiles current: load them from the DB at
 /// startup and hot-swap them in, then reload periodically. Fails safe — a failed load keeps the
-/// current table (initially the legacy default).
+/// current table (initially `ProfileTable::built_in`).
 pub fn spawn_aircraft_profiles_refresh(
     reg: Arc<JobRegistry>,
     pool: PgPool,
@@ -4295,5 +4295,45 @@ mod vatusa_reset_run_prune_tests {
             vatusa_reset_run_prune_once(&pool, Utc::now()).await,
             Err("prune failed".to_string())
         );
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement             | Test
+// ------------------------|-------------------------------------------------------
+// AC 5 refresh keeps ERAM | the_profiles_refresh_installs_a_table_that_holds_eram
+#[cfg(test)]
+mod eram_profiles_refresh_tests {
+    use sqlx::PgPool;
+
+    // AC 5, 11. refresh_aircraft_profiles_once on a migrated database: the stored table labels B738
+    // "eram:B738" and PA28 "type:PA28"; after inserting a B738 type row and refreshing again, "type:B738".
+    // Red when: load_all builds a table without ERAM.
+    #[sqlx::test]
+    async fn the_profiles_refresh_installs_a_table_that_holds_eram(pool: PgPool) {
+        use std::sync::atomic::AtomicBool;
+
+        use arc_swap::ArcSwap;
+
+        use crate::feed::trajectory::ProfileTable;
+
+        let profiles = ArcSwap::from_pointee(ProfileTable::default());
+        let loaded = AtomicBool::new(false);
+        let refresh = || super::refresh_aircraft_profiles_once(&pool, &profiles, &loaded);
+        let label = |ty: &str| profiles.load().resolve_label(ty, "");
+        assert_eq!(label("B738"), "default", "precondition");
+
+        assert_eq!(refresh().await, Ok("reloaded".to_string()));
+        assert!(loaded.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(label("B738"), "eram:B738");
+        assert_eq!(label("PA28"), "type:PA28");
+
+        sqlx::query("insert into flow.aircraft_profile (kind, key) values ('type', 'B738')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(refresh().await, Ok("reloaded".to_string()));
+        assert_eq!(label("B738"), "type:B738");
     }
 }

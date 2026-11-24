@@ -260,3 +260,32 @@ describe("FcaDetail proposed crossing time (VATUSA/OIS#814)", () => {
     }
   });
 });
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                    | Test
+// -------------------------------|-----------------------------------------------------------------
+// AC 12 the debug source, ERAM   | shows eram:B738 as the profile of a flight timed on its record
+// AC 12 the debug source, a row  | shows type:B738 when an operator's row was flown
+describe("FcaDetail debug performance source (VATUSA/OIS#985)", () => {
+  // Seed a flight whose debug.profile is "eram:B738" (cruise_tas 450, cruise_alt 35000), debug on: the debug line reads
+  // "profile eram:B738". Red when: the prefix is parsed away or mapped to "type".
+  const debugged = (profile: string) =>
+    ({
+      ...flight("AAL1", false),
+      debug: { profile, cruise_tas: 450, cross_speed: 400, cruise_alt: 35_000, headwind: null, unresolved: [] },
+    }) as FcaFlight;
+  it("shows eram:B738 as the profile of a flight timed on its record", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, [debugged("eram:B738")]);
+    expect(host.textContent).toContain("profile eram:B738");
+    expect(host.textContent).toContain("450kt TAS @ FL350");
+  });
+  // The same flight with "type:B738"; with debug off neither shows (control).
+  it("shows type:B738 when an operator's row was flown", () => {
+    const host = mount(CONTROLLER, fca(null, null), true, [debugged("type:B738"), flight("DAL2", false)]);
+    expect(host.textContent).toContain("profile type:B738");
+    const plain = mount(CONTROLLER, fca(null, null), true, [flight("DAL2", false)]);
+    expect(plain.textContent).toContain("DAL2");
+    expect(plain.textContent).not.toContain("profile ");
+  });
+});

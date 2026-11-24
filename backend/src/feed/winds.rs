@@ -260,8 +260,8 @@ impl Winds {
         (!col.is_empty()).then_some(col)
     }
 
-    /// Headwind (kt) at a single point along `course_deg`, interpolated to `alt_ft`.
-    #[cfg(test)]
+    /// Headwind (kt) at a single point along `course_deg`, interpolated to `alt_ft`; None where the
+    /// field does not cover the point.
     pub fn point_headwind(&self, lat: f64, lon: f64, course_deg: f64, alt_ft: f64) -> Option<f64> {
         let col = self.column(lat, lon)?;
         let levels = col

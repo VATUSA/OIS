@@ -14,6 +14,10 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Changed:** `FcaFlightDebug.profile` (from `GET /api/v1/flow/fcas/{id}/traffic` with debug on) can be
+  `eram:<type>`, a flight timed on ERAM's built-in tables for its type, beside `type:`, `family:`, `wake:`
+  and `default`. ETAs, crossing speeds and altitudes on every endpoint that times a flight come from the new
+  model. No caller change. (#985)
 - **Moved:** the interactive API reference is now Scalar at `/docs/v1`. `/docs/swagger`,
   `/docs/swagger/` and `/docs/v1/` answer 308 to `/docs/v1`, and `/docs/swagger/openapi.json` answers 308 to
   `/docs/api/v1/openapi.json`, which is unchanged. A client that follows redirects needs no change;

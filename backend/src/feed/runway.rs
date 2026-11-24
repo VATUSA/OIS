@@ -605,7 +605,7 @@ mod tests {
             &nav,
             &ap,
             &shear,
-            &trajectory::AircraftProfile::default(),
+            crate::feed::performance::Performance::Row(&trajectory::AircraftProfile::default()),
             &crate::feed::predict::ArrivalInput {
                 dep: "KJFK",
                 arr: "KDCA",
@@ -616,7 +616,7 @@ mod tests {
                 hdg: 220,
                 arr_ll: [38.8521, -77.0377],
                 cruise_ft: 35_000.0,
-                cruise_tas: 440.0,
+                filed_tas: 440.0,
             },
             now,
         );
@@ -679,7 +679,7 @@ mod family_profile_tests {
         let nav = NavData::load();
         let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let family = AircraftProfile {
-            desc_fpm: 3_000.0,
+            desc_ias_hi: 250.0,
             ..AircraftProfile::default()
         };
         let with = ProfileTable::new(
@@ -687,6 +687,7 @@ mod family_profile_tests {
             HashMap::new(),
             HashMap::from([("jet".to_string(), family.clone())]),
             HashMap::new(),
+            None,
         );
         let eta = |t: &ProfileTable| {
             collect_arrivals("KDCA", &data, &ap, &nav, &Winds::default(), t, now, 600)
@@ -699,7 +700,7 @@ mod family_profile_tests {
             &nav,
             &ap,
             &Winds::default(),
-            &family,
+            crate::feed::performance::Performance::Row(&family),
             &predict::ArrivalInput {
                 dep: "KJFK",
                 arr: "KDCA",
@@ -710,7 +711,7 @@ mod family_profile_tests {
                 hdg: 220,
                 arr_ll: [38.8521, -77.0377],
                 cruise_ft: 35_000.0,
-                cruise_tas: 440.0,
+                filed_tas: 440.0,
             },
             now,
         );
@@ -720,6 +721,80 @@ mod family_profile_tests {
             eta(&with),
             eta(&ProfileTable::default()),
             "the family row moves the ETA"
+        );
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement              | Test
+// -------------------------|------------------------------------------------------------------
+// AC 4, 8, 10 runway ETE   | collect_arrivals_times_a_stepped_down_b738_at_its_observed_speed
+// AC 4, 5, 9 runway ETE    | collect_arrivals_times_a_slowed_descent_at_its_assigned_speed
+#[cfg(test)]
+mod eram_wiring_tests {
+    use super::*;
+    use crate::feed::predict::march_input_tests::{eram_profiles, jfk_mia, step1};
+    use crate::feed::predict::{self, Flight};
+    use crate::feed::trajectory::ProfileTable;
+    use crate::feed::vatsim::Pilot;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    /// Seconds from now to the ETA `collect_arrivals` gives `p` into KMIA, in still air.
+    fn ete(profiles: &ProfileTable, p: &Pilot) -> f64 {
+        let (nav, ap, winds) = (NavData::default(), jfk_mia(), Winds::default());
+        let data = VatsimData {
+            pilots: vec![p.clone()],
+            ..Default::default()
+        };
+        let out = collect_arrivals("KMIA", &data, &ap, &nav, &winds, profiles, now(), 120);
+        let inp = predict::Inputs {
+            nav: &nav,
+            airports: &ap,
+            winds: &winds,
+            profiles,
+            locked: &predict::NO_LOCKS,
+        };
+        let t = predict::trajectory(&inp, Flight::Pilot(p), None, now()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].eta_ms, t.eta_at_field().timestamp_millis());
+        (out[0].eta_ms - now().timestamp_millis()) as f64 / 1000.0
+    }
+
+    // AC 4, 8, 10. STEP1 (`predict::march_input_tests`): eta_ms - now is 4,368 s +/- 2 (climbing: 3,888), and
+    // equals predict::trajectory's. Red when: collect_arrivals leaves the entry point.
+    #[test]
+    fn collect_arrivals_times_a_stepped_down_b738_at_its_observed_speed() {
+        let sec = ete(&eram_profiles(), &step1());
+        assert!((sec - 4_368.0).abs() <= 2.0, "{sec}");
+    }
+
+    // AC 4, 5, 9. A B738 at FL200, 60 nm from the field, 342 kt (250 KCAS): 743 s against 699 s at 408 kt, on
+    // the bundled table; both equal predict::trajectory's, and 699 s differs from the default row's.
+    // Red when: the observed speed is dropped, or the table given is not the one resolved through.
+    #[test]
+    fn collect_arrivals_times_a_slowed_descent_at_its_assigned_speed() {
+        let at = |gs: i64| Pilot {
+            latitude: 25.79 + 60.0 / 60.04,
+            longitude: -80.29,
+            altitude: 20_000,
+            groundspeed: gs,
+            heading: 180,
+            ..step1()
+        };
+        let (slowed, free) = (
+            ete(&eram_profiles(), &at(342)),
+            ete(&eram_profiles(), &at(408)),
+        );
+        assert!((slowed - 743.0).abs() <= 3.0, "{slowed}");
+        assert!((free - 699.0).abs() <= 3.0, "{free}");
+        let row = ete(&ProfileTable::default(), &at(408));
+        assert!(
+            (row - free).abs() > 2.0,
+            "the default row times it apart: {row}"
         );
     }
 }

@@ -2425,7 +2425,7 @@ mod tests {
     }
 
     /// KJFK→KDCA on the great circle, FL350 at 440 kt, the default profile: FAR1 at cruise ~160 nm
-    /// out (240 kt, under the anchoring threshold, so its profile is unscaled) and NEAR1 ~15 nm out
+    /// out (at its predicted 440 kt, so its profile is unscaled) and NEAR1 ~15 nm out
     /// at 3,000 ft and `near_gs`, timed by `compute` in still air at `t0`.
     fn far_and_near(near_gs: i64) -> (VatsimData, AirportDb) {
         let ap = AirportDb::from([
@@ -2451,7 +2451,7 @@ mod tests {
         };
         let data = VatsimData {
             pilots: vec![
-                pilot("FAR1", [40.4, -74.2], 35_000, 240),
+                pilot("FAR1", [40.4, -74.2], 35_000, 440),
                 pilot("NEAR1", [38.95, -76.75], 3_000, near_gs),
             ],
             ..Default::default()
@@ -2462,8 +2462,8 @@ mod tests {
     /// Airport-flow MIT is converted at the trailing flight's predicted groundspeed 40 nm short of
     /// the field (`MIT_CROSSING_NM`): below cruise for a jet descending into the field. A flight
     /// already inside 40 nm reads its own descent schedule 40 nm out (#813), so NEAR1 converts at
-    /// the speed FAR1, the same type on the same cruise, reaches there: 363.4 kt, hand-worked from
-    /// the default profile (1,800 fpm, 250/290 KIAS, ISA, sea-level field, still air).
+    /// the speed FAR1, the same type on the same cruise, reaches there: 355.8 kt, hand-worked from
+    /// the default profile (290 KIAS at the descent path's 13,333 ft, ISA, sea-level field, still air).
     #[test]
     fn compute_converts_mit_at_each_flights_speed_forty_miles_out() {
         let (data, ap) = far_and_near(180);
@@ -2509,10 +2509,10 @@ mod tests {
             "positive control: inside 40 nm"
         );
         assert!(
-            (near - far).abs() < 0.5,
-            "same type and cruise at 40 nm: {near} vs {far}"
+            (near - far).abs() < 2.0,
+            "same type and cruise at 40 nm, within a step: {near} vs {far}"
         );
-        assert!((near - 363.4).abs() < 0.5, "{near}");
+        assert!((near - 355.8).abs() < 0.5, "{near}");
         assert!(
             near > traj(1).gs_at(0.0),
             "not the speed where it is now: {near}"
@@ -2520,8 +2520,8 @@ mod tests {
     }
 
     /// #813: a flight inside 40 nm doing 150 kt converts the 10 MIT to the flight ahead of it at
-    /// its descent speed 40 nm out, 363.4 kt (as in
-    /// `compute_converts_mit_at_each_flights_speed_forty_miles_out`): 10 / 363.4 h, about 99 s, not
+    /// its descent speed 40 nm out, 355.8 kt (as in
+    /// `compute_converts_mit_at_each_flights_speed_forty_miles_out`): 10 / 355.8 h, about 101 s, not
     /// the 240 s its current 150 kt would give.
     #[test]
     fn the_gap_ahead_of_a_flight_inside_forty_miles_is_timed_at_its_descent_speed() {
@@ -2547,7 +2547,7 @@ mod tests {
             gap > 60_000.0,
             "positive control: the MIT governs, not the floor: {gap}"
         );
-        assert!((gap - 99_060.0).abs() < 150.0, "{gap}");
+        assert!((gap - 101_180.0).abs() < 150.0, "{gap}");
     }
 
     /// Only a pilot on the ground within 5 nm of the field has arrived: one on a 3 nm final at 140 kt
@@ -2861,7 +2861,7 @@ mod tests {
         let airborne =
             (traj.eta_at_field() - traj.wheels_up()).num_milliseconds() as f64 / 60_000.0;
         // The ETA is whole seconds, so allow one.
-        assert!((airborne - 47.382).abs() < 1.0 / 60.0, "{airborne}");
+        assert!((airborne - 47.790).abs() < 1.0 / 60.0, "{airborne}");
     }
 
     // AC5 cross-surface: ladder and runway ETE agree when the wind is not uniform.
@@ -2939,7 +2939,7 @@ mod tests {
     }
 
     /// AC2 absolute fixture on the path `POST /tmu/cfr` locks: NOM1 flies the 300 nm nominal leg in
-    /// still air, 47.382 min airborne (`the_nominal_300_nm_leg_flies_still_air`). Its ready time is its
+    /// still air, 47.790 min airborne (`the_nominal_300_nm_leg_flies_still_air`). Its ready time is its
     /// wheels-up and its STA is one airborne ETE later, with nothing between. now is 22:13:20Z.
     #[test]
     fn a_ready_time_slot_locks_the_ready_time_and_lands_one_airborne_ete_later() {
@@ -2997,7 +2997,7 @@ mod tests {
             "timed from its CFR, not its proposal"
         );
         assert!(!f.wheels_up_proposed);
-        let landed = at(23, 47, 22) + Duration::milliseconds(900);
+        let landed = at(23, 47, 47) + Duration::milliseconds(400);
         let off = (f.sta.unwrap() - landed).num_milliseconds().abs();
         assert!(off <= 1_000, "STA {:?} against {landed}", f.sta);
     }
@@ -3254,13 +3254,15 @@ mod tests {
             HashMap::from([(
                 "jet".to_string(),
                 trajectory::AircraftProfile {
-                    desc_fpm: 3_000.0,
+                    desc_ias_hi: 220.0,
+                    desc_ias_lo: 210.0,
                     climb_fpm_lo: 3_500.0,
                     climb_fpm_hi: 3_000.0,
                     ..trajectory::AircraftProfile::default()
                 },
             )]),
             HashMap::new(),
+            None,
         );
         let pg = base_program();
         let etas = |table: &trajectory::ProfileTable| {
@@ -3296,5 +3298,145 @@ mod tests {
         let got = ["B772", "AT72", "PA34"].map(engine_family);
         assert_eq!(got, ENGINE_FAMILIES.map(Some));
         assert_eq!(ENGINE_FAMILIES, ["jet", "turboprop", "piston"]);
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                        | Test
+// -----------------------------------|------------------------------------------------------------------
+// AC 4, 5 airport flow, ground       | compute_times_a_parked_b738_on_its_eram_record
+// AC 4, 8, 10 airport flow, airborne | compute_times_a_stepped_down_arrival_level_at_its_observed_speed
+// AC 4 airport-flow MIT speed        | compute_converts_mit_at_the_eram_descent_speed
+#[cfg(test)]
+mod eram_wiring_tests {
+    use super::*;
+    use crate::feed::airports::{Airport, AirportDb};
+    use crate::feed::nav::NavData;
+    use crate::feed::predict::march_input_tests::{b738, eram_profiles, jfk_mia, step1};
+    use crate::feed::predict::{self, Flight};
+    use crate::feed::trajectory::ProfileTable;
+    use crate::feed::vatsim::Pilot;
+    use crate::feed::winds::Winds;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    /// `compute` into `icao` over `pilots` in still air, each row beside what `predict::trajectory`
+    /// answers for it.
+    fn rows(
+        icao: &str,
+        ap: &AirportDb,
+        profiles: &ProfileTable,
+        pilots: Vec<Pilot>,
+    ) -> Vec<(FlowFlight, DateTime<Utc>)> {
+        let (nav, winds) = (NavData::default(), Winds::default());
+        let inp = predict::Inputs {
+            nav: &nav,
+            airports: ap,
+            winds: &winds,
+            profiles,
+            locked: &predict::NO_LOCKS,
+        };
+        let data = VatsimData {
+            pilots,
+            ..Default::default()
+        };
+        let mut flow = compute(
+            icao,
+            None,
+            &data,
+            &inp,
+            &HashMap::new(),
+            &HashSet::new(),
+            now(),
+        );
+        data.pilots
+            .iter()
+            .map(|p| {
+                let i = flow.flights.iter().position(|f| f.callsign == p.callsign);
+                let row = flow.flights.remove(i.expect("a row per pilot"));
+                let t = predict::trajectory(&inp, Flight::Pilot(p), None, now()).unwrap();
+                (row, t.eta_at_field())
+            })
+            .collect()
+    }
+
+    // AC 4, 5. GND1, a B738 parked at KJFK, KJFK->KDCA unresolved (184.9 x 1.12 = 207.1 nm), filed 440:
+    // compute's eta - etd is 2,038.6 s on the bundled ERAM table, 2,092.9 s on ProfileTable::default(), and
+    // equals predict::trajectory's on both. A QQQQ beside it does not move (control).
+    // Red when: compute resolves profiles from anything but inp.profiles.
+    #[test]
+    fn compute_times_a_parked_b738_on_its_eram_record() {
+        let ap = AirportDb::from([
+            ("KJFK".to_string(), Airport::at(40.64, -73.78)),
+            ("KDCA".to_string(), Airport::at(38.85, -77.04)),
+        ]);
+        let parked = |cs: &str, ty: &str| {
+            let mut fp = b738("KJFK", "KDCA");
+            fp.aircraft_short = ty.into();
+            fp.cruise_tas = "440".into();
+            Pilot {
+                callsign: cs.into(),
+                latitude: 40.64,
+                longitude: -73.78,
+                altitude: 13,
+                groundspeed: 0,
+                flight_plan: Some(fp),
+                ..Default::default()
+            }
+        };
+        let etes = |profiles: &ProfileTable| -> Vec<f64> {
+            let pilots = vec![parked("GND1", "B738"), parked("GND2", "QQQQ")];
+            rows("KDCA", &ap, profiles, pilots)
+                .iter()
+                .map(|(row, eta)| {
+                    assert_eq!(row.eta, Some(*eta), "{}", row.callsign);
+                    (row.eta.unwrap() - row.etd.unwrap()).num_seconds() as f64
+                })
+                .collect()
+        };
+        let (eram, default) = (etes(&eram_profiles()), etes(&ProfileTable::default()));
+        assert!((eram[0] - 2_038.6).abs() <= 3.0, "{eram:?}");
+        assert!((default[0] - 2_092.9).abs() <= 3.0, "{default:?}");
+        assert_eq!(eram[1], default[1], "a type ERAM lacks does not move");
+    }
+
+    // AC 4, 8, 10. STEP1 (`predict::march_input_tests`): compute's eta - now is 4,368 s +/- 2, not the
+    // 3,888 s of a flight climbing back to FL350, and equals predict::trajectory's.
+    // Red when: compute times it outside the entry point.
+    #[test]
+    fn compute_times_a_stepped_down_arrival_level_at_its_observed_speed() {
+        let out = rows("KMIA", &jfk_mia(), &eram_profiles(), vec![step1()]);
+        let (row, eta) = &out[0];
+        assert_eq!(row.eta, Some(*eta));
+        let ete = (row.eta.unwrap() - now()).num_seconds() as f64;
+        assert!((ete - 4_368.0).abs() <= 2.0, "{ete}");
+    }
+
+    // AC 4. A B738 inside 40 nm: mit_cross_kt is 349.0 (ERAM descent at 13,333 ft) on the bundled table and
+    // 355.8 on the default row, so a 10 MIT gap is 103.2 s against 101.2 s.
+    // Red when: the MIT speed keeps reading a row for an ERAM type.
+    #[test]
+    fn compute_converts_mit_at_the_eram_descent_speed() {
+        let near = Pilot {
+            latitude: 25.79 + 30.0 / 60.04,
+            longitude: -80.29,
+            altitude: 9_000,
+            groundspeed: 250,
+            heading: 180,
+            ..step1()
+        };
+        for (profiles, kt, gap_ms) in [
+            (eram_profiles(), 349.0, 103_200.0),
+            (ProfileTable::default(), 355.8, 101_200.0),
+        ] {
+            let out = rows("KMIA", &jfk_mia(), &profiles, vec![near.clone()]);
+            let got = out[0].0.mit_cross_kt;
+            assert!((got - kt).abs() < 0.5, "{got} against {kt}");
+            let gap = route_interval_ms(0, 10, 60_000.0, got);
+            assert!((gap - gap_ms).abs() < 150.0, "{gap}");
+        }
     }
 }

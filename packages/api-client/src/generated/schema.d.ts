@@ -5413,7 +5413,7 @@ export interface components {
             cruise_alt: number;
             /**
              * Format: int64
-             * @description Cruise TAS (kt) used for the ETA, after the profile cap.
+             * @description Cruise TAS (kt) used for the ETA: the filing, held to what the type flies.
              */
             cruise_tas: number;
             /**
@@ -5423,8 +5423,8 @@ export interface components {
              */
             headwind?: number | null;
             /**
-             * @description The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
-             *     "default".
+             * @description The aircraft performance flown: "type:C172" (a stored row), "eram:B738" (ERAM's tables),
+             *     "family:jet", "wake:H", or "default".
              */
             profile: string;
             /**
