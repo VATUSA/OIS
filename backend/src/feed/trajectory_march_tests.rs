@@ -1283,19 +1283,19 @@ fn descent_ground_speed_at_reads_the_fields_temperature() {
         &warm,
     );
     assert!((gs - 500.5).abs() < 0.1, "{gs}");
-    // A field below sea level is read as 0, and a filing under the field as the field: 40 nm out of a 6,000 ft
-    // field, filed 4,000, the default row cruises (its own descent is 10 nm).
+    // A field below sea level is read as 0, and a filing under the field as the field: 5 nm from a 6,000 ft field,
+    // filed 4,000, the default row flies 250 KIAS at 6,000 ft.
     let row = AircraftProfile::default();
-    let at = |cruise_ft: f64, arr_elev_ft: f64| {
+    let at = |d_nm: f64, cruise_ft: f64, arr_elev_ft: f64| {
         let filed = Filed {
             cruise_ft,
             tas_kt: 440.0,
             arr_elev_ft,
         };
-        descent_ground_speed_at(40.0, &filed, Performance::Row(&row), &RouteWind::still())
+        descent_ground_speed_at(d_nm, &filed, Performance::Row(&row), &RouteWind::still())
     };
-    assert_eq!(at(35_000.0, -200.0), at(35_000.0, 0.0));
-    assert_eq!(at(4_000.0, 6_000.0), 440.0);
+    assert_eq!(at(40.0, 35_000.0, -200.0), at(40.0, 35_000.0, 0.0));
+    assert!((at(5.0, 4_000.0, 6_000.0) - ias_to_tas(250.0, 6_000.0)).abs() < 1e-9);
 }
 
 // AC 3, AC 9. The default row at FL350 doing its 440 kt, 110 nm out: its descent schedule there is 521 kt, but it
