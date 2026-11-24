@@ -57,6 +57,7 @@
 //! AC 8 no 250 kt gate                  | a_slow_flight_at_cruise_is_scaled
 //! AC 8 wind along the heading          | the_anchor_takes_the_headwind_it_is_given_not_the_routes
 //! AC 8 level flight, at its level      | a_stepped_down_flight_is_scaled_at_its_present_level
+//! AC 8 level flight, a row's Mach      | a_row_held_level_is_measured_and_flown_at_its_mach_there
 //! AC 9 15 kt deadband, both sides      | a_descent_slower_by_more_than_15_kt_cas_is_capped_at_its_observed_speed
 //! AC 9 CAS, to the end                 | the_assigned_speed_is_a_cas_held_to_the_field
 //! AC 9 not also scaled                 | a_capped_flight_is_not_also_scaled
@@ -1693,4 +1694,36 @@ fn a_level_flights_top_of_descent_is_still_its_filed_altitudes() {
     assert_eq!(vp.ground_speed_at(85.0), 240.0);
     alts(&vp, &[(61.0, 20_000.0), (59.0, 19_666.7)]);
     secs(&vp, 2_167.5);
+}
+
+// AC 8. A row cruising at Mach 0.84, filed 520, level at 30,000 under FL350: its groundspeed at its start is the one
+// observed. Still air, 500 (495.0 there, 484.2 at FL350); 250 K there and 220 K at FL350, 517 (517.4 and 485.4).
+// Red when: the scale or the step reads the Mach at the cruise altitude.
+#[test]
+fn a_row_held_level_is_measured_and_flown_at_its_mach_there() {
+    let row = AircraftProfile {
+        cruise_mach: Some(0.84),
+        ..AircraftProfile::default()
+    };
+    let levels = vec![(30_000.0, 0.0, Some(250.0)), (35_000.0, 0.0, Some(220.0))];
+    let warm = RouteWind::new(vec![WindKnot { d_nm: 0.0, levels }]);
+    for (wind, gs_kt) in [(RouteWind::still(), 500.0), (warm, 517.0)] {
+        let start = FlightStart {
+            alt_ft: 30_000.0,
+            to_go_nm: 400.0,
+            airborne: Some(Airborne {
+                gs_kt,
+                headwind_kt: None,
+                from_departure_nm: Some(900.0),
+            }),
+        };
+        let filed = Filed {
+            cruise_ft: Some(35_000.0),
+            tas_kt: 520.0,
+            arr_elev_ft: 0.0,
+        };
+        let vp = VerticalProfile::build(&start, &filed, Performance::Row(&row), wind);
+        let got = vp.ground_speed_at(400.0);
+        assert!((got - gs_kt).abs() < 1e-6, "{got}");
+    }
 }

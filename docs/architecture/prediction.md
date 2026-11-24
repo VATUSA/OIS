@@ -251,9 +251,9 @@ Where OIS's model departs from vTBFM's:
 - A flight whose departure is unknown is never held to an assigned speed; vTBFM holds it. A slowed arrival with
   a bad filing therefore loses the hold, and an unheld slowed arrival is the case vTBFM measured reading about
   5 minutes early, over 80 nm (`server/src/trajectory/integrator.ts:700`).
-- A departure is looked up in OIS's worldwide airport table; vTBFM's holds US airports only
-  (`server/src/trajectory/integrator.ts:353-354`). An arrival from abroad, well below its filed altitude, is read as
-  level here and climbs there.
+- A departure is looked up in OIS's worldwide airport table; vTBFM's (`server/src/trajectory/integrator.ts:353-354`)
+  comes from the FAA's data and holds 12,749 US fields and 144 others, most of them Canadian. An arrival from a field
+  it does not hold, well below its filed altitude, is read as level here and climbs there.
 - A short trip climbs to meet the descent path, and a climbing flight is never held to an assigned speed. In
   vTBFM a flight whose whole route is inside top of descent is in descent from its first step, and can be held.
 - A climb caught in the 500 ft band goes on to its level; vTBFM's stays where it was caught.
