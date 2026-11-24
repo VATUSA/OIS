@@ -1870,13 +1870,14 @@ mod tests {
     /// The calls into the model that produce a time, a speed or a position along a route. Outside
     /// the model's own files, only [`trajectory`] and its [`Trajectory`] make them
     /// (and the offline profile backtest, which feeds no surface).
-    const TIMING_CALLS: [&str; 13] = [
+    const TIMING_CALLS: [&str; 14] = [
         "VerticalProfile::build",
         "descent_ground_speed_at(",
         "profile_from_here(",
         "eta_along_route(",
         "arrival_eta(",
         "capped_cruise_tas(",
+        "profiles.resolve(",
         ".descent_tas(",
         ".cruise_in(",
         ".climb(",

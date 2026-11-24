@@ -5408,12 +5408,13 @@ export interface components {
             cross_speed: number;
             /**
              * Format: int64
-             * @description Cruise altitude (ft) as filed, 35,000 when none was readable; the flight may be flown lower.
+             * @description Cruise altitude (ft) as filed, 35,000 when none was readable; the flight may be flown at another.
              */
             cruise_alt: number;
             /**
              * Format: int64
-             * @description Cruise TAS (kt) used for the ETA: the filing, held to ERAM's range for the type or its row's cap.
+             * @description Cruise TAS (kt) used for the ETA: the filing, held to ERAM's range for the type, or to its row's cap and
+             *     Mach; what the type cruises at when the filing can't be used.
              */
             cruise_tas: number;
             /**

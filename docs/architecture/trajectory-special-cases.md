@@ -47,7 +47,6 @@ Decided.
 | S46 | `server/src/trajectory/trajectoryCoordinator.ts:420` | Sector crossings stop being sampled past a horizon | No display looks further | Fixes stop at the sector monitor's six hours | Nothing to take |  |
 | S47 | `server/src/trajectory/performance.ts:134` | A flight with no record flies its filed speed when over 100 kt, else 280 kt, and climbs at 1,500 fpm, unscaled | A path only its test fixtures take | Every flight resolves to a record or a row | Leave out |  |
 | S48 | `server/src/shared/routeParser.ts:462` | With no destination, a last leg over 300 nm and three times the rest of the route is dropped | A name collision at the end of a route | The 900 nm refusal of S25 | Leave out |  |
-| S45 | `server/src/trajectory/integrator.ts:117` | Every descent is 1,000 ft per 3 nm, 333 ft a nautical mile | The path pins the profile to the field | The same. Jets recorded on VATSIM on 2026-11-23 flew 243 to 302 ft a nautical mile | Leave out until the backtest scores a shallower path |  |
 | S49 | `server/src/shared/routeParser.ts:495` | A route with no resolvable point gives no track | No reason stated | The great circle to the field, padded on the ground; 300 nm with neither | Leave out |  |
 | S50 | `server/src/trajectory/integrator.ts:731` | A flight starts at its reported altitude, on the ground too | Plain start | A ground flight starts at 0 ft | Take: a departure from a high field is predicted too low on its way up |  |
 | S51 | `server/src/shared/routeParser.ts:290` | An airway is flown only between its listed entry and exit; unjoined, it is dropped | No reason stated | Joined at the waypoint nearest each end; with no fix between two airways the first is flown to its end | Take, with the parsing work |  |
@@ -63,13 +62,11 @@ Decided.
 | S61 | `server/src/upstream/rapWinds.ts:122` | A level missing a field is dropped, ends are held, a bad block is calm | Extrapolating past the top invents a 300 kt headwind | A file missing a wind level is refused for the next; ends held, gaps still | Leave out |  |
 | S62 | `server/src/trajectory/trajectoryCoordinator.ts:805` | No winds means still air, never no track | Bailing out emptied the lists | The same | Nothing to take |  |
 | S63 | `server/src/shared/winds.ts:204` | Wind is blended as vectors and held beyond 3,000 and 39,000 ft | Degrees wrap at 360 | The same idea | Nothing to take |  |
-| S64 | `server/src/trajectory/integrator.ts:1102` | Below the path a descending flight stays level until it meets it | Keeps the descent monotonic | The same | Nothing to take |  |
 | S65 | `server/src/shared/constants.ts:14` | Airborne is 50 kt or more at any altitude | One value everywhere | The same | Nothing to take |  |
 | S66 | `server/src/shared/routeParser.ts:534` | The destination is exempt from the detour test and judges the last fix | It was safe only by accident | Appended unguarded; it does not judge the last fix | Leave out |  |
 | S67 | `server/src/shared/routeParser.ts:537` | A K is stripped only from a K airport | Stripping any letter sent YMML to Minnesota | An exact ICAO key | Leave out |  |
 | S68 | `server/src/trajectory/integrator.ts:915` | A fix within 0.01 nm is recorded at once; steps are cut short and snapped at each fix | Rounding must not cost 15 s | One distance axis, cut short only at the field | Nothing to take |  |
 | S69 | `server/src/counts/sectorStrata.ts:26` | Sector band edges at 23,500 and 34,500 ft, missing layers worked by another | A level flight flickered between layers | Each volume has its own base and top | Leave out |  |
-| S70 | `server/src/trajectory/performance.ts:28` | The type's maximum altitude caps nothing | The tables run to 44,000 ft and more | The same; a row has a ceiling | Nothing to take |  |
 | S71 | `server/src/trajectory/performance.ts:154` | A record with a table missing is flown on the ones it has; a bad file stops startup | 280 kt for every flight would be silent | A file missing any table is refused when first read, at startup | Nothing to take |  |
 | S72 | `server/src/trajectory/integrator.ts:326` | Leading digits of the filed speed are read | The field is free text | A number or nothing, which is the midpoint | Take: `450kt` is readable |  |
 | S73 | `server/src/shared/routeParser.ts:559` | A point at the previous position is dropped | No reason stated | The same | Nothing to take |  |
@@ -78,14 +75,14 @@ Decided.
 
 ## Decided
 
-Answered by the operator while #985 was planned, 2026-11-23. **Decision** quotes the answer. The STAR cases are
+Answered by the operator during #985. **Decision** quotes the answer. The STAR cases are
 #1100 [STAR crossing restrictions are dropped at the CIFP parser] (Triaging), the SID case
 #1099 [SID exit transitions and SIDs without a common route expand to nothing] (Triaging).
 
 | # | vTBFM file:line | What it does | Why it is there | OIS today | Recommendation | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
 | S0 | `server/src/trajectory/performance.ts:248` | ERAM tables for 2,692 types | Replaced learned profiles for 15 types | The same file, behind an operator's type row | Take | "eram data is okay to put in the repo." |
-| S1 | `server/src/trajectory/integrator.ts:705-726` | A slowed descent keeps its observed CAS, 15 kt deadband | Metering delay never counted down on a slowed flight | The same, except that a climbing flight is not held and the scale is dropped | Take | "All four now" |
+| S1 | `server/src/trajectory/integrator.ts:705-726` | A slowed descent keeps its observed CAS, 15 kt deadband | Metering delay never counted down on a slowed flight | The same, except that a climbing flight and one whose departure is unknown are not held, and the scale is dropped | Take | "All four now" |
 | S2 | `server/src/trajectory/integrator.ts:344` | Below filed and past 1.5 times the climb distance is level; the route midpoint with no climb table, and never on a round trip | Stepped-down arrivals were predicted climbing back | The same rule; every record has a climb table, so the midpoint is not needed | Take | "All four now" |
 | S3 | `server/src/trajectory/verticalPlan.ts:50` | STAR altitude windows bend the descent path | Boundary altitudes | None | Take, in its own change | "All four now", then "Three issues": #1100 |
 | S4 | `server/src/trajectory/integrator.ts:986` | STAR speeds are caps | ETAs on charted speeds | None | Take, with S3 | "All four now", then "Three issues": #1100 |
@@ -93,9 +90,13 @@ Answered by the operator while #985 was planned, 2026-11-23. **Decision** quotes
 | S6 | `server/src/trajectory/integrator.ts:601` | Descent speeds start 10 nm early, or where the path reaches cruise if farther; 1 nm per 300 ft with no descent table | Early is safer than late | The same; every record has a descent table | Take the margin | "vTBFM's 10 nm" |
 | S7 | `server/src/trajectory/integrator.ts:1101` | A flight above the path is on it at the next step | One line, no second descent model | The same | Take | "vTBFM's snap" |
 | S8 | `server/src/trajectory/integrator.ts:666` | The scale has no 250 kt gate, a 500 ft band, counts above cruise and reads the wind along the heading; 15 percent either way, for the whole route | Turboprops got none | The same gates; the scale is on groundspeed, where vTBFM scales true airspeed before the wind | Take the gates | "vTBFM's gates" |
-| S76 | `server/src/shared/routeParser.ts:266` | A SID's exit transition is chosen by the next filed fix and joined to its trunk | `MUSEL8 SLI` flew 220 nm where 31 was filed | The transition is read only from the token before; a SID with no common route expands to nothing | Take | "Three issues": #1099 |
+| S76 | `server/src/shared/routeParser.ts:266` | A SID's exit transition is chosen by the next filed fix and joined to its trunk; with no match it flies its trunk, else its longest path | `MUSEL8 SLI` flew 220 nm where 31 was filed | The transition is read only from the token before; a SID with no common route expands to nothing | Take | "Three issues": #1099 |
 | S77 | `server/src/trajectory/procedureConstraints.ts:4` | The finer rules of S3, S4 and S9: read before the trim, last occurrence of a fix, a passed cap stays, a floor beats a contradicting ceiling, no runway transitions | A 280 kt cap was forgotten once its fix was passed | None | Take, with S3 | "Three issues": #1100 |
 | S9 | `server/src/routemods/apply.ts:71` | Published speeds come only from the last procedure the origin does not publish | A SID was flown as a descent | No published speeds | Take, with S3 | "Three issues": #1100 |
 | S11 | `server/src/trajectory/performance.ts:150` | A filed speed over 100 kt is held inside the range for its type, the midpoint when unusable | ERAM's treatment of a filed speed | The same for an ERAM type, with 60 to 700 kt usable and the range read once, at the level flown | Take, with OIS's bounds | "ERAM clamp + OIS bounds" |
 | S12 | `server/src/trajectory/performance.ts:275` | An unknown type flies ERAM's default for its altitude | Every flight gets a record | Family, wake and default rows | Leave out | "OIS's tiers" |
 | S15 | `server/src/trajectory/performance.ts:76` | Standard-day speeds, no temperature | ERAM's tables are standard-day | Climb and descent speeds scaled by the field's temperature | Adapt | "Scale ERAM speed" |
+| S45 | `server/src/trajectory/integrator.ts:117` | Every descent is 1,000 ft per 3 nm, 333 ft a nautical mile | The path pins the profile to the field | The same. Jets recorded on VATSIM on 2026-11-23 flew 243 to 302 ft a nautical mile | Take; look again when the backtest scores a shallower path | "Approve as written" (AC 3) |
+| S64 | `server/src/trajectory/integrator.ts:1102` | Below the path a descending flight stays level until it meets it | Keeps the descent monotonic | The same | Take | "Approve as written" (AC 2 and 3) |
+| S70 | `server/src/trajectory/performance.ts:28` | The type's maximum altitude caps nothing | The tables run to 44,000 ft and more | The same; a row has a ceiling | Take | "No ceiling, keep descent cap" |
+| S78 | `server/src/trajectory/integrator.ts:710` | A slowed descent is held whatever its departure | One rule for every flight inside top of descent | A flight whose departure is unknown is not held: it may be climbing out of it. A slowed arrival with a bad filing loses the hold, and an unheld one is what vTBFM measured reading about 5 min early | Adapt | "Fix, reword AC 9" |

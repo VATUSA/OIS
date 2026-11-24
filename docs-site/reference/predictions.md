@@ -10,10 +10,12 @@ aircraft does. This page says what the prediction assumes, so you can tell when 
 - **The filed route**, from where the aircraft is now. If it can't be read, the straight line to the
   destination.
 - **The filed altitude and speed.** An altitude it can't read is taken as FL350. A speed outside the type's
-  range is brought into it, and one it can't use is the middle of that range.
+  range is brought into it, and one it can't use is the middle of that range. A type flown on a profile instead
+  is held to the profile's cruise speed, which also stands in for one it can't use.
 - **Winds and temperatures aloft**, read at each point of the flight at the altitude the aircraft will be at there.
 - **The aircraft type's performance**: ERAM's own climb and descent tables, unless a planner has entered a
-  [profile for that type](/planning/aircraft-profiles).
+  [profile for that type](/planning/aircraft-profiles). A type ERAM doesn't have flies the profile for its engine
+  family or wake class, or the default.
 
 ## Climb, cruise and descent
 
@@ -47,8 +49,9 @@ expected there, and speeds up or slows down the rest of the flight to match, by 
 aircraft isn't adjusted.
 
 An aircraft in its descent that is more than 15 knots indicated slower than expected is taken to be on an
-assigned speed. It is predicted no faster than that all the way in, so a delay you absorb with speed control
-shows in its ETA. Take the restriction off and the ETA comes forward at the next update.
+assigned speed, if OIS knows where it left from. It is predicted no faster than that all the way in, so a delay
+you absorb with speed control shows in its ETA. Take the restriction off and the ETA comes forward at the next
+update.
 
 ## What it can't see
 

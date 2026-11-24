@@ -213,7 +213,7 @@ impl Performance<'_> {
     pub fn descent_distance_nm(&self, from_ft: f64, to_ft: f64, cruise_tas: f64) -> f64 {
         distance_nm(to_ft, from_ft, |alt| match self {
             Self::Eram(r) => (interp(&r.descent, alt, 2), interp(&r.descent, alt, 1)),
-            Self::Row(p) => (self.descent_tas(alt, None, cruise_tas), p.desc_fpm.max(1.0)),
+            Self::Row(p) => (self.descent_tas(alt, None, cruise_tas), p.desc_fpm),
         })
     }
 

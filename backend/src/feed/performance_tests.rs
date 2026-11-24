@@ -409,6 +409,11 @@ fn a_rows_cruise_speed_is_unchanged() {
         cruise_mach: Some(0.84),
         ..AircraftProfile::default()
     };
+    assert_eq!(
+        Performance::Row(&mach).cruise_in(400.0, 35_000.0, None),
+        400.0,
+        "a slower filing is not sped up to its Mach"
+    );
     let held = |temp| Performance::Row(&mach).cruise_in(520.0, 35_000.0, temp);
     assert!(close(held(None), 484.2, 0.1), "{}", held(None));
     assert!(
@@ -512,13 +517,21 @@ fn a_rows_distances_integrate_its_schedule() {
     assert!(close(down, 118.80, 0.1), "{down}");
     let up = p.climb_distance_nm(35_000.0);
     assert!(close(up, 139.00, 0.1), "{up}");
-    // Air at or below absolute zero, and an altitude under the ground, still have a speed.
+}
+
+// AC 7. Air at absolute zero still has a speed, and under the ground the standard temperature is sea level's, so
+// 288.15 K there is a factor of 1. Red when: the temperature or the altitude is not floored.
+#[test]
+fn a_temperature_and_an_altitude_are_floored_before_they_scale_a_speed() {
     let eram = flat(300.0, 240.0);
-    for (alt, temp) in [(10_000.0, Some(0.0)), (-500.0, Some(288.0))] {
-        let (tas, _) = Performance::Eram(&eram).climb(alt, temp);
-        assert!(tas > 0.0 && tas.is_finite(), "{tas}");
-    }
-    // A stored rate of 0 is a long way, not an infinite one.
+    let climb = |alt, temp| Performance::Eram(&eram).climb(alt, Some(temp)).0;
+    assert!(climb(10_000.0, 0.0) > 0.0);
+    assert!((climb(-500.0, 288.15) - 300.0).abs() < 1e-9);
+}
+
+// AC 3, AC 10. A stored rate of 0 is a long way, not an infinite one. Red when: it is divided by.
+#[test]
+fn a_rows_zero_rate_is_flown_at_one_foot_a_minute() {
     let stuck = AircraftProfile {
         climb_fpm_lo: 0.0,
         desc_fpm: 0.0,

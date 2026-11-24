@@ -649,13 +649,20 @@ async fn the_runway_route_times_a_stepped_down_flight_at_its_observed_speed(pool
         .map(|mut c| c.insert("KMIA".into(), fresh));
     assert!(cache.is_ok());
     let cookie = holder(&pool, "flow.runway.read").await;
-    let now = Utc::now();
+    let sent = Utc::now();
     let (status, body) = send_json(&state, Method::GET, "/api/v1/flow/runway/KMIA", &cookie).await;
+    let answered = Utc::now();
     assert_eq!(status, 200, "{body}");
     let arrivals = body["arrivals"].as_array().unwrap();
     assert_eq!(arrivals.len(), 1, "{body}");
-    let sec = (time(&arrivals[0]["eta"]) - now).num_seconds();
-    assert!((sec - 4_368).abs() <= 3, "{sec}");
+    // The route's own clock is between the two.
+    let eta = time(&arrivals[0]["eta"]);
+    let slack = chrono::Duration::seconds(3);
+    let ete = chrono::Duration::seconds(4_368);
+    assert!(
+        sent + ete - slack <= eta && eta <= answered + ete + slack,
+        "{eta}"
+    );
 }
 
 // AC 4, 5. The sector-demand route with a volume from 2,500 to 3,500 ft over KJFK's first miles: a released B738

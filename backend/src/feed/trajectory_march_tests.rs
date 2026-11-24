@@ -82,6 +82,12 @@
 //! AC 4, 8 the 60 kt floor              | the_anchor_compares_against_no_less_than_60_kt
 //! AC 4, 7 inside 40 nm, warm air       | descent_ground_speed_at_reads_the_fields_temperature
 //! AC 4 a junk route                    | a_route_past_25_000_nm_is_flown_in_longer_steps
+//! AC 4 past either end                 | a_query_past_either_end_reads_the_end
+//! AC 4, 6 the 60 kt cruise floor       | a_row_cruising_under_60_kt_is_flown_at_60
+//! AC 6 the filing a row is read by     | a_row_with_no_filed_speed_is_read_at_its_filed_altitude
+//! AC 8, 12 the cruise speed shown      | the_cruise_speed_is_read_where_the_flight_starts
+//! AC 9 departure unknown               | a_slow_descent_with_no_known_departure_is_not_held
+//! AC 9 CAS, not TAS                    | the_deadband_is_calibrated_airspeed
 
 use super::super::performance::{EramRecord, EramTable};
 use super::*;
@@ -965,6 +971,145 @@ fn a_descent_slower_by_more_than_15_kt_cas_is_capped_at_its_observed_speed() {
         assert!((capped.ground_speed_at(d) - 224.0).abs() < 1e-9);
     }
     secs(&at(220.0), 490.91);
+}
+
+// AC 9. FLAT, 20,000 ft, 60 nm, departure 300. gs 222 is 18 kt TAS slow and 13.1 CAS: not held, 240. gs 218 is 22
+// TAS and 16.1 CAS: held, 218. Red when: the 15 kt is compared in TAS.
+#[test]
+fn the_deadband_is_calibrated_airspeed() {
+    let at = |gs: f64| {
+        air(20_000.0, 60.0, gs, Some(300.0))
+            .fly()
+            .ground_speed_at(59.5)
+    };
+    assert_eq!(at(222.0), 240.0);
+    assert!((at(218.0) - 218.0).abs() < 1e-6, "{}", at(218.0));
+}
+
+// AC 9. FLAT, 5,000 ft, 60 nm, gs 180 (slow): departure 300 is held, 180 at 59.5; unknown is not, and takes the
+// 900 s of a flight at its descent speed. Red when: an unknown departure is held.
+#[test]
+fn a_slow_descent_with_no_known_departure_is_not_held() {
+    let known = air(5_000.0, 60.0, 180.0, Some(300.0)).fly();
+    assert!((known.ground_speed_at(59.5) - 180.0).abs() < 1e-6);
+    let unknown = air(5_000.0, 60.0, 180.0, None).fly();
+    assert_eq!(unknown.ground_speed_at(59.5), 240.0);
+    secs(&unknown, 900.0);
+    // At its level it is still scaled: 408 of 480.
+    let scaled = air(30_000.0, 80.0, 408.0, None).fly();
+    assert!((scaled.ground_speed_at(79.5) - 240.0 * 0.85).abs() < 1e-6);
+}
+
+// AC 4. FLAT at cruise, 200.5 nm out: past the start every query reads the start, and past the field the field.
+// Red when: a distance is extrapolated.
+#[test]
+fn a_query_past_either_end_reads_the_end() {
+    let vp = air(30_000.0, 200.5, 480.0, Some(300.0)).fly();
+    assert_eq!(vp.alt_at(1e9), 30_000.0);
+    assert_eq!(vp.time_between(1e9, 0.0), vp.time_between(200.5, 0.0));
+    assert_eq!(vp.time_between(200.5, -5.0), vp.time_between(200.5, 0.0));
+    assert_eq!(vp.alt_at(-5.0), vp.alt_at(0.0));
+}
+
+// AC 4, AC 6. A row cruising at 40 kt (the least the page stores) with 50 kt on its tail is flown at 60, so 96 kt
+// (1.6 x 60), not 64: at cruise, held level below its filing, and 150 nm out of the field.
+// Red when: a cruise speed under 60 is flown.
+#[test]
+fn a_row_cruising_under_60_kt_is_flown_at_60() {
+    let row = AircraftProfile {
+        cruise_tas: Some(40.0),
+        ..AircraftProfile::default()
+    };
+    let wind = RouteWind::uniform(-50.0);
+    let cruising = build_row(&row, 10_000.0, 200.0, 10_000.0, 100.0, wind.clone());
+    assert_eq!(cruising.ground_speed_at(199.0), 96.0);
+    let filed = Filed {
+        cruise_ft: 35_000.0,
+        tas_kt: 100.0,
+        arr_elev_ft: 0.0,
+    };
+    let level = FlightStart {
+        alt_ft: 10_000.0,
+        to_go_nm: 300.0,
+        airborne: Some(Airborne {
+            gs_kt: 96.0,
+            headwind_kt: Some(-50.0),
+            from_departure_nm: Some(900.0),
+        }),
+    };
+    let vp = VerticalProfile::build(&level, &filed, Performance::Row(&row), wind.clone());
+    assert_eq!(vp.alt_at(250.0), 10_000.0);
+    assert_eq!(vp.ground_speed_at(250.0), 96.0);
+    let gs = descent_ground_speed_at(150.0, &filed, Performance::Row(&row), &wind);
+    assert_eq!(gs, 96.0);
+}
+
+// AC 6. A row with no cruise speed of its own, no filed speed and a 20,000 ft ceiling, filed FL350, cruises at the
+// 440 kt of its filed altitude, not the 300 of the 20,000 ft it flies: at cruise, held level at 20,000 under FL350,
+// and 150 nm out. Red when: the altitude flown is passed for the filed one.
+#[test]
+fn a_row_with_no_filed_speed_is_read_at_its_filed_altitude() {
+    let low = AircraftProfile {
+        service_ceiling_ft: 20_000.0,
+        ..AircraftProfile::default()
+    };
+    let still = RouteWind::still();
+    let vp = build_row(&low, 20_000.0, 300.0, 35_000.0, 0.0, still.clone());
+    assert_eq!(vp.ground_speed_at(250.0), 440.0);
+    let filed = Filed {
+        cruise_ft: 35_000.0,
+        tas_kt: 0.0,
+        arr_elev_ft: 0.0,
+    };
+    let gs = descent_ground_speed_at(150.0, &filed, Performance::Row(&low), &still);
+    assert_eq!(gs, 440.0);
+    let level = FlightStart {
+        alt_ft: 20_000.0,
+        to_go_nm: 300.0,
+        airborne: Some(Airborne {
+            gs_kt: 440.0,
+            headwind_kt: None,
+            from_departure_nm: Some(900.0),
+        }),
+    };
+    let row = AircraftProfile::default();
+    let vp = VerticalProfile::build(&level, &filed, Performance::Row(&row), still);
+    assert_eq!(vp.alt_at(250.0), 20_000.0);
+    assert_eq!(vp.ground_speed_at(250.0), 440.0);
+}
+
+// AC 8, AC 12. Mach 0.84 filed 520, level at 30,000 under FL350, in air of 250 K there and 220 K at FL350: the
+// cruise speed is 661.4788 x 0.84 x sqrt(250 / 288.15) = 517.4, not FL350's 485.4. FLAT held level at 20,000 in the
+// sloped range (300 to 400) shows 400. Red when: it is read at the filed level, or in standard air.
+#[test]
+fn the_cruise_speed_is_read_where_the_flight_starts() {
+    let mach = AircraftProfile {
+        cruise_mach: Some(0.84),
+        ..AircraftProfile::default()
+    };
+    let wind = RouteWind::new(vec![WindKnot {
+        d_nm: 0.0,
+        levels: vec![(30_000.0, 0.0, Some(250.0)), (35_000.0, 0.0, Some(220.0))],
+    }]);
+    let start = FlightStart {
+        alt_ft: 30_000.0,
+        to_go_nm: 400.0,
+        airborne: Some(Airborne {
+            gs_kt: 517.0,
+            headwind_kt: None,
+            from_departure_nm: Some(900.0),
+        }),
+    };
+    let filed = Filed {
+        cruise_ft: 35_000.0,
+        tas_kt: 520.0,
+        arr_elev_ft: 0.0,
+    };
+    let vp = VerticalProfile::build(&start, &filed, Performance::Row(&mach), wind);
+    assert!((vp.cruise_tas() - 517.4).abs() < 0.2, "{}", vp.cruise_tas());
+    let mut f = air(20_000.0, 200.5, 400.0, Some(113.0));
+    f.rec = sloped_envelope();
+    assert_eq!(f.fly().cruise_tas(), 400.0);
 }
 
 // AC 9. FLAT, 20,000 ft, 60 nm, departure 200, gs 205.5 (150 KCAS at 20,000 ft): gs 205.5 at 59.5, 175.2 at

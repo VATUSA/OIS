@@ -45,8 +45,8 @@ pub fn filed_altitude_ft(s: &str) -> Option<f64> {
     (n >= 1000.0).then_some(n)
 }
 
-/// The cruise altitude the model times a flight at: [`filed_altitude_ft`], or 35,000 ft when the
-/// filing is unknown.
+/// The cruise altitude a filing is read as: [`filed_altitude_ft`], or 35,000 ft when it is unknown. A type
+/// with no ceiling also flies 35,000 for one it can't believe ([`MAX_PLAUSIBLE_ALT_FT`]).
 pub fn parse_alt_ft(s: &str) -> f64 {
     filed_altitude_ft(s).unwrap_or(UNFILED_CRUISE_FT)
 }
@@ -617,7 +617,7 @@ impl VerticalProfile {
     /// does not cover counts as 0. A summary for the debug view. None in still air.
     pub fn mean_headwind(&self, from_d: f64, to_d: f64) -> Option<f64> {
         let (hi, lo) = (from_d.max(to_d), from_d.min(to_d));
-        if self.still || hi <= lo {
+        if self.still {
             return None;
         }
         let (mut sum, mut nm) = (0.0, 0.0);
@@ -748,9 +748,11 @@ impl<'a> Plan<'a> {
     }
 
     /// Hold a flight that starts inside its descent, slower than predicted by more than the deadband, to
-    /// the speed it is flying. It replaces the anchoring scale, which would slow it twice.
+    /// the speed it is flying. It replaces the anchoring scale, which would slow it twice. One with no known
+    /// departure may be climbing out of it, so it is not held.
     fn hold_assigned_speed(&mut self) {
-        let Some(a) = &self.start.airborne else {
+        let known = |a: &&Airborne| a.from_departure_nm.is_some();
+        let Some(a) = self.start.airborne.as_ref().filter(known) else {
             return;
         };
         if self.climbing || self.start.to_go_nm > self.descent_start_nm {

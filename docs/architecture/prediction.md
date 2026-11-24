@@ -63,8 +63,8 @@ The entry point decides each input once:
   (`backend/src/feed/trajectory.rs:20`) knots. A type on an ERAM record cruises at it, held inside the
   record's minimum and maximum true airspeed at the altitude it cruises at, and at the middle of that range
   when the filing is not believed. A type on a row has it capped by the row's cruise speed, which also
-  stands in for a filing that is not believed; a row with no cruise speed falls back to an altitude
-  default (`trajectory::capped_cruise_tas`).
+  stands in for a filing that is not believed; a row with no cruise speed falls back to 440 kt filed at
+  28,000 ft or above, 300 at 15,000 or above, 170 below (`trajectory::tas_or_default`).
 - **The departure** is the filed airport's position, for the straight-line distance a flight has come
   from it. A departure the airport table does not hold has no distance.
 
@@ -186,7 +186,8 @@ heading. A flight read as level below its filed altitude is anchored at that lev
 A flight that starts inside its descent start and is not climbing to meet the path may be slower than
 predicted by more than `ASSIGNED_SPEED_DEADBAND_KT` (`backend/src/feed/trajectory.rs:482`) knots of calibrated
 airspeed. It is then taken to be on an assigned speed: its observed calibrated airspeed is a ceiling to the
-end of the route, and it is not scaled as well. A faster reading changes nothing.
+end of the route, and it is not scaled as well. A faster reading changes nothing. A flight whose departure is
+unknown is not held, since it may be climbing out of it.
 
 Both are read fresh from each poll; nothing is carried between polls. A climbing or ground flight is
 neither scaled nor held.
@@ -246,6 +247,9 @@ does not enforce the window.
 
 Where OIS's model departs from vTBFM's:
 
+- A flight whose departure is unknown is never held to an assigned speed; vTBFM holds it. A slowed arrival with
+  a bad filing therefore loses the hold, and an unheld slowed arrival is the case vTBFM measured reading about
+  5 minutes early, over 80 nm (`server/src/trajectory/integrator.ts:700`).
 - A short trip climbs to meet the descent path, and a climbing flight is never held to an assigned speed. In
   vTBFM a flight whose whole route is inside top of descent is in descent from its first step, and can be held.
 - A climb caught in the 500 ft band goes on to its level; vTBFM's stays where it was caught.
