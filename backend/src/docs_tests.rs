@@ -646,8 +646,6 @@ fn the_prediction_doc_cites_each_constant_where_it_is_defined() {
         "AIRBORNE_GS_KT",
         "GROUND_ROUTE_FACTOR",
         "ANCHOR_MAX_BIAS",
-        "ANCHOR_MIN_GS_KT",
-        "ANCHOR_ALT_TOLERANCE_FT",
         "RELEASE_MARGIN_MS",
     ] {
         assert!(names.contains(name), "{name} is cited");
@@ -733,7 +731,7 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
         );
     }
     let freeze = section(&doc, "Freeze horizons");
-    assert!(freeze.contains("There is no freeze horizon"), "{freeze}");
+    assert!(freeze.contains("`freeze_min`"), "{freeze}");
     assert!(freeze.contains("an FCA release"), "{freeze}");
 
     // Columns: topic, OIS, TBFM, vTBFM. Each TBFM claim sits beside its source.
@@ -749,10 +747,10 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
 
     // AC7: OIS's anchoring and vTBFM's bias, each in its own column.
     let anchoring = comparison_row(&doc, "Anchoring");
-    for part in ["±15 %", "≥250 kt", "300 ft", "whole remaining flight"] {
+    for part in ["0.85 to 1.15", "500 ft", "whole remaining flight"] {
         assert!(anchoring[1].contains(part), "OIS {part}: {anchoring:?}");
     }
-    for part in ["0.85 to 1.15", "≥250 kt", "500 ft", "whole integration"] {
+    for part in ["0.85 to 1.15", "500 ft", "whole integration"] {
         assert!(anchoring[3].contains(part), "vTBFM {part}: {anchoring:?}");
     }
 
@@ -772,4 +770,196 @@ fn the_prediction_doc_covers_each_topic_and_cites_its_sources() {
         sources.contains("§17.2") && sources.contains("§18.2"),
         "{sources}"
     );
+}
+
+// ---- #985 AC 12, 14 to 17: the trajectory write-ups and the special-case list ------------------
+//
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                           | Test
+// --------------------------------------|---------------------------------------------------------------------
+// AC 12 aircraft-profiles docs page     | the_aircraft_profiles_docs_page_names_the_built_in_tables
+// AC 12, 14 debug field's contract text | the_fca_debug_profile_description_names_the_eram_source
+// AC 15 constants with their lines      | the_prediction_doc_cites_each_march_constant
+// AC 15 steps, differences, climbs      | the_prediction_doc_covers_the_march_and_where_it_differs_from_vtbfm
+// AC 16 controller page                 | the_controller_prediction_page_is_published_without_code
+// AC 17 special-case list               | every_special_case_row_names_its_line_and_only_a_decided_one_has_a_decision
+
+/// A repo file, its line endings normalized.
+fn repo_file(path: &str) -> String {
+    std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+        .replace("\r\n", "\n")
+}
+
+// AC 12. docs-site/planning/aircraft-profiles.md and the page in the app say the built-in tables cover 2,692
+// types, the count read from the file; the docs page says a type row overrides them, and no longer says a type
+// without a profile is "metered like a generic jet" or that resolution "falls back in four tiers".
+#[test]
+fn the_aircraft_profiles_docs_page_names_the_built_in_tables() {
+    let types = crate::feed::performance::EramTable::bundled().type_count();
+    let count = format!("{},{:03} types", types / 1_000, types % 1_000);
+    let page = repo_file("docs-site/planning/aircraft-profiles.md");
+    assert!(page.contains(&count), "{count}");
+    assert!(page.contains("Adding one for a type replaces ERAM's tables for it"));
+    for stale in ["generic jet", "four tiers"] {
+        assert!(!page.contains(stale), "{stale}");
+    }
+    // The page in the app names the same count.
+    let app = repo_file("web/src/pages/planning/aircraft-profiles.tsx");
+    assert!(app.contains(&count), "{count}");
+}
+
+// AC 12, 14. In ApiDoc::openapi(), FcaFlightDebug.profile's description contains "eram:", and the schema's
+// property names are these six. Red when: the doc comment is not updated, or a field is
+// added. The regenerated client itself is checked by CI's client-drift job.
+#[test]
+fn the_fca_debug_profile_description_names_the_eram_source() {
+    let doc = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+    let props = &doc["components"]["schemas"]["FcaFlightDebug"]["properties"];
+    let text = props["profile"]["description"].as_str().unwrap();
+    assert!(text.contains("\"eram:B738\""), "{text}");
+    let mut names: Vec<&str> = props
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "cross_speed",
+            "cruise_alt",
+            "cruise_tas",
+            "headwind",
+            "profile",
+            "unresolved"
+        ]
+    );
+}
+
+// AC 15. Every constant declared in the model's two files is cited, each at its line
+// (the_prediction_doc_cites_each_constant_where_it_is_defined). Red when: a constant is added uncited.
+#[test]
+fn the_prediction_doc_cites_each_march_constant() {
+    let cited: BTreeSet<String> = constant_citations(&prediction_doc())
+        .into_iter()
+        .map(|c| c.0)
+        .collect();
+    let mut seen = 0;
+    for file in ["trajectory.rs", "performance.rs"] {
+        let src = repo_file(&format!("backend/src/feed/{file}"));
+        let model = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for line in model.lines() {
+            let line = line.trim_start_matches("pub ");
+            let Some(rest) = line.strip_prefix("const ") else {
+                continue;
+            };
+            let name = rest.split(':').next().unwrap();
+            assert!(cited.contains(name), "{file}: {name} is not cited");
+            seen += 1;
+        }
+    }
+    assert!(seen >= 15, "the scan is live: {seen}");
+}
+
+// AC 15. The doc has each step, the list of differences from vTBFM, and the climbs measured on VATSIM, and its
+// comparison table's Performance, Integration and Anchoring rows say what OIS does (15 s, 500 ft, no 250 kt).
+#[test]
+fn the_prediction_doc_covers_the_march_and_where_it_differs_from_vtbfm() {
+    let doc = prediction_doc().replace("\r\n", "\n");
+    let march = section(&doc, "Climb, cruise and descent");
+    for part in [
+        "**Cruise altitude**",
+        "**Descent start**",
+        "**The phase of each step**",
+        "**A short trip.**",
+        "**Level below the filed altitude.**",
+        "**descent path**",
+    ] {
+        assert!(march.contains(part), "{part}");
+    }
+    let integration = comparison_row(&doc, "Integration");
+    assert!(integration[1].contains("15 s steps"), "{integration:?}");
+    let performance = comparison_row(&doc, "Performance");
+    assert!(
+        performance[1].contains("2,692 types") && performance[1].contains("own row comes first"),
+        "{performance:?}"
+    );
+    let anchoring = comparison_row(&doc, "Anchoring");
+    assert!(!anchoring[1].contains("250"), "{anchoring:?}");
+    assert!(doc.contains("Where OIS's model departs from vTBFM's:"));
+    let climbs = section(&doc, "Climbs measured on VATSIM");
+    for part in ["20 to 45 %", "within 3 %", "| A320 | 55 |", "| B738 | 13 |"] {
+        assert!(climbs.contains(part), "{part}");
+    }
+}
+
+// AC 16. The docs-site page exists, is linked from docs-site/.vitepress/config.mts, has no fenced code block
+// and no Rust path or constant name, and states the descent, level-below-filed and assigned-speed rules.
+#[test]
+fn the_controller_prediction_page_is_published_without_code() {
+    let page = repo_file("docs-site/reference/predictions.md");
+    let config = repo_file("docs-site/.vitepress/config.mts");
+    assert!(
+        config.contains("link: \"/reference/predictions\""),
+        "linked"
+    );
+    for code in ["```", ".rs", "::", "`"] {
+        assert!(!page.contains(code), "no code: {code}");
+    }
+    for rule in [
+        "1,000 feet for every 3 miles",
+        "one and a half times that distance",
+        "by up to 15 percent",
+        "more than 15 knots indicated slower",
+        "climbs until it meets the descent path",
+    ] {
+        assert!(page.replace('\n', " ").contains(rule), "{rule}");
+    }
+}
+
+// AC 17. Every row of the special-case list has a vTBFM `file:line`, what it does, why, OIS's equivalent, a
+// recommendation and a decision cell: empty under Open, filled under Decided. The list names commit b6bc6c5d, and
+// every case is on it once. Red when: the build fills in an open decision, or a cell is blank. An operator who
+// decides a case moves its row to Decided.
+#[test]
+fn every_special_case_row_names_its_line_and_only_a_decided_one_has_a_decision() {
+    let doc = repo_file("docs/architecture/trajectory-special-cases.md");
+    assert!(doc.contains("`zla-artcc/vTBFM` at `b6bc6c5d`"));
+    let rows = |heading: &str| -> Vec<Vec<String>> {
+        section(&doc, heading)
+            .lines()
+            .filter(|l| l.starts_with("| S"))
+            .map(|l| {
+                let cells = l.trim_start_matches("| ").trim_end_matches('|');
+                cells.split('|').map(|c| c.trim().to_string()).collect()
+            })
+            .collect()
+    };
+    let cites = |cell: &str| {
+        let cell = cell.trim_matches('`');
+        cell.split_once(':').is_some_and(|(path, lines)| {
+            path.starts_with("server/src/")
+                && path.ends_with(".ts")
+                && lines.split('-').all(|n| n.parse::<u32>().is_ok())
+        })
+    };
+    let mut ids = BTreeSet::new();
+    let (open, decided) = (rows("Open"), rows("Decided"));
+    for row in open.iter().chain(&decided) {
+        assert_eq!(row.len(), 7, "{row:?}");
+        assert!(cites(&row[1]), "{row:?}");
+        assert!(row[2..6].iter().all(|c| !c.is_empty()), "{row:?}");
+        assert!(ids.insert(row[0].clone()), "listed twice: {row:?}");
+    }
+    for row in &open {
+        assert_eq!(row[6], "", "undecided: {row:?}");
+    }
+    for row in &decided {
+        assert_ne!(row[6], "", "decided: {row:?}");
+    }
+    let want: BTreeSet<String> = (0..=80).map(|n| format!("S{n}")).collect();
+    assert_eq!(ids, want, "every case is on the list once");
 }

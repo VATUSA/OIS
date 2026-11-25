@@ -5408,12 +5408,13 @@ export interface components {
             cross_speed: number;
             /**
              * Format: int64
-             * @description Filed cruise altitude (ft) used.
+             * @description Cruise altitude (ft) as filed, 35,000 when none was readable; the flight may be flown at another.
              */
             cruise_alt: number;
             /**
              * Format: int64
-             * @description Cruise TAS (kt) used for the ETA, after the profile cap.
+             * @description Cruise TAS (kt) used for the ETA: the filing, held to ERAM's range for the type, or to its row's cap and
+             *     Mach; what the type cruises at when the filing can't be used.
              */
             cruise_tas: number;
             /**
@@ -5423,8 +5424,8 @@ export interface components {
              */
             headwind?: number | null;
             /**
-             * @description The resolved aircraft performance profile: "type:C172", "family:jet", "wake:H", or
-             *     "default".
+             * @description The aircraft performance flown: "type:C172" (a stored row), "eram:B738" (ERAM's tables),
+             *     "family:jet", "wake:H", or "default".
              */
             profile: string;
             /**

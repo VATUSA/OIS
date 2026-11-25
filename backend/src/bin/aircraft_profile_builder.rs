@@ -8,7 +8,7 @@
 //!     --from 2026-09-20 --to 2026-10-11 \
 //!     --out /tmp/aircraft_profiles.json --report coverage.md
 //!
-//! # Score: the stored catalog (set A) against it with the file's types applied (set B).
+//! # Score: what the live model flies (set A) against it with the file's types applied (set B).
 //! RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- backtest \
 //!     --from 2026-09-20 --to 2026-10-11 \
 //!     --profiles /tmp/aircraft_profiles.json --report backtest.md
@@ -186,7 +186,7 @@ async fn main() -> Result<(), String> {
                 .await
                 .map_err(|e| format!("replaying: {e:?}"))?;
             let text =
-                backtest::report(&scored, held_out, "A (stored catalog)", "B (with profiles)");
+                backtest::report(&scored, held_out, "A (as flown live)", "B (with profiles)");
             emit(&text, report.as_deref())?;
             tracing::info!("{held_out} held-out flights, {} scored", scored.len());
         }

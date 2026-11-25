@@ -247,7 +247,7 @@ impl Accumulator {
 impl TypeProfile {
     /// `base` with every measured field replaced by the measurement. Schedule values (IAS, climb and
     /// descent Mach, rates) take the median. `cruise_tas` and `cruise_mach` are **caps** in the
-    /// model (`trajectory::capped_cruise_tas`, `VerticalProfile::build`), so they take the upper
+    /// model (`trajectory::capped_cruise_tas`, `Performance::cruise_in`), so they take the upper
     /// quartile: a median cap would slow down half the flights that really fly faster.
     pub fn apply_to(&self, base: &AircraftProfile) -> AircraftProfile {
         apply_fields(&self.fields, base)

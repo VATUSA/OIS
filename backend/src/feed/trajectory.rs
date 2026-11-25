@@ -1,20 +1,30 @@
-//! Shared trajectory / ETA model — a per-aircraft vertical-profile integrator with winds-aloft
-//! correction. This is the single predictor used by every surface that estimates where connected
-//! aircraft will be at a given time (FCA metering, airport-flow demand, runway ETE), so those
-//! surfaces stay consistent. The crossing/arrival geometry ports from vatflow's `fca-metering.js`;
-//! the performance model is OIS's own configurable [`AircraftProfile`] / [`VerticalProfile`].
+//! Shared trajectory / ETA model: the single predictor used by every surface that estimates where
+//! connected aircraft will be at a given time (FCA metering, airport-flow demand, runway ETE), so those
+//! surfaces stay consistent. It ports vTBFM's trajectory model (#985); `docs/architecture/prediction.md`
+//! describes it and where it differs.
 //!
-//! A profile integrates a climb (per-band IAS schedule + rates), a cruise (TAS or Mach), and a
-//! descent to a real top-of-descent, with a Mach↔TAS crossover. Wind and temperature come from a
-//! [`RouteWind`] sampled at each point's distance and altitude ([`crate::feed::winds`]); the Mach
-//! portion uses the air temperature there, and ISA where the field has none. It fails safe to still
-//! air when winds are unavailable.
+//! A flight is flown forward from where it is, in short steps: each step picks climb, cruise or descent
+//! from the distance to go and the altitude, takes its speed from the type's [`Performance`], and the
+//! wind and temperature from a [`RouteWind`] sampled at that point ([`crate::feed::winds`]). It fails
+//! safe to still air when winds are unavailable.
+
+use super::performance::{EramTable, Performance};
+
+/// Lower bound (kt) on a believable filed cruise TAS: below it, nothing was filed or it was a Mach number.
+pub const MIN_PLAUSIBLE_TAS: f64 = 60.0;
 
 /// Upper bound on a *believable* filed cruise TAS (kt). Pilots sometimes file garbage (e.g. `4800`),
 /// and since the ETA clamps groundspeed only *relative* to TAS, an absurd value would collapse the
 /// transit time and shoot the aircraft to the front of the sequence. Anything above this is treated
 /// as unfiled and replaced with the altitude-based default. Comfortably above any real airliner.
 pub const MAX_PLAUSIBLE_TAS: f64 = 700.0;
+
+/// Upper bound (ft) on a believable altitude, filed or reported, above any aircraft on the network. ERAM
+/// gives no ceiling, so this is what keeps a junk filing from setting the length of a climb.
+const MAX_PLAUSIBLE_ALT_FT: f64 = 100_000.0;
+
+/// The cruise altitude (ft) a flight with no readable filing is timed at, if its type cruises that high.
+const UNFILED_CRUISE_FT: f64 = 35_000.0;
 
 /// The filed cruise altitude in feet, or `None` when it is unfiled or unreadable (#813).
 ///
@@ -35,16 +45,20 @@ pub fn filed_altitude_ft(s: &str) -> Option<f64> {
     (n >= 1000.0).then_some(n)
 }
 
-/// The cruise altitude the model times a flight at: [`filed_altitude_ft`], or 35,000 ft when the
-/// filing is unknown.
+/// The cruise altitude a filing is shown as: [`filed_altitude_ft`], or 35,000 ft when it is unknown.
 pub fn parse_alt_ft(s: &str) -> f64 {
-    filed_altitude_ft(s).unwrap_or(35000.0)
+    filed_altitude_ft(s).unwrap_or(UNFILED_CRUISE_FT)
+}
+
+/// Whether a filed TAS (kt) is worth reading: not missing, a Mach number in the wrong field, or garbage.
+pub(crate) fn believable_tas(tas: f64) -> bool {
+    (MIN_PLAUSIBLE_TAS..=MAX_PLAUSIBLE_TAS).contains(&tas)
 }
 
 /// Filed TAS (kt) with a sane fallback estimated from cruise altitude. A filed value outside the
 /// believable band (too slow, or garbage like `4800`) is discarded for the altitude-based default.
 pub fn tas_or_default(tas: f64, cruise_alt_ft: f64) -> f64 {
-    if (60.0..=MAX_PLAUSIBLE_TAS).contains(&tas) {
+    if believable_tas(tas) {
         return tas;
     }
     if cruise_alt_ft >= 28000.0 {
@@ -56,6 +70,10 @@ pub fn tas_or_default(tas: f64, cruise_alt_ft: f64) -> f64 {
     }
 }
 
+/// The least and the most of a true airspeed that a groundspeed can be, whatever the wind reads.
+const MIN_GS_FRACTION: f64 = 0.4;
+const MAX_GS_FRACTION: f64 = 1.6;
+
 /// Groundspeed from TAS and headwind (`+` = headwind, `-` = tailwind), clamped to a sane
 /// band so a bad wind reading can't produce absurd speeds. Still air when `headwind` is None.
 pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
@@ -64,9 +82,9 @@ pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
         Some(hw) => {
             // Order the bounds so a nonsensical negative TAS can't invert the clamp range.
             let (lo, hi) = if tas >= 0.0 {
-                (tas * 0.4, tas * 1.6)
+                (tas * MIN_GS_FRACTION, tas * MAX_GS_FRACTION)
             } else {
-                (tas * 1.6, tas * 0.4)
+                (tas * MAX_GS_FRACTION, tas * MIN_GS_FRACTION)
             };
             (tas - hw).clamp(lo, hi)
         }
@@ -78,25 +96,12 @@ pub fn effective_gs(tas: f64, headwind: Option<f64>) -> f64 {
 /// outright when the filing is missing/garbage) — so a mis-filed 400 kt C172 is still metered at
 /// its real ~110 kt. With no profile cruise_tas, we fall back to the legacy filed-or-altitude TAS.
 pub fn capped_cruise_tas(filed_tas: f64, cruise_alt_ft: f64, profile: &AircraftProfile) -> f64 {
-    let believable = (60.0..=MAX_PLAUSIBLE_TAS).contains(&filed_tas);
     match profile.cruise_tas {
-        Some(cap) if believable => filed_tas.min(cap),
+        Some(cap) if believable_tas(filed_tas) => filed_tas.min(cap),
         Some(cap) => cap,
         None => tas_or_default(filed_tas, cruise_alt_ft),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Vertical-profile model (configurable per-aircraft performance).
-//
-// The legacy `profile_transit_sec` above times a climb-to-cruise only and treats its speed
-// constants as groundspeeds. The model below is the richer, configurable replacement: a
-// per-aircraft `AircraftProfile` (climb / cruise / descent speed schedules with an ISA
-// Mach↔TAS crossover, climb & descent rates, and a service ceiling) integrated over a route
-// with a real top-of-descent. Speed-schedule values are indicated airspeeds (KIAS) converted
-// to true airspeed by the standard atmosphere, so a profile's numbers mean what they do on a
-// SimBrief airframe. Phase C migrates the callers from the legacy fn to this model.
-// ---------------------------------------------------------------------------
 
 /// Standard-atmosphere constants (ISA, sea level).
 const ISA_T0_K: f64 = 288.15; // sea-level temperature, K
@@ -130,6 +135,11 @@ fn isa_density_ratio(alt_ft: f64) -> f64 {
 /// (incompressible) correction — good enough for ETA modelling across the flight envelope.
 pub fn ias_to_tas(ias_kt: f64, alt_ft: f64) -> f64 {
     ias_kt / isa_density_ratio(alt_ft.max(0.0)).max(1e-3).sqrt()
+}
+
+/// Calibrated airspeed (kt) for a true airspeed at altitude: the inverse of [`ias_to_tas`].
+pub fn tas_to_cas(tas_kt: f64, alt_ft: f64) -> f64 {
+    tas_kt * isa_density_ratio(alt_ft.max(0.0)).max(1e-3).sqrt()
 }
 
 /// True airspeed (kt) for a Mach number at altitude in the standard atmosphere: TAS = M · a,
@@ -248,17 +258,6 @@ impl RouteWind {
     }
 }
 
-/// How far past a gap knot the profile takes its still-air sample.
-const GAP_EDGE_NM: f64 = 1e-3;
-
-/// The distances at which a profile samples one wind knot. The wind and temperature step at a gap
-/// knot (the covered value holds up to it, [`RouteWind::new`]), so a gap knot also gets a sample just
-/// past it; without it the samples would ramp the covered value across the next span. A distance
-/// exactly at a knot reads the span that ends there, so no sample is needed before it.
-fn knot_sample_distances(k: &WindKnot) -> impl Iterator<Item = f64> {
-    std::iter::once(k.d_nm).chain(k.levels.is_empty().then_some(k.d_nm + GAP_EDGE_NM))
-}
-
 /// `v0` to `v1` at fraction `t`; with one side missing, the other.
 fn between(v0: Option<f64>, v1: Option<f64>, t: f64) -> Option<f64> {
     match (v0, v1) {
@@ -301,8 +300,7 @@ fn lerp_levels(below: Option<(f64, f64)>, above: Option<(f64, f64)>, alt_ft: f64
 }
 
 /// A configurable per-aircraft performance profile. `Default` reproduces the legacy
-/// climb/cruise numbers (250/290 kt, 2000/1500 fpm, no Mach) plus a plain jet descent, so a
-/// caller with no matching profile behaves like the old model (now with a descent phase).
+/// climb/cruise numbers (250/290 kt, 2000/1500 fpm, no Mach) plus a plain jet descent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AircraftProfile {
     // Climb speed schedule (KIAS) + rates (fpm).
@@ -341,22 +339,24 @@ impl Default for AircraftProfile {
     }
 }
 
-/// A resolved set of aircraft profiles with the four-tier fallback used to pick performance for a
-/// flight: exact ICAO type → engine family (`jet` / `turboprop` / `piston`, from
-/// [`crate::feed::flow::engine_family`]) → wake class (`L/M/H/J`) → the global default. Built from
-/// the DB by [`crate::repos::aircraft_profiles`] and cached in `AppState`; `Default` (legacy
-/// numbers, no type/family/wake overrides) is the safe fallback before the table has loaded.
+/// The aircraft performance a flight is picked from: a stored type row → ERAM's record of the type →
+/// engine family row (`jet` / `turboprop` / `piston`, from [`crate::feed::flow::engine_family`]) →
+/// wake-class row (`L/M/H/J`) → the global default row. Rows are built from the DB by
+/// [`crate::repos::aircraft_profiles`]; the whole is cached in `AppState`. `Default` holds the legacy
+/// default row and nothing else; [`Self::built_in`] is the fallback before the rows have loaded.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileTable {
     default: AircraftProfile,
     by_wake: std::collections::HashMap<String, AircraftProfile>,
     by_family: std::collections::HashMap<String, AircraftProfile>,
     by_type: std::collections::HashMap<String, AircraftProfile>,
+    eram: Option<&'static EramTable>,
 }
 
 /// The tier [`ProfileTable`] matched, so `resolve` and `resolve_label` read one decision.
 enum Tier {
     Type(String),
+    Eram(String),
     Family(&'static str),
     Wake(String),
     Default,
@@ -370,21 +370,40 @@ impl ProfileTable {
         by_wake: std::collections::HashMap<String, AircraftProfile>,
         by_family: std::collections::HashMap<String, AircraftProfile>,
         by_type: std::collections::HashMap<String, AircraftProfile>,
+        eram: Option<&'static EramTable>,
     ) -> Self {
         Self {
             default,
             by_wake,
             by_family,
             by_type,
+            eram,
         }
     }
 
-    fn tier(&self, ty: &str, wake: &str) -> (Tier, &AircraftProfile) {
+    /// The bundled ERAM table over the legacy default row: what flies until the stored rows load.
+    pub fn built_in() -> Self {
+        Self {
+            eram: Some(EramTable::bundled()),
+            ..Self::default()
+        }
+    }
+
+    fn tier(&self, ty: &str, wake: &str) -> (Tier, Performance<'_>) {
         let ty = ty.to_ascii_uppercase();
         if let Some(p) = self.by_type.get(&ty) {
-            return (Tier::Type(ty), p);
+            return (Tier::Type(ty), Performance::Row(p));
         }
-        let family = crate::feed::flow::engine_family(&ty);
+        if let Some(r) = self.eram.and_then(|e| e.get(&ty)) {
+            return (Tier::Eram(ty), Performance::Eram(r));
+        }
+        let (tier, p) = self.row_below_type(&ty, wake);
+        (tier, Performance::Row(p))
+    }
+
+    /// The row an uppercase type falls to when no row names it: family, wake class, default.
+    fn row_below_type(&self, ty: &str, wake: &str) -> (Tier, &AircraftProfile) {
+        let family = crate::feed::flow::engine_family(ty);
         if let Some((f, p)) = family.and_then(|f| self.by_family.get(f).map(|p| (f, p))) {
             return (Tier::Family(f), p);
         }
@@ -395,17 +414,27 @@ impl ProfileTable {
         (Tier::Default, &self.default)
     }
 
-    /// The performance profile for an aircraft: exact type → engine family → wake class → global
-    /// default.
-    pub fn resolve(&self, ty: &str, wake: &str) -> &AircraftProfile {
+    /// The performance an aircraft flies: its type row → ERAM → family row → wake row → default row.
+    pub fn resolve(&self, ty: &str, wake: &str) -> Performance<'_> {
         self.tier(ty, wake).1
     }
 
-    /// A label for which tier `resolve` matched, for the debug view: `type:<T>`, `family:<F>`,
-    /// `wake:<W>`, or `default`.
+    /// The row an aircraft would fly with no ERAM table: what a measured row for its type starts from
+    /// (`profile_builder::backtest`).
+    pub fn row(&self, ty: &str, wake: &str) -> &AircraftProfile {
+        let ty = ty.to_ascii_uppercase();
+        match self.by_type.get(&ty) {
+            Some(p) => p,
+            None => self.row_below_type(&ty, wake).1,
+        }
+    }
+
+    /// A label for which tier `resolve` matched, for the debug view: `type:<T>`, `eram:<T>`,
+    /// `family:<F>`, `wake:<W>`, or `default`.
     pub fn resolve_label(&self, ty: &str, wake: &str) -> String {
         match self.tier(ty, wake).0 {
             Tier::Type(t) => format!("type:{t}"),
+            Tier::Eram(t) => format!("eram:{t}"),
             Tier::Family(f) => format!("family:{f}"),
             Tier::Wake(w) => format!("wake:{w}"),
             Tier::Default => "default".to_string(),
@@ -417,7 +446,13 @@ impl ProfileTable {
 /// held down to the Mach number's TAS when one is set (the SimBrief crossover — Mach wins high,
 /// IAS wins low). `ias` is the schedule speed for the altitude band; `mach` the phase Mach, flown in
 /// air at `temp_k`.
-fn phase_tas(ias_lo: f64, ias_hi: f64, mach: Option<f64>, alt_ft: f64, temp_k: f64) -> f64 {
+pub(crate) fn phase_tas(
+    ias_lo: f64,
+    ias_hi: f64,
+    mach: Option<f64>,
+    alt_ft: f64,
+    temp_k: f64,
+) -> f64 {
     let ias = if alt_ft < 10_000.0 { ias_lo } else { ias_hi };
     let tas_ias = ias_to_tas(ias, alt_ft);
     match mach {
@@ -426,508 +461,436 @@ fn phase_tas(ias_lo: f64, ias_hi: f64, mach: Option<f64>, alt_ft: f64, temp_k: f
     }
 }
 
-/// Groundspeed floor so a stalled step can't divide by ~zero.
+/// Groundspeed floor (kt), so no step stalls.
 const GS_FLOOR_KT: f64 = 60.0;
-/// Vertical integration step (ft) for building the climb/descent altitude-vs-distance curves.
-const VERT_STEP_FT: f64 = 500.0;
-/// Horizontal integration step (nm) for timing a distance span across the profile.
-const HORIZ_STEP_NM: f64 = 3.0;
-/// Groundspeed anchoring (#313) trusts the observed groundspeed only for an aircraft established at
-/// cruise: at least this fast…
-const ANCHOR_MIN_GS_KT: f64 = 250.0;
-/// …and within this many feet of the profile's cruise altitude. A climbing departure is not anchored.
-const ANCHOR_ALT_TOLERANCE_FT: f64 = 300.0;
-/// The anchoring bias is clamped to ±this fraction, so one noisy `gs` sample can't throw the
+/// Length (s) of one integration step; the last one is cut short at the field.
+const STEP_SEC: f64 = 15.0;
+/// A route longer than this (nm), over once around the earth, is flown in steps longer in proportion, so
+/// a junk route cannot set how many there are.
+const MAX_STEPPED_NM: f64 = 25_000.0;
+/// Descent gradient: 1,000 ft for every 3 nm to the field.
+const DESCENT_FT_PER_NM: f64 = 1000.0 / 3.0;
+/// Descent speeds start this far (nm) outside the type's own descent distance.
+const DESCENT_MARGIN_NM: f64 = 10.0;
+/// A flight this close (ft) below its cruise level is at cruise.
+const CRUISE_BAND_FT: f64 = 500.0;
+/// A flight below its filed altitude is level there once it is farther from its departure than this
+/// many times its type's climb distance.
+const LEVEL_CLIMB_DISTANCES: f64 = 1.5;
+/// A descending flight this much (kt CAS) slower than predicted is flying an assigned speed.
+const ASSIGNED_SPEED_DEADBAND_KT: f64 = 15.0;
+/// The anchoring scale is clamped to ±this fraction, so one noisy groundspeed can't throw the
 /// trajectory.
 const ANCHOR_MAX_BIAS: f64 = 0.15;
 
-/// A resolved vertical flight profile, anchored at the aircraft's current state and running
-/// forward to the destination. Built once per aircraft, then queried for the altitude at, and
-/// the time to reach, any point measured as distance-to-destination.
+/// Where a flight starts: its altitude, its distance along the route to the field, and what is known
+/// of one already flying.
+pub struct FlightStart {
+    pub alt_ft: f64,
+    pub to_go_nm: f64,
+    /// None on the ground.
+    pub airborne: Option<Airborne>,
+}
+
+impl FlightStart {
+    /// Its altitude, held to a believable one.
+    fn altitude(&self) -> f64 {
+        self.alt_ft.clamp(0.0, MAX_PLAUSIBLE_ALT_FT)
+    }
+}
+
+/// What an airborne flight is doing.
+#[derive(Debug, Clone, Copy)]
+pub struct Airborne {
+    pub gs_kt: f64,
+    /// The headwind (kt) along its heading at its position and altitude; None in still air.
+    pub headwind_kt: Option<f64>,
+    /// Straight-line distance (nm) from its departure field; None when that field is unknown.
+    pub from_departure_nm: Option<f64>,
+}
+
+/// What a flight filed and where it lands.
+pub struct Filed {
+    /// None when no altitude was readable.
+    pub cruise_ft: Option<f64>,
+    /// The filed cruise true airspeed (kt) as filed; 0 when none.
+    pub tas_kt: f64,
+    pub arr_elev_ft: f64,
+}
+
+impl Filed {
+    /// The altitude (ft) a row reads the filing at.
+    fn altitude_ft(&self) -> f64 {
+        self.cruise_ft.unwrap_or(UNFILED_CRUISE_FT)
+    }
+}
+
+/// A point the flight passes: its distance to the field, its altitude there, the time from the start,
+/// and the groundspeed and headwind of the step it flies **from** here (the last point repeats the last
+/// step's).
+#[derive(Debug, Clone, Copy)]
+struct Sample {
+    d_nm: f64,
+    alt_ft: f64,
+    sec: f64,
+    gs_kt: f64,
+    headwind_kt: f64,
+}
+
+/// A flight flown forward from where it is to the field, in steps of [`STEP_SEC`]. Built once per flight,
+/// then queried by distance to the field (`d`): `d = 0` is the field, increasing back along the route.
 ///
-/// Distances are **nm-to-destination** (`d`): `d = 0` is the field, increasing back along the
-/// route. The aircraft is at `(start_alt, start_d)`. Ahead of it: climb from `start_alt` to the
-/// achieved cruise altitude, cruise, then descend from top-of-descent to the field.
+/// Every query reads the one track, so a time, the speed it was flown at and the altitude there always
+/// describe the same flight.
 pub struct VerticalProfile {
-    /// The wind and temperature along the route, read at each point's `d` and altitude.
-    wind: RouteWind,
-    /// Multiplier on every predicted groundspeed; `1.0` unless [`Self::anchor_to_observed_gs`] set it.
-    gs_bias: f64,
-    /// The aircraft's starting altitude and distance, and the cruise altitude / TAS the profile
-    /// flies there.
-    start_alt: f64,
-    start_d: f64,
-    cruise_alt: f64,
+    /// The wind carries no level anywhere on the route.
+    still: bool,
     cruise_tas: f64,
-    /// Samples of `(distance-to-destination, altitude, true-airspeed, headwind)` from the field
-    /// (d=0) up the descent, through cruise, and out the climb, in increasing `d`. Monotonic in `d`.
-    /// The TAS is the phase-appropriate speed (descent/cruise/climb schedule) at that point, its
-    /// Mach part in the air temperature there. The headwind is [`Self::wind`] at that point's
-    /// distance and altitude, with a sample at every wind knot, so a query interpolates it like the
-    /// TAS instead of reading the wind field again. All three are linearly interpolated between
-    /// samples.
-    samples: Vec<(f64, f64, f64, f64)>,
+    /// In increasing `d`; never empty.
+    samples: Vec<Sample>,
 }
 
 impl VerticalProfile {
-    /// Build the profile. `start_alt_ft` / `start_d_nm` anchor the aircraft (for a ground or
-    /// pre-file departure, pass surface altitude and the full route length). `cruise_req_ft` is
-    /// the filed cruise altitude; `cruise_tas_kt` the (already filed-capped) cruise true airspeed.
-    /// `wind` is the route's wind by distance-to-destination, on the same `d` axis.
-    pub fn build(
-        start_alt_ft: f64,
-        start_d_nm: f64,
-        arr_elev_ft: f64,
-        cruise_req_ft: f64,
-        cruise_tas_kt: f64,
-        profile: &AircraftProfile,
-        wind: RouteWind,
-    ) -> Self {
-        let arr_elev = arr_elev_ft.max(0.0);
-        // A departure climbs from its own start altitude, even when the destination field is higher.
-        let start_alt = start_alt_ft.max(0.0);
-        let cruise_alt = cruise_req_ft
-            .min(profile.service_ceiling_ft)
-            .max(start_alt.max(arr_elev));
-        let speeds = Speeds {
-            profile,
-            wind: &wind,
-            cruise_tas: cruise_tas_kt.max(GS_FLOOR_KT),
-        };
-
-        // Descent leg (field → cruise): integrate altitude up from the field, accumulating the
-        // horizontal distance each vertical step covers. Gives distance-to-destination at each alt.
-        let desc = integrate_descent(arr_elev, cruise_alt, &speeds);
-        let desc_dist = desc.last().map(|&(d, ..)| d).unwrap_or(0.0);
-
-        // Climb leg (start_alt → cruise): distance the aircraft needs to reach cruise from here,
-        // with the profile's per-band climb rates.
-        let climb = integrate_climb(start_alt, cruise_alt, start_d_nm, &speeds);
-        let climb_dist = climb.last().map(|&(d, ..)| d).unwrap_or(0.0);
-
-        // Assemble samples in increasing distance-to-destination:
-        //   0..desc_dist                     → descent curve (arr_elev up to cruise_alt)
-        //   desc_dist..(start_d − climb_dist) → cruise
-        //   top                              → climb curve anchored at (start_d, start_alt)
-        let mut samples: Vec<(f64, f64, f64)> = Vec::new();
-        let toc_d = start_d_nm - climb_dist; // distance-to-dest where cruise is reached
-
-        if toc_d <= desc_dist {
-            // Triangle: no room to cruise. Find the meeting altitude by walking descent + climb
-            // outward until their combined distance fills the route; cap the peak there.
-            let peak = triangle_peak(start_alt, arr_elev, cruise_alt, start_d_nm, &speeds);
-            samples.extend(integrate_descent(arr_elev, peak, &speeds));
-            let climb2 = integrate_climb(start_alt, peak, start_d_nm, &speeds);
-            for &(cd, a, t) in climb2.iter().rev() {
-                samples.push((start_d_nm - cd, a, t));
-            }
-        } else {
-            samples.extend(desc.iter().copied());
-            // The cruise leg: its TAS changes along the route only through the air temperature
-            // under a cruise Mach, so a sample at each wind knot inside it (and just past a gap,
-            // where the temperature steps) carries that change.
-            for d in wind.knots.iter().flat_map(knot_sample_distances) {
-                if d > desc_dist && d < toc_d {
-                    samples.push((d, cruise_alt, speeds.cruise_at(d, cruise_alt)));
-                }
-            }
-            samples.push((toc_d, cruise_alt, speeds.cruise_at(toc_d, cruise_alt))); // cruise start
-            for &(cd, a, t) in climb.iter().rev() {
-                samples.push((start_d_nm - cd, a, t));
-            }
+    /// Fly `start` to the field. `wind` is the route's wind by distance to the field, on the same `d`
+    /// axis as `start.to_go_nm`.
+    pub fn build(start: &FlightStart, filed: &Filed, perf: Performance, wind: RouteWind) -> Self {
+        let plan = Plan::new(start, filed, perf, &wind);
+        let mut samples = plan.fly();
+        samples.reverse();
+        let (_, temp) = wind.air(start.to_go_nm, plan.level_ft);
+        Self {
+            still: wind.is_still(),
+            cruise_tas: perf.cruise_in(plan.cruise_tas, plan.level_ft, temp),
+            samples,
         }
-        // Span the whole route, then sort & de-duplicate in `d`.
-        let span_d = start_d_nm.max(desc_dist);
-        samples.push((span_d, start_alt, speeds.cruise_at(span_d, start_alt)));
-        samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        samples.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
-
-        let cruise_tas = speeds.cruise_at(start_d_nm, cruise_alt);
-        let mut profile = Self {
-            wind,
-            gs_bias: 1.0,
-            start_alt,
-            start_d: start_d_nm,
-            cruise_alt,
-            cruise_tas,
-            samples: samples
-                .into_iter()
-                .map(|(d, a, t)| (d, a, t, 0.0))
-                .collect(),
-        };
-        profile.sample_headwinds();
-        profile
     }
 
-    /// Give every sample its headwind, adding a sample at each wind knot inside the profile so the
-    /// headwind between samples is linear, as the wind field is between knots. A sample the
-    /// cruise leg already holds keeps its TAS; one added here on the climb or descent interpolates
-    /// it.
-    fn sample_headwinds(&mut self) {
-        if self.wind.is_still() {
-            return;
-        }
-        let top = self.samples.last().map_or(0.0, |s| s.0);
-        let extra: Vec<(f64, f64, f64, f64)> = self
-            .wind
-            .knots
-            .iter()
-            .flat_map(knot_sample_distances)
-            .filter(|&d| d > 0.0 && d < top)
-            .map(|d| (d, self.alt_at(d), self.interp(d, |s| s.2), 0.0))
-            .collect();
-        self.samples.extend(extra);
+    /// The cruise true airspeed (kt) the flight is predicted at from where it starts.
+    pub fn cruise_tas(&self) -> f64 {
+        self.cruise_tas
+    }
+
+    /// Index of the sample the flight at `d` was last at: the nearest one at or beyond it.
+    fn behind(&self, d_nm: f64) -> usize {
         self.samples
-            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        self.samples.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
-        for s in &mut self.samples {
-            s.3 = self.wind.headwind(s.0, s.1).unwrap_or(0.0);
-        }
+            .partition_point(|s| s.d_nm < d_nm)
+            .min(self.samples.len() - 1)
     }
 
-    /// Anchor the prediction to the aircraft's observed groundspeed (#313): when it is established
-    /// at cruise (see [`ANCHOR_MIN_GS_KT`] / [`ANCHOR_ALT_TOLERANCE_FT`]), every predicted
-    /// groundspeed is scaled by `observed / predicted-cruise-groundspeed`, clamped to
-    /// ±[`ANCHOR_MAX_BIAS`]. Otherwise the profile is returned unchanged. One multiplier for the
-    /// whole remaining flight, derived from the latest poll — nothing is stored between polls.
-    pub fn anchor_to_observed_gs(mut self, observed_gs_kt: f64) -> Self {
-        let established = observed_gs_kt >= ANCHOR_MIN_GS_KT
-            && (self.start_alt - self.cruise_alt).abs() <= ANCHOR_ALT_TOLERANCE_FT;
-        if established {
-            // The cruise groundspeed where the aircraft is now, not the profile's speed at the exact
-            // start point: an aircraft a few hundred feet below cruise sits on the climb curve's
-            // (IAS-schedule) speed there.
-            let hw = self.wind.headwind(self.start_d, self.cruise_alt);
-            let predicted = effective_gs(self.cruise_tas, hw).max(GS_FLOOR_KT);
-            self.gs_bias =
-                (observed_gs_kt / predicted).clamp(1.0 - ANCHOR_MAX_BIAS, 1.0 + ANCHOR_MAX_BIAS);
-        }
-        self
-    }
-
-    /// The headwind (kt) the profile flies at `d`, at its altitude there; None in still air.
-    fn headwind_at(&self, d_nm: f64) -> Option<f64> {
-        (!self.wind.is_still()).then(|| self.interp(d_nm, |s| s.3))
-    }
-
-    /// The predicted groundspeed at `d`: interpolated TAS, corrected by the wind at `d` and the
-    /// profile's altitude there, anchoring bias applied, floored at [`GS_FLOOR_KT`]. One search
-    /// serves both the TAS and the headwind: this runs for every step of every timing query.
-    fn gs_at(&self, d_nm: f64) -> f64 {
-        let (i0, i1, t) = self.locate(d_nm);
-        let field = |f: fn(&(f64, f64, f64, f64)) -> f64| {
-            let (a, b) = (f(&self.samples[i0]), f(&self.samples[i1]));
-            a + t * (b - a)
-        };
-        let hw = (!self.wind.is_still()).then(|| field(|s| s.3));
-        (effective_gs(field(|s| s.2), hw) * self.gs_bias).max(GS_FLOOR_KT)
-    }
-
-    /// The samples bracketing distance-to-destination `d` and the fraction between them: equal
-    /// indices (and `t` 0) at a sample or outside the samples' span, which holds the end value.
-    fn locate(&self, d_nm: f64) -> (usize, usize, f64) {
-        let d = d_nm.max(0.0);
-        let last = self.samples.len().saturating_sub(1);
-        match self
-            .samples
-            .binary_search_by(|s| s.0.partial_cmp(&d).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            Ok(i) => (i, i, 0.0),
-            Err(0) => (0, 0, 0.0),
-            Err(i) if i > last => (last, last, 0.0),
-            Err(i) => {
-                let (s0, s1) = (&self.samples[i - 1], &self.samples[i]);
-                let t = if (s1.0 - s0.0).abs() < 1e-9 {
-                    0.0
-                } else {
-                    (d - s0.0) / (s1.0 - s0.0)
-                };
-                (i - 1, i, t)
-            }
-        }
-    }
-
-    /// Interpolate a sample field (`.1` altitude, `.2` TAS, `.3` headwind) at
-    /// distance-to-destination `d`.
-    fn interp(&self, d_nm: f64, field: impl Fn(&(f64, f64, f64, f64)) -> f64) -> f64 {
-        if self.samples.is_empty() {
-            return 0.0;
-        }
-        let (i0, i1, t) = self.locate(d_nm);
-        let (a, b) = (field(&self.samples[i0]), field(&self.samples[i1]));
-        a + t * (b - a)
-    }
-
-    /// Altitude (ft) at a distance-to-destination `d`.
+    /// Altitude (ft) at a distance `d` from the field.
     pub fn alt_at(&self, d_nm: f64) -> f64 {
-        self.interp(d_nm, |s| s.1)
+        let i = self.behind(d_nm);
+        let from = self.samples[i];
+        let Some(to) = i.checked_sub(1).map(|j| self.samples[j]) else {
+            return from.alt_ft;
+        };
+        let flown = (from.d_nm - d_nm).max(0.0) / (from.d_nm - to.d_nm);
+        from.alt_ft + flown * (to.alt_ft - from.alt_ft)
     }
 
-    /// Predicted ground speed (kt) at a distance-to-destination `d` — the phase-appropriate TAS
-    /// with wind (and any groundspeed anchoring) applied, floored at [`GS_FLOOR_KT`] exactly like
-    /// [`Self::time_between`]'s internal integration, so a displayed speed never reads below what
-    /// the paired ETA in the same row was actually timed against.
-    ///
-    /// No cap at the cruise groundspeed: [`Self::build`]'s samples are the truth, read the same way
-    /// here and by [`Self::time_between`] (#361). The cruise leg's TAS changes only with the air
-    /// temperature under a cruise Mach (#836).
+    /// Predicted groundspeed (kt) at `d`: the speed of the step that passes it, which is the speed
+    /// [`Self::time_between`] flew there (#361).
     pub fn ground_speed_at(&self, d_nm: f64) -> f64 {
-        self.gs_at(d_nm)
+        self.samples[self.behind(d_nm)].gs_kt
     }
 
-    /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`),
-    /// integrating the phase-appropriate groundspeed in small steps.
+    /// Seconds from the start to `d`.
+    fn sec_to(&self, d_nm: f64) -> f64 {
+        let s = self.samples[self.behind(d_nm)];
+        s.sec + (s.d_nm - d_nm.max(0.0)).max(0.0) / s.gs_kt * 3600.0
+    }
+
+    /// Seconds to fly from distance-to-destination `from_d` forward to `to_d` (`to_d < from_d`).
     pub fn time_between(&self, from_d: f64, to_d: f64) -> f64 {
-        let (hi, lo) = (from_d.max(to_d), from_d.min(to_d));
-        let span = hi - lo;
-        if span <= 0.0 {
-            return 0.0;
-        }
-        let n = (span / HORIZ_STEP_NM).ceil().max(1.0) as usize;
-        let step = span / n as f64;
-        let mut secs = 0.0;
-        for k in 0..n {
-            let mid = hi - (k as f64 + 0.5) * step;
-            secs += step / self.gs_at(mid) * 3600.0;
-        }
-        secs
+        (self.sec_to(to_d) - self.sec_to(from_d)).abs()
     }
 
-    /// Inverse of [`Self::time_between`] (#226's forward prediction scrubber): the
-    /// distance-to-destination reached after `elapsed_sec` starting from `from_d`. `time_between`
-    /// has no closed-form inverse (it's a numerical integral over climb/cruise/descent segments),
-    /// but it's monotonic in the target distance, so this binary-searches it the same way
-    /// [`triangle_peak`] searches a peak altitude. Clamped to `0.0` (already landed) when
-    /// `elapsed_sec` reaches or exceeds the full remaining flight time.
+    /// Inverse of [`Self::time_between`]: the distance to the field `elapsed_sec` after `from_d` (#226's
+    /// projection). `0.0`, landed, once `elapsed_sec` reaches the flying time left.
     pub fn distance_after(&self, from_d: f64, elapsed_sec: f64) -> f64 {
         if elapsed_sec <= 0.0 {
             return from_d;
         }
-        if elapsed_sec >= self.time_between(from_d, 0.0) {
+        let at = self.sec_to(from_d) + elapsed_sec;
+        if at >= self.samples[0].sec {
             return 0.0;
         }
-        let (mut lo, mut hi) = (0.0_f64, from_d);
-        for _ in 0..24 {
-            let mid = (lo + hi) / 2.0;
-            if self.time_between(from_d, mid) > elapsed_sec {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        (lo + hi) / 2.0
+        // Samples run from the field back, so elapsed time falls along them.
+        let s = self.samples[self.samples.partition_point(|s| s.sec > at)];
+        (s.d_nm - s.gs_kt * (at - s.sec) / 3600.0).max(0.0)
     }
 
-    /// The distance-weighted mean headwind (kt) the profile flies between `from_d` and `to_d`, each
-    /// step read at the profile's altitude there; a stretch the field does not cover counts as 0. A
-    /// summary for the debug view; the timing itself reads the wind point by point. None in still
-    /// air.
+    /// The distance-weighted mean headwind (kt) flown between `from_d` and `to_d`; a stretch the field
+    /// does not cover counts as 0. A summary for the debug view. None in still air.
     pub fn mean_headwind(&self, from_d: f64, to_d: f64) -> Option<f64> {
         let (hi, lo) = (from_d.max(to_d), from_d.min(to_d));
-        let n = ((hi - lo) / HORIZ_STEP_NM).ceil().max(1.0) as usize;
-        let step = (hi - lo) / n as f64;
-        let (mut sum, mut cnt) = (0.0, 0usize);
-        for k in 0..n {
-            let mid = hi - (k as f64 + 0.5) * step;
-            if let Some(hw) = self.headwind_at(mid) {
-                sum += hw;
-                cnt += 1;
+        if self.still {
+            return None;
+        }
+        let (mut sum, mut nm) = (0.0, 0.0);
+        for step in self.samples.windows(2) {
+            let flown = step[1].d_nm.min(hi) - step[0].d_nm.max(lo);
+            if flown > 0.0 {
+                sum += flown * step[1].headwind_kt;
+                nm += flown;
             }
         }
-        (cnt > 0).then_some(sum / cnt as f64)
+        (nm > 0.0).then_some(sum / nm)
     }
 }
 
-/// The groundspeed (kt) an aircraft flies `d_nm` from the field on its descent from
-/// `cruise_req_ft`, whatever it is doing now: the descent curve [`VerticalProfile::build`]
-/// integrates, read at `d_nm`, or the cruise speed when `d_nm` lies above the top of descent. The
-/// arguments are [`VerticalProfile::build`]'s; there is no groundspeed anchoring.
+/// Everything a flight's steps are decided from, settled once before the first step.
+struct Plan<'a> {
+    start: &'a FlightStart,
+    perf: Performance<'a>,
+    wind: &'a RouteWind,
+    elev_ft: f64,
+    /// The altitude the flight cruises at.
+    cruise_ft: f64,
+    /// The level it stops climbing at: [`Self::cruise_ft`], or its present altitude when it is level
+    /// below that.
+    level_ft: f64,
+    cruise_tas: f64,
+    /// Distance to the field (nm) inside which the flight descends.
+    descent_start_nm: f64,
+    /// The flight climbs until it meets the descent path, wherever that is.
+    climbing: bool,
+    /// Multiplier on every groundspeed.
+    gs_scale: f64,
+    /// A calibrated airspeed (kt) the flight is held to.
+    cas_ceiling: Option<f64>,
+}
+
+impl<'a> Plan<'a> {
+    fn new(
+        start: &'a FlightStart,
+        filed: &Filed,
+        perf: Performance<'a>,
+        wind: &'a RouteWind,
+    ) -> Self {
+        let elev_ft = filed.arr_elev_ft.max(0.0);
+        let cruise_ft = cruise_altitude(filed, perf, start.altitude().max(elev_ft));
+        let filed_cruise_tas = perf
+            .cruise_tas(filed.tas_kt, filed.altitude_ft(), cruise_ft)
+            .max(GS_FLOOR_KT);
+        let descent_start_nm = descent_start_nm(perf, cruise_ft, elev_ft, filed_cruise_tas);
+        let mut plan = Self {
+            start,
+            perf,
+            wind,
+            elev_ft,
+            cruise_ft,
+            level_ft: cruise_ft,
+            cruise_tas: filed_cruise_tas,
+            descent_start_nm,
+            climbing: false,
+            gs_scale: 1.0,
+            cas_ceiling: None,
+        };
+        if plan.is_level_below_cruise() {
+            plan.level_ft = plan.alt0();
+            plan.cruise_tas = perf
+                .cruise_tas(filed.tas_kt, filed.altitude_ft(), plan.level_ft)
+                .max(GS_FLOOR_KT);
+        }
+        plan.climbing = plan.nearer_departure()
+            && plan.below_level(plan.alt0())
+            && plan.alt0() < plan.path_ft(start.to_go_nm);
+        plan.gs_scale = plan.anchor_scale();
+        plan.hold_assigned_speed();
+        plan
+    }
+
+    fn alt0(&self) -> f64 {
+        self.start.altitude()
+    }
+
+    fn below_level(&self, alt_ft: f64) -> bool {
+        alt_ft < self.level_ft - CRUISE_BAND_FT
+    }
+
+    /// The descent path's altitude `d` from the field.
+    fn path_ft(&self, d_nm: f64) -> f64 {
+        self.elev_ft + DESCENT_FT_PER_NM * d_nm
+    }
+
+    /// On the ground, or still nearer its departure than its destination.
+    fn nearer_departure(&self) -> bool {
+        self.start
+            .airborne
+            .as_ref()
+            .is_none_or(|a| a.from_departure_nm.is_some_and(|d| d < self.start.to_go_nm))
+    }
+
+    /// One VATSIM position carries no vertical rate, so "level" is read from where the flight is: below
+    /// its cruise altitude, outside its descent, and well past where its type's climb would have ended.
+    fn is_level_below_cruise(&self) -> bool {
+        let from_departure = self
+            .start
+            .airborne
+            .as_ref()
+            .and_then(|a| a.from_departure_nm);
+        let Some(from_departure) = from_departure else {
+            return false;
+        };
+        self.start.to_go_nm > self.descent_start_nm
+            && self.below_level(self.alt0())
+            && from_departure > LEVEL_CLIMB_DISTANCES * self.perf.climb_distance_nm(self.cruise_ft)
+    }
+
+    /// The observed groundspeed over the predicted one, for a flight established at its level or above
+    /// it; 1 for any other.
+    fn anchor_scale(&self) -> f64 {
+        let Some(a) = &self.start.airborne else {
+            return 1.0;
+        };
+        let alt = self.alt0();
+        if self.below_level(alt) {
+            return 1.0;
+        }
+        let (_, temp) = self.wind.air(self.start.to_go_nm, alt);
+        let tas = self.perf.cruise_in(self.cruise_tas, alt, temp);
+        let predicted = effective_gs(tas, a.headwind_kt).max(GS_FLOOR_KT);
+        (a.gs_kt / predicted).clamp(1.0 - ANCHOR_MAX_BIAS, 1.0 + ANCHOR_MAX_BIAS)
+    }
+
+    /// Hold a flight that starts inside its descent, slower than predicted by more than the deadband, to
+    /// the speed it is flying. It replaces the anchoring scale, which would slow it twice. One with no known
+    /// departure may be climbing out of it, so it is not held.
+    fn hold_assigned_speed(&mut self) {
+        let known = |a: &&Airborne| a.from_departure_nm.is_some();
+        let Some(a) = self.start.airborne.as_ref().filter(known) else {
+            return;
+        };
+        if self.climbing || self.start.to_go_nm > self.descent_start_nm {
+            return;
+        }
+        let alt = self.alt0();
+        let (_, temp) = self.wind.air(self.start.to_go_nm, alt);
+        let predicted = self.perf.descent_tas(alt, temp, self.cruise_tas) * self.gs_scale;
+        let observed = tas_to_cas(a.gs_kt + a.headwind_kt.unwrap_or(0.0), alt);
+        if observed < tas_to_cas(predicted, alt) - ASSIGNED_SPEED_DEADBAND_KT {
+            self.cas_ceiling = Some(observed);
+            self.gs_scale = 1.0;
+        }
+    }
+
+    /// The flight's points from its start to the field.
+    fn fly(&self) -> Vec<Sample> {
+        let mut out = Vec::new();
+        let (mut d, mut alt, mut sec) = (self.start.to_go_nm.max(0.0), self.alt0(), 0.0);
+        let full_step_sec = STEP_SEC * (d / MAX_STEPPED_NM).max(1.0);
+        let mut climbing = self.climbing;
+        let (mut gs, mut headwind) = (self.cruise_tas, 0.0);
+        while d > 0.0 {
+            climbing &= alt < self.level_ft && alt < self.path_ft(d);
+            let phase = self.phase(d, alt, climbing);
+            let (hw, temp) = self.wind.air(d, alt);
+            let (tas, fpm) = self.speed(phase, alt, temp);
+            gs = (effective_gs(tas, hw) * self.gs_scale).max(GS_FLOOR_KT);
+            headwind = hw.unwrap_or(0.0);
+            out.push(Sample {
+                d_nm: d,
+                alt_ft: alt,
+                sec,
+                gs_kt: gs,
+                headwind_kt: headwind,
+            });
+            let step_nm = (gs * full_step_sec / 3600.0).min(d);
+            let step_sec = step_nm / gs * 3600.0;
+            d -= step_nm;
+            sec += step_sec;
+            alt = match phase {
+                Phase::Climb => (alt + fpm * step_sec / 60.0)
+                    .min(self.cruise_ft)
+                    .min(self.path_ft(d)),
+                // The last of the climb: a flight in the cruise band goes on to its level.
+                Phase::Cruise => alt.max(self.level_ft.min(self.path_ft(d))),
+                Phase::Descent => alt.min(self.path_ft(d)),
+            };
+        }
+        out.push(Sample {
+            d_nm: 0.0,
+            alt_ft: alt,
+            sec,
+            gs_kt: gs,
+            headwind_kt: headwind,
+        });
+        out
+    }
+
+    fn phase(&self, d_nm: f64, alt_ft: f64, climbing: bool) -> Phase {
+        if d_nm <= self.descent_start_nm && !climbing {
+            Phase::Descent
+        } else if self.below_level(alt_ft) {
+            Phase::Climb
+        } else {
+            Phase::Cruise
+        }
+    }
+
+    /// The true airspeed (kt) of a step in `phase` at `alt_ft`, and the climb rate (fpm) of a climb.
+    fn speed(&self, phase: Phase, alt_ft: f64, temp_k: Option<f64>) -> (f64, f64) {
+        let (tas, fpm) = match phase {
+            Phase::Climb => self.perf.climb(alt_ft, temp_k),
+            Phase::Cruise => (self.perf.cruise_in(self.cruise_tas, alt_ft, temp_k), 0.0),
+            Phase::Descent => (self.perf.descent_tas(alt_ft, temp_k, self.cruise_tas), 0.0),
+        };
+        match self.cas_ceiling {
+            Some(cas) => (tas.min(ias_to_tas(cas, alt_ft)), fpm),
+            None => (tas, fpm),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    Climb,
+    Cruise,
+    Descent,
+}
+
+/// The altitude a flight cruises at: its filing, held to the type's ceiling, never below `at_least_ft`.
+/// A type with no ceiling reads a filing above [`MAX_PLAUSIBLE_ALT_FT`] as unfiled, and flies an unfiled one
+/// no higher than it has a cruise speed for.
+fn cruise_altitude(filed: &Filed, perf: Performance, at_least_ft: f64) -> f64 {
+    let believed = filed.cruise_ft.filter(|ft| *ft <= MAX_PLAUSIBLE_ALT_FT);
+    let cruise_ft = match perf.ceiling_ft() {
+        Some(ceiling) => filed.altitude_ft().min(ceiling),
+        None => believed.unwrap_or_else(|| UNFILED_CRUISE_FT.min(perf.cruise_top_ft())),
+    };
+    cruise_ft.max(at_least_ft)
+}
+
+/// Distance to the field (nm) at which descent speeds start: the type's own descent plus its margin, and
+/// never inside the point where the descent path reaches cruise.
+fn descent_start_nm(perf: Performance, cruise_ft: f64, elev_ft: f64, cruise_tas: f64) -> f64 {
+    let own = perf.descent_distance_nm(cruise_ft, elev_ft, cruise_tas) + DESCENT_MARGIN_NM;
+    own.max((cruise_ft - elev_ft) / DESCENT_FT_PER_NM)
+}
+
+/// The groundspeed (kt) an aircraft flies `d_nm` from the field on its descent, whatever it is doing now:
+/// on the descent path at its descent speed, or at its cruise speed when `d_nm` lies above the top of
+/// descent. There is no anchoring and no assigned speed.
 pub fn descent_ground_speed_at(
     d_nm: f64,
-    arr_elev_ft: f64,
-    cruise_req_ft: f64,
-    cruise_tas_kt: f64,
-    profile: &AircraftProfile,
+    filed: &Filed,
+    perf: Performance,
     wind: &RouteWind,
 ) -> f64 {
-    let arr_elev = arr_elev_ft.max(0.0);
-    let cruise_alt = cruise_req_ft.min(profile.service_ceiling_ft).max(arr_elev);
-    let speeds = Speeds {
-        profile,
-        wind,
-        cruise_tas: cruise_tas_kt.max(GS_FLOOR_KT),
+    let elev = filed.arr_elev_ft.max(0.0);
+    let cruise_ft = cruise_altitude(filed, perf, elev);
+    let cruise_tas = perf
+        .cruise_tas(filed.tas_kt, filed.altitude_ft(), cruise_ft)
+        .max(GS_FLOOR_KT);
+    let alt = (elev + DESCENT_FT_PER_NM * d_nm).min(cruise_ft);
+    let (hw, temp) = wind.air(d_nm, alt);
+    let tas = if d_nm <= descent_start_nm(perf, cruise_ft, elev, cruise_tas) {
+        perf.descent_tas(alt, temp, cruise_tas)
+    } else {
+        perf.cruise_in(cruise_tas, alt, temp)
     };
-    let desc = integrate_descent(arr_elev, cruise_alt, &speeds);
-    let (alt, tas) = match desc.iter().position(|s| s.0 >= d_nm) {
-        Some(0) => (desc[0].1, desc[0].2),
-        Some(i) => {
-            let ((d0, a0, t0), (d1, a1, t1)) = (desc[i - 1], desc[i]);
-            let f = if d1 > d0 {
-                (d_nm - d0) / (d1 - d0)
-            } else {
-                0.0
-            };
-            (a0 + f * (a1 - a0), t0 + f * (t1 - t0))
-        }
-        None => (cruise_alt, speeds.cruise_at(d_nm, cruise_alt)),
-    };
-    step_gs(tas, wind.headwind(d_nm, alt))
-}
-
-/// The speed schedule a profile integrates with: the aircraft's phases, the wind along the route,
-/// and the capped cruise TAS.
-struct Speeds<'a> {
-    profile: &'a AircraftProfile,
-    wind: &'a RouteWind,
-    cruise_tas: f64,
-}
-
-impl Speeds<'_> {
-    /// The headwind and the air temperature (K) at `(d, alt)`: the field's temperature where it
-    /// has one, ISA otherwise.
-    fn air(&self, d: f64, alt: f64) -> (Option<f64>, f64) {
-        let (hw, temp) = self.wind.air(d, alt);
-        (hw, temp.unwrap_or_else(|| isa_temp_k(alt.max(0.0))))
-    }
-
-    /// Cruise TAS in air at `temp_k`, held down to the cruise Mach when one is set (Mach governs
-    /// high up).
-    fn cruise_in(&self, temp_k: f64) -> f64 {
-        match self.profile.cruise_mach {
-            Some(m) => self.cruise_tas.min(mach_to_tas_at(m, temp_k)),
-            None => self.cruise_tas,
-        }
-    }
-
-    /// The descent schedule at `alt` in air at `temp_k`, never faster than the aircraft cruises
-    /// there (#361).
-    ///
-    /// Without the cap, a profile with no `desc_mach` resolves its IAS schedule to a TAS well above
-    /// cruise up high (the default profile's 290 KIAS is 521 kt TAS at FL350 against a 440 kt
-    /// cruise). The descent curve's top sample then sits at cruise altitude carrying that number,
-    /// and `interp` ramps the cruise leg between two speeds at the same altitude, so `time_between`
-    /// integrated an aircraft accelerating through cruise.
-    fn descent_in(&self, alt: f64, temp_k: f64) -> f64 {
-        let p = self.profile;
-        phase_tas(p.desc_ias_lo, p.desc_ias_hi, p.desc_mach, alt, temp_k)
-            .min(self.cruise_in(temp_k))
-    }
-
-    /// The climb schedule at `alt` in air at `temp_k`.
-    fn climb_in(&self, alt: f64, temp_k: f64) -> f64 {
-        let p = self.profile;
-        phase_tas(p.climb_ias_lo, p.climb_ias_hi, p.climb_mach, alt, temp_k)
-    }
-
-    /// Cruise TAS at `(d, alt)`.
-    fn cruise_at(&self, d: f64, alt: f64) -> f64 {
-        self.cruise_in(self.air(d, alt).1)
-    }
-
-    /// The descent schedule at `(d, alt)`.
-    fn descent_at(&self, d: f64, alt: f64) -> f64 {
-        self.descent_in(alt, self.air(d, alt).1)
-    }
-
-    /// The climb schedule at `(d, alt)`.
-    fn climb_at(&self, d: f64, alt: f64) -> f64 {
-        self.climb_in(alt, self.air(d, alt).1)
-    }
-}
-
-/// Groundspeed for a step flown at `tas` into `headwind`.
-fn step_gs(tas: f64, headwind: Option<f64>) -> f64 {
-    effective_gs(tas, headwind).max(GS_FLOOR_KT)
-}
-
-/// Integrate the descent from the field (`lo_alt`) up to `hi_alt` at the profile's descent rate,
-/// returning `(distance_to_destination, altitude, true_airspeed)` samples. Each step's groundspeed
-/// takes the wind and temperature at the step's own distance from the field and altitude.
-fn integrate_descent(lo_alt: f64, hi_alt: f64, speeds: &Speeds) -> Vec<(f64, f64, f64)> {
-    let fpm = speeds.profile.desc_fpm;
-    let mut out = vec![(0.0, lo_alt, speeds.descent_at(0.0, lo_alt))];
-    if hi_alt <= lo_alt || fpm <= 0.0 {
-        return out;
-    }
-    let mut alt = lo_alt;
-    let mut dist = 0.0;
-    while alt < hi_alt {
-        let top = (alt + VERT_STEP_FT).min(hi_alt);
-        let mid = (alt + top) / 2.0;
-        let step_sec = (top - alt) / fpm * 60.0;
-        let (hw, temp) = speeds.air(dist, mid);
-        dist += step_gs(speeds.descent_in(mid, temp), hw) * step_sec / 3600.0;
-        alt = top;
-        out.push((dist, alt, speeds.descent_at(dist, alt)));
-    }
-    out
-}
-
-/// Integrate a climb from `lo_alt` to `hi_alt` with the profile's per-band climb rates
-/// (`climb_fpm_lo` below 10,000 ft, `climb_fpm_hi` above), starting `start_d` from the destination.
-/// Returns `(distance_flown_from_start, altitude, tas)`; each step reads the wind and temperature
-/// at `start_d − distance_flown` and its altitude.
-fn integrate_climb(
-    lo_alt: f64,
-    hi_alt: f64,
-    start_d: f64,
-    speeds: &Speeds,
-) -> Vec<(f64, f64, f64)> {
-    let p = speeds.profile;
-    let mut out = vec![(0.0, lo_alt, speeds.climb_at(start_d, lo_alt))];
-    if hi_alt <= lo_alt {
-        return out;
-    }
-    let mut alt = lo_alt;
-    let mut dist = 0.0;
-    while alt < hi_alt {
-        let top = (alt + VERT_STEP_FT).min(hi_alt);
-        let mid = (alt + top) / 2.0;
-        let fpm = if mid < 10_000.0 {
-            p.climb_fpm_lo
-        } else {
-            p.climb_fpm_hi
-        }
-        .max(1.0);
-        let step_sec = (top - alt) / fpm * 60.0;
-        let (hw, temp) = speeds.air(start_d - dist, mid);
-        dist += step_gs(speeds.climb_in(mid, temp), hw) * step_sec / 3600.0;
-        alt = top;
-        out.push((dist, alt, speeds.climb_at(start_d - dist, alt)));
-    }
-    out
-}
-
-/// For a short hop with no room to cruise, find the altitude where climb-from-start and
-/// descent-to-field meet within `route_nm` (binary search on the peak altitude).
-fn triangle_peak(
-    start_alt: f64,
-    arr_elev: f64,
-    cruise_cap: f64,
-    route_nm: f64,
-    speeds: &Speeds,
-) -> f64 {
-    let dist_for = |peak: f64| -> f64 {
-        let c = integrate_climb(start_alt, peak, route_nm, speeds)
-            .last()
-            .map(|&(d, ..)| d)
-            .unwrap_or(0.0);
-        let d = integrate_descent(arr_elev, peak, speeds)
-            .last()
-            .map(|&(dd, ..)| dd)
-            .unwrap_or(0.0);
-        c + d
-    };
-    let (mut lo, mut hi) = (start_alt.max(arr_elev), cruise_cap);
-    for _ in 0..24 {
-        let mid = (lo + hi) / 2.0;
-        if dist_for(mid) > route_nm {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    (lo + hi) / 2.0
+    effective_gs(tas, hw).max(GS_FLOOR_KT)
 }
 
 #[cfg(test)]
@@ -953,10 +916,10 @@ mod tests {
         assert_eq!(filed_altitude_ft("A045"), Some(4500.0));
     }
 
-    /// Unknown is unknown for the band and 35,000 ft for the timing; a filing under 1,000 ft is
-    /// unknown on both, at the boundary as well as below it.
+    /// Unknown is unknown to the band and the model, and shown as 35,000 ft; a filing under 1,000 ft is
+    /// unknown, at the boundary as well as below it.
     #[test]
-    fn an_unreadable_filing_is_unknown_to_the_band_and_35000_ft_to_the_model() {
+    fn an_unreadable_filing_is_unknown_and_shown_as_35000_ft() {
         for s in ["", "VFR", "0", "8", "700"] {
             assert_eq!(filed_altitude_ft(s), None, "{s:?}");
             assert_eq!(parse_alt_ft(s), 35000.0, "{s:?}");
@@ -989,6 +952,55 @@ mod tests {
 
     // --- vertical-profile model ---
 
+    /// `start_alt` at `start_d` from the field with no groundspeed read: a departure, or the raw profile
+    /// of a flight already up there.
+    fn flown(
+        start_alt: f64,
+        start_d: f64,
+        arr_elev_ft: f64,
+        cruise_ft: f64,
+        tas_kt: f64,
+        p: &AircraftProfile,
+        wind: RouteWind,
+    ) -> VerticalProfile {
+        let start = FlightStart {
+            alt_ft: start_alt,
+            to_go_nm: start_d,
+            airborne: None,
+        };
+        let filed = Filed {
+            cruise_ft: Some(cruise_ft),
+            tas_kt,
+            arr_elev_ft,
+        };
+        VerticalProfile::build(&start, &filed, Performance::Row(p), wind)
+    }
+
+    /// A flight at FL350, `start_d` out, at `gs` along the route.
+    fn anchored(
+        start_d: f64,
+        tas_kt: f64,
+        p: &AircraftProfile,
+        wind: RouteWind,
+        gs: f64,
+    ) -> VerticalProfile {
+        let start = FlightStart {
+            alt_ft: 35_000.0,
+            to_go_nm: start_d,
+            airborne: Some(Airborne {
+                gs_kt: gs,
+                headwind_kt: wind.headwind(start_d, 35_000.0),
+                from_departure_nm: None,
+            }),
+        };
+        let filed = Filed {
+            cruise_ft: Some(35_000.0),
+            tas_kt,
+            arr_elev_ft: 0.0,
+        };
+        VerticalProfile::build(&start, &filed, Performance::Row(p), wind)
+    }
+
     /// A light-piston profile: slow, low ceiling, gentle climb — the C172 case.
     fn c172() -> AircraftProfile {
         AircraftProfile {
@@ -1004,6 +1016,14 @@ mod tests {
             desc_ias_hi: 110.0,
             desc_ias_lo: 90.0,
             desc_fpm: 500.0,
+        }
+    }
+
+    /// [`b77w`] with no cruise TAS of its own, so its Mach is what holds a 520 kt filing.
+    fn mach_cruiser() -> AircraftProfile {
+        AircraftProfile {
+            cruise_tas: None,
+            ..b77w()
         }
     }
 
@@ -1039,8 +1059,8 @@ mod tests {
     fn light_aircraft_is_slower_than_a_heavy_jet() {
         // Same 200 nm departure leg (surface → cruise). The C172 must take far longer than the 777.
         let hw = RouteWind::still();
-        let cessna = VerticalProfile::build(0.0, 200.0, 0.0, 12000.0, 110.0, &c172(), hw.clone());
-        let heavy = VerticalProfile::build(0.0, 200.0, 0.0, 37000.0, 490.0, &b77w(), hw.clone());
+        let cessna = flown(0.0, 200.0, 0.0, 12000.0, 110.0, &c172(), hw.clone());
+        let heavy = flown(0.0, 200.0, 0.0, 37000.0, 490.0, &b77w(), hw.clone());
         let t_c = cessna.time_between(200.0, 0.0);
         let t_h = heavy.time_between(200.0, 0.0);
         assert!(
@@ -1054,8 +1074,7 @@ mod tests {
         // An airborne jet at FL350, 300 nm out. Altitude should be at cruise far out, and well
         // below cruise close in (past top-of-descent) — i.e. the descent phase exists.
         let p = b77w();
-        let vp =
-            VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 480.0, &p, RouteWind::still());
+        let vp = flown(35000.0, 300.0, 0.0, 35000.0, 480.0, &p, RouteWind::still());
         assert!(
             (vp.alt_at(300.0) - 35000.0).abs() < 1500.0,
             "cruising far out"
@@ -1070,8 +1089,7 @@ mod tests {
     #[test]
     fn service_ceiling_caps_cruise() {
         // Filed FL350 but a 14,000 ft ceiling → the C172 never models above its ceiling.
-        let vp =
-            VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 110.0, &c172(), RouteWind::still());
+        let vp = flown(0.0, 300.0, 0.0, 35000.0, 110.0, &c172(), RouteWind::still());
         let peak = (0..=300).map(|d| vp.alt_at(d as f64)).fold(0.0, f64::max);
         assert!(
             peak <= 14000.5,
@@ -1083,7 +1101,7 @@ mod tests {
 
     #[test]
     fn distance_after_round_trips_through_time_between() {
-        let vp = VerticalProfile::build(
+        let vp = flown(
             35000.0,
             300.0,
             0.0,
@@ -1104,15 +1122,13 @@ mod tests {
 
     #[test]
     fn distance_after_at_zero_elapsed_is_the_starting_distance() {
-        let vp =
-            VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), RouteWind::still());
+        let vp = flown(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), RouteWind::still());
         assert!((vp.distance_after(300.0, 0.0) - 300.0).abs() < 1e-6);
     }
 
     #[test]
     fn distance_after_clamps_to_zero_once_the_flight_would_have_landed() {
-        let vp =
-            VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), RouteWind::still());
+        let vp = flown(0.0, 300.0, 0.0, 35000.0, 480.0, &b77w(), RouteWind::still());
         let total = vp.time_between(300.0, 0.0);
         assert_eq!(vp.distance_after(300.0, total), 0.0);
         assert_eq!(vp.distance_after(300.0, total + 3600.0), 0.0);
@@ -1122,8 +1138,7 @@ mod tests {
     fn short_hop_never_reaches_cruise() {
         // 40 nm hop: a heavy can't climb to FL370 and back down in the distance, so the modeled
         // peak altitude stays well under the requested cruise (the triangle case).
-        let vp =
-            VerticalProfile::build(0.0, 40.0, 0.0, 37000.0, 490.0, &b77w(), RouteWind::still());
+        let vp = flown(0.0, 40.0, 0.0, 37000.0, 490.0, &b77w(), RouteWind::still());
         let peak = (0..=40).map(|d| vp.alt_at(d as f64)).fold(0.0, f64::max);
         assert!(
             peak < 30000.0,
@@ -1137,7 +1152,7 @@ mod tests {
 
     #[test]
     fn headwind_slows_the_vertical_model_too() {
-        let still = VerticalProfile::build(
+        let still = flown(
             35000.0,
             400.0,
             0.0,
@@ -1146,7 +1161,7 @@ mod tests {
             &b77w(),
             RouteWind::still(),
         );
-        let hw = VerticalProfile::build(
+        let hw = flown(
             35000.0,
             400.0,
             0.0,
@@ -1162,7 +1177,7 @@ mod tests {
     fn ground_speed_at_reflects_headwind_and_matches_alt_at_s_own_phase() {
         // Same cruise-altitude comparison as `headwind_slows_the_vertical_model_too`, but on the
         // per-point speed accessor the #225 per-fix debug table uses directly.
-        let still = VerticalProfile::build(
+        let still = flown(
             35000.0,
             400.0,
             0.0,
@@ -1171,7 +1186,7 @@ mod tests {
             &b77w(),
             RouteWind::still(),
         );
-        let hw = VerticalProfile::build(
+        let hw = flown(
             35000.0,
             400.0,
             0.0,
@@ -1183,7 +1198,7 @@ mod tests {
         assert!(hw.ground_speed_at(200.0) < still.ground_speed_at(200.0));
 
         // Near the field on a descent, ground speed should be well below the cruise TAS.
-        let descending = VerticalProfile::build(
+        let descending = flown(
             35000.0,
             300.0,
             0.0,
@@ -1209,7 +1224,7 @@ mod tests {
         // A slow GA aircraft's low descent IAS, plus a headwind, pushes `effective_gs`'s own
         // `tas * 0.4` clamp (≈36kt here) below GS_FLOOR_KT — exactly the case `time_between`'s
         // internal integration floors but `ground_speed_at` didn't.
-        let slow_with_headwind = VerticalProfile::build(
+        let slow_with_headwind = flown(
             6000.0,
             30.0,
             0.0,
@@ -1230,7 +1245,7 @@ mod tests {
         // Sanity that the Default profile behaves like a climbing jet: a surface departure over
         // 300 nm takes longer than the same distance flown entirely at cruise.
         let p = AircraftProfile::default();
-        let dep = VerticalProfile::build(0.0, 300.0, 0.0, 35000.0, 450.0, &p, RouteWind::still());
+        let dep = flown(0.0, 300.0, 0.0, 35000.0, 450.0, &p, RouteWind::still());
         let climb_time = dep.time_between(300.0, 0.0);
         let pure_cruise = 300.0 / 450.0 * 3600.0;
         assert!(
@@ -1240,10 +1255,8 @@ mod tests {
     }
 
     /// Regression (#355): anywhere the profile is still at cruise altitude, `ground_speed_at` must
-    /// not read above the cruise groundspeed. `build` lays the descent curve down first and its top
-    /// sample carries the *descent* schedule's TAS at cruise altitude (~519 kt for this profile at
-    /// FL350 against a 440 kt cruise), while the only cruise sample sits at top-of-climb — so the
-    /// raw interpolation ramps TAS across a leg whose altitude is flat. FCA MIT spacing is sized
+    /// not read above the cruise groundspeed. The *descent* schedule's TAS at cruise altitude is higher
+    /// (~521 kt for this profile at FL350 against a 440 kt cruise). FCA MIT spacing is sized
     /// from this number, so an un-capped read under-provisions every enroute crossing: a 20 MIT fix
     /// 150 nm out would get `20 / 508 * 3600 = 142 s`, which the aircraft flies at its real 440 kt
     /// for 17.3 nm, not 20.
@@ -1251,7 +1264,7 @@ mod tests {
     fn ground_speed_at_never_reads_above_cruise_while_still_at_cruise_altitude() {
         let profile = AircraftProfile::default();
         let cruise_tas = 440.0;
-        let vp = VerticalProfile::build(
+        let vp = flown(
             35_000.0,
             300.0,
             0.0,
@@ -1286,72 +1299,14 @@ mod tests {
         );
     }
 
-    // ---- groundspeed anchoring (#313) ----
-
-    /// Still-air Default profile established at FL350 cruising 450 kt TAS, 400 nm out.
-    fn at_cruise(start_alt: f64) -> VerticalProfile {
-        VerticalProfile::build(
-            start_alt,
-            400.0,
-            0.0,
-            35000.0,
-            450.0,
-            &AircraftProfile::default(),
-            RouteWind::still(),
-        )
-    }
-
-    #[test]
-    fn anchoring_scales_the_prediction_to_the_observed_groundspeed() {
-        let raw = at_cruise(35000.0);
-        let anchored = at_cruise(35000.0).anchor_to_observed_gs(495.0); // 10% faster than profile
-        assert!((anchored.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
-        let (t_raw, t_anchored) = (
-            raw.time_between(400.0, 0.0),
-            anchored.time_between(400.0, 0.0),
-        );
-        assert!(
-            (t_anchored - t_raw / 1.1).abs() < 1.0,
-            "anchored {t_anchored}s should be ~{}s",
-            t_raw / 1.1
-        );
-    }
-
-    #[test]
-    fn anchoring_bias_is_clamped_to_fifteen_percent() {
-        let fast = at_cruise(35000.0).anchor_to_observed_gs(450.0 * 1.4);
-        assert!((fast.ground_speed_at(400.0) - 450.0 * 1.15).abs() < 1e-6);
-        let slow = at_cruise(35000.0).anchor_to_observed_gs(450.0 * 0.6);
-        assert!((slow.ground_speed_at(400.0) - 450.0 * 0.85).abs() < 1e-6);
-    }
-
-    #[test]
-    fn anchoring_trusts_only_an_aircraft_established_at_cruise() {
-        let raw_time = |alt: f64| at_cruise(alt).time_between(400.0, 0.0);
-        let anchored_time = |alt: f64, gs: f64| {
-            at_cruise(alt)
-                .anchor_to_observed_gs(gs)
-                .time_between(400.0, 0.0)
-        };
-
-        // Climbing through FL240 at 400 kt: not established at cruise, flies the raw profile.
-        assert_eq!(anchored_time(24000.0, 400.0), raw_time(24000.0));
-        // At cruise but below the minimum trusted groundspeed.
-        assert_eq!(anchored_time(35000.0, 240.0), raw_time(35000.0));
-        // Just outside / inside the 300 ft cruise-altitude tolerance.
-        assert_eq!(anchored_time(34650.0, 495.0), raw_time(34650.0));
-        assert!(anchored_time(34750.0, 495.0) < raw_time(34750.0));
-    }
-
     // ---- arrival-field elevation (#315) ----
 
     #[test]
     fn a_high_field_arrival_starts_its_descent_nearer_the_field() {
         // Same cruise and route into a sea-level field and into DEN (5,431 ft).
         let p = AircraftProfile::default();
-        let sea =
-            VerticalProfile::build(35000.0, 300.0, 0.0, 35000.0, 450.0, &p, RouteWind::still());
-        let den = VerticalProfile::build(
+        let sea = flown(35000.0, 300.0, 0.0, 35000.0, 450.0, &p, RouteWind::still());
+        let den = flown(
             35000.0,
             300.0,
             5431.0,
@@ -1382,9 +1337,8 @@ mod tests {
     fn a_departure_into_a_high_field_still_climbs_from_its_own_altitude() {
         // A sea-level departure into DEN must not start its climb at DEN's elevation.
         let p = AircraftProfile::default();
-        let from_sea_level =
-            VerticalProfile::build(0.0, 300.0, 5431.0, 35000.0, 450.0, &p, RouteWind::still());
-        let from_field_height = VerticalProfile::build(
+        let from_sea_level = flown(0.0, 300.0, 5431.0, 35000.0, 450.0, &p, RouteWind::still());
+        let from_field_height = flown(
             5431.0,
             300.0,
             5431.0,
@@ -1402,20 +1356,14 @@ mod tests {
 
     // ---- #361: the cruise leg is flat ----------------------------------------------------------
 
-    /// The regression this fix exists for. `build` assembles the descent curve first, and with no
-    /// `desc_mach` the default profile's 290 KIAS schedule resolves to ~521 kt TAS at FL350 —
-    /// above the 440 kt cruise. That number used to land on the descent curve's **top** sample, at
-    /// cruise altitude, while the only cruise sample sat at top-of-climb with cruise TAS, so
-    /// `interp` ramped between two speeds at the *same* altitude for the whole cruise leg
-    /// (measured 440 → 462 → 485 → 508 → 519 kt at a flat 35,000 ft).
-    ///
-    /// Removing `.min(self.cruise_in(temp_k))` from `Speeds::descent_in` restores that ramp and
-    /// fails here.
+    /// With no `desc_mach` the default profile's 290 KIAS descent schedule resolves to ~521 kt TAS at
+    /// FL350, above the 440 kt cruise, and descent speeds start before the path leaves FL350.
+    /// Removing the cruise cap from `Performance::descent_tas` fails here.
     #[test]
     fn the_cruise_leg_is_flat_at_cruise_speed() {
         let profile = AircraftProfile::default();
         let cruise_tas = 440.0;
-        let vp = VerticalProfile::build(
+        let vp = flown(
             35_000.0,
             300.0,
             0.0,
@@ -1434,21 +1382,18 @@ mod tests {
                 vp.alt_at(d)
             );
             assert!(
-                (vp.gs_at(d) - cruise_gs).abs() < 1.0,
+                (vp.ground_speed_at(d) - cruise_gs).abs() < 1.0,
                 "d={d}: the cruise leg must be flat at {cruise_gs:.0} kt, got {:.1} kt",
-                vp.gs_at(d)
+                vp.ground_speed_at(d)
             );
         }
     }
 
-    /// On a hop too short to cruise, `triangle_peak` searches for the altitude where the climb and
-    /// the descent meet, and the profile then flies both legs to it. The search times the descent
-    /// on the schedule the profile flies, capped at the cruise speed (#836), so the two legs meet at
-    /// one point. Searching on the uncapped schedule finds a lower peak whose capped descent ends
-    /// short of the climb, and the profile levels off between them.
+    /// A hop too short to cruise climbs until it meets the descent path and turns down there, with no
+    /// level-off between.
     #[test]
     fn a_short_hop_climbs_and_descends_to_one_peak() {
-        let vp = VerticalProfile::build(
+        let vp = flown(
             0.0,
             60.0,
             0.0,
@@ -1460,7 +1405,7 @@ mod tests {
         let step = 0.01;
         let alts: Vec<f64> = (0..=6_000).map(|i| vp.alt_at(i as f64 * step)).collect();
         let peak = alts.iter().copied().fold(f64::MIN, f64::max);
-        assert!(peak < 30_000.0, "a triangle hop, peak {peak:.0} ft");
+        assert!(peak < 30_000.0, "a short hop, peak {peak:.0} ft");
         let level_nm = alts.iter().filter(|&&a| a > peak - 1.0).count() as f64 * step;
         assert!(
             level_nm < 0.5,
@@ -1476,7 +1421,7 @@ mod tests {
         let profile = AircraftProfile::default();
         let cruise_tas = 440.0;
         let route = 300.0;
-        let vp = VerticalProfile::build(
+        let vp = flown(
             35_000.0,
             route,
             0.0,
@@ -1490,9 +1435,9 @@ mod tests {
         let mut d = route;
         while d >= 0.0 {
             assert!(
-                vp.gs_at(d) <= cruise_gs + 1.0,
+                vp.ground_speed_at(d) <= cruise_gs + 1.0,
                 "d={d:.0}: predicted {:.1} kt exceeds the {cruise_gs:.0} kt cruise groundspeed",
-                vp.gs_at(d)
+                vp.ground_speed_at(d)
             );
             d -= 5.0;
         }
@@ -1513,7 +1458,7 @@ mod tests {
     #[test]
     fn the_descent_schedule_still_governs_below_cruise() {
         let profile = AircraftProfile::default();
-        let vp = VerticalProfile::build(
+        let vp = flown(
             35_000.0,
             300.0,
             0.0,
@@ -1523,80 +1468,20 @@ mod tests {
             RouteWind::still(),
         );
 
-        let near_field = vp.gs_at(20.0);
+        let near_field = vp.ground_speed_at(20.0);
         assert!(
             (250.0..320.0).contains(&near_field),
             "a fix 20 nm out should read the arrival descent speed, got {near_field:.1} kt"
         );
         assert!(
-            vp.gs_at(20.0) < vp.gs_at(80.0) && vp.gs_at(80.0) < vp.gs_at(150.0),
-            "the descent must still slow monotonically toward the field: 20nm={:.1} 80nm={:.1} \
+            vp.ground_speed_at(20.0) < vp.ground_speed_at(50.0)
+                && vp.ground_speed_at(50.0) < vp.ground_speed_at(150.0),
+            "the descent must still slow monotonically toward the field: 20nm={:.1} 50nm={:.1} \
              150nm={:.1}",
-            vp.gs_at(20.0),
-            vp.gs_at(80.0),
-            vp.gs_at(150.0)
+            vp.ground_speed_at(20.0),
+            vp.ground_speed_at(50.0),
+            vp.ground_speed_at(150.0)
         );
-    }
-
-    /// #813: the groundspeed the descent schedule gives `d` nm from the field is the speed a
-    /// profile built from cruise far enough out (no triangle; top of descent ~119 nm) flies there,
-    /// in still air and into a headwind. The literals are hand-worked from the default profile
-    /// (1,800 fpm, 250/290 KIAS, ISA): 363.4 kt at 40 nm in still air (~14,600 ft there); 341.2 kt
-    /// into 30 kt, which also shortens every descent step (~15,900 ft there).
-    #[test]
-    fn descent_ground_speed_at_reads_the_descent_schedule_from_cruise() {
-        let p = AircraftProfile::default();
-        let reference = VerticalProfile::build(
-            35_000.0,
-            300.0,
-            0.0,
-            35_000.0,
-            440.0,
-            &p,
-            RouteWind::still(),
-        );
-        let still = RouteWind::still();
-        let at_40 = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &still);
-        assert!(
-            (at_40 - reference.ground_speed_at(40.0)).abs() < 1e-6,
-            "{at_40}"
-        );
-        assert!((at_40 - 363.4).abs() < 0.5, "{at_40}");
-        let at_150 = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &still);
-        assert_eq!(at_150, 440.0, "above the top of descent it cruises");
-        assert!((at_150 - reference.ground_speed_at(150.0)).abs() < 1e-6);
-
-        let head = RouteWind::uniform(30.0);
-        let windy_reference =
-            VerticalProfile::build(35_000.0, 300.0, 0.0, 35_000.0, 440.0, &p, head.clone());
-        let windy = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &head);
-        assert!(
-            (windy - windy_reference.ground_speed_at(40.0)).abs() < 1e-6,
-            "{windy}"
-        );
-        assert!((windy - 341.2).abs() < 0.5, "{windy}");
-
-        // The wind is read at the descent's own altitude 40 nm out (~14,600 ft): 80 kt on the nose
-        // from FL300 up and calm below 20,000 ft leaves it at the still-air speed, while above the
-        // top of descent the cruise leg flies into the full 80 kt (440 - 80).
-        let aloft = RouteWind::new(
-            [0.0, 300.0]
-                .into_iter()
-                .map(|d| WindKnot {
-                    d_nm: d,
-                    levels: vec![
-                        (0.0, 0.0, None),
-                        (20_000.0, 0.0, None),
-                        (30_000.0, 80.0, None),
-                        (45_000.0, 80.0, None),
-                    ],
-                })
-                .collect(),
-        );
-        let low_calm = descent_ground_speed_at(40.0, 0.0, 35_000.0, 440.0, &p, &aloft);
-        assert!((low_calm - at_40).abs() < 1e-9, "{low_calm} vs {at_40}");
-        let high_wind = descent_ground_speed_at(150.0, 0.0, 35_000.0, 440.0, &p, &aloft);
-        assert_eq!(high_wind, 360.0, "positive control: the wind aloft is live");
     }
 
     // ---- #836: wind and temperature read per segment, per altitude ----------------------------
@@ -1636,16 +1521,7 @@ mod tests {
         profile: &AircraftProfile,
         wind: RouteWind,
     ) -> VerticalProfile {
-        VerticalProfile::build(35_000.0, start_d, 0.0, 35_000.0, tas, profile, wind)
-    }
-
-    /// The furthest distance-to-destination still below cruise: top of descent.
-    fn top_of_descent(vp: &VerticalProfile, max_d: f64) -> f64 {
-        let mut d = 0.0;
-        while d < max_d && vp.alt_at(d + 0.1) < 34_999.0 {
-            d += 0.1;
-        }
-        d
+        flown(35_000.0, start_d, 0.0, 35_000.0, tas, profile, wind)
     }
 
     // AC3: an aircraft's wind at FL350 does not apply on its approach at 3,000 ft.
@@ -1657,7 +1533,8 @@ mod tests {
         let one_value = cruise(300.0, 440.0, &p, RouteWind::uniform(80.0));
         assert!((windy.ground_speed_at(250.0) - 360.0).abs() < 0.5);
         assert!((still.ground_speed_at(250.0) - 440.0).abs() < 0.5);
-        assert!((windy.ground_speed_at(5.0) - still.ground_speed_at(5.0)).abs() < 0.5);
+        // The two step grids differ by a step's altitude, about 1 kt, not by any wind.
+        assert!((windy.ground_speed_at(5.0) - still.ground_speed_at(5.0)).abs() < 3.0);
         let t = windy.time_between(300.0, 0.0);
         assert!(t > still.time_between(300.0, 0.0));
         assert!(
@@ -1691,35 +1568,15 @@ mod tests {
         let p = AircraftProfile::default();
         let wind = flat(&[
             (0.0, 0.0, None),
-            (199.0, 0.0, None),
-            (201.0, 100.0, None),
+            (274.0, 0.0, None),
+            (276.0, 100.0, None),
             (400.0, 100.0, None),
         ]);
-        let per_segment = cruise(400.0, 440.0, &p, wind).time_between(400.0, 0.0);
-        let mean = cruise(400.0, 440.0, &p, RouteWind::uniform(50.0)).time_between(400.0, 0.0);
-        // 1/(TAS − hw) is convex: at a flat 440 kt, 200/340 + 200/440 h is 3,754 s against
-        // 400/390 h = 3,692 s.
+        let per_segment = cruise(400.0, 440.0, &p, wind).time_between(400.0, 150.0);
+        let mean = cruise(400.0, 440.0, &p, RouteWind::uniform(50.0)).time_between(400.0, 150.0);
+        // 1/(TAS − hw) is convex: at a flat 440 kt, 125/340 + 125/440 h is 2,346 s against
+        // 250/390 h = 2,308 s.
         assert!(per_segment > mean + 30.0, "{per_segment} vs {mean}");
-    }
-
-    // AC3: descent integration reads the wind at each step's own altitude.
-    #[test]
-    fn a_low_level_tailwind_moves_top_of_descent_further_out() {
-        let p = AircraftProfile::default();
-        let low_tail = RouteWind::new(vec![knot(
-            0.0,
-            vec![
-                (0.0, -60.0, None),
-                (9_000.0, -60.0, None),
-                (11_000.0, 0.0, None),
-                (35_000.0, 0.0, None),
-            ],
-        )]);
-        let windy = cruise(300.0, 440.0, &p, low_tail);
-        let still = cruise(300.0, 440.0, &p, RouteWind::still());
-        let moved = top_of_descent(&windy, 300.0) - top_of_descent(&still, 300.0);
-        // Below 10,000 ft the descent takes ~5.5 min at 1,800 fpm; 60 kt of tailwind adds ~5.5 nm.
-        assert!(moved > 4.0, "top of descent moved {moved} nm");
     }
 
     // AC3: climb integration reads the wind at its own d. 60 kt on the nose for the first 20 nm
@@ -1734,11 +1591,11 @@ mod tests {
             (280.0, 60.0, None),
             (300.0, 60.0, None),
         ]);
-        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, w);
+        let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, w);
         let (windy, still) = (build(wind), build(RouteWind::still()));
         let climb_nm = |vp: &VerticalProfile| {
             let mut d = 300.0;
-            while d > 0.0 && vp.alt_at(d) < 34_999.0 {
+            while d > 0.0 && vp.alt_at(d) < 34_400.0 {
                 d -= 0.1;
             }
             300.0 - d
@@ -1763,8 +1620,8 @@ mod tests {
             0.0,
             vec![(35_000.0, 0.0, Some(ISA_FL350_K + 15.0))],
         )]);
-        let hot = cruise(400.0, 520.0, &b77w(), warm);
-        let isa = cruise(400.0, 520.0, &b77w(), RouteWind::still());
+        let hot = cruise(400.0, 520.0, &mach_cruiser(), warm);
+        let isa = cruise(400.0, 520.0, &mach_cruiser(), RouteWind::still());
         // 661.4788 kt × 0.84 × √(T / 288.15).
         assert!(
             (hot.ground_speed_at(350.0) - 500.5).abs() < 0.3,
@@ -1791,7 +1648,7 @@ mod tests {
     #[test]
     fn a_field_without_temperatures_flies_mach_on_isa() {
         let wind = RouteWind::new(vec![knot(0.0, vec![(35_000.0, 40.0, None)])]);
-        let vp = cruise(400.0, 520.0, &b77w(), wind);
+        let vp = cruise(400.0, 520.0, &mach_cruiser(), wind);
         assert!((vp.ground_speed_at(350.0) - (484.2 - 40.0)).abs() < 0.3);
     }
 
@@ -1803,14 +1660,13 @@ mod tests {
             (c172(), 110.0, 12_000.0),
             (AircraftProfile::default(), 440.0, 35_000.0),
         ] {
-            let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, alt, tas, &p, w);
+            let build = |w| flown(0.0, 300.0, 0.0, alt, tas, &p, w);
             let (hot, isa) = (build(warm.clone()), build(RouteWind::still()));
             assert!((hot.time_between(300.0, 0.0) - isa.time_between(300.0, 0.0)).abs() < 1e-9);
         }
     }
 
-    // The cruise leg carries a sample at each knot, so a temperature change mid-cruise changes
-    // the Mach TAS there (not a ramp between top of climb and top of descent).
+    // Each step reads the temperature where it is, so a change mid-cruise changes the Mach TAS there.
     #[test]
     fn the_cruise_leg_changes_speed_where_the_temperature_changes() {
         let wind = RouteWind::new(
@@ -1824,7 +1680,7 @@ mod tests {
             .map(|&(d, t)| knot(d, vec![(35_000.0, 0.0, Some(t))]))
             .collect(),
         );
-        let vp = cruise(600.0, 520.0, &b77w(), wind);
+        let vp = cruise(600.0, 520.0, &mach_cruiser(), wind);
         assert!(
             (vp.ground_speed_at(450.0) - 500.5).abs() < 0.3,
             "{}",
@@ -1837,59 +1693,42 @@ mod tests {
         );
     }
 
-    // Anchoring (#313) compares the observed groundspeed with the prediction where the aircraft
-    // is, not with a route mean.
-    #[test]
-    fn anchoring_reads_the_headwind_where_the_aircraft_is() {
-        let p = AircraftProfile::default();
-        let wind = flat(&[
-            (0.0, 100.0, None),
-            (200.0, 100.0, None),
-            (300.0, 0.0, None),
-            (400.0, 0.0, None),
-        ]);
-        let vp = cruise(400.0, 450.0, &p, wind.clone()).anchor_to_observed_gs(450.0);
-        assert!(
-            (vp.ground_speed_at(400.0) - 450.0).abs() < 1e-6,
-            "{}",
-            vp.ground_speed_at(400.0)
-        );
-        let fast = cruise(400.0, 450.0, &p, wind).anchor_to_observed_gs(495.0);
-        assert!((fast.ground_speed_at(400.0) - 495.0).abs() < 1e-6);
-    }
-
     // Into a headwind stronger than the climb and descent speeds, each step is flown at the
-    // groundspeed floor (60 kt): a 500 fpm climb or descent through 5,000 ft covers 10 nm.
+    // groundspeed floor (60 kt): a 500 fpm climb through 5,000 ft covers 10 nm, and 10 nm of descent
+    // takes 10 minutes.
     #[test]
     fn climb_and_descent_into_a_headwind_past_their_tas_fly_the_groundspeed_floor() {
         let wind = flat(&[(0.0, 200.0, None), (200.0, 200.0, None)]);
-        let vp = VerticalProfile::build(0.0, 200.0, 0.0, 10_000.0, 110.0, &c172(), wind);
+        let vp = flown(0.0, 200.0, 0.0, 10_000.0, 110.0, &c172(), wind);
         assert!(
             (vp.alt_at(190.0) - 5_000.0).abs() < 1e-6,
             "{}",
             vp.alt_at(190.0)
         );
-        assert!(
-            (vp.alt_at(10.0) - 5_000.0).abs() < 1e-6,
-            "{}",
-            vp.alt_at(10.0)
-        );
+        let last_ten = vp.time_between(10.0, 0.0);
+        assert!((last_ten - 600.0).abs() < 1e-6, "{last_ten}");
     }
 
-    // Anchoring divides by the cruise speed the profile flies in the field's air, not the ISA
-    // speed: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
+    // Anchoring divides by the cruise speed the profile flies in the air where it is, not the ISA speed nor the
+    // arrival field's: a Mach 0.84 cruise at ISA+15 flies 500.5 kt where ISA would give 484.2 kt.
     #[test]
     fn anchoring_a_mach_cruise_off_isa_lands_on_the_observed_groundspeed() {
         let warm = flat(&[
             (0.0, 0.0, Some(ISA_FL350_K + 15.0)),
             (400.0, 0.0, Some(ISA_FL350_K + 15.0)),
         ]);
-        let vp = cruise(400.0, 520.0, &b77w(), warm).anchor_to_observed_gs(520.0);
+        let vp = anchored(400.0, 520.0, &mach_cruiser(), warm, 520.0);
         assert!(
             (vp.ground_speed_at(400.0) - 520.0).abs() < 1e-6,
             "{}",
             vp.ground_speed_at(400.0)
         );
+        let warm_there = flat(&[
+            (0.0, 0.0, Some(ISA_FL350_K)),
+            (400.0, 0.0, Some(ISA_FL350_K + 15.0)),
+        ]);
+        let vp = anchored(400.0, 520.0, &mach_cruiser(), warm_there, 520.0);
+        assert!((vp.ground_speed_at(400.0) - 520.0).abs() < 1e-6);
     }
 
     // RouteWind sampling between and outside knots.
@@ -2015,9 +1854,19 @@ mod tests {
     #[test]
     fn the_profile_stops_a_covered_temperature_at_the_first_gap_past_the_field() {
         let warm = vec![(35_000.0, 0.0, Some(ISA_FL350_K + 15.0))];
-        let vp = cruise(600.0, 520.0, &b77w(), covered_450_to_500(warm.clone()));
-        let isa = cruise(600.0, 520.0, &b77w(), RouteWind::still());
-        let hot = cruise(600.0, 520.0, &b77w(), RouteWind::new(vec![knot(0.0, warm)]));
+        let vp = cruise(
+            600.0,
+            520.0,
+            &mach_cruiser(),
+            covered_450_to_500(warm.clone()),
+        );
+        let isa = cruise(600.0, 520.0, &mach_cruiser(), RouteWind::still());
+        let hot = cruise(
+            600.0,
+            520.0,
+            &mach_cruiser(),
+            RouteWind::new(vec![knot(0.0, warm)]),
+        );
         assert!(hot.ground_speed_at(525.0) > isa.ground_speed_at(525.0) + 10.0);
         for d in [575.0, 375.0] {
             assert!(
@@ -2048,7 +1897,8 @@ mod tests {
         );
         let mean = vp.mean_headwind(600.0, 350.0).unwrap();
         assert!((mean - 48.0).abs() < 0.5, "{mean}");
-        assert!((vp.mean_headwind(550.0, 400.0).unwrap() - 80.0).abs() < 0.5);
+        // One step at each end may straddle the gap, 1.8 nm of the 150.
+        assert!((vp.mean_headwind(550.0, 400.0).unwrap() - 80.0).abs() < 1.0);
     }
 
     // Still air: no wind, no temperature.
@@ -2067,7 +1917,7 @@ mod tests {
     #[test]
     fn the_profile_interpolates_inside_its_last_segment() {
         let p = AircraftProfile::default();
-        let vp = VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, RouteWind::still());
+        let vp = flown(0.0, 300.0, 0.0, 35_000.0, 440.0, &p, RouteWind::still());
         // The first climb step: 500 ft at 2,000 fpm is 15 s, about 1 nm at the climb speed.
         let a = vp.alt_at(299.9);
         assert!(a > 10.0 && a < 500.0, "0.1 nm into the climb at {a} ft");
@@ -2112,58 +1962,43 @@ mod tests {
     // The field's temperature drives the Mach part of the descent: warm air is faster there.
     #[test]
     fn a_descent_mach_flies_faster_in_warm_air() {
-        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 520.0, &mach_cruiser(), w);
         let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
-        // The last 150 nm hold the whole descent, which is integrated from the field and does not
-        // depend on the climb.
+        // The last 150 nm hold the whole descent, and the climb is over before them.
         let saved = isa.time_between(150.0, 0.0) - warm.time_between(150.0, 0.0);
         assert!(saved > 0.5, "the warm Mach descent saves {saved} s");
     }
 
-    // The descent reads the temperature at each step's own distance: warm air only from 60 nm
-    // out (where the Mach part of the descent is) still speeds it up.
+    // The descent reads the temperature at each step's own distance: the same Mach band is warm 95 nm
+    // out and ISA 86 nm out. The two marches' steps fall at different distances, so the speeds compared
+    // are up to a step's altitude apart (about 1.5 kt of a constant Mach).
     #[test]
     fn a_descent_reads_the_temperature_where_each_step_is() {
         let isa = |ft: f64| 288.15 - 0.0019812 * ft;
         let band = |dt: f64| {
             vec![
-                (28_000.0, 0.0, Some(isa(28_000.0) + dt)),
-                (34_000.0, 0.0, Some(isa(34_000.0) + dt)),
-                (35_000.0, 0.0, Some(ISA_FL350_K)),
+                (25_000.0, 0.0, Some(isa(25_000.0) + dt)),
+                (35_000.0, 0.0, Some(ISA_FL350_K + dt)),
             ]
         };
         let far_warm = RouteWind::new(vec![
             knot(0.0, band(0.0)),
-            knot(50.0, band(0.0)),
-            knot(60.0, band(15.0)),
+            knot(88.0, band(0.0)),
+            knot(92.0, band(15.0)),
             knot(300.0, band(15.0)),
         ]);
-        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 520.0, &mach_cruiser(), w);
         let (warm, isa_p) = (build(far_warm), build(RouteWind::still()));
-        let saved = isa_p.time_between(100.0, 0.0) - warm.time_between(100.0, 0.0);
-        assert!(saved > 0.5, "warm upper descent saves {saved} s");
-        // The descent's shape too: flown faster through the warm Mach band, it covers more ground
-        // per foot, so top of descent sits further out.
-        let tod = |vp: &VerticalProfile| {
-            let (mut lo, mut hi) = (0.0, 299.0);
-            for _ in 0..40 {
-                let mid = (lo + hi) / 2.0;
-                if vp.alt_at(mid) < 34_999.0 {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            lo
-        };
-        let further = tod(&warm) - tod(&isa_p);
-        assert!(further > 0.05, "top of descent moved out {further} nm");
+        let faster = |d: f64| warm.ground_speed_at(d) - isa_p.ground_speed_at(d);
+        // 661.4788 x 0.84 x (sqrt(T + 15) - sqrt(T)) / sqrt(288.15) at ~31,700 ft: 15.9 kt.
+        assert!((faster(95.0) - 15.9).abs() < 1.5, "{}", faster(95.0));
+        assert!(faster(86.0).abs() < 2.0, "{}", faster(86.0));
     }
 
     // The same on the climb: the Mach part of it is faster in warm air.
     #[test]
     fn a_climb_mach_flies_faster_in_warm_air() {
-        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 520.0, &mach_cruiser(), w);
         let (warm, isa) = (build(warm_below_cruise()), build(RouteWind::still()));
         // The first 150 nm hold the climb and the start of the ISA cruise.
         let saved = isa.time_between(300.0, 150.0) - warm.time_between(300.0, 150.0);
@@ -2187,44 +2022,10 @@ mod tests {
             knot(270.0, levels(0.0)),
             knot(300.0, levels(15.0)),
         ]);
-        let build = |w| VerticalProfile::build(0.0, 300.0, 0.0, 35_000.0, 520.0, &b77w(), w);
+        let build = |w| flown(0.0, 300.0, 0.0, 35_000.0, 520.0, &mach_cruiser(), w);
         let (warm_start, isa_air) = (build(wind), build(RouteWind::still()));
         let gained = isa_air.time_between(300.0, 150.0) - warm_start.time_between(300.0, 150.0);
         assert!(gained.abs() < 0.05, "the Mach climb is on ISA: {gained} s");
-    }
-
-    // AC3 inside the descent: a headwind from 60 nm out and calm inside 50 nm moves top of
-    // descent in, because the descent is integrated through the wind at each step's own distance.
-    #[test]
-    fn a_headwind_on_the_upper_descent_moves_top_of_descent_in() {
-        let p = AircraftProfile::default();
-        let wind = flat(&[
-            (0.0, 0.0, None),
-            (50.0, 0.0, None),
-            (60.0, 80.0, None),
-            (300.0, 80.0, None),
-        ]);
-        let (windy, still) = (
-            cruise(300.0, 440.0, &p, wind),
-            cruise(300.0, 440.0, &p, RouteWind::still()),
-        );
-        let moved = top_of_descent(&still, 300.0) - top_of_descent(&windy, 300.0);
-        assert!(moved > 2.0, "top of descent moved in {moved} nm");
-        // Inside 50 nm both fly the same calm descent.
-        assert!((windy.alt_at(30.0) - still.alt_at(30.0)).abs() < 1.0);
-    }
-
-    // A wind knot inside the descent adds no cruise-altitude sample there.
-    #[test]
-    fn a_wind_knot_inside_the_descent_keeps_the_descent_shape() {
-        let p = AircraftProfile::default();
-        let wind = flat(&[(0.0, 10.0, None), (30.0, 10.0, None), (300.0, 10.0, None)]);
-        let vp = cruise(300.0, 440.0, &p, wind);
-        assert!(
-            vp.alt_at(30.0) < 20_000.0,
-            "30 nm out reads {} ft",
-            vp.alt_at(30.0)
-        );
     }
 
     // A temperature at or below absolute zero is clamped to 1 K rather than taking a square root
@@ -2263,7 +2064,7 @@ mod profile_table_family_tests {
     // the tier it came from.
     use std::collections::HashMap;
 
-    use super::{AircraftProfile, ProfileTable};
+    use super::{AircraftProfile, Performance, ProfileTable};
 
     fn fpm(desc_fpm: f64) -> AircraftProfile {
         AircraftProfile {
@@ -2291,7 +2092,16 @@ mod profile_table_family_tests {
             map(has("wake"), &[("H", 3_333.0)]),
             map(has("family"), &[("jet", 2_222.0), ("turboprop", 2_777.0)]),
             map(has("type"), &[("B772", 1_111.0)]),
+            None,
         )
+    }
+
+    /// The `desc_fpm` of the row a flight resolves to.
+    fn fpm_of(t: &ProfileTable, ty: &str, wake: &str) -> f64 {
+        match t.resolve(ty, wake) {
+            Performance::Row(p) => p.desc_fpm,
+            Performance::Eram(_) => panic!("{ty} resolved to ERAM"),
+        }
     }
 
     #[test]
@@ -2303,11 +2113,7 @@ mod profile_table_family_tests {
             (&["default"], 4_444.0),
         ];
         for (tiers, want) in steps {
-            assert_eq!(
-                table(tiers).resolve("B772", "H").desc_fpm,
-                want,
-                "tiers {tiers:?}"
-            );
+            assert_eq!(fpm_of(&table(tiers), "B772", "H"), want, "tiers {tiers:?}");
         }
     }
 
@@ -2318,31 +2124,24 @@ mod profile_table_family_tests {
             HashMap::new(),
             HashMap::from([("turboprop".to_string(), fpm(2_777.0))]),
             HashMap::new(),
+            None,
         );
         assert_eq!(
-            t.resolve("B772", "").desc_fpm,
+            fpm_of(&t, "B772", ""),
             4_444.0,
             "a jet ignores the turboprop row"
         );
-        assert_eq!(
-            t.resolve("AT72", "").desc_fpm,
-            2_777.0,
-            "a turboprop takes it"
-        );
+        assert_eq!(fpm_of(&t, "AT72", ""), 2_777.0, "a turboprop takes it");
     }
 
     #[test]
     fn a_type_outside_the_engine_reference_skips_the_family_tier() {
         let t = table(&["type", "family", "wake", "default"]);
-        assert_eq!(t.resolve("QQQQ", "H").desc_fpm, 3_333.0);
-        assert_eq!(t.resolve("QQQQ", "").desc_fpm, 4_444.0);
-        assert_eq!(t.resolve("B772", "").desc_fpm, 1_111.0, "control: type row");
+        assert_eq!(fpm_of(&t, "QQQQ", "H"), 3_333.0);
+        assert_eq!(fpm_of(&t, "QQQQ", ""), 4_444.0);
+        assert_eq!(fpm_of(&t, "B772", ""), 1_111.0, "control: type row");
         let no_type = table(&["family", "wake", "default"]);
-        assert_eq!(
-            no_type.resolve("B772", "").desc_fpm,
-            2_222.0,
-            "control: family row"
-        );
+        assert_eq!(fpm_of(&no_type, "B772", ""), 2_222.0, "control: family row");
     }
 
     #[test]
@@ -2356,33 +2155,38 @@ mod profile_table_family_tests {
         for (tiers, label, want) in steps {
             let t = table(tiers);
             assert_eq!(t.resolve_label("B772", "H"), label, "tiers {tiers:?}");
-            assert_eq!(t.resolve("B772", "H").desc_fpm, want, "tiers {tiers:?}");
+            assert_eq!(fpm_of(&t, "B772", "H"), want, "tiers {tiers:?}");
         }
         let lower = table(&["family", "wake", "default"]);
         assert_eq!(lower.resolve_label("b772", "h"), "family:jet");
-        assert_eq!(lower.resolve("b772", "h").desc_fpm, 2_222.0);
+        assert_eq!(fpm_of(&lower, "b772", "h"), 2_222.0);
         assert_eq!(lower.resolve_label("at72", ""), "family:turboprop");
         let wake_only = table(&["wake", "default"]);
         assert_eq!(wake_only.resolve_label("QQQQ", "h"), "wake:H");
-        assert_eq!(wake_only.resolve("QQQQ", "h").desc_fpm, 3_333.0);
+        assert_eq!(fpm_of(&wake_only, "QQQQ", "h"), 3_333.0);
         let piston = ProfileTable::new(
             fpm(4_444.0),
             HashMap::new(),
             HashMap::from([("piston".to_string(), fpm(1_000.0))]),
             HashMap::new(),
+            None,
         );
         assert_eq!(piston.resolve_label("PA34", ""), "family:piston");
-        assert_eq!(piston.resolve("PA34", "").desc_fpm, 1_000.0);
+        assert_eq!(fpm_of(&piston, "PA34", ""), 1_000.0);
     }
 
     #[test]
     fn with_no_family_rows_resolution_is_type_then_wake_then_default() {
         let t = table(&["type", "wake", "default"]);
-        assert_eq!(t.resolve("B772", "H").desc_fpm, 1_111.0);
-        assert_eq!(t.resolve("B738", "H").desc_fpm, 3_333.0);
-        assert_eq!(t.resolve("B738", "").desc_fpm, 4_444.0);
+        assert_eq!(fpm_of(&t, "B772", "H"), 1_111.0);
+        assert_eq!(fpm_of(&t, "B738", "H"), 3_333.0);
+        assert_eq!(fpm_of(&t, "B738", ""), 4_444.0);
         assert_eq!(t.resolve_label("B772", "H"), "type:B772");
         assert_eq!(t.resolve_label("B738", "H"), "wake:H");
         assert_eq!(t.resolve_label("B738", ""), "default");
     }
 }
+
+#[path = "trajectory_march_tests.rs"]
+#[cfg(test)]
+mod trajectory_march_tests;

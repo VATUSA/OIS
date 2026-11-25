@@ -70,7 +70,10 @@ above. `GET /api/v1/flow/sector-demand/{artcc}` serves it (Operations page, belo
   the flight is. **Proposed** means on the ground holding a locked wheels-up, projected from it. `combined`
   is the busiest minute of both together, never active-peak plus proposed-peak.
 - **Projection** (`feed/sector_tracks.rs`, `project_tracks`) is a read-only caller of the trajectory model.
-  It makes the same calls as the map's predicted-traffic projection, so it adds no second predictor.
+  It makes the same calls as the map's predicted-traffic projection, so it adds no second predictor. A flight
+  read as level below its filed altitude stays in the strata it is in until its descent, and an arrival inside its
+  descent is not put back up unless it is still nearer its departure (#985)
+  ([`prediction.md`](../architecture/prediction.md#climb-cruise-and-descent)).
 - **Wheels-up precedence** (`repos::flow::locked_wheels_up`): a flight can hold an issued CFR, a release in
   each FCA it crosses, and a GDP slot. The engine takes the **latest** of the following:
   - its CFR (`tmu.issued_cfrs.wheels_up`);

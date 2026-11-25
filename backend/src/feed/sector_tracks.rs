@@ -295,9 +295,9 @@ impl Ctx<'_> {
 /// the flight is (the shared model's `progress_after`, the cost of a projection) at most once and
 /// only when asked for.
 ///
-/// The distance flown never decreases from one minute to the next: `distance_after` bisects the same
-/// tree for every elapsed time, and a later time leaves it at or below where an earlier one did. That
-/// is what lets [`Self::first_reaching`] bisect the minutes.
+/// The distance flown never decreases from one minute to the next: `distance_after` reads one track whose
+/// elapsed time rises all the way to the field. That is what lets [`Self::first_reaching`] bisect the
+/// minutes.
 struct Minutes<'a> {
     traj: &'a predict::Trajectory<'a>,
     start_ms: i64,
@@ -703,7 +703,7 @@ mod tests {
     }
 
     /// A box `[min_lat, max_lat, min_lon, max_lon]`.
-    fn bbox([min_lat, max_lat, min_lon, max_lon]: [f64; 4]) -> Bbox {
+    pub(super) fn bbox([min_lat, max_lat, min_lon, max_lon]: [f64; 4]) -> Bbox {
         Bbox {
             min_lat,
             max_lat,
@@ -748,7 +748,7 @@ mod tests {
 
     /// Twelve airports and a deterministic spread of traffic between them: airborne anywhere along
     /// the great circle, grounded at the gate, and prefiled, with wheels-up past, near and far.
-    fn network() -> (VatsimData, HashMap<String, i64>, AirportDb) {
+    pub(super) fn network() -> (VatsimData, HashMap<String, i64>, AirportDb) {
         let fields = [
             ("KJFK", 40.64, -73.78),
             ("KDCA", 38.85, -77.04),
@@ -855,12 +855,24 @@ mod tests {
         nav: &NavData,
         bbox: Option<Bbox>,
     ) -> [(Vec<OwnedTrack>, usize); 2] {
-        let (profiles, winds) = (ProfileTable::default(), Winds::default());
+        let profiles = ProfileTable::default();
+        both_walks_on(&profiles, data, wheels_up, airports, nav, bbox)
+    }
+
+    pub(super) fn both_walks_on(
+        profiles: &ProfileTable,
+        data: &VatsimData,
+        wheels_up: &HashMap<String, i64>,
+        airports: &AirportDb,
+        nav: &NavData,
+        bbox: Option<Bbox>,
+    ) -> [(Vec<OwnedTrack>, usize); 2] {
+        let winds = Winds::default();
         [true, false].map(|every_minute| {
             let ctx = Ctx {
                 nav,
                 airports,
-                profiles: &profiles,
+                profiles,
                 winds: &winds,
                 now_ms: now(),
                 bbox,
@@ -873,10 +885,10 @@ mod tests {
     }
 
     /// A fix as bits: its time, latitude, longitude and altitude.
-    type FixBits = (i64, u64, u64, Option<u64>);
+    pub(super) type FixBits = (i64, u64, u64, Option<u64>);
 
     /// A track as bits, so "the same" means identical, not close.
-    fn bits(tracks: &[OwnedTrack]) -> Vec<(String, Population, Vec<FixBits>)> {
+    pub(super) fn bits(tracks: &[OwnedTrack]) -> Vec<(String, Population, Vec<FixBits>)> {
         tracks
             .iter()
             .map(|t| {
@@ -957,7 +969,8 @@ mod tests {
     // `Winds::test_shear()`: 80 kt from 225° (on the nose of the SW-bound KJFK→KDCA course) at and
     // above 30,000 ft east of 75.5°W, calm elsewhere.
 
-    use crate::feed::trajectory::{AircraftProfile, RouteWind};
+    use crate::feed::performance::Performance;
+    use crate::feed::trajectory::{Airborne, AircraftProfile, RouteWind};
 
     fn project_in(data: &VatsimData, wheels_up: &[(&str, i64)], winds: &Winds) -> Vec<OwnedTrack> {
         let wheels_up: HashMap<String, i64> =
@@ -990,6 +1003,23 @@ mod tests {
         crate::feed::flow::gc_dist(a.lat, a.lon, b.lat, b.lon)
     }
 
+    /// The pilot of these tests, `len` from KDCA: climbing 20 nm off KJFK, below its level and outside
+    /// its top of descent, so neither its groundspeed nor its departure is read.
+    fn climbing_out(len: f64) -> predict::FromHere<'static> {
+        predict::FromHere {
+            route_nm: len,
+            alt_ft: 24_000.0,
+            airborne: Some(Airborne {
+                gs_kt: 400.0,
+                headwind_kt: None,
+                from_departure_nm: Some(crate::feed::flow::gc_dist(40.64, -73.78, 40.2, -74.0)),
+            }),
+            cruise_ft: Some(35_000.0),
+            filed_tas: 440.0,
+            arr: "KDCA",
+        }
+    }
+
     // AC5: an airborne flight's minute-by-minute fixes move with the wind along its route.
     #[test]
     fn an_airborne_track_advances_through_the_route_wind() {
@@ -1017,15 +1047,9 @@ mod tests {
         .unwrap();
         let len = predict::path_len_nm(&path);
         let vp = predict::profile_from_here(
-            true,
-            len,
-            24_000.0,
-            400.0,
-            35_000.0,
-            440.0,
+            &climbing_out(len),
             &airports(),
-            "KDCA",
-            &AircraftProfile::default(),
+            Performance::Row(&AircraftProfile::default()),
             shear.along(&path, len),
         );
         let (pos, _) = fca::point_and_heading_at(&path, len - vp.distance_after(len, 900.0));
@@ -1085,15 +1109,9 @@ mod tests {
         .unwrap();
         let len = predict::path_len_nm(&path);
         let old = predict::profile_from_here(
-            true,
-            len,
-            24_000.0,
-            400.0,
-            35_000.0,
-            440.0,
+            &climbing_out(len),
             &airports(),
-            "KDCA",
-            &AircraftProfile::default(),
+            Performance::Row(&AircraftProfile::default()),
             RouteWind::uniform(one),
         );
         let tracks = project_in(&data, &[], &shear);
@@ -1135,6 +1153,7 @@ mod tests {
                 },
             )]),
             HashMap::new(),
+            None,
         );
         let alts = |table: &ProfileTable| -> HashMap<String, Vec<(i64, Option<i64>)>> {
             project_tracks(
@@ -1170,6 +1189,136 @@ mod tests {
             with[&id("CTL1")],
             without[&id("CTL1")],
             "control: no engine family"
+        );
+    }
+}
+
+// Coverage matrix (VATUSA/OIS#985)
+//
+// Requirement                   | Test
+// ------------------------------|---------------------------------------------------------------------
+// AC 4, 8, 10 sector demand     | a_stepped_down_flight_stays_in_the_strata_it_is_in
+// AC 4, 5 sector demand, ground | a_released_departure_is_projected_on_its_eram_climb
+// AC 4 minutes skipped, exact   | skipping_minutes_outside_the_box_changes_no_fix_on_eram_performance
+#[cfg(test)]
+mod eram_wiring_tests {
+    use super::tests::{bits, both_walks_on, network};
+    use super::*;
+    use crate::feed::predict::march_input_tests::{b738, eram_profiles, jfk_mia, step1};
+    use crate::feed::trajectory::ProfileTable;
+    use crate::feed::vatsim::{FlightPlan, Pilot};
+
+    const NOW: i64 = 1_700_000_000_000;
+
+    fn fixes(profiles: &ProfileTable, p: Pilot, wheels_up: Option<i64>) -> Vec<Fix> {
+        let released = wheels_up.map(|t| (p.callsign.clone(), t));
+        let data = VatsimData {
+            pilots: vec![p],
+            ..Default::default()
+        };
+        let mut tracks = project_tracks(
+            &data,
+            &NavData::default(),
+            &jfk_mia(),
+            profiles,
+            &Winds::default(),
+            &HashMap::from_iter(released),
+            &HashSet::new(),
+            NOW,
+            None,
+        );
+        assert_eq!(tracks.len(), 1);
+        tracks.remove(0).fixes
+    }
+
+    fn at(fixes: &[Fix], minute: i64) -> Fix {
+        let t = NOW + minute * MINUTE_MS;
+        *fixes.iter().find(|f| f.t_ms == t).expect("a fix a minute")
+    }
+
+    // AC 4, 8, 10. STEP1 (`predict::march_input_tests`): its +15 min fix is 100 nm along at 30,000 ft and its
+    // +30 min fix 200 nm at 30,000, so it never enters a volume based at FL310; climbing back it would be at
+    // 35,000 ft, inside it, by 100 nm. Red when: project_tracks drops an input.
+    #[test]
+    fn a_stepped_down_flight_stays_in_the_strata_it_is_in() {
+        let level = fixes(&eram_profiles(), step1(), None);
+        for (minute, nm) in [(15, 100.0), (30, 200.0)] {
+            let f = at(&level, minute);
+            let flown = gc_dist(33.0, -77.5, f.lat, f.lon);
+            assert!((flown - nm).abs() < 0.5, "{minute} min: {flown}");
+            assert!((f.alt_ft.unwrap() - 30_000.0).abs() < 1.0, "{f:?}");
+        }
+        assert!(
+            level.iter().all(|f| f.alt_ft.unwrap() < 31_000.0),
+            "never in a volume based at FL310"
+        );
+        // Positive control: out of a field the table does not hold, it climbs through that base.
+        let unknown = Pilot {
+            flight_plan: Some(b738("KZZZ", "KMIA")),
+            ..step1()
+        };
+        let climbing = fixes(&eram_profiles(), unknown, None);
+        assert!(at(&climbing, 15).alt_ft.unwrap() > 34_000.0);
+    }
+
+    // AC 4, 5. A released B738 off KJFK: one minute after wheels-up it is between 2,800 and 3,000 ft (ERAM
+    // 2,699 fpm at sea level rising to 3,246 at 4,000 ft), where the default row's 2,000 fpm is at 2,000.
+    // Red when: the table is not the one project_tracks was given.
+    #[test]
+    fn a_released_departure_is_projected_on_its_eram_climb() {
+        let parked = || Pilot {
+            latitude: 40.64,
+            longitude: -73.78,
+            altitude: 13,
+            groundspeed: 0,
+            ..step1()
+        };
+        let up = |profiles: &ProfileTable, p: Pilot| {
+            at(&fixes(profiles, p, Some(NOW)), 1).alt_ft.unwrap()
+        };
+        let eram = up(&eram_profiles(), parked());
+        assert!((2_800.0..3_000.0).contains(&eram), "{eram}");
+        let row = up(&ProfileTable::default(), parked());
+        assert!((row - 2_000.0).abs() < 1.0, "{row}");
+        let qqqq = Pilot {
+            flight_plan: Some(FlightPlan {
+                aircraft_short: "QQQQ".into(),
+                ..b738("KJFK", "KMIA")
+            }),
+            ..parked()
+        };
+        assert!((up(&eram_profiles(), qqqq) - 2_000.0).abs() < 1.0);
+    }
+
+    // AC 4. skipping_minutes_outside_the_box_changes_no_fix over `network()` with the bundled table: bit for
+    // bit the same fixes skipping and walking every minute. `Minutes` relies on the distance flown never
+    // decreasing from one minute to the next. Red when: distance_after is not monotonic in elapsed time.
+    #[test]
+    fn skipping_minutes_outside_the_box_changes_no_fix_on_eram_performance() {
+        let (data, wheels_up, airports) = network();
+        let nav = NavData::load();
+        let profiles = eram_profiles();
+        let (mut kept, mut every, mut skipping) = (0, 0, 0);
+        for b in [
+            [36.5, 40.5, -81.5, -74.5],
+            [39.0, 42.5, -76.5, -71.5],
+            [40.0, 44.0, -91.0, -85.0],
+            [32.0, 37.5, -121.0, -114.0],
+            [41.5, 44.5, -102.0, -95.0],
+            [39.0, 39.3, -77.3, -77.0],
+        ] {
+            let bbox = Some(super::tests::bbox(b));
+            let [(reference, walked), (windowed, resolved)] =
+                both_walks_on(&profiles, &data, &wheels_up, &airports, &nav, bbox);
+            assert_eq!(bits(&windowed), bits(&reference), "box {b:?}");
+            kept += reference.iter().map(|t| t.fixes.len()).sum::<usize>();
+            every += walked;
+            skipping += resolved;
+        }
+        assert!(kept > 1_000, "the fixtures must keep real fixes: {kept}");
+        assert!(
+            skipping * 4 < every,
+            "minutes resolved: {skipping} skipping, {every} walking"
         );
     }
 }
