@@ -244,6 +244,33 @@ describe("IdstPage scope save errors", () => {
     expect(chips()).toHaveLength(0);
   });
 
+  it("still toasts when the page unmounts before the scope PUT fails", async () => {
+    prefsGetAnswers(OK({}));
+    let failPut!: (answer: unknown) => void;
+    api.PUT.mockReturnValue(new Promise((resolve) => (failPut = resolve)));
+    const qc = await mount();
+    await type("KDCA");
+    await clickAdd();
+    expect(prefPuts()).toHaveLength(1);
+
+    // Leave IDST, keeping the app-level providers (the toast host lives above the page).
+    const { root } = roots[roots.length - 1];
+    await act(async () =>
+      root.render(
+        <QueryClientProvider client={qc}>
+          <ToastProvider>
+            <div />
+          </ToastProvider>
+        </QueryClientProvider>,
+      ),
+    );
+    expect(document.querySelector("#idst-airport")).toBeNull();
+
+    await act(async () => failPut(FAIL_WITH_BODY));
+    await flush();
+    expect(text()).toContain(SAVE_ERROR);
+  });
+
   it("adds the chip, sends airports [\"KDCA\"] and shows no toast when the PUT is ok", async () => {
     prefsGetAnswers(OK({}));
     await mount();

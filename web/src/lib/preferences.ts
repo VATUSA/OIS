@@ -32,10 +32,14 @@ export function preferencesFrom<T>(ok: boolean, data: unknown): T | null {
   return (data ?? null) as T | null;
 }
 
-/** Upserts this user's preferences for a namespace and primes the query cache with the result. */
-export function useSavePreferences<T>(namespace: string) {
+/**
+ * Upserts this user's preferences for a namespace and primes the query cache with the result.
+ * `onError` is the mutation's own, so it still runs when the component unmounts before the save fails.
+ */
+export function useSavePreferences<T>(namespace: string, options?: { onError?: () => void }) {
   const queryClient = useQueryClient();
   return useMutation({
+    onError: options?.onError,
     mutationFn: async (value: T): Promise<T> => {
       const { response } = await ois.PUT("/api/v1/me/preferences/{namespace}", {
         params: { path: { namespace } },

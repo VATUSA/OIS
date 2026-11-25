@@ -27,10 +27,12 @@ export function scopeIsEmpty(s: IdstScope): boolean {
 export function useIdstScope() {
   const toast = useToast();
   const prefs = usePreferences<IdstScope>(SCOPE_NS);
-  const save = useSavePreferences<IdstScope>(SCOPE_NS);
+  const save = useSavePreferences<IdstScope>(SCOPE_NS, {
+    onError: () => toast.error("Couldn't save your IDST scope"),
+  });
   const scope: IdstScope = { ...EMPTY_SCOPE, ...(prefs.data ?? {}) };
   const setScope = (s: IdstScope) => {
-    if (prefs.data !== undefined) save.mutate(s, { onError: () => toast.error("Couldn't save your IDST scope") });
+    if (prefs.data !== undefined) save.mutate(s);
   };
   return { scope, setScope, loadFailed: prefs.isError && prefs.data === undefined, retryLoad: () => void prefs.refetch() };
 }
