@@ -30,7 +30,7 @@ A slash command named here means its file: when you cannot run `/ship` as a comm
 
 Use absolute paths. The session cwd is shared with the orchestrator and pins to whoever entered a worktree last. `EnterWorktree` refuses a subagent, so follow the subagent fallback in `/start` Step 2.3: run every git, gh and stamper command as `cd <absolute worktree path> && <command>`, and never wrap a push or a stamp in a script to get past a gate. On a Windows host, `bin/wsl-clone.sh gate|push|pr` is the one exception: `gate` runs the real `just test`, and `push` and `pr` check the markers the gates would (`ticket-lifecycle.md` → "A Windows host").
 
-Time-box `gh` (`timeout 60 gh …`; `git push` uses it as its credential helper): a call that times out is waiting on a locked keyring, so return `STATUS: blocked` and say so.
+Time-box `gh` (`timeout 60 gh …`; `git push` uses it as its credential helper): a call that times out is waiting on a locked keyring, so return `STATUS: blocked` and say so. A commit-signing failure (`op-ssh-sign`, "1Password: failed to fill whole buffer") is the same: return `STATUS: blocked` with the error, and never change the signing config.
 
 The scratchpad and port 3000 are shared with other agents. Prefix every scratchpad file with the issue number, and run the stack on a spare port. For a walk that needs port 3000, return `STATUS: needs-port` with `PORT_3000: request` (not an operator question) and wait for the grant; the next report after the walk returns `PORT_3000: released` once the stack is stopped.
 

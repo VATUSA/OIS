@@ -223,6 +223,8 @@ Around it:
   pattern after `cargo fmt` reflows lines.
 - **Never mutate while a suite builds in the same tree.** cargo and vitest read sources at build
   time, so a background run picks up your mutant (#699). Mutate first, or in a second worktree.
+  A running Vite hot-reloads each mutant and keeps stale modules after the restore; stop that
+  worktree's Vite before mutating web sources, or restart it before the walk (#1009).
 - **One verification run per worktree.** To abandon a backgrounded script, stop the task itself,
   not its test binary: killing the child lets the shell run its next mutation (#585). Kill only the
   process IDs your own runner started (record them, or walk the tree from your task's PID); every

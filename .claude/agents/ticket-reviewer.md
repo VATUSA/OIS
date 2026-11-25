@@ -104,7 +104,7 @@ Small items don't need rework: doc or comment wording, a missing test or mutatio
 
 1. Commit it with explicit paths, `<type>(<scope>): <what>`, the body saying it is a review fix for `#<n>`, no trailers.
 2. Run the affected tests, then `just test` on the clean tree and read its summary lines; its marker lets the pre-push hook skip clippy and the suite for that commit.
-3. Push it as a standalone command, through the pre-push hook: `git push origin HEAD:<pr-branch>`. Confirm `git ls-remote origin refs/heads/<pr-branch>` equals `git rev-parse HEAD`. Never push the review branch under its own name.
+3. Push it as a standalone command, through the pre-push hook, from inside the worktree (`cd` first, not `git -C`), naming the review branch as the source: `git push origin chore/<n>/review-<hash>:<pr-branch>`. The hooks refuse `HEAD:<pr-branch>` and the `-C` form. Confirm `git ls-remote origin refs/heads/<pr-branch>` equals `git rev-parse HEAD`. Never push the review branch under its own name.
 4. Re-run the mutations the fix touches, and the stack walk when it touches a page or an endpoint.
 5. Name each fix in one line in the handoff comment, and use the new head's short SHA there; those lines need no second approval.
 

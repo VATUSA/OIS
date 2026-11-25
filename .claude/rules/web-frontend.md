@@ -29,6 +29,12 @@ truth after that regeneration, and turbo may replay a cached typecheck from anot
   component never calls `fetch` and never keeps a second copy of server data in `useState`.
 - A user-facing setting is an entry in `web/src/lib/settings/registry.ts`, read with
   `useSetting(key, default).value`; it then appears on `/settings` with no other wiring.
+- TanStack Query keeps `data` when a refetch fails, so `isError` and `!isSuccess` are true with good
+  data on screen. A load that never succeeded is `isError && data === undefined`; gate writes on a
+  loaded value, not `isSuccess`, and test a refetch failure after a good load (#1009).
+- A side effect that must survive navigation (an error toast) goes in `useMutation`'s options, not
+  `mutate()`'s: TanStack skips `mutate()` callbacks once the caller unmounts. Test it by unmounting
+  before the request settles (#1009).
 - `hasPermission` (`web/src/lib/permissions.ts`) mirrors the backend for display only. Hiding a
   control is not authorization; the backend refuses the request regardless (`secure-coding.md`).
 
