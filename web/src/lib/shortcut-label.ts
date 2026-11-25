@@ -10,9 +10,10 @@ interface NavigatorWithUAData {
 }
 
 /**
- * The OS name, read once at module load. Chromium (and so the Windows desktop webview) answers
- * through `userAgentData` ("macOS", "Windows"); WebKit, including the macOS and Linux desktop
- * webviews, has only `navigator.platform` ("MacIntel", "Linux x86_64").
+ * The OS name, read once at module load. Chromium, the Windows desktop webview included, answers
+ * through `userAgentData` in a secure context ("macOS", "Windows"); elsewhere, and in WebKit (the
+ * macOS and Linux desktop webviews), `navigator.platform` answers ("MacIntel", "Win32",
+ * "Linux x86_64").
  */
 function readPlatform(): string {
   if (typeof navigator === "undefined") return "";

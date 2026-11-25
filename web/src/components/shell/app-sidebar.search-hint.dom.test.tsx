@@ -22,8 +22,8 @@ import {afterEach, beforeAll, describe, expect, it, vi} from "vitest";
 // navigator.platform / navigator.userAgentData, configurable) FIRST, then vi.resetModules() and
 // `await import("./app-sidebar")`; restore both properties in afterEach.
 // Query the pill as the expanded button whose text contains "Search" and its <kbd>; the collapsed
-// control by button[aria-label^="Search"]. Each Ctrl case also asserts the element contains no "⌘"
-// (the pre-fix value), beside the macOS control that does.
+// control by button[aria-label^="Search"]. Every Ctrl case asserts the exact "Ctrl K" text, which the
+// pre-fix "⌘K" fails, beside the macOS control that expects "⌘K".
 
 vi.mock("@tauri-apps/api/window", () => ({getCurrentWindow: () => ({label: "main"})}));
 vi.mock("@tanstack/react-router", () => ({

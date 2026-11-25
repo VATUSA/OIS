@@ -11,7 +11,8 @@ import {beforeAll, describe, expect, it} from "vitest";
 // AC2 the helper is the one source of the label      | shortcut-label.ts is the only file with the ⌘ literal       | done
 // guard is live (scan finds files)                   | file count above a floor; app-sidebar.tsx is in the set     | done
 // guard is live (matcher matches)                    | a planted '"⌘K"' string in a code sample is flagged         | done
-// guard does not flag prose                          | ⌘K inside // and /* */ comments is not flagged              | done
+// guard catches escaped forms                        | ⌘, \u{2318}, &#8984;, &#x2318; each flagged            | done
+// guard does not flag prose                         | ⌘K inside // and /* */ comments is not flagged              | done
 //
 // A source scan on purpose ("Absence needs a guard, not a grep", test-writing.md): a render test
 // covers the sidebar only, and a new hint could be added anywhere. Mirror the ROOTS / strip / scan /
@@ -27,10 +28,13 @@ function strip(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
+/** ⌘ as written, or as a JS escape (`⌘`, `\u{2318}`) or an HTML entity (`&#8984;`, `&#x2318;`). */
+const COMMAND_KEY = /⌘|\\u2318|\\u\{2318\}|&#8984;|&#x2318;/gi;
+
 /** `file:line` for every ⌘ left in the code of `text`. */
 function scan(file: string, text: string): string[] {
   const code = strip(text);
-  return [...code.matchAll(/⌘/g)].map((m) => `${file}:${code.slice(0, m.index).split("\n").length}`);
+  return [...code.matchAll(COMMAND_KEY)].map((m) => `${file}:${code.slice(0, m.index).split("\n").length}`);
 }
 
 async function sources(dir: string): Promise<string[]> {
@@ -72,6 +76,12 @@ describe("shortcut hints come from shortcutLabel (VATUSA/OIS#1005 AC2)", () => {
       "planted.tsx:1",
       "planted.tsx:2",
     ]);
+  });
+  it("flags ⌘ written as a JS escape or an HTML entity, each on its own line", () => {
+    const planted = ['"\\u2318K"', '"\\u{2318}K"', "<kbd>&#8984;K</kbd>", "<kbd>&#x2318;K</kbd>", "<kbd>&#X2318;K</kbd>"];
+    for (const sample of planted) {
+      expect(scan("planted.tsx", `const a = ${sample};\n`), sample).toEqual(["planted.tsx:1"]);
+    }
   });
   it("does not flag ⌘K written in a // line comment or a /* block */ comment", () => {
     expect(scan("prose.tsx", "// open with ⌘K\n/* ⌘K\n   search */\nconst x = 1;\n")).toEqual([]);
