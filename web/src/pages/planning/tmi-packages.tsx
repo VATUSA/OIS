@@ -12,6 +12,7 @@ import {
   StatusPill,
   Switch,
   useConfirm,
+  useToast,
 } from "@ois/ui";
 import {Archive, Gauge, Play, Plus, X} from "lucide-react";
 
@@ -92,9 +93,93 @@ export function itemSummary(item: TmiPackageItem): string {
   return `${s("airport")} · ${s("scope") || "all"} · ${s("until") ? `${s("until")}z` : "UFN"}`;
 }
 
+type ItemPayload = { payload: Record<string, unknown> } | { error: string };
+
+/**
+ * An optional DD/HHMMz field: blank is no time, anything else must parse. Returns `null` for text
+ * that does not parse, so the caller refuses it rather than saving the item without the time.
+ */
+function optionalZulu(text: string | undefined): string | undefined | null {
+  return text?.trim() ? parseZulu(text) : undefined;
+}
+
+function programPayload(f: Record<string, string>): ItemPayload {
+  if (!f.icao?.trim()) return { error: "ICAO is required" };
+  if (!f.aar?.trim()) return { error: "AAR is required" };
+  return {
+    payload: {
+      icao: f.icao,
+      aar: Number(f.aar) || 0,
+      trail: Number(f.trail) || 0,
+      mit: Number(f.mit) || 0,
+    },
+  };
+}
+
+function restrictionPayload(f: Record<string, string>, structured: boolean, ntml: Ntml): ItemPayload {
+  if (!f.requesting?.trim()) return { error: "Requesting is required" };
+  if (!f.providing?.trim()) return { error: "Providing is required" };
+  if (!structured && !f.restriction?.trim()) return { error: "A restriction is required" };
+  if (structured && (!ntml.element.trim() || !ntml.kind.trim())) {
+    return { error: "An element and a restriction type are required" };
+  }
+  const start = optionalZulu(f.start);
+  if (start === null) return { error: "Start time must be DD/HHMMz (e.g. 12/1430z)" };
+  const stop = optionalZulu(f.stop);
+  if (stop === null) return { error: "Stop time must be DD/HHMMz (e.g. 12/1830z)" };
+  return {
+    payload: {
+      requesting: f.requesting,
+      providing: f.providing,
+      restriction: structured ? "" : f.restriction,
+      structured: structured ? ntml : undefined,
+      start_time: start,
+      stop_time: stop,
+    },
+  };
+}
+
+function advisoryPayload(f: Record<string, string>): ItemPayload {
+  // The window is required, unlike a restriction's optional start/stop: an advisory with no
+  // window is never auto-removed, and the backend rejects one for that reason.
+  if (!f.facility?.trim()) return { error: "Facility is required" };
+  if (!f.advKind?.trim()) return { error: "Advisory type is required" };
+  const from = parseZulu(f.validFrom ?? "");
+  if (!from) return { error: "Valid from must be DD/HHMMz (e.g. 12/1430z)" };
+  const to = parseZulu(f.validTo ?? "");
+  if (!to) return { error: "Valid to must be DD/HHMMz (e.g. 12/1830z)" };
+  if (new Date(to) <= new Date(from)) return { error: "Valid to must be after valid from" };
+  if (!f.body?.trim()) return { error: "Advisory text is required" };
+  return { payload: { facility: f.facility, kind: f.advKind, body: f.body, valid_from: from, valid_to: to } };
+}
+
+/**
+ * The payload for a new package item, or the message naming the first field that fails its check.
+ * Exported for tests.
+ */
+export function buildItemPayload(
+  kind: Kind,
+  f: Record<string, string>,
+  structured: boolean,
+  ntml: Ntml,
+): ItemPayload {
+  switch (kind) {
+    case "program":
+      return programPayload(f);
+    case "restriction":
+      return restrictionPayload(f, structured, ntml);
+    case "ground_stop":
+      if (!f.airport?.trim()) return { error: "Airport is required" };
+      return { payload: { airport: f.airport, scope: f.scope || undefined, until: f.until || undefined } };
+    case "advisory":
+      return advisoryPayload(f);
+  }
+}
+
 function AddItemForm({ eventId, packageId }: { eventId: number; packageId: string }) {
   const add = useAddPackageItem(eventId);
   const rates = useAirportRates(eventId);
+  const toast = useToast();
   const [kind, setKind] = useState<Kind>("program");
   const [f, setF] = useState<Record<string, string>>({});
   const [structured, setStructured] = useState(false);
@@ -102,52 +187,12 @@ function AddItemForm({ eventId, packageId }: { eventId: number; packageId: strin
   const set = (k: string, v: string) => setF((prev) => ({ ...prev, [k]: v }));
 
   function submit() {
-    let payload: Record<string, unknown> | null = null;
-    if (kind === "program") {
-      if (!f.icao || !f.aar) return;
-      payload = {
-        icao: f.icao,
-        aar: Number(f.aar) || 0,
-        trail: Number(f.trail) || 0,
-        mit: Number(f.mit) || 0,
-      };
-    } else if (kind === "restriction") {
-      if (!f.requesting || !f.providing) return;
-      if (!structured && !f.restriction) return;
-      if (structured && (!ntml.element.trim() || !ntml.kind.trim())) return;
-      payload = {
-        requesting: f.requesting,
-        providing: f.providing,
-        restriction: structured ? "" : f.restriction,
-        structured: structured ? ntml : undefined,
-        start_time: parseZulu(f.start ?? "") ?? undefined,
-        stop_time: parseZulu(f.stop ?? "") ?? undefined,
-      };
-    } else if (kind === "ground_stop") {
-      if (!f.airport) return;
-      payload = {
-        airport: f.airport,
-        scope: f.scope || undefined,
-        until: f.until || undefined,
-      };
-    } else if (kind === "advisory") {
-      // The window is required, unlike a restriction's optional start/stop: an advisory with no
-      // window is never auto-removed, and the backend rejects one for that reason.
-      const from = parseZulu(f.validFrom ?? "");
-      const to = parseZulu(f.validTo ?? "");
-      if (!f.facility || !f.advKind || !f.body || !from || !to) return;
-      if (new Date(to) <= new Date(from)) return;
-      payload = {
-        facility: f.facility,
-        kind: f.advKind,
-        body: f.body,
-        valid_from: from,
-        valid_to: to,
-      };
+    const built = buildItemPayload(kind, f, structured, ntml);
+    if ("error" in built) {
+      toast.warning(built.error);
+      return;
     }
-    // The ground-stop branch used to be a bare `else`, so any kind added to the union above
-    // silently became a ground stop. Each kind now claims itself and `payload` stays null otherwise.
-    if (!payload) return;
+    const { payload } = built;
     add.mutate(
       { packageId, kind, payload },
       {
@@ -454,10 +499,15 @@ export function TmiPackagesSection({ eventId }: { eventId: number }) {
   const packages = usePackages(eventId);
   const create = useCreatePackage(eventId);
   const [name, setName] = useState("");
+  const toast = useToast();
 
   function add() {
     const n = name.trim();
-    if (n) create.mutate(n, { onSuccess: () => setName("") });
+    if (!n) {
+      toast.warning("Package name is required");
+      return;
+    }
+    create.mutate(n, { onSuccess: () => setName("") });
   }
 
   const rows = packages.data ?? [];
