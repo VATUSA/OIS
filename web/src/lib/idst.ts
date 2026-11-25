@@ -1,5 +1,6 @@
 import {pollUnlessLive, useRealtimeLive} from "@/lib/realtime";
 import {useQuery} from "@tanstack/react-query";
+import {useToast} from "@ois/ui";
 import type {components} from "@ois/api-client";
 
 import {ois} from "./api";
@@ -18,16 +19,28 @@ export function scopeIsEmpty(s: IdstScope): boolean {
 
 /**
  * The user's IDST scope (airports/TRACONs/ARTCCs), persisted server-side so it follows the account.
- * `setScope` does nothing until the stored scope has loaded, so an edit can't overwrite it.
+ * `setScope` does nothing until the stored scope has loaded once, so an edit can't overwrite it with
+ * a scope built from nothing. `loadFailed` is a load that never succeeded; `refreshFailed` is a
+ * failed refetch after a good load, which keeps the loaded scope (TanStack keeps `data` on error)
+ * so edits still save. A failed save raises an error toast.
  */
 export function useIdstScope() {
+  const toast = useToast();
   const prefs = usePreferences<IdstScope>(SCOPE_NS);
-  const save = useSavePreferences<IdstScope>(SCOPE_NS);
+  const save = useSavePreferences<IdstScope>(SCOPE_NS, {
+    onError: () => toast.error("Couldn't save your IDST scope"),
+  });
   const scope: IdstScope = { ...EMPTY_SCOPE, ...(prefs.data ?? {}) };
   const setScope = (s: IdstScope) => {
-    if (prefs.isSuccess) save.mutate(s);
+    if (prefs.data !== undefined) save.mutate(s);
   };
-  return { scope, setScope };
+  return {
+    scope,
+    setScope,
+    loadFailed: prefs.isError && prefs.data === undefined,
+    refreshFailed: prefs.isError && prefs.data !== undefined,
+    retryLoad: () => void prefs.refetch(),
+  };
 }
 
 /** FCA-metered ground departures in scope, split into unscheduled / released. Polls while in scope. */

@@ -705,10 +705,11 @@ const FCA_PREFS_NS = "fca";
  * desktop app (#789). `""` is ALL ARTCCs and is saved like any other choice. With `persist` off it's
  * plain page state that starts at ALL, as on the advisories overview and the event builder.
  *
- * Mirrors `useIdstScope`: nothing is written until the stored value has loaded, so the `""` default
+ * Like `useIdstScope`, nothing is written until the stored value has loaded, so the `""` default
  * shown while it loads can't overwrite a saved ARTCC. A pick made before then (or while signed out,
  * when the load fails) still applies on this page; it just isn't saved. Until the user picks, a
- * refetch that brings back a value saved on another device replaces the shown one.
+ * refetch that brings back a value saved on another device replaces the shown one. Unlike
+ * `useIdstScope`, it waits for `isSuccess`, so a pick after a failed refetch is not saved.
  *
  * `ignoreStored` shows ALL in place of the saved ARTCC without touching it: a notification's
  * `?fca=` deep link must not land on an FCA the saved filter hides (owner decision on #789). A pick
