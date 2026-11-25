@@ -38,6 +38,30 @@ export const SHOT_RETENTION = 3;
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "2026-11-25-eram-trajectory",
+    date: "2026-11-25",
+    title: "A new trajectory model on ERAM aircraft performance",
+    sections: [
+      {
+        heading: "Predictions",
+        highlights: [
+          "ETAs now come from flying each flight forward in 15-second steps, choosing climb, cruise or descent at each step. An arrival already descending is no longer predicted to climb back to its filed altitude first, so its ETA and sector times are no longer early.",
+          "Climb, descent and speed for 2,692 aircraft types now come from ERAM's performance tables. A type row on the Aircraft profiles page still overrides them.",
+          "The built-in profile rows that still held their original numbers were removed so the ERAM data applies. Rows you edited are kept.",
+        ],
+      },
+      {
+        heading: "Fixes",
+        highlights: [
+          "Set program on an airport that already has a program keeps its gate rules, exclusions and jets-only setting.",
+          "Adding a TMI-package item now says which field is missing or wrong, and a start or stop time not in DD/HHMMz form is refused instead of saving a restriction with no window.",
+          "IDST shows an error with Retry when your scope fails to load or refresh, a toast when it fails to save, and a message under an invalid airport.",
+          "The search shortcut hint reads Ctrl K on Windows and Linux instead of the Mac Command key.",
+        ],
+      },
+    ],
+  },
+  {
     id: "2026-11-22-api-reference",
     date: "2026-11-22",
     title: "A new API reference at /docs/v1",
