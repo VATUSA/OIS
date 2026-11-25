@@ -32,7 +32,17 @@ function hhmmZ(iso?: string | null): string {
   return `${new Date(iso).toISOString().slice(11, 16).replace(":", "")}z`;
 }
 
-function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstScope) => void }) {
+function ScopePanel({
+  scope,
+  setScope,
+  refreshFailed,
+  onRetry,
+}: {
+  scope: IdstScope;
+  setScope: (s: IdstScope) => void;
+  refreshFailed: boolean;
+  onRetry: () => void;
+}) {
   const [airport, setAirport] = useState("");
   const [airportError, setAirportError] = useState<string | null>(null);
   const addAirport = () => {
@@ -55,6 +65,15 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
   return (
     <Card className="flex flex-col gap-4 p-4">
       <h2 className="text-xl font-bold">Working</h2>
+
+      {refreshFailed && (
+        <div data-refresh-error className="flex items-center justify-between gap-2 text-xs text-danger">
+          <span>Couldn&apos;t refresh your IDST scope.</span>
+          <Button size="sm" variant="secondary" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         <label htmlFor="idst-airport" className="text-xs font-semibold text-ink-2">
@@ -401,7 +420,7 @@ export function SelectedPanel({
 export function IdstPage() {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "flow.fca.update");
-  const { scope, setScope, loadFailed, retryLoad } = useIdstScope();
+  const { scope, setScope, loadFailed, refreshFailed, retryLoad } = useIdstScope();
   const idst = useIdst(scope);
   const [selKey, setSelKey] = useState<string | null>(null);
 
@@ -430,7 +449,7 @@ export function IdstPage() {
       </div>
 
       <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
-        <ScopePanel scope={scope} setScope={setScope} />
+        <ScopePanel scope={scope} setScope={setScope} refreshFailed={refreshFailed} onRetry={retryLoad} />
         {loadFailed ? (
           <QueryState
             isError

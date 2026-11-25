@@ -25,6 +25,7 @@ beforeAll(() => {
 
 const PREFS_PATH = "/api/v1/me/preferences/{namespace}";
 const LOAD_ERROR = "Couldn't load your IDST scope.";
+const REFRESH_ERROR = "Couldn't refresh your IDST scope.";
 const SAVE_ERROR = "Couldn't save your IDST scope";
 const AIRPORT_ERROR = "Airport must be 3 or 4 letters or digits";
 const EMPTY_PROMPT = "Set your scope to see FCA-metered ground departures.";
@@ -137,6 +138,7 @@ describe("IdstPage scope load errors", () => {
     expect(text()).toContain(LOAD_ERROR);
     expect(button("Retry")).toBeDefined();
     expect(text()).not.toContain(EMPTY_PROMPT);
+    expect(text()).not.toContain(REFRESH_ERROR);
   });
 
   it("shows the set-your-scope prompt and no error when the GET is ok", async () => {
@@ -196,6 +198,7 @@ describe("IdstPage scope load errors", () => {
     expect(prefGets()).toHaveLength(2);
     expect(qc.getQueryState(["preferences", "idst"])?.status).toBe("error");
     expect(text()).not.toContain(LOAD_ERROR);
+    expect(text()).toContain(REFRESH_ERROR);
     expect(text()).toContain("No unscheduled metered departures in scope");
     expect(chips().length).toBeGreaterThan(0);
 
@@ -203,6 +206,32 @@ describe("IdstPage scope load errors", () => {
     await clickAdd();
     expect(prefPuts()).toHaveLength(1);
     expect(prefPuts()[0][1].body).toEqual({ airports: ["KDCA", "KIAD"], tracons: [], artccs: [] });
+  });
+
+  it("clears the refresh error when Retry refetches successfully, and never shows it on a good load", async () => {
+    prefsGetAnswers(
+      OK({ airports: ["KDCA"], tracons: [], artccs: [] }),
+      FAIL_WITH_BODY,
+      OK({ airports: ["KDCA", "KIAD"], tracons: [], artccs: [] }),
+    );
+    const qc = await mount();
+    expect(text()).not.toContain(REFRESH_ERROR);
+    expect(button("Retry")).toBeUndefined();
+
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["preferences", "idst"] });
+    });
+    await flush();
+    expect(text()).toContain(REFRESH_ERROR);
+    expect(text()).not.toContain(LOAD_ERROR);
+
+    await act(async () => button("Retry")!.click());
+    await vi.waitFor(async () => {
+      await flush();
+      expect(text()).not.toContain(REFRESH_ERROR);
+    });
+    expect(prefGets()).toHaveLength(3);
+    expect(text()).toContain("KIAD");
   });
 
   it("sends no PUT when an airport is added after a failed load, and does after an ok one", async () => {

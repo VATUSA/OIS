@@ -6,7 +6,8 @@ import {ois} from "./api";
  * Per-user preferences for a namespace — an opaque, client-owned jsonb blob stored server-side
  * (see backend migration 0034). The value shape is owned by the caller, so pass a type param;
  * the backend never inspects it. A failed load is a query error — never `null` — so callers that
- * write must wait for `isSuccess`, or they'd overwrite what's stored with a value built from nothing.
+ * write must wait until a value has loaded, or they'd overwrite what's stored with a value built from
+ * nothing. A failed refetch keeps the loaded `data` but turns `isSuccess` false.
  */
 export function usePreferences<T>(namespace: string, options?: { enabled?: boolean }) {
   return useQuery({
