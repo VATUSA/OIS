@@ -499,10 +499,15 @@ export function TmiPackagesSection({ eventId }: { eventId: number }) {
   const packages = usePackages(eventId);
   const create = useCreatePackage(eventId);
   const [name, setName] = useState("");
+  const toast = useToast();
 
   function add() {
     const n = name.trim();
-    if (n) create.mutate(n, { onSuccess: () => setName("") });
+    if (!n) {
+      toast.warning("Package name is required");
+      return;
+    }
+    create.mutate(n, { onSuccess: () => setName("") });
   }
 
   const rows = packages.data ?? [];

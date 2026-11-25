@@ -184,6 +184,39 @@ describe("TMI package add-item form (VATUSA/OIS#1012)", () => {
     expect(document.querySelector('[role="radiogroup"][aria-label="Item kind"]')).toBeNull();
   });
 
+  describe("new package", () => {
+    const newPackage = () => {
+      const el = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "New package");
+      if (!el) throw new Error("no New package button");
+      return el;
+    };
+
+    it("refuses a blank package name, naming the field and keeping the input", async () => {
+      await mount();
+      await typeInto(input("New package name"), "   ");
+      await click(newPackage());
+      await settle();
+      expect(toasts().some((t) => t.includes("Package name is required")), `toasts: ${JSON.stringify(toasts())}`).toBe(
+        true,
+      );
+      expect(post).not.toHaveBeenCalled();
+      expect(input("New package name").value).toBe("   ");
+    });
+
+    it("creates a package with a trimmed name", async () => {
+      await mount();
+      await typeInto(input("New package name"), "  FNO kickoff  ");
+      await click(newPackage());
+      await settle();
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(post).toHaveBeenCalledWith("/api/v1/events/{id}/packages", {
+        params: {path: {id: EVENT}},
+        body: {name: "FNO kickoff"},
+      });
+      expect(toasts().filter((t) => t.includes("Package name is required"))).toEqual([]);
+    });
+  });
+
   describe("program", () => {
     it.each([
       ["ICAO", "ICAO is required"],
