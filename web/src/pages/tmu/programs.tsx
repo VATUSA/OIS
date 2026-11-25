@@ -129,6 +129,7 @@ function TrailSelect({
 // --- add a new airport program (the tab's control row) ---
 
 function SetProgramForm() {
+  const programs = usePrograms();
   const upsert = useUpsertProgram();
   const toast = useToast();
   const [icao, setIcao] = useState("");
@@ -138,6 +139,11 @@ function SetProgramForm() {
   const [until, setUntil] = useState("");
 
   function submit() {
+    // The PUT replaces the whole program, so the restrictions to keep come from the loaded list.
+    if (!programs.data) {
+      toast.warning("The program list hasn't loaded yet, so the program can't be set");
+      return;
+    }
     const cleanIcao = icao.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
     if (cleanIcao.length < 3 || cleanIcao.length > 4) {
       toast.warning("Enter a 3–4 character ICAO");
@@ -157,6 +163,7 @@ function SetProgramForm() {
       }
     }
     const mitN = mit.trim() ? Math.round(Number(mit)) : 0;
+    const existing = programs.data.find((p) => p.icao === cleanIcao);
     upsert.mutate(
       {
         icao: cleanIcao,
@@ -164,10 +171,10 @@ function SetProgramForm() {
           aar: aarN,
           trail: mitN > 0 ? 0 : trail,
           mit: mitN,
-          gates: [],
-          exclude_wake: [],
-          exclude_types: [],
-          jets_only: false,
+          gates: existing?.gates ?? [],
+          exclude_wake: existing?.exclude_wake ?? [],
+          exclude_types: existing?.exclude_types ?? [],
+          jets_only: existing?.jets_only ?? false,
           active_until: activeUntil,
         },
       },
