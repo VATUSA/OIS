@@ -11,8 +11,8 @@ import {beforeAll, describe, expect, it} from "vitest";
 // AC2 the helper is the one source of the label      | shortcut-label.ts is the only file with the ⌘ literal       | done
 // guard is live (scan finds files)                   | file count above a floor; app-sidebar.tsx is in the set     | done
 // guard is live (matcher matches)                    | a planted '"⌘K"' string in a code sample is flagged         | done
-// guard catches escaped forms                        | ⌘, \u{2318}, &#8984;, &#x2318; each flagged            | done
-// guard does not flag prose                         | ⌘K inside // and /* */ comments is not flagged              | done
+// guard catches escaped forms                        | \u2318, \u{2318}, &#8984;, &#x2318;, &#X2318; each flagged | done
+// guard does not flag prose                          | ⌘K inside // and /* */ comments is not flagged              | done
 //
 // A source scan on purpose ("Absence needs a guard, not a grep", test-writing.md): a render test
 // covers the sidebar only, and a new hint could be added anywhere. Mirror the ROOTS / strip / scan /
@@ -28,7 +28,7 @@ function strip(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
-/** ⌘ as written, or as a JS escape (`⌘`, `\u{2318}`) or an HTML entity (`&#8984;`, `&#x2318;`). */
+/** ⌘ as written, or as a JS escape (`\u2318`, `\u{2318}`) or an HTML entity (`&#8984;`, `&#x2318;`). */
 const COMMAND_KEY = /⌘|\\u2318|\\u\{2318\}|&#8984;|&#x2318;/gi;
 
 /** `file:line` for every ⌘ left in the code of `text`. */
