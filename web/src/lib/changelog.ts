@@ -45,9 +45,9 @@ export const CHANGELOG: ChangelogEntry[] = [
       {
         heading: "Predictions",
         highlights: [
-          "ETAs now come from flying each flight forward in 15-second steps, choosing climb, cruise or descent at each step. An arrival already descending is no longer predicted to climb back to its filed altitude first, so its ETA and sector times are no longer early.",
+          "ETAs now come from flying each flight forward in 15-second steps, choosing climb, cruise or descent at each step. An arrival already descending is no longer predicted to climb back to its filed altitude first, which made its ETA and sector times early.",
           "Climb, descent and speed for 2,692 aircraft types now come from ERAM's performance tables. A type row on the Aircraft profiles page still overrides them.",
-          "The built-in profile rows that still held their original numbers were removed so the ERAM data applies. Rows you edited are kept.",
+          "The ten built-in type rows (B738, A320 and others) that still held their original numbers were removed so the ERAM data applies. Rows you edited are kept, as are the built-in default, wake and PA28 rows.",
         ],
       },
       {
