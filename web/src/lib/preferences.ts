@@ -37,11 +37,12 @@ export function useSavePreferences<T>(namespace: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (value: T): Promise<T> => {
-      const { error } = await ois.PUT("/api/v1/me/preferences/{namespace}", {
+      const { response } = await ois.PUT("/api/v1/me/preferences/{namespace}", {
         params: { path: { namespace } },
         body: value,
       });
-      if (error) throw new Error("save failed");
+      // Keyed on `response.ok` for the same reason as `preferencesFrom`: a bodyless failure has no `error`.
+      if (!response.ok) throw new Error("save failed");
       return value;
     },
     onSuccess: (value) => {

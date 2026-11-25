@@ -10,6 +10,7 @@ import {
   FilterChip,
   Input,
   MetricCard,
+  QueryState,
   Select,
   StatusPill,
 } from "@ois/ui";
@@ -33,11 +34,15 @@ function hhmmZ(iso?: string | null): string {
 
 function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstScope) => void }) {
   const [airport, setAirport] = useState("");
+  const [airportError, setAirportError] = useState<string | null>(null);
   const addAirport = () => {
     const a = airport.trim().toUpperCase();
-    if (/^[A-Z0-9]{3,4}$/.test(a) && !scope.airports.includes(a)) {
-      setScope({ ...scope, airports: [...scope.airports, a] });
+    if (!a) return;
+    if (!/^[A-Z0-9]{3,4}$/.test(a)) {
+      setAirportError("Airport must be 3 or 4 letters or digits");
+      return;
     }
+    if (!scope.airports.includes(a)) setScope({ ...scope, airports: [...scope.airports, a] });
     setAirport("");
   };
   const addFacility = (pick: FacilityPick) => {
@@ -59,7 +64,12 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
           <Input
             id="idst-airport"
             value={airport}
-            onChange={(e) => setAirport(e.target.value)}
+            onChange={(e) => {
+              setAirport(e.target.value);
+              setAirportError(null);
+            }}
+            aria-invalid={airportError ? true : undefined}
+            aria-describedby={airportError ? "idst-airport-error" : undefined}
             onKeyDown={(e) => e.key === "Enter" && addAirport()}
             placeholder="KDCA"
             className="h-8 font-mono uppercase"
@@ -68,6 +78,11 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
             Add
           </Button>
         </div>
+        {airportError && (
+          <p id="idst-airport-error" role="alert" className="text-xs text-danger">
+            {airportError}
+          </p>
+        )}
         {scope.airports.length > 0 && (
           <FilterBar className="gap-1.5">
             {scope.airports.map((a) => (
@@ -386,7 +401,7 @@ export function SelectedPanel({
 export function IdstPage() {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "flow.fca.update");
-  const { scope, setScope } = useIdstScope();
+  const { scope, setScope, loadFailed, retryLoad } = useIdstScope();
   const idst = useIdst(scope);
   const [selKey, setSelKey] = useState<string | null>(null);
 
@@ -416,7 +431,14 @@ export function IdstPage() {
 
       <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
         <ScopePanel scope={scope} setScope={setScope} />
-        {scopeIsEmpty(scope) ? (
+        {loadFailed ? (
+          <QueryState
+            isError
+            error="Couldn't load your IDST scope."
+            onRetry={retryLoad}
+            className="min-h-[16rem] rounded-md border border-line"
+          />
+        ) : scopeIsEmpty(scope) ? (
           <EmptyState className="min-h-[16rem] rounded-md border border-line">
             Set your scope to see FCA-metered ground departures.
           </EmptyState>
