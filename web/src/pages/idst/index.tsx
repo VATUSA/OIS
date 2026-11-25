@@ -10,6 +10,7 @@ import {
   FilterChip,
   Input,
   MetricCard,
+  QueryState,
   Select,
   StatusPill,
 } from "@ois/ui";
@@ -31,13 +32,27 @@ function hhmmZ(iso?: string | null): string {
   return `${new Date(iso).toISOString().slice(11, 16).replace(":", "")}z`;
 }
 
-function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstScope) => void }) {
+function ScopePanel({
+  scope,
+  setScope,
+  refreshFailed,
+  onRetry,
+}: {
+  scope: IdstScope;
+  setScope: (s: IdstScope) => void;
+  refreshFailed: boolean;
+  onRetry: () => void;
+}) {
   const [airport, setAirport] = useState("");
+  const [airportError, setAirportError] = useState<string | null>(null);
   const addAirport = () => {
     const a = airport.trim().toUpperCase();
-    if (/^[A-Z0-9]{3,4}$/.test(a) && !scope.airports.includes(a)) {
-      setScope({ ...scope, airports: [...scope.airports, a] });
+    if (!a) return;
+    if (!/^[A-Z0-9]{3,4}$/.test(a)) {
+      setAirportError("Airport must be 3 or 4 letters or digits");
+      return;
     }
+    if (!scope.airports.includes(a)) setScope({ ...scope, airports: [...scope.airports, a] });
     setAirport("");
   };
   const addFacility = (pick: FacilityPick) => {
@@ -51,6 +66,15 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
     <Card className="flex flex-col gap-4 p-4">
       <h2 className="text-xl font-bold">Working</h2>
 
+      {refreshFailed && (
+        <div data-refresh-error className="flex items-center justify-between gap-2 text-xs text-danger">
+          <span>Couldn&apos;t refresh your IDST scope.</span>
+          <Button size="sm" variant="secondary" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      )}
+
       <div className="flex flex-col gap-1.5">
         <label htmlFor="idst-airport" className="text-xs font-semibold text-ink-2">
           Tower · Airport
@@ -59,7 +83,12 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
           <Input
             id="idst-airport"
             value={airport}
-            onChange={(e) => setAirport(e.target.value)}
+            onChange={(e) => {
+              setAirport(e.target.value);
+              setAirportError(null);
+            }}
+            aria-invalid={airportError ? true : undefined}
+            aria-describedby={airportError ? "idst-airport-error" : undefined}
             onKeyDown={(e) => e.key === "Enter" && addAirport()}
             placeholder="KDCA"
             className="h-8 font-mono uppercase"
@@ -68,6 +97,11 @@ function ScopePanel({ scope, setScope }: { scope: IdstScope; setScope: (s: IdstS
             Add
           </Button>
         </div>
+        {airportError && (
+          <p id="idst-airport-error" role="alert" className="text-xs text-danger">
+            {airportError}
+          </p>
+        )}
         {scope.airports.length > 0 && (
           <FilterBar className="gap-1.5">
             {scope.airports.map((a) => (
@@ -386,7 +420,7 @@ export function SelectedPanel({
 export function IdstPage() {
   const { data: me } = useMe();
   const canEdit = hasPermission(me, "flow.fca.update");
-  const { scope, setScope } = useIdstScope();
+  const { scope, setScope, loadFailed, refreshFailed, retryLoad } = useIdstScope();
   const idst = useIdst(scope);
   const [selKey, setSelKey] = useState<string | null>(null);
 
@@ -415,8 +449,15 @@ export function IdstPage() {
       </div>
 
       <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)_320px]">
-        <ScopePanel scope={scope} setScope={setScope} />
-        {scopeIsEmpty(scope) ? (
+        <ScopePanel scope={scope} setScope={setScope} refreshFailed={refreshFailed} onRetry={retryLoad} />
+        {loadFailed ? (
+          <QueryState
+            isError
+            error="Couldn't load your IDST scope."
+            onRetry={retryLoad}
+            className="min-h-[16rem] rounded-md border border-line"
+          />
+        ) : scopeIsEmpty(scope) ? (
           <EmptyState className="min-h-[16rem] rounded-md border border-line">
             Set your scope to see FCA-metered ground departures.
           </EmptyState>

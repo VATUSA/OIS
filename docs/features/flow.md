@@ -9,7 +9,7 @@
 > domain — see [tmu-ntml-adv-tmi.md](tmu-ntml-adv-tmi.md). Two more `flow`-domain
 > features exist and aren't detailed below: **airport surface data** (gates/ramp
 > areas/taxiways, `flow.surface_data.update`) and **aircraft performance profiles**
-> (`flow.aircraft_profiles.{read,update}` — climb/cruise/descent speeds per type,
+> (`flow.aircraft_profiles.{read,update}` — climb/cruise/descent speeds per type, over the bundled ERAM tables,
 > feeding the shared trajectory/ETA model this whole domain's metering runs on). The
 > **arrival demand chart (AADC)** — a bucketed forward-demand view built on this same
 > live-flow computation — has its own spec: [aadc.md](aadc.md).
@@ -431,7 +431,7 @@ wheels-up, its metering holds no issued CFR and the departures list shows none (
 Airport-flow miles-in-trail is converted to a time gap at the trailing flight's predicted
 groundspeed 40 nm along-route short of the field (`MIT_CROSSING_NM`), floored at 120 kt as FCA
 metering floors its crossing speed. A flight already inside 40 nm reads its own descent schedule
-40 nm out (its type's profile, filed cruise altitude and speed, the wind along its remaining route), not
+40 nm out (its type's performance, filed cruise altitude and speed, the wind along its remaining route), not
 its speed where it is now. Airport-flow MIT is set per
 arrival gate, and the gate is usually a STAR name rather than a point on the route, so there is no
 fix to read a speed at. When a flight would land ahead of a slot already assigned on its gate, the
@@ -442,7 +442,7 @@ only, so they read it through `predict::flight_path`, the path the trajectory is
 great-circle fallback included.
 
 `only_the_entry_point_times_a_flight` (`feed/predict.rs`) fails when non-test code outside
-`feed/predict.rs`, `feed/trajectory.rs` and the offline profile backtest
+`feed/predict.rs`, `feed/trajectory.rs`, `feed/performance.rs` and the offline profile backtest
 (`profile_builder/backtest.rs`, below) calls the model directly. To re-derive the caller list:
 
 ```bash
@@ -453,7 +453,7 @@ and keep the hits outside `#[cfg(test)]` modules.
 
 ## Measuring aircraft profiles *(#828)*
 
-The `flow.aircraft_profile` rows are hand-written. `aircraft-profile-builder` measures what each
+The `flow.aircraft_profile` rows are hand-written, and a type row replaces that type's ERAM record (#985). `aircraft-profile-builder` measures what each
 type actually flies on VATSIM from the stats history, and scores a profile set against flights it
 held out. It runs offline from a checkout (the backend image ships only `ois-backend`), reads the
 database named by `DATABASE_URL` and writes nothing to it:
@@ -463,7 +463,7 @@ database named by `DATABASE_URL` and writes nothing to it:
 RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- build \
     --from 2026-09-20 --to 2026-10-11 --out /tmp/aircraft_profiles.json --report coverage.md
 
-# Score: the stored catalog (set A) against it with the measured rows applied (set B).
+# Score: what the live model flies (set A) against it with the measured rows applied (set B).
 RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder -- backtest \
     --from 2026-09-20 --to 2026-10-11 --profiles /tmp/aircraft_profiles.json --report backtest.md
 ```
@@ -494,5 +494,6 @@ RUST_LOG=info cargo run -p ois-backend --release --bin aircraft-profile-builder 
   `predict::arrival_eta` and, for the top of descent, `predict::arrival_route` +
   `predict::eta_along_route`, the model's own functions; the live surfaces reach the same model
   through `predict::trajectory`. Errors are predicted minus
-  observed, at the top of descent and at touchdown. Set B lays each profiled type, family and wake
-  row over set A; the report's second table holds the flights set B times on one of those rows.
+  observed, at the top of descent and at touchdown. Both sets hold the ERAM tables, so set A is what the
+  live model flies. Set B lays each profiled type, family and wake
+  row over set A, a type's row in place of its ERAM record and built on the row that type would fly without it; the report's second table holds the flights set B times on one of those rows.

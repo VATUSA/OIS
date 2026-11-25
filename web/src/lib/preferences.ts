@@ -6,7 +6,8 @@ import {ois} from "./api";
  * Per-user preferences for a namespace — an opaque, client-owned jsonb blob stored server-side
  * (see backend migration 0034). The value shape is owned by the caller, so pass a type param;
  * the backend never inspects it. A failed load is a query error — never `null` — so callers that
- * write must wait for `isSuccess`, or they'd overwrite what's stored with a value built from nothing.
+ * write must wait until a value has loaded, or they'd overwrite what's stored with a value built from
+ * nothing. A failed refetch keeps the loaded `data` but turns `isSuccess` false.
  */
 export function usePreferences<T>(namespace: string, options?: { enabled?: boolean }) {
   return useQuery({
@@ -32,16 +33,21 @@ export function preferencesFrom<T>(ok: boolean, data: unknown): T | null {
   return (data ?? null) as T | null;
 }
 
-/** Upserts this user's preferences for a namespace and primes the query cache with the result. */
-export function useSavePreferences<T>(namespace: string) {
+/**
+ * Upserts this user's preferences for a namespace and primes the query cache with the result.
+ * `onError` is the mutation's own, so it still runs when the component unmounts before the save fails.
+ */
+export function useSavePreferences<T>(namespace: string, options?: { onError?: () => void }) {
   const queryClient = useQueryClient();
   return useMutation({
+    onError: options?.onError,
     mutationFn: async (value: T): Promise<T> => {
-      const { error } = await ois.PUT("/api/v1/me/preferences/{namespace}", {
+      const { response } = await ois.PUT("/api/v1/me/preferences/{namespace}", {
         params: { path: { namespace } },
         body: value,
       });
-      if (error) throw new Error("save failed");
+      // Keyed on `response.ok` for the same reason as `preferencesFrom`: a bodyless failure has no `error`.
+      if (!response.ok) throw new Error("save failed");
       return value;
     },
     onSuccess: (value) => {

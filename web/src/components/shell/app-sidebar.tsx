@@ -46,6 +46,7 @@ import {DOCS_URL} from "@/lib/api";
 import {useLogout, useMe} from "@/lib/auth";
 import {hasPermission} from "@/lib/permissions";
 import {ADMIN_HOME, AREAS, groupContainsPath, visibleGroups} from "@/lib/nav";
+import {shortcutLabel} from "@/lib/shortcut-label";
 
 import {openCommandSearch} from "./command-search";
 import {useRecentPages} from "./recent-pages";
@@ -243,7 +244,7 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
   if (collapsed) {
     return (
       <div className="flex justify-center">
-        <ChromeButton label="Search (⌘K)" onClick={openCommandSearch}>
+        <ChromeButton label={`Search (${shortcutLabel("K")})`} onClick={openCommandSearch}>
           <Search />
         </ChromeButton>
       </div>
@@ -257,7 +258,7 @@ function SearchPill({ collapsed }: { collapsed: boolean }) {
     >
       <Search className="size-3.5" />
       Search
-      <kbd className="ml-auto rounded-xs border border-line px-1.5 font-mono text-[10px]">⌘K</kbd>
+      <kbd className="ml-auto rounded-xs border border-line px-1.5 font-mono text-[10px]">{shortcutLabel("K")}</kbd>
     </button>
   );
 }

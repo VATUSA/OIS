@@ -34,8 +34,8 @@ const MIN_GAP_SEC: i64 = 5;
 pub const MIN_VERTICAL_FPM: f64 = 300.0;
 /// A pair changing altitude slower than this (fpm) is level.
 pub const LEVEL_MAX_FPM: f64 = 100.0;
-/// A level pair within this many feet of the flight's highest altitude is at cruise. Matches
-/// `trajectory::ANCHOR_ALT_TOLERANCE_FT`, the model's own "established at cruise" band.
+/// A level pair within this many feet of the flight's highest altitude is at cruise. Narrower than the
+/// model's own cruise band (`trajectory::CRUISE_BAND_FT`), so a sample is of level flight.
 pub const CRUISE_BAND_FT: f64 = 300.0;
 /// Faster than this (fpm) is a teleport or a sim glitch, not flying.
 const MAX_PLAUSIBLE_FPM: f64 = 8_000.0;
