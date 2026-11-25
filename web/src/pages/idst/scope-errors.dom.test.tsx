@@ -66,7 +66,7 @@ const flush = () =>
     await new Promise((r) => setTimeout(r, 0));
   });
 
-async function mount() {
+async function mount({ settle = true }: { settle?: boolean } = {}) {
   const qc = new QueryClient({
     defaultOptions: {
       queries: {
@@ -93,6 +93,7 @@ async function mount() {
       </QueryClientProvider>,
     );
   });
+  if (!settle) return qc;
   await vi.waitFor(async () => {
     await flush();
     expect(qc.getQueryState(["preferences", "idst"])?.fetchStatus).toBe("idle");
@@ -170,6 +171,38 @@ describe("IdstPage scope load errors", () => {
     });
     await flush();
     expect(text()).toContain(LOAD_ERROR);
+  });
+
+  it("shows no load error while the scope GET is still in flight", async () => {
+    api.GET.mockImplementation((path: string, init?: Init) =>
+      isIdstPrefs(path, init) ? new Promise(() => {}) : Promise.resolve(OK()),
+    );
+    const qc = await mount({ settle: false });
+    await flush();
+    expect(qc.getQueryState(["preferences", "idst"])?.status).toBe("pending");
+    expect(prefGets()).toHaveLength(1);
+    expect(text()).not.toContain(LOAD_ERROR);
+  });
+
+  it("keeps the loaded scope and the flight tables, and still saves, when a background refetch fails", async () => {
+    prefsGetAnswers(OK({ airports: ["KDCA"], tracons: [], artccs: [] }), FAIL_WITH_BODY);
+    const qc = await mount();
+    expect(text()).toContain("No unscheduled metered departures in scope");
+
+    await act(async () => {
+      await qc.refetchQueries({ queryKey: ["preferences", "idst"] });
+    });
+    await flush();
+    expect(prefGets()).toHaveLength(2);
+    expect(qc.getQueryState(["preferences", "idst"])?.status).toBe("error");
+    expect(text()).not.toContain(LOAD_ERROR);
+    expect(text()).toContain("No unscheduled metered departures in scope");
+    expect(chips().length).toBeGreaterThan(0);
+
+    await type("KIAD");
+    await clickAdd();
+    expect(prefPuts()).toHaveLength(1);
+    expect(prefPuts()[0][1].body).toEqual({ airports: ["KDCA", "KIAD"], tracons: [], artccs: [] });
   });
 
   it("sends no PUT when an airport is added after a failed load, and does after an ok one", async () => {
@@ -308,6 +341,16 @@ describe("IdstPage airport input validation", () => {
     expect(prefPuts()[0][1].body).toEqual({ airports: ["KDCA"], tracons: [], artccs: [] });
   });
 
+  it("clears the input and sends no PUT for an airport already in scope", async () => {
+    prefsGetAnswers(OK({ airports: ["KDCA"], tracons: [], artccs: [] }));
+    await mount();
+    await type("kdca");
+    await clickAdd();
+    expect(prefPuts()).toHaveLength(0);
+    expect(input().value).toBe("");
+    expect(alertText()).toBeNull();
+  });
+
   it("clears the inline message when the user edits the input", async () => {
     prefsGetAnswers(OK({}));
     await mount();
@@ -317,5 +360,6 @@ describe("IdstPage airport input validation", () => {
     await type("KD");
     expect(alertText()).toBeNull();
     expect(input().getAttribute("aria-invalid")).toBeNull();
+    expect(input().getAttribute("aria-describedby")).toBeNull();
   });
 });

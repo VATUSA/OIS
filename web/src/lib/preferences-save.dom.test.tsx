@@ -34,7 +34,7 @@ beforeEach(() => {
   api.PUT.mockReset();
 });
 
-/** Mounts the hook against a cache holding STORED and returns its mutateAsync. */
+/** Mounts the hook against a cache holding STORED; returns the client and a getter for the mutation. */
 function mountSave() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } },

@@ -19,8 +19,10 @@ export function scopeIsEmpty(s: IdstScope): boolean {
 
 /**
  * The user's IDST scope (airports/TRACONs/ARTCCs), persisted server-side so it follows the account.
- * `setScope` does nothing until the stored scope has loaded, so an edit can't overwrite it; a failed
- * load is exposed as `loadFailed` with `retryLoad`, and a failed save raises an error toast.
+ * `setScope` does nothing until the stored scope has loaded once, so an edit can't overwrite it with
+ * a scope built from nothing. `loadFailed` is a load that never succeeded; a failed background
+ * refetch keeps the loaded scope (TanStack keeps `data` on error) and edits still save. A failed
+ * save raises an error toast.
  */
 export function useIdstScope() {
   const toast = useToast();
@@ -28,9 +30,9 @@ export function useIdstScope() {
   const save = useSavePreferences<IdstScope>(SCOPE_NS);
   const scope: IdstScope = { ...EMPTY_SCOPE, ...(prefs.data ?? {}) };
   const setScope = (s: IdstScope) => {
-    if (prefs.isSuccess) save.mutate(s, { onError: () => toast.error("Couldn't save your IDST scope") });
+    if (prefs.data !== undefined) save.mutate(s, { onError: () => toast.error("Couldn't save your IDST scope") });
   };
-  return { scope, setScope, loadFailed: prefs.isError, retryLoad: () => void prefs.refetch() };
+  return { scope, setScope, loadFailed: prefs.isError && prefs.data === undefined, retryLoad: () => void prefs.refetch() };
 }
 
 /** FCA-metered ground departures in scope, split into unscheduled / released. Polls while in scope. */
