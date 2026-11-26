@@ -362,7 +362,8 @@ bash <parser> < "$SCRATCH/sample.txt"                                          #
 **Look at the bytes before you write the pattern.** ANSI escapes, `\r`, BOMs, non-breaking
 spaces and trailing whitespace are all invisible in a terminal and all break a naive match.
 `cat -v`, `xxd | head`, or a grep for `\e` settles it in one command; reasoning about it settles
-nothing.
+nothing. The same check applies before committing an escape sequence written into source or a
+comment (`\u2318`): an edit can land it as the decoded character (#1005).
 
 **Drive every branch from real samples too, not just the happy one.** Keep a green capture and a
 red capture. A parser that only ever sees success cannot be shown to fail closed, and failing
