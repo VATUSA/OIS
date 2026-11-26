@@ -42,7 +42,7 @@ gh issue list --repo VATUSA/OIS --assignee @me --state open --limit 300 \
         | "count: \(length)", (.[] | select(.status == "Returned" or .status == "To Do"))'
 ```
 
-An `In build` item has a worker running on it; never offer it. A `To Do` item with a branch or worktree for its number is either parked work or another session mid-cycle: offer it as such, the operator's answer settles which, and a parked pick is said so in the dispatch.
+An `In build` item has a worker running on it; never offer it. An item an open PR already closes (`gh pr list --repo VATUSA/OIS --state open --search "<n> in:body"`, body says `Closes #<n>`) is delivered by that PR: offer it as such, never as buildable. A `To Do` item with a branch or worktree for its number is either parked work or another session mid-cycle: offer it as such, the operator's answer settles which, and a parked pick is said so in the dispatch.
 
 Group by `priority:` label: critical, high, medium, low, trivial, then unlabeled. Take the highest non-empty group, `Returned` before `To Do`. Offer it with AskUserQuestion, `multiSelect: true`, at most four options; the operator can type other issue numbers through Other. The selection, in the order offered, is the queue. Work it strictly one ticket at a time.
 

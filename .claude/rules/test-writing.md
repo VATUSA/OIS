@@ -43,6 +43,12 @@ user has `server_admin: true` passes every permission check, because `hasPermiss
 on it (`web/src/lib/permissions.ts`). Use `server_admin: false` and the real permission tree, drive
 each entry on its own, then remove one entry and confirm only its case goes red.
 
+**A sort or comparison mutant is equivalent only after it survives two locales.** glibc's
+en_US.UTF-8 collation ignores spaces, so a plain `sort` in place of `sort -n` interleaves `90 a`,
+`900 c`, `90 b` and `uniq -d` misses the pair, while `LC_ALL=C` keeps them adjacent (#911). Run it
+under `LC_ALL=C` and the host's UTF-8 locale; a test that depends on collation drives both and
+prints SKIP where the locale is absent.
+
 **A guard that compares identities needs a same-size test.** "Refuse if the set of ids changed" is
 proven only by swapping one member at the same count. A zero-to-one test still passes when the
 comparison is weakened to `len()`; mutate it to `len()` and confirm the swap test goes red.
