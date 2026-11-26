@@ -107,23 +107,45 @@ pub fn spawn_refresh(state: TraconState) {
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         loop {
             ticker.tick().await;
-            match fetch(&client).await {
-                Ok(data) => {
-                    tracing::info!(
-                        tracons = data.features.len(),
-                        "SimAware TRACON boundaries loaded"
-                    );
-                    state.store(Arc::new(data));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "tracon: refresh failed; keeping current boundaries");
-                }
-            }
+            apply_refresh(&state, fetch(&client).await);
         }
     });
 }
 
-async fn fetch(client: &reqwest::Client) -> Result<TraconData, reqwest::Error> {
+/// Install one fetch result: a parsed set replaces the current one, and any failure keeps it, so a
+/// bad upstream release never blanks boundaries already loaded.
+fn apply_refresh(state: &TraconState, result: Result<TraconData, FetchError>) {
+    match result {
+        Ok(data) => {
+            tracing::info!(
+                tracons = data.features.len(),
+                "SimAware TRACON boundaries loaded"
+            );
+            state.store(Arc::new(data));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "tracon: refresh failed; keeping current boundaries");
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FetchError {
+    #[error("download failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error(transparent)]
+    Parse(#[from] ParseError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ParseError {
+    #[error("not a GeoJSON FeatureCollection: {0}")]
+    Document(#[from] serde_json::Error),
+    #[error("no usable TRACON feature among {total} entries")]
+    NoUsableFeatures { total: usize },
+}
+
+async fn fetch(client: &reqwest::Client) -> Result<TraconData, FetchError> {
     let text = client
         .get(BOUNDARIES_URL)
         .send()
@@ -131,13 +153,15 @@ async fn fetch(client: &reqwest::Client) -> Result<TraconData, reqwest::Error> {
         .error_for_status()?
         .text()
         .await?;
-    Ok(parse(&text))
+    Ok(parse(&text)?)
 }
 
 #[derive(Deserialize)]
 struct FeatureCollection {
+    /// Raw entries, each converted to a [`Feature`] on its own, so one entry of another shape (a
+    /// nested `FeatureCollection`, #1120) is skipped instead of failing the whole document.
     #[serde(default)]
-    features: Vec<Feature>,
+    features: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -169,40 +193,61 @@ struct Geometry {
     coordinates: serde_json::Value,
 }
 
-fn parse(src: &str) -> TraconData {
-    let fc: FeatureCollection = serde_json::from_str(src).unwrap_or(FeatureCollection {
-        features: Vec::new(),
-    });
+/// Parse the combined boundaries document. An entry that is not a `Feature` with `properties` and
+/// `geometry` is skipped and counted in a warning. A document that is not a feature collection, or
+/// one with no usable feature, is an error, so the refresh keeps the boundaries it holds.
+fn parse(src: &str) -> Result<TraconData, ParseError> {
+    let fc: FeatureCollection = serde_json::from_str(src)?;
+    let total = fc.features.len();
+    let mut malformed = 0usize;
     let mut features = Vec::new();
-    for f in fc.features {
-        let Some(id) = f.properties.id else { continue };
-        let rings = outer_rings(&id, &f.geometry);
-        if rings.is_empty() {
-            continue;
+    for value in fc.features {
+        match serde_json::from_value::<Feature>(value) {
+            Ok(f) => features.extend(convert(f)),
+            Err(_) => malformed += 1,
         }
-        let prefixes: Vec<String> = f
-            .properties
-            .prefix
-            .iter()
-            .map(|p| p.to_ascii_uppercase())
-            .collect();
-        if prefixes.is_empty() {
-            continue;
-        }
-        let label = match (f.properties.label_lat, f.properties.label_lon) {
-            (Some(lat), Some(lon)) => Some([lat, lon]),
-            _ => None,
-        };
-        features.push(TraconFeature {
-            id: id.to_ascii_uppercase(),
-            name: f.properties.name,
-            prefixes,
-            suffix: f.properties.suffix.map(|s| s.to_ascii_uppercase()),
-            label,
-            rings,
-        });
     }
-    TraconData::build(features)
+    if malformed > 0 {
+        tracing::warn!(
+            skipped = malformed,
+            total,
+            "tracon: skipped entries that are not a Feature with properties and geometry"
+        );
+    }
+    if features.is_empty() {
+        return Err(ParseError::NoUsableFeatures { total });
+    }
+    Ok(TraconData::build(features))
+}
+
+/// One source feature as a matchable boundary, or `None` without an id, a prefix or a drawable ring.
+fn convert(f: Feature) -> Option<TraconFeature> {
+    let id = f.properties.id?;
+    let rings = outer_rings(&id, &f.geometry);
+    if rings.is_empty() {
+        return None;
+    }
+    let prefixes: Vec<String> = f
+        .properties
+        .prefix
+        .iter()
+        .map(|p| p.to_ascii_uppercase())
+        .collect();
+    if prefixes.is_empty() {
+        return None;
+    }
+    let label = match (f.properties.label_lat, f.properties.label_lon) {
+        (Some(lat), Some(lon)) => Some([lat, lon]),
+        _ => None,
+    };
+    Some(TraconFeature {
+        id: id.to_ascii_uppercase(),
+        name: f.properties.name,
+        prefixes,
+        suffix: f.properties.suffix.map(|s| s.to_ascii_uppercase()),
+        label,
+        rings,
+    })
 }
 
 /// Outer ring(s) as `[lat, lon]` from a Polygon or MultiPolygon, with off-globe vertices removed
@@ -289,7 +334,7 @@ mod tests {
           {"type":"Feature","properties":{"id":"SCT","prefix":["SCT"],"name":"SoCal Approach"},
            "geometry":{"type":"Polygon","coordinates":[[[-118.5,33.0],[-118.0,33.0],[-118.0,33.5],[-118.5,33.5],[-118.5,33.0]]]}}
         ]}"#;
-        parse(src)
+        parse(src).expect("sample parses")
     }
 
     #[test]
@@ -328,7 +373,7 @@ mod tests {
           {"type":"Feature","properties":{"id":"GONE","prefix":["GONE"]},
            "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[500.0,41.0],[-79.0,95.0]]]}}
         ]}"#;
-        let d = parse(src);
+        let d = parse(src).expect("BAD keeps a ring");
         let bad = d
             .match_callsign("BAD_APP")
             .expect("BAD keeps its valid vertices");
@@ -348,5 +393,117 @@ mod tests {
     #[test]
     fn unknown_prefix_is_unmatched() {
         assert!(sample().match_callsign("ZZZ_APP").is_none());
+    }
+
+    /// Bytes cut from SimAware release v1.2.15's `TRACONBoundaries.geojson`: its header, the nested
+    /// Luxembourg `FeatureCollection` that release put at `features[230]` with its two neighbors,
+    /// and the IND feature.
+    const V1_2_15_EXCERPT: &str =
+        include_str!("../../../fixtures/simaware-tracon-v1.2.15-excerpt.geojson");
+
+    #[test]
+    fn a_nested_feature_collection_is_skipped_and_the_valid_features_load() {
+        let d = parse(V1_2_15_EXCERPT).expect("the valid features beside the nested one load");
+        let ind = d
+            .match_callsign("IND_APP")
+            .expect("IND_APP matches its polygon");
+        assert_eq!(ind.id, "IND");
+        assert!(!ind.rings.is_empty(), "IND keeps its ring");
+        assert!(
+            d.match_callsign("EKYT_APP").is_some(),
+            "the neighbor before it loads"
+        );
+        assert!(
+            d.match_callsign("ELM_APP").is_some(),
+            "the neighbor after it loads"
+        );
+        assert!(
+            d.match_callsign("ELLX_APP").is_none(),
+            "the nested collection is skipped, not recovered"
+        );
+        assert_eq!(d.features.len(), 3);
+    }
+
+    #[test]
+    fn a_document_that_is_not_a_feature_collection_is_an_error() {
+        for (case, src) in [
+            (
+                "truncated",
+                r#"{"type":"FeatureCollection","features":[{"type":"Feature""#,
+            ),
+            ("not json", "<html>rate limited</html>"),
+            (
+                "features is not an array",
+                r#"{"type":"FeatureCollection","features":{}}"#,
+            ),
+        ] {
+            assert!(
+                matches!(parse(src), Err(ParseError::Document(_))),
+                "{case}: expected a document error"
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_with_no_usable_feature_is_an_error() {
+        for (case, src, total) in [
+            ("empty", r#"{"type":"FeatureCollection","features":[]}"#, 0),
+            ("no features key", r#"{"type":"FeatureCollection"}"#, 0),
+            (
+                "only a nested collection",
+                r#"{"type":"FeatureCollection","features":[{"type":"FeatureCollection","features":[]}]}"#,
+                1,
+            ),
+            (
+                "only a feature without a prefix",
+                r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"id":"X"},
+                  "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[-80.0,41.0],[-79.0,41.0],[-80.0,40.0]]]}}]}"#,
+                1,
+            ),
+        ] {
+            match parse(src) {
+                Err(ParseError::NoUsableFeatures { total: t }) => assert_eq!(t, total, "{case}"),
+                other => panic!(
+                    "{case}: expected NoUsableFeatures, got {:?}",
+                    other.map(|d| d.features.len())
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_boundaries_already_loaded() {
+        let state = new_state();
+        apply_refresh(&state, Ok(sample()));
+        assert!(
+            state.load().match_callsign("SFO_APP").is_some(),
+            "control: the load landed"
+        );
+
+        apply_refresh(
+            &state,
+            parse(r#"{"type":"FeatureCollection","features":[]}"#).map_err(FetchError::from),
+        );
+        assert!(
+            state.load().match_callsign("SFO_APP").is_some(),
+            "an empty release keeps the current boundaries"
+        );
+
+        apply_refresh(&state, parse("<html>").map_err(FetchError::from));
+        assert!(
+            state.load().match_callsign("SFO_APP").is_some(),
+            "a malformed release keeps the current boundaries"
+        );
+
+        apply_refresh(&state, parse(V1_2_15_EXCERPT).map_err(FetchError::from));
+        let now = state.load();
+        assert!(
+            now.match_callsign("IND_APP").is_some(),
+            "a good release replaces them"
+        );
+        assert!(
+            now.match_callsign("SFO_APP").is_none(),
+            "the old set is gone"
+        );
     }
 }
