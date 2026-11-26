@@ -223,7 +223,7 @@ trajectory's ETA there less its wheels-up (`release_ms` in `handlers/flow.rs`, `
   airborne flight, which has left, is not floored.
 - **A CFR issued without a ready time** locks the program's metered CFR, else the flight's locked
   or proposed wheels-up (`FlowFlight.etd`).
-- **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:515`) milliseconds on
+- **FCA metering** keeps `RELEASE_MARGIN_MS` (`backend/src/handlers/flow.rs:554`) milliseconds on
   top of the separation, so a release never takes a slot that only just fits. Miles-in-trail turns
   into a time gap at the crossing speed, floored at `MIN_CROSS_SPEED_KT`
   (`backend/src/feed/predict.rs:280`) knots; airport-flow MIT reads that speed `MIT_CROSSING_NM`
