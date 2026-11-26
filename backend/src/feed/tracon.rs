@@ -112,10 +112,13 @@ pub fn spawn_refresh(state: TraconState) {
     });
 }
 
-/// Install one fetch result: a parsed set replaces the current one, and any failure keeps it, so a
-/// bad upstream release never blanks boundaries already loaded.
-fn apply_refresh(state: &TraconState, result: Result<TraconData, FetchError>) {
-    match result {
+/// Parse and install one download. A parsed set replaces the current one; a failed download, or a
+/// release with no usable feature, keeps it.
+fn apply_refresh(state: &TraconState, downloaded: Result<String, reqwest::Error>) {
+    let parsed = downloaded
+        .map_err(FetchError::from)
+        .and_then(|text| parse(&text).map_err(FetchError::from));
+    match parsed {
         Ok(data) => {
             tracing::info!(
                 tracons = data.features.len(),
@@ -145,15 +148,14 @@ enum ParseError {
     NoUsableFeatures { total: usize },
 }
 
-async fn fetch(client: &reqwest::Client) -> Result<TraconData, FetchError> {
-    let text = client
+async fn fetch(client: &reqwest::Client) -> Result<String, reqwest::Error> {
+    client
         .get(BOUNDARIES_URL)
         .send()
         .await?
         .error_for_status()?
         .text()
-        .await?;
-    Ok(parse(&text)?)
+        .await
 }
 
 #[derive(Deserialize)]
@@ -193,25 +195,39 @@ struct Geometry {
     coordinates: serde_json::Value,
 }
 
-/// Parse the combined boundaries document. An entry that is not a `Feature` with `properties` and
-/// `geometry` is skipped and counted in a warning. A document that is not a feature collection, or
-/// one with no usable feature, is an error, so the refresh keeps the boundaries it holds.
+/// Parse the combined boundaries document. Every entry that yields no boundary is skipped and
+/// counted in one warning: one that does not parse as a TRACON `Feature` (`malformed`), and one that
+/// parses but has no id, prefix or drawable ring (`unusable`). A document that is not a feature
+/// collection, or one with no usable feature, is an error, so the refresh keeps the boundaries it
+/// holds.
 fn parse(src: &str) -> Result<TraconData, ParseError> {
     let fc: FeatureCollection = serde_json::from_str(src)?;
     let total = fc.features.len();
     let mut malformed = 0usize;
+    let mut first_malformed: Option<(usize, serde_json::Error)> = None;
     let mut features = Vec::new();
-    for value in fc.features {
+    for (index, value) in fc.features.into_iter().enumerate() {
         match serde_json::from_value::<Feature>(value) {
             Ok(f) => features.extend(convert(f)),
-            Err(_) => malformed += 1,
+            Err(e) => {
+                malformed += 1;
+                first_malformed.get_or_insert((index, e));
+            }
         }
     }
-    if malformed > 0 {
+    let unusable = total - malformed - features.len();
+    if malformed + unusable > 0 {
+        let (first_index, first_error) = match &first_malformed {
+            Some((i, e)) => (Some(*i), Some(e.to_string())),
+            None => (None, None),
+        };
         tracing::warn!(
-            skipped = malformed,
+            malformed,
+            unusable,
             total,
-            "tracon: skipped entries that are not a Feature with properties and geometry"
+            first_malformed_index = first_index,
+            first_malformed_error = first_error.as_deref(),
+            "tracon: skipped entries that yield no boundary"
         );
     }
     if features.is_empty() {
@@ -326,7 +342,10 @@ mod tests {
     use super::*;
 
     fn sample() -> TraconData {
-        let src = r#"{"type":"FeatureCollection","features":[
+        parse(SAMPLE).expect("sample parses")
+    }
+
+    const SAMPLE: &str = r#"{"type":"FeatureCollection","features":[
           {"type":"Feature","properties":{"id":"NCT","prefix":["SFO"],"suffix":"APP","name":"NorCal Approach","label_lat":36.4,"label_lon":-122.1},
            "geometry":{"type":"Polygon","coordinates":[[[-122.5,37.0],[-122.0,37.0],[-122.0,37.5],[-122.5,37.5],[-122.5,37.0]]]}},
           {"type":"Feature","properties":{"id":"NCT","prefix":["SFO","OAK"],"suffix":"DEP","name":"NorCal Departure"},
@@ -334,8 +353,6 @@ mod tests {
           {"type":"Feature","properties":{"id":"SCT","prefix":["SCT"],"name":"SoCal Approach"},
            "geometry":{"type":"Polygon","coordinates":[[[-118.5,33.0],[-118.0,33.0],[-118.0,33.5],[-118.5,33.5],[-118.5,33.0]]]}}
         ]}"#;
-        parse(src).expect("sample parses")
-    }
 
     #[test]
     fn matches_suffix_specific_feature() {
@@ -471,10 +488,11 @@ mod tests {
         }
     }
 
+    /// Drives `apply_refresh` with downloaded text, the step `spawn_refresh` runs after each fetch.
     #[test]
     fn a_failed_refresh_keeps_the_boundaries_already_loaded() {
         let state = new_state();
-        apply_refresh(&state, Ok(sample()));
+        apply_refresh(&state, Ok(SAMPLE.to_owned()));
         assert!(
             state.load().match_callsign("SFO_APP").is_some(),
             "control: the load landed"
@@ -482,20 +500,20 @@ mod tests {
 
         apply_refresh(
             &state,
-            parse(r#"{"type":"FeatureCollection","features":[]}"#).map_err(FetchError::from),
+            Ok(r#"{"type":"FeatureCollection","features":[]}"#.to_owned()),
         );
         assert!(
             state.load().match_callsign("SFO_APP").is_some(),
             "an empty release keeps the current boundaries"
         );
 
-        apply_refresh(&state, parse("<html>").map_err(FetchError::from));
+        apply_refresh(&state, Ok("<html>".to_owned()));
         assert!(
             state.load().match_callsign("SFO_APP").is_some(),
             "a malformed release keeps the current boundaries"
         );
 
-        apply_refresh(&state, parse(V1_2_15_EXCERPT).map_err(FetchError::from));
+        apply_refresh(&state, Ok(V1_2_15_EXCERPT.to_owned()));
         let now = state.load();
         assert!(
             now.match_callsign("IND_APP").is_some(),
@@ -504,6 +522,140 @@ mod tests {
         assert!(
             now.match_callsign("SFO_APP").is_none(),
             "the old set is gone"
+        );
+    }
+
+    /// A `MakeWriter` that keeps everything the fmt layer writes.
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the buffer's mutex is only held for a write")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The lines `parse` logs at WARN for `src`, as plain text.
+    fn parse_warnings(src: &str) -> Vec<String> {
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || parse(src))
+            .expect("every document these tests log from parses");
+        let bytes = buffer.0.lock().expect("no writer holds the lock").clone();
+        String::from_utf8(bytes)
+            .expect("the fmt layer writes UTF-8")
+            .lines()
+            .filter(|l| l.contains("tracon: skipped entries that yield no boundary"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// One entry per way an entry yields no boundary, beside one that loads (lowercase, labelled).
+    const MIXED: &str = r#"{"type":"FeatureCollection","features":[
+      {"type":"Feature","properties":{"id":"nct","prefix":["sfo"],"suffix":"app","label_lat":36.4,"label_lon":-122.1},
+       "geometry":{"type":"Polygon","coordinates":[[[-122.5,37.0],[-122.0,37.0],[-122.0,37.5],[-122.5,37.0]]]}},
+      {"type":"Feature","properties":{"prefix":["NOID"]},
+       "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[-80.0,41.0],[-79.0,41.0],[-80.0,40.0]]]}},
+      {"type":"Feature","properties":{"id":"PT","prefix":["PT"]},
+       "geometry":{"type":"Point","coordinates":[-80.0,40.0]}},
+      {"type":"Feature","properties":{"id":"STR","prefix":"STR"},
+       "geometry":{"type":"Polygon","coordinates":[[[-80.0,40.0],[-80.0,41.0],[-79.0,41.0],[-80.0,40.0]]]}},
+      {"type":"FeatureCollection","features":[]}
+    ]}"#;
+
+    #[test]
+    fn every_skipped_entry_is_counted_in_one_warning() {
+        let excerpt = parse_warnings(V1_2_15_EXCERPT);
+        assert_eq!(excerpt.len(), 1, "one skip warning: {excerpt:?}");
+        for field in [
+            "malformed=1",
+            "unusable=0",
+            "total=4",
+            "first_malformed_index=1",
+        ] {
+            assert!(excerpt[0].contains(field), "{field} in {}", excerpt[0]);
+        }
+        assert!(
+            excerpt[0].contains("missing field `properties`"),
+            "the first failure's error: {}",
+            excerpt[0]
+        );
+
+        let mixed = parse_warnings(MIXED);
+        assert_eq!(mixed.len(), 1, "one skip warning: {mixed:?}");
+        for field in [
+            "malformed=2",
+            "unusable=2",
+            "total=5",
+            "first_malformed_index=3",
+        ] {
+            assert!(mixed[0].contains(field), "{field} in {}", mixed[0]);
+        }
+        assert!(
+            mixed[0].contains("expected a sequence"),
+            "the first failure's error, not the last's: {}",
+            mixed[0]
+        );
+
+        let unusable_only = parse_warnings(
+            r#"{"type":"FeatureCollection","features":[
+              {"type":"Feature","properties":{"id":"SCT","prefix":["SCT"]},
+               "geometry":{"type":"Polygon","coordinates":[[[-118.5,33.0],[-118.0,33.0],[-118.0,33.5],[-118.5,33.0]]]}},
+              {"type":"Feature","properties":{"id":"PT","prefix":["PT"]},
+               "geometry":{"type":"Point","coordinates":[-80.0,40.0]}}
+            ]}"#,
+        );
+        assert_eq!(
+            unusable_only.len(),
+            1,
+            "one skip warning: {unusable_only:?}"
+        );
+        for field in ["malformed=0", "unusable=1", "total=2"] {
+            assert!(
+                unusable_only[0].contains(field),
+                "{field} in {}",
+                unusable_only[0]
+            );
+        }
+
+        assert!(
+            parse_warnings(SAMPLE).is_empty(),
+            "a document where every entry loads logs no skip warning"
+        );
+    }
+
+    #[test]
+    fn a_feature_is_uppercased_and_keeps_its_label_while_an_id_less_one_is_dropped() {
+        let d = parse(MIXED).expect("the lowercase feature loads");
+        assert_eq!(
+            d.features.len(),
+            1,
+            "only the lowercase feature yields a boundary"
+        );
+        let f = d
+            .match_callsign("SFO_APP")
+            .expect("lowercase prefix and suffix match an uppercase callsign");
+        assert_eq!(f.id, "NCT");
+        assert_eq!(f.prefixes, vec!["SFO".to_owned()]);
+        assert_eq!(f.suffix.as_deref(), Some("APP"));
+        assert_eq!(f.label, Some([36.4, -122.1]));
+        assert!(d.match_callsign("NOID_APP").is_none(), "no id, no boundary");
+        assert!(
+            d.match_callsign("PT_APP").is_none(),
+            "a Point draws no ring"
         );
     }
 }
