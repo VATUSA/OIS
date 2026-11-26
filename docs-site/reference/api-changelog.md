@@ -14,6 +14,15 @@ Each entry names the endpoint, what changed, and whether an existing caller has 
 
 ## Unreleased (pre-1.0)
 
+- **Added:** `IdstFlight.can_release` in `GET /api/v1/flow/idst`: whether the caller may mark, clear or
+  swap that flight's release on that FCA, from the same permission, ARTCC and release-holder checks the
+  release routes apply. No caller change. (#1121)
+- **Changed:** `MeBody.tmu_national` in `GET /api/v1/me` is now true for national `tmu.program.update`,
+  not `tmu.program.read`: a rostered controller reads TMU data at every ARTCC but is not a national TMU.
+  A caller that used the flag to choose a restriction audience needs no change. (#1121)
+- **Changed:** every signed-in member holds `flow.fca.read`, so `GET /api/v1/flow/fcas` and
+  `GET /api/v1/flow/idst` answer 200 rather than 401 for a member with no other role. No caller change.
+  (#1121)
 - **Changed:** `FcaFlightDebug.profile` (from `GET /api/v1/flow/fcas/{id}/traffic` with debug on) can be
   `eram:<type>`, a flight timed on ERAM's built-in tables for its type, beside `type:`, `family:`, `wake:`
   and `default`. ETAs, crossing speeds and altitudes on every endpoint that times a flight come from the new

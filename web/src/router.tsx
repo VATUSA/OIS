@@ -12,6 +12,7 @@ import {PrimaryWindowFeatures} from "@/components/primary-window-features";
 import {WhatsNew} from "@/components/whats-new";
 import {useMe} from "@/lib/auth";
 import {movedPath} from "@/lib/moved-paths";
+import {navGuard} from "@/lib/route-guard";
 import {AdvisoriesPage} from "@/pages/advisories";
 import {AdvisoriesFcaPage} from "@/pages/advisories/fcas";
 import {PilotPage} from "@/pages/pilot";
@@ -153,6 +154,7 @@ const airportRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "airport",
   component: AirportPage,
+  beforeLoad: navGuard("/ops/airport"),
   staticData: { layout: "wide", title: "Airport" },
   // `?icao=` deep-links an airport (the ⌘K search jumps here).
   validateSearch: (search: Record<string, unknown>): { icao?: string } => ({
@@ -174,6 +176,7 @@ const tmuRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "tmu",
   component: TmuPage,
+  beforeLoad: navGuard("/ops/tmu"),
   staticData: { layout: "wide", title: "TMU", views: [{ value: "board", label: "Board", icon: LayoutGrid }, { value: "table", label: "Table", icon: Rows3 }] },
   // Which tab is active — permission-gated fallback (if the user can't see this tab) happens in
   // the component, since that depends on auth state this route-level validator doesn't have.
@@ -195,6 +198,7 @@ const myRoute = createRoute({
 const myIndexRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "/",
+  beforeLoad: navGuard("/ops/my"),
   staticData: { title: "My dashboards", views: [{ value: "grid", label: "Grid", icon: LayoutGrid }, { value: "list", label: "List", icon: List }] },
   component: BoardLibraryPage,
 });
@@ -207,6 +211,7 @@ const sharedBoardRoute = createRoute({
 const boardRoute = createRoute({
   getParentRoute: () => myRoute,
   path: "$boardId",
+  beforeLoad: navGuard("/ops/my"),
   staticData: { title: "Dashboard" },
   component: BoardViewPage,
 });
@@ -215,6 +220,7 @@ const fcaRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "fca",
   component: FcaPage,
+  beforeLoad: navGuard("/ops/fca"),
   staticData: { layout: "full", title: "FCA flow" },
   // `?fca=<id>` selects that FCA on arrival — a desktop release/metering notification links here.
   validateSearch: (search: Record<string, unknown>): { fca?: string } => ({
@@ -226,6 +232,7 @@ const runwayRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "runway",
   component: RunwayPage,
+  beforeLoad: navGuard("/ops/runway"),
   staticData: { layout: "full", title: "Runway balancer" },
 });
 
@@ -233,6 +240,7 @@ const idstRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "idst",
   component: IdstPage,
+  beforeLoad: navGuard("/ops/idst"),
   staticData: { layout: "wide", title: "IDST" },
 });
 
@@ -240,6 +248,7 @@ const aadcRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "aadc",
   component: AadcPage,
+  beforeLoad: navGuard("/ops/aadc"),
   staticData: { layout: "wide", title: "Arrival demand chart" },
 });
 
@@ -248,6 +257,7 @@ const sectorMonitorRoute = createRoute({
   getParentRoute: () => opsRoute,
   path: "sectors",
   component: SectorMonitorPage,
+  beforeLoad: navGuard("/ops/sectors"),
   staticData: { layout: "wide", title: "Sector monitor" },
 });
 

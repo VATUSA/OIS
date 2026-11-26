@@ -39,6 +39,8 @@ ARTCC:
 | `NTMO` | National Traffic Management Officer |
 | `DCC_STAFF` | DCC (Discord coordination) staff |
 
+**Rostered controllers.** Every VATUSA controller on a facility roster, home or visiting, gets the `CONTROLLER` role automatically, at every ARTCC: view and edit FCAs, issue and cancel releases, edit routes and runway configurations, exclude flights and assign CFRs, plus read the TMU boards. It does not include event planning or publishing TMIs, advisories, GDPs, ground stops or programs. Leaving the roster removes it.
+
 Roles bundle a set of the permissions below; ask an administrator which role covers what you need
 rather than requesting individual permissions.
 
@@ -122,7 +124,8 @@ something narrower.
 **Your own account (`auth`)**
 
 Every signed-in user holds `auth.profile.read`, `auth.profile.update`, and `auth.sessions.delete` —
-viewing and editing your own profile and ending your own sessions needs no special grant.
+viewing and editing your own profile and ending your own sessions needs no special grant. Every
+signed-in user also holds `flow.fca.read`, so the FCA map and IDST are readable without a role.
 
 A handful of server-operator-only permissions (`system.jobs.*`, `service_accounts.*`,
 `integration.jobs.update`) aren't listed here — they're not capabilities any facility staff role

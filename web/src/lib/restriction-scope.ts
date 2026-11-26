@@ -9,7 +9,8 @@ import type {Me} from "./auth";
  * the same shape as `notifyFacilities` for FCA releases, so the two audiences can't drift apart.
  *
  * The national test is `tmu_national` rather than `server_admin`: a DCC controller holds
- * `tmu.program.read` nationally without being a server admin, and should still see the whole country.
+ * `tmu.program.update` nationally without being a server admin, and should still see the whole
+ * country. A rostered controller reads TMU data nationally but is not a national TMU (#1121).
  * Until the VATUSA profile has synced there is no facility to go on, so that is nothing rather than
  * everything — a silent alert is recoverable, a nationwide one trains people to ignore it.
  */

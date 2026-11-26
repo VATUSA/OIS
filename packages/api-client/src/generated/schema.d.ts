@@ -6088,6 +6088,11 @@ export interface components {
             arr: string;
             callsign: string;
             /**
+             * @description Whether the caller may mark, clear or swap this flight's release on this FCA: the same
+             *     permission, ARTCC-scope and release-holder checks the release routes apply (#1121).
+             */
+            can_release: boolean;
+            /**
              * Format: date-time
              * @description Metered crossing time (CTA) at the FCA line.
              */
@@ -6217,9 +6222,11 @@ export interface components {
             role_names: string[];
             server_admin: boolean;
             /**
-             * @description True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
-             *     restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
-             *     ARTCC dimension, so without this the client can't tell the two apart (#405).
+             * @description True when the member holds `tmu.program.update` nationally — a DCC/national TMU who should see
+             *     restrictions from every ARTCC, not only their own. A rostered controller reads the TMU picture
+             *     nationally but is not a national TMU, so this is false for them (#1121). `permissions` is a
+             *     flat name tree with no ARTCC dimension, so without this the client can't tell the two apart
+             *     (#405).
              */
             tmu_national: boolean;
             vatusa?: components["schemas"]["VatusaProfile"] | null;

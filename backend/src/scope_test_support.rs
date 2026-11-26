@@ -136,6 +136,46 @@ pub(crate) async fn grant(
     .unwrap();
 }
 
+/// A member as the VATUSA sync makes them: their roster row written through
+/// `repos::vatusa::upsert_member` (sign-in's path), so they hold exactly what the sync grants, and the
+/// baseline `USER` group every signed-in member holds. `home` is their home facility (`""` for none)
+/// and `visits` their visiting ARTCCs. Returns the user id; a rostered member holds `CONTROLLER`
+/// nationally (#1121).
+pub(crate) async fn rostered_member(pool: &PgPool, home: &str, visits: &[&str]) -> String {
+    let (user, cid): (String, i64) = sqlx::query_as(
+        "insert into identity.users (full_name, display_name, cid) \
+         values ('Rostered', 'Rostered', (select coalesce(max(cid), 1000000) + 1 from identity.users)) \
+         returning id, cid",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let visits: Vec<_> = visits
+        .iter()
+        .map(|f| serde_json::json!({ "facility": f }))
+        .collect();
+    let member: crate::feed::vatusa::VatusaMember = serde_json::from_value(serde_json::json!({
+        "cid": cid, "facility": home, "visiting_facilities": visits, "roles": [],
+    }))
+    .unwrap();
+    crate::repos::vatusa::upsert_member(pool, &member)
+        .await
+        .unwrap();
+    signed_in_baseline(pool, &user).await;
+    user
+}
+
+/// The `USER` group sign-in gives every member (`BASELINE_ROLE`), as a `system` row.
+pub(crate) async fn signed_in_baseline(pool: &PgPool, user_id: &str) {
+    sqlx::query(
+        "insert into access.user_roles (user_id, role_name, source) values ($1, 'USER', 'system')",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// A signed-in session for `user_id`, as the `Cookie` header value the router reads it from.
 pub(crate) async fn session_cookie(pool: &PgPool, user_id: &str) -> String {
     // Every real account has a VATSIM CID, and the session lookup decodes it as non-null — a

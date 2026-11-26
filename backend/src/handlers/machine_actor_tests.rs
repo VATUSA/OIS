@@ -218,7 +218,7 @@ async fn crossing_state(pool: PgPool) -> AppState {
 }
 
 /// [`crossing_state`] with one such pilot per callsign.
-async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
+pub(super) async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
     let state = test_state(pool, HashMap::new());
     {
         let mut feed = state.feed.write().await;
@@ -254,7 +254,7 @@ async fn crossing_state_of(pool: PgPool, callsigns: &[&str]) -> AppState {
 }
 
 /// A crossing FCA (the JFK→DCA corridor between WHITE and SIE) and its id.
-async fn fca(pool: &PgPool) -> String {
+pub(super) async fn fca(pool: &PgPool) -> String {
     sqlx::query_scalar(
         "insert into flow.fca (name, color, artcc, points, dests, origins, fixes, scope, \
              dir, mode, rate, mit, enabled) \
@@ -267,7 +267,7 @@ async fn fca(pool: &PgPool) -> String {
     .unwrap()
 }
 
-async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str, cta: i64) {
+pub(super) async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str, cta: i64) {
     sqlx::query(
         "insert into flow.fca_release (fca_id, callsign, cta_ms, edct_ms) values ($1, $2, $3, $3)",
     )
@@ -281,7 +281,7 @@ async fn seed_release(pool: &PgPool, fca_id: &str, callsign: &str, cta: i64) {
 
 /// A release `service_account` holds — written by it, so a machine acting on its own release is
 /// exercised rather than refused as a person's (#585).
-async fn seed_owned_release(
+pub(super) async fn seed_owned_release(
     pool: &PgPool,
     fca_id: &str,
     callsign: &str,
@@ -633,7 +633,7 @@ async fn a_service_account_scope_honours_its_roles_artcc(pool: PgPool) {
 // ==== VATUSA/OIS#585: authority, idempotency and conflict for external release writers =============
 
 /// One request's status, `ETag` and body.
-async fn send_full(
+pub(super) async fn send_full(
     state: &AppState,
     method: http::Method,
     uri: &str,

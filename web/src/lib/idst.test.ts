@@ -18,6 +18,7 @@ const flight = (callsign: string, over: Partial<IdstFlight> = {}): IdstFlight =>
   released_by_machine: null,
   runway: "31L",
   runway_source: "config",
+  can_release: true,
   ...over,
 });
 
@@ -40,6 +41,11 @@ describe("swapPartners", () => {
       flight("NORW", { runway: null }),
     ];
     expect(swapPartners(me, released)).toEqual([]);
+  });
+
+  it("leaves out a release the caller may not change, and keeps one they may (#1121)", () => {
+    const out = swapPartners(me, [flight("UAL2", { can_release: false }), flight("DAL3")]);
+    expect(out.map((f) => f.callsign)).toEqual(["DAL3"]);
   });
 
   it("matches the departure airport case-insensitively", () => {

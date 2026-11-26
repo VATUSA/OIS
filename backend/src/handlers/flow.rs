@@ -506,6 +506,45 @@ async fn require_fca_scope(
     }
 }
 
+/// Who is asking IDST whether they may release, with their audit actor id when they are a machine.
+struct ReleaseWriter {
+    principal: Principal,
+    /// A machine's existing actor id, read without creating one: a machine that has never acted holds
+    /// no release. Always `None` for a person, whom [`release_authority::authorize`] never refuses.
+    actor: Option<String>,
+}
+
+impl ReleaseWriter {
+    /// Whether a release write on `fca` for a flight `holder` holds would pass the release routes'
+    /// checks: `flow.fca.update` at the FCA's ARTCC ([`require_fca_scope`]) and who holds the release
+    /// ([`release_authority::authorize`]). Event-FCA visibility needs no check here: IDST lists only
+    /// what [`flow_repo::list_fcas`] shows, which hides an unpublished event FCA (#746).
+    fn may_release(
+        &self,
+        scope: &crate::repos::access::PermissionScope,
+        fca: &FcaBody,
+        holder: Option<&flow_repo::ReleaseHolder>,
+    ) -> bool {
+        let artcc = flow_repo::norm_artcc(Some(&fca.artcc));
+        scope.allows(artcc.as_deref())
+            && release_authority::authorize(&self.principal, self.actor.as_deref(), holder).is_ok()
+    }
+}
+
+/// A machine principal's audit actor id, read-only (see [`ReleaseWriter::actor`]).
+async fn release_writer_actor(
+    pool: &sqlx::PgPool,
+    principal: &Principal,
+) -> Result<Option<String>, ApiError> {
+    match principal {
+        Principal::User(_) => Ok(None),
+        Principal::ApiKey(k) => crate::repos::audit::fetch_api_key_actor_id(pool, &k.id).await,
+        Principal::ServiceAccount(sa) => {
+            crate::repos::audit::fetch_service_account_actor_id(pool, &sa.id).await
+        }
+    }
+}
+
 /// Protective margin added to the separation when **issuing** a release (#356).
 ///
 /// A release is a commitment made now against *predicted* crossing times, so it should not take a
@@ -2285,10 +2324,14 @@ fn split_codes(s: &Option<String>) -> Vec<String> {
 pub async fn list_idst(
     State(state): State<AppState>,
     _permission: RequirePermission<FlowFcaRead>,
+    Actor(principal): Actor,
     Query(q): Query<IdstQuery>,
 ) -> Result<Json<IdstResponse>, ApiError> {
     let pool = state.db.as_ref().ok_or(ApiError::ServiceUnavailable)?;
     let now = Utc::now();
+    // `can_release` per row (#1121): resolved once, then checked per FCA and per holder below.
+    let release_scope = principal.permission_scope(&state, FCA_UPDATE_PERM).await?;
+    let writer_actor = release_writer_actor(pool, &principal).await?;
     let empty = |now| {
         Json(IdstResponse {
             unscheduled: Vec::new(),
@@ -2338,6 +2381,10 @@ pub async fn list_idst(
         let held = held_by_fca.remove(&fca.id).unwrap_or_default();
         fca_releases.push((fca, releases, holders, held));
     }
+    let release_writer = ReleaseWriter {
+        principal,
+        actor: writer_actor,
+    };
     // Predicted runways, read with the rest of the DB work up front (#511). Derived by
     // `jobs::departure_runway_derive_once`, not here: the ladder's config rung needs a per-airport wind
     // fetch, which this read — scoped to a whole ARTCC and polled every 30 s — cannot afford.
@@ -2401,10 +2448,11 @@ pub async fn list_idst(
                     .get(&(f.dep.to_ascii_uppercase(), f.callsign.clone()))
                     .cloned();
                 // Provenance for the controller (#585 AC4): a machine-issued release names it.
-                let released_by_machine = holders
-                    .get(&f.callsign)
+                let holder = holders.get(&f.callsign);
+                let released_by_machine = holder
                     .and_then(|h| h.machine.as_ref())
                     .map(|(_, name)| name.clone());
+                let can_release = release_writer.may_release(&release_scope, fca, holder);
                 let item = IdstFlight {
                     callsign: f.callsign,
                     dep: f.dep,
@@ -2421,6 +2469,7 @@ pub async fn list_idst(
                     released_by_machine,
                     runway: pick.as_ref().map(|(r, _)| r.clone()),
                     runway_source: pick.as_ref().map(|(_, s)| s.clone()),
+                    can_release,
                 };
                 if item.released {
                     released.push(item);
@@ -6651,7 +6700,8 @@ mod fca_scope_tests {
         .unwrap()
     }
 
-    /// A CONTROLLER at `artcc`, granted the way the VATUSA sync grants it (#730), as a session cookie.
+    /// A CONTROLLER granted by hand at `artcc` only, as a session cookie. The sync grants it
+    /// nationally (#1121); a hand-scoped grant still stops at its ARTCC.
     async fn controller(pool: &PgPool, artcc: &str) -> String {
         use crate::repos::access::{GrantSource, set_user_role_scoped};
         let user = seed_user(pool).await;
@@ -6662,7 +6712,7 @@ mod fca_scope_tests {
             "CONTROLLER",
             true,
             Some(artcc),
-            GrantSource::Vatusa,
+            GrantSource::Manual,
         )
         .await
         .unwrap();
@@ -6670,15 +6720,18 @@ mod fca_scope_tests {
         session_cookie(pool, &user).await
     }
 
-    /// #736: an event FCA belongs to the planner lifecycle. A controller holding `flow.fca.*` at ZDC is
-    /// refused both writes on ZDC's event FCAs: an unpublished one (planned or archived) `404`s (as
-    /// `fca_traffic` answers), a published one `409 event_fca`s. Nothing changes. A non-event ZDC FCA
-    /// stays theirs to write.
+    /// #736: an event FCA belongs to the planner lifecycle. A rostered controller (national
+    /// `flow.fca.*` through the sync's CONTROLLER, #1121, here a ZTL home) is refused both writes on
+    /// ZDC's event FCAs: an unpublished one (planned or archived) `404`s (as `fca_traffic` answers), a
+    /// published one `409 event_fca`s. Nothing changes. A non-event ZDC FCA is theirs to write.
     #[sqlx::test]
-    async fn a_controller_cannot_write_an_event_fca_through_the_plain_routes(pool: PgPool) {
+    async fn a_rostered_controller_cannot_write_an_event_fca_through_the_plain_routes(
+        pool: PgPool,
+    ) {
         seed_event_fcas(&pool).await;
         let state = test_state(pool.clone(), Default::default());
-        let cookie = controller(&pool, "ZDC").await;
+        let user = crate::scope_test_support::rostered_member(&pool, "ZTL", &[]).await;
+        let cookie = session_cookie(&pool, &user).await;
         let uri = |id: &str| format!("/api/v1/flow/fcas/{id}");
 
         for (id, refused) in [
@@ -6810,10 +6863,76 @@ mod fca_scope_tests {
         );
     }
 
-    /// #730: a rostered controller's FCA access comes from the CONTROLLER group the VATUSA sync grants
-    /// at their facility — not a direct grant — and still stops at that facility's boundary.
+    /// #1121: a rostered controller's FCA access comes from the CONTROLLER group the VATUSA sync grants,
+    /// nationally, so a controller whose only ARTCC is a ZNY visit creates, edits and deletes ZTL's
+    /// FCAs. A signed-in member with only the `USER` baseline reads FCAs and writes none of them.
     #[sqlx::test]
-    async fn a_zdc_controller_edits_zdc_fcas_and_is_refused_ztls(pool: PgPool) {
+    async fn a_rostered_controller_writes_another_artccs_fcas_and_a_member_only_reads(
+        pool: PgPool,
+    ) {
+        let state = test_state(pool.clone(), Default::default());
+        let owner = seed_user(&pool).await;
+        let visitor = crate::scope_test_support::rostered_member(&pool, "", &["ZNY"]).await;
+        let visitor = session_cookie(&pool, &visitor).await;
+        let member = seed_user(&pool).await;
+        crate::scope_test_support::signed_in_baseline(&pool, &member).await;
+        let member = session_cookie(&pool, &member).await;
+        let ztl_fca = seed_fca(&pool, &owner, "ZTL").await;
+        let put = format!("/api/v1/flow/fcas/{ztl_fca}");
+
+        // The member: reads, and every write is refused for want of the permission (401).
+        assert_eq!(
+            send(&state, Method::GET, "/api/v1/flow/fcas", &member, None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &member,
+                Some(fca("ZTL"))
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &put, &member, Some(fca("ZDC"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(&state, Method::DELETE, &put, &member, None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(artcc_of(&pool, &ztl_fca).await.as_deref(), Some("ZTL"));
+
+        // The ZNY visitor, on ZTL's FCA.
+        assert_eq!(
+            send(
+                &state,
+                Method::POST,
+                "/api/v1/flow/fcas",
+                &visitor,
+                Some(fca("ZTL"))
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&state, Method::PUT, &put, &visitor, Some(fca("ZDC"))).await,
+            StatusCode::OK
+        );
+        assert_eq!(artcc_of(&pool, &ztl_fca).await.as_deref(), Some("ZDC"));
+        assert_eq!(
+            send(&state, Method::DELETE, &put, &visitor, None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(row(&pool, &ztl_fca).await.1, "deleted");
+    }
+
+    /// #730: a CONTROLLER granted by hand at one facility still stops at that facility's boundary.
+    #[sqlx::test]
+    async fn a_hand_scoped_zdc_controller_edits_zdc_fcas_and_is_refused_ztls(pool: PgPool) {
         use crate::repos::access::{GrantSource, set_user_role_scoped};
         let state = test_state(pool.clone(), Default::default());
         let owner = seed_user(&pool).await;
@@ -6825,7 +6944,7 @@ mod fca_scope_tests {
             "CONTROLLER",
             true,
             Some("ZDC"),
-            GrantSource::Vatusa,
+            GrantSource::Manual,
         )
         .await
         .unwrap();

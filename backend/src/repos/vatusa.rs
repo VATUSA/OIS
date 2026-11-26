@@ -218,8 +218,8 @@ pub async fn upsert_member(pool: &PgPool, m: &VatusaMember) -> Result<(), ApiErr
     tx.commit().await.map_err(|_| ApiError::Internal)
 }
 
-/// The group every rostered controller holds at their home ARTCC and each visiting ARTCC (#730): the
-/// baseline operational set (migration 0126). Granted by the reconciler like a role mapping, with
+/// The group every rostered controller holds, nationally (#730, #1121): the baseline operational set
+/// (migrations 0126, 0129), usable at every ARTCC. Granted by the reconciler like a role mapping, with
 /// `source = 'vatusa'`, so it comes and goes with the roster and never touches a hand-made grant.
 pub const ROSTER_GROUP: &str = "CONTROLLER";
 
@@ -231,8 +231,8 @@ type JustifiedGrants = BTreeMap<(String, Option<String>), Vec<String>>;
 ///
 /// - **Role mappings** (#548): `access.vatusa_role_mappings` applied to their VATUSA roles, scoped to
 ///   the facility the role is held at. A division role (`ZHQ`, not an ARTCC) is a **national** grant.
-/// - **The roster** (#730): [`ROSTER_GROUP`] at their home ARTCC and at each visiting ARTCC. Never
-///   national: a `ZHQ` home is not an ARTCC, so it grants nothing.
+/// - **The roster** (#730, #1121): [`ROSTER_GROUP`] **nationally**, once, for a member whose home or any
+///   visiting facility is an ARTCC. A `ZHQ` home is not an ARTCC, so on its own it grants nothing.
 ///
 /// Any facility missing from `org.facilities` is skipped, so the `access.user_roles` FK is never hit.
 async fn desired_vatusa_grants(
@@ -251,12 +251,12 @@ async fn desired_vatusa_grants(
             left join org.facilities f on f.id = vr.facility
             where vr.cid = $1 and (vr.facility = 'ZHQ' or f.id is not null)
             union all
-            select $2, f.id, 'roster home ' || f.id
+            select $2, null::text, 'roster home ' || f.id
             from identity.users u
             join org.facilities f on f.id = u.home_facility
             where u.cid = $1
             union all
-            select $2, f.id, 'roster visit ' || f.id
+            select $2, null::text, 'roster visit ' || f.id
             from identity.vatusa_visits v
             join org.facilities f on f.id = v.facility
             where v.cid = $1
@@ -619,10 +619,10 @@ pub(crate) async fn reset_candidates(pool: &PgPool) -> Result<Vec<String>, ApiEr
             left join org.facilities f on f.id = vr.facility
             where vr.facility = 'ZHQ' or f.id is not null
             union
-            select u.cid, $1, f.id
+            select u.cid, $1, null::text
             from identity.users u join org.facilities f on f.id = u.home_facility
             union
-            select v.cid, $1, f.id
+            select v.cid, $1, null::text
             from identity.vatusa_visits v join org.facilities f on f.id = v.facility
         ),
         drift(user_id) as (
@@ -1781,20 +1781,37 @@ mod tests {
             .1
     }
 
-    fn controller(artcc: &str) -> (String, Option<String>, String) {
-        vatusa("CONTROLLER", Some(artcc))
+    /// The one roster grant: CONTROLLER, national (#1121).
+    fn controller() -> (String, Option<String>, String) {
+        vatusa("CONTROLLER", None)
     }
 
-    /// AC1: at home and at every visiting ARTCC, on sign-in, with no manual step.
+    /// #1121: a home controller holds CONTROLLER once, nationally, on sign-in, however many ARTCCs
+    /// they visit, and no ARTCC-scoped row.
     #[sqlx::test]
-    async fn a_rostered_controller_is_controller_at_home_and_each_visit(pool: PgPool) {
+    async fn a_rostered_controller_is_controller_nationally(pool: PgPool) {
         let user = seed_user(&pool).await;
         sign_in_as(&pool, " zdc ", &["ZTL", "zny"]).await;
         assert_eq!(
             grants(&pool, &user).await,
-            [controller("ZDC"), controller("ZNY"), controller("ZTL")],
-            "normalised like the pull's, and one grant per facility"
+            [controller()],
+            "one national grant, normalised like the pull's"
         );
+    }
+
+    /// #1121: a visiting-only member (no ARTCC home) is a rostered controller too, on sign-in and
+    /// through the pull.
+    #[sqlx::test]
+    async fn a_visiting_only_controller_is_controller_nationally(pool: PgPool) {
+        let user = seed_user(&pool).await;
+        sign_in_as(&pool, "ZHQ", &["ZTL"]).await;
+        assert_eq!(grants(&pool, &user).await, [controller()]);
+        assert_eq!(
+            pull(&pool, "", &["ZNY"]).await,
+            0,
+            "already held: nothing moves"
+        );
+        assert_eq!(grants(&pool, &user).await, [controller()]);
     }
 
     /// AC7, and the facilities that aren't ARTCCs: no home and no visits holds nothing beyond USER; a
@@ -1808,32 +1825,28 @@ mod tests {
         assert!(grants(&pool, &user).await.is_empty());
     }
 
-    /// AC3 through the pull: a transfer moves the grant, and the pull reports it moved (#644's nudge).
+    /// Through the pull: joining grants it and the pull reports the move (#644's nudge); a transfer
+    /// keeps the one national grant and moves nothing (#1121).
     #[sqlx::test]
-    async fn a_transfer_moves_the_grant_on_the_next_pull(pool: PgPool) {
+    async fn a_transfer_keeps_the_national_grant(pool: PgPool) {
         let user = seed_user(&pool).await;
         assert_eq!(pull(&pool, "ZDC", &[]).await, 1);
-        assert_eq!(grants(&pool, &user).await, [controller("ZDC")]);
-        assert_eq!(pull(&pool, "ZTL", &[]).await, 1);
-        assert_eq!(grants(&pool, &user).await, [controller("ZTL")]);
-        assert_eq!(
-            pull(&pool, "ZTL", &[]).await,
-            0,
-            "an unchanged member moves nothing"
-        );
+        assert_eq!(grants(&pool, &user).await, [controller()]);
+        assert_eq!(pull(&pool, "ZTL", &[]).await, 0);
+        assert_eq!(grants(&pool, &user).await, [controller()]);
     }
 
-    /// AC4 through the pull — a visit-only change, which reconciled nothing before #730.
+    /// Through the pull: dropping one visit keeps the grant while a home or another visit remains;
+    /// dropping the last ARTCC removes it, and the pull reports the move.
     #[sqlx::test]
-    async fn dropping_a_visit_removes_its_grant(pool: PgPool) {
+    async fn the_grant_goes_with_the_last_rostered_artcc(pool: PgPool) {
         let user = seed_user(&pool).await;
-        pull(&pool, "ZDC", &["ZTL"]).await;
-        assert_eq!(
-            grants(&pool, &user).await,
-            [controller("ZDC"), controller("ZTL")]
-        );
-        assert_eq!(pull(&pool, "ZDC", &[]).await, 1);
-        assert_eq!(grants(&pool, &user).await, [controller("ZDC")]);
+        pull(&pool, "", &["ZTL", "ZNY"]).await;
+        assert_eq!(grants(&pool, &user).await, [controller()]);
+        assert_eq!(pull(&pool, "", &["ZNY"]).await, 0);
+        assert_eq!(grants(&pool, &user).await, [controller()]);
+        assert_eq!(pull(&pool, "", &[]).await, 1);
+        assert!(grants(&pool, &user).await.is_empty());
     }
 
     /// A controller who leaves the division holds no VATUSA role, only a home and visits — they must
@@ -1852,12 +1865,13 @@ mod tests {
         };
         // A home and nothing else — the plainest controller, and the one roles alone never noticed.
         pull(&pool, "ZDC", &[]).await;
+        assert_eq!(grants(&pool, &user).await, [controller()]);
         assert_eq!(super::clear_departed(&pool, &[]).await.unwrap(), 1);
         assert!(grants(&pool, &user).await.is_empty());
         assert_eq!(home().await, None);
         // A visit and nothing else.
         pull(&pool, "", &["ZTL"]).await;
-        assert_eq!(grants(&pool, &user).await, [controller("ZTL")]);
+        assert_eq!(grants(&pool, &user).await, [controller()]);
         assert_eq!(super::clear_departed(&pool, &[]).await.unwrap(), 1);
         assert!(grants(&pool, &user).await.is_empty());
     }
@@ -1893,6 +1907,89 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(manual, [Some("ZDC".to_string()), Some("ZNY".to_string())]);
+    }
+
+    /// Migration 0139 (#1121): each member's scoped `vatusa` CONTROLLER rows become one national row.
+    /// One surviving neighbour per predicate of its delete: another group (`EC`), another source
+    /// (`manual`), a national row already held, and a detached member. `USER` gains `flow.fca.read`.
+    #[sqlx::test]
+    async fn migration_0139_makes_synced_controllers_national(pool: PgPool) {
+        async fn row(pool: &PgPool, user: &str, role: &str, at: Option<&str>, source: &str) {
+            sqlx::query(
+                "insert into access.user_roles (user_id, role_name, artcc_id, source) \
+                 values ($1, $2, $3, $4)",
+            )
+            .bind(user)
+            .bind(role)
+            .bind(at)
+            .bind(source)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let home_and_visit = crate::scope_test_support::seed_user(&pool).await;
+        row(&pool, &home_and_visit, "CONTROLLER", Some("ZDC"), "vatusa").await;
+        row(&pool, &home_and_visit, "CONTROLLER", Some("ZNY"), "vatusa").await;
+        row(&pool, &home_and_visit, "EC", Some("ZDC"), "vatusa").await;
+        let hand_made = crate::scope_test_support::seed_user(&pool).await;
+        row(&pool, &hand_made, "CONTROLLER", Some("ZDC"), "manual").await;
+        let already_national = crate::scope_test_support::seed_user(&pool).await;
+        row(&pool, &already_national, "CONTROLLER", None, "vatusa").await;
+        row(
+            &pool,
+            &already_national,
+            "CONTROLLER",
+            Some("ZTL"),
+            "vatusa",
+        )
+        .await;
+        let detached = crate::scope_test_support::seed_user(&pool).await;
+        row(&pool, &detached, "CONTROLLER", Some("ZDC"), "vatusa").await;
+        detach(&pool, &detached).await;
+        sqlx::query("delete from access.role_permissions where role_name = 'USER' and permission_name = 'flow.fca.read'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0139_national_controller.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            grants(&pool, &home_and_visit).await,
+            [vatusa("CONTROLLER", None), vatusa("EC", Some("ZDC"))],
+            "two scoped rows become one national; the EC row is another group's"
+        );
+        assert_eq!(
+            grants(&pool, &hand_made).await,
+            [(
+                "CONTROLLER".to_string(),
+                Some("ZDC".to_string()),
+                "manual".to_string()
+            )],
+            "a hand-made grant is not the sync's"
+        );
+        assert_eq!(
+            grants(&pool, &already_national).await,
+            [vatusa("CONTROLLER", None)],
+            "an existing national row is kept, not duplicated"
+        );
+        assert_eq!(
+            grants(&pool, &detached).await,
+            [vatusa("CONTROLLER", Some("ZDC"))],
+            "a detached member keeps their rows until a Resync"
+        );
+        let user_reads: bool = sqlx::query_scalar(
+            "select exists(select 1 from access.role_permissions \
+             where role_name = 'USER' and permission_name = 'flow.fca.read')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(user_reads);
     }
 
     /// #549: a detached member is off sync for the roster grant too.
@@ -1949,13 +2046,13 @@ mod tests {
         // The preview is what a Resync would do, from the roles stored while detached…
         let (add, remove) = preview_resync(&pool, &user, CID).await.unwrap();
         let add: Vec<_> = add.into_iter().map(|(key, _)| key).collect();
-        // The member's home is now ZNY, so a Resync also grants the roster group there (#730); the
-        // detach above kept it from being granted until then.
+        // The member's home is now ZNY, an ARTCC, so a Resync also grants the national roster group
+        // (#730, #1121); the detach above kept it from being granted until then.
         assert_eq!(
             add,
             [
                 ("AEC".to_string(), Some("ZDC".to_string())),
-                ("CONTROLLER".to_string(), Some("ZNY".to_string()))
+                ("CONTROLLER".to_string(), None)
             ]
         );
         assert_eq!(remove, [("EC".to_string(), Some("ZDC".to_string()))]);
@@ -1967,10 +2064,7 @@ mod tests {
         tx.commit().await.unwrap();
         assert_eq!(
             grants(&pool, &user).await,
-            [
-                vatusa("AEC", Some("ZDC")),
-                vatusa("CONTROLLER", Some("ZNY"))
-            ],
+            [vatusa("AEC", Some("ZDC")), vatusa("CONTROLLER", None)],
             "the Resync applies exactly the preview, roster grant included (#730)"
         );
         assert!(detached_state(&pool, &user).await.unwrap().is_none());

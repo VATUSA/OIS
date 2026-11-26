@@ -1286,8 +1286,8 @@ mod tests {
         let w = world(pool).await;
         let home_missing = user(&w.pool, 1_795_030, "Home Missing").await;
         let home_ok = user(&w.pool, 1_795_031, "Home Ok").await;
-        // Each holds one `vatusa` row that matches what VATUSA justifies (CONTROLLER at ZDC) in all
-        // but one column: the scope for one, the group for the other.
+        // Each holds one `vatusa` row that matches what VATUSA justifies (CONTROLLER, national, #1121)
+        // in all but one column: the scope for one, the group for the other.
         let wrong_scope = user(&w.pool, 1_795_037, "Wrong Scope").await;
         let wrong_group = user(&w.pool, 1_795_038, "Wrong Group").await;
         sqlx::query("update identity.users set home_facility = 'ZDC' where id = any($1)")
@@ -1295,9 +1295,9 @@ mod tests {
             .execute(&w.pool)
             .await
             .unwrap();
-        group(&w.pool, &home_ok, "CONTROLLER", Some("ZDC"), "vatusa").await;
-        group(&w.pool, &wrong_scope, "CONTROLLER", Some("ZJX"), "vatusa").await;
-        group(&w.pool, &wrong_group, "EC", Some("ZDC"), "vatusa").await;
+        group(&w.pool, &home_ok, "CONTROLLER", None, "vatusa").await;
+        group(&w.pool, &wrong_scope, "CONTROLLER", Some("ZDC"), "vatusa").await;
+        group(&w.pool, &wrong_group, "EC", None, "vatusa").await;
         user(&w.pool, 1_795_032, "Visit Missing").await;
         let visit_ok = user(&w.pool, 1_795_033, "Visit Ok").await;
         for cid in [1_795_032_i64, 1_795_033] {
@@ -1307,7 +1307,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        group(&w.pool, &visit_ok, "CONTROLLER", Some("ZJX"), "vatusa").await;
+        group(&w.pool, &visit_ok, "CONTROLLER", None, "vatusa").await;
         user(&w.pool, 1_795_034, "Division Missing").await;
         let division_ok = user(&w.pool, 1_795_035, "Division Ok").await;
         for cid in [1_795_034_i64, 1_795_035] {

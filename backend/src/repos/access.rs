@@ -2366,8 +2366,17 @@ mod tests {
             "auth.sessions.delete",
             "access.self.read",
             "users.directory.read",
+            // #1121: every signed-in member reads FCAs and IDST.
+            "flow.fca.read",
         ] {
             assert!(baseline.contains(name), "the USER group must carry {name}");
+        }
+        // #1121: reading is all; FCA writes stay with rostered controllers and the flow groups.
+        for name in ["flow.fca.update", "flow.fca.delete", "flow.route.update"] {
+            assert!(
+                !baseline.contains(name),
+                "the USER group must not carry {name}"
+            );
         }
     }
 

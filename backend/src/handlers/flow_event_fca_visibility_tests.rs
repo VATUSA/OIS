@@ -237,8 +237,8 @@ async fn snapshot(pool: &PgPool, id: &str) -> Snapshot {
     }
 }
 
-/// A CONTROLLER at `artcc`, granted the way the VATUSA sync grants it (#730), as a session cookie.
-/// Not an event planner.
+/// A CONTROLLER granted by hand at `artcc` only, as a session cookie. Not an event planner. The sync
+/// grants CONTROLLER nationally (#1121, [`rostered`]); a hand-scoped grant still stops at its ARTCC.
 async fn controller(pool: &PgPool, artcc: &str) -> String {
     use crate::repos::access::{GrantSource, set_user_role_scoped};
     let user = seed_user(pool).await;
@@ -249,11 +249,18 @@ async fn controller(pool: &PgPool, artcc: &str) -> String {
         "CONTROLLER",
         true,
         Some(artcc),
-        GrantSource::Vatusa,
+        GrantSource::Manual,
     )
     .await
     .unwrap();
     tx.commit().await.unwrap();
+    session_cookie(pool, &user).await
+}
+
+/// A rostered controller whose only ARTCC is ZTL, through the real VATUSA sync: `CONTROLLER`
+/// nationally (#1121). Not an event planner.
+async fn rostered(pool: &PgPool) -> String {
+    let user = crate::scope_test_support::rostered_member(pool, "ZTL", &[]).await;
     session_cookie(pool, &user).await
 }
 
@@ -363,6 +370,33 @@ async fn live_fcas_403_out_of_scope(pool: PgPool, op: Op) {
             before,
             "{op:?} left {id} unchanged"
         );
+    }
+}
+
+/// #1121: a rostered controller from another ARTCC (ZTL) operates ZDC's published event FCA and its
+/// ordinary FCA, and still gets `404` on ZDC's planned and archived event FCAs with nothing changed:
+/// the national grant reaches every ARTCC but not event planning.
+async fn a_rostered_controller_elsewhere_operates_live_fcas_but_not_hidden_ones(
+    pool: PgPool,
+    op: Op,
+) {
+    let state = seed(&pool).await;
+    let ztl = rostered(&pool).await;
+    for id in HIDDEN {
+        let before = snapshot(&pool, id).await;
+        assert_eq!(
+            call(&state, op, id, &ztl).await.0,
+            StatusCode::NOT_FOUND,
+            "{op:?} on {id}"
+        );
+        assert_eq!(
+            snapshot(&pool, id).await,
+            before,
+            "{op:?} left {id} unchanged"
+        );
+    }
+    for id in LIVE {
+        assert_operable(&pool, &state, op, id, &ztl).await;
     }
 }
 
@@ -480,6 +514,16 @@ macro_rules! route_tests {
             #[sqlx::test]
             async fn live_fcas_403_out_of_scope(pool: PgPool) {
                 super::live_fcas_403_out_of_scope(pool, $op).await;
+            }
+
+            #[sqlx::test]
+            async fn a_rostered_controller_elsewhere_operates_live_fcas_but_not_hidden_ones(
+                pool: PgPool,
+            ) {
+                super::a_rostered_controller_elsewhere_operates_live_fcas_but_not_hidden_ones(
+                    pool, $op,
+                )
+                .await;
             }
 
             #[sqlx::test]

@@ -17,8 +17,6 @@ import {
 import {Clock, Plane, RefreshCw, Route, Navigation} from "lucide-react";
 
 import {usePageHeader} from "@/components/shell/page-meta";
-import {useMe} from "@/lib/auth";
-import {hasPermission} from "@/lib/permissions";
 import {setResult, setResultIsCurrent, useClearRelease, useMarkRelease, useSwapReleases, type SetResult} from "@/lib/fca";
 import {parseHhmm} from "@/lib/time";
 import {swapPartners, useIdst, useIdstScope, scopeIsEmpty, type IdstFlight, type IdstScope} from "@/lib/idst";
@@ -295,11 +293,9 @@ function SwapControl({ selected, released }: { selected: IdstFlight; released: I
 export function SelectedPanel({
   selected,
   released,
-  canEdit,
 }: {
   selected: IdstFlight | null;
   released: IdstFlight[];
-  canEdit: boolean;
 }) {
   const qc = useQueryClient();
   const [ready, setReady] = useState("");
@@ -352,7 +348,9 @@ export function SelectedPanel({
             ) : null}
           </dl>
 
-          {canEdit ? (
+          {/* The server's answer for this flight on this FCA (#1121): the permission, the FCA's ARTCC
+              and who holds the release, the checks the release routes make. */}
+          {selected.can_release ? (
             selected.released ? (
               <div className="flex flex-col gap-2">
                 <SwapControl key={keyOf(selected)} selected={selected} released={released} />
@@ -408,7 +406,7 @@ export function SelectedPanel({
               </div>
             )
           ) : (
-            <p className="text-xs text-ink-3">You don&apos;t have permission to issue releases.</p>
+            <p className="text-xs text-ink-3">You can’t change this flight’s release.</p>
           )}
         </>
       )}
@@ -418,8 +416,6 @@ export function SelectedPanel({
 
 /** IDST — the Integrated Departure Scheduling console for FCA release timing. */
 export function IdstPage() {
-  const { data: me } = useMe();
-  const canEdit = hasPermission(me, "flow.fca.update");
   const { scope, setScope, loadFailed, refreshFailed, retryLoad } = useIdstScope();
   const idst = useIdst(scope);
   const [selKey, setSelKey] = useState<string | null>(null);
@@ -479,7 +475,7 @@ export function IdstPage() {
             />
           </div>
         )}
-        <SelectedPanel selected={selected} released={released} canEdit={canEdit} />
+        <SelectedPanel selected={selected} released={released} />
       </div>
     </div>
   );

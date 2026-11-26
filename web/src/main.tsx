@@ -1,10 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import {QueryClient, QueryClientProvider} from "@tanstack/react-query";
+import {QueryClientProvider} from "@tanstack/react-query";
 import {RouterProvider} from "@tanstack/react-router";
 import {DialogProvider, ThemeProvider, ToastProvider, TooltipProvider} from "@ois/ui";
 
 import {router} from "./router";
+import {queryClient} from "./lib/query-client";
 import {launchDesktop} from "./lib/desktop-launch";
 import {installLogger} from "./lib/logger";
 import {ErrorBoundary} from "./components/error-boundary";
@@ -13,8 +14,6 @@ import "@fontsource-variable/inter";
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/600.css";
 import "./index.css";
-
-const queryClient = new QueryClient();
 
 // Desktop only: rotate the keychain-stored session on launch, which both proves it is still valid
 // and pushes its expiry out, so an app that's opened regularly never makes the user sign in again

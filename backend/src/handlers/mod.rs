@@ -77,6 +77,8 @@ mod flow_prefile_candidate_tests;
 #[cfg(test)]
 mod machine_actor_tests;
 #[cfg(test)]
+mod national_controller_tests;
+#[cfg(test)]
 mod proposed_wheels_up_tests;
 #[cfg(test)]
 mod service_account_grant_tests;

@@ -604,8 +604,8 @@ async fn reading_demand_needs_flow_sectors_read(pool: PgPool) {
 }
 
 /// #725 owner decision 4 (migration 0129): a rostered controller opens the Sector Monitor. The
-/// CONTROLLER group is granted the way the VATUSA sync grants it (#730): one row at the home ARTCC,
-/// `source = 'vatusa'`, no direct `flow.sectors.read`. `flow.sectors.read` is a read gate, which a grant
+/// CONTROLLER group is granted by hand at ZDC only, with no direct `flow.sectors.read`: the narrowest
+/// grant (the sync's is national, #1121). `flow.sectors.read` is a read gate, which a grant
 /// at any scope satisfies, so a ZDC controller reads ZDC **and** a neighbour (ZNY), the page's view-only
 /// neighbour tables. It edits neither: the edit flags are false at both, and a limit write at their own
 /// ZDC is refused, since CONTROLLER holds no `flow.sector_limits.update`. A signed-in user outside the
@@ -623,7 +623,7 @@ async fn a_controller_reads_demand_at_home_and_next_door_and_edits_none(pool: Pg
         "CONTROLLER",
         true,
         Some("ZDC"),
-        GrantSource::Vatusa,
+        GrantSource::Manual,
     )
     .await
     .unwrap();

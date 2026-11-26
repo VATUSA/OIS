@@ -489,6 +489,52 @@ function useOnGone(fcaId: string) {
 /** A Set's ready time was refused: not `HHMM`/`HHMMz`, or before the current minute (#816). */
 class ReadyRefusedError extends Error {}
 
+/** A release write the server refused, with what it said, so the toast can give the reason (#1121). */
+class ReleaseRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/** Why the server refused a release write, by its error code (#56, #585). */
+const RELEASE_REFUSAL_CODES: Record<string, string> = {
+  different_runway: "They depart different runways.",
+  different_departure: "They depart different airports.",
+  runway_unassigned: "One of them has no departure runway assigned.",
+  departure_unknown: "One of them is no longer in the feed.",
+  held_by_person: "A person holds this release.",
+  held_by_other_machine: "Another tool holds this release.",
+};
+
+/**
+ * The reason to show for a refused mark, clear or swap, or undefined when there is none worth
+ * showing (#1121). 401 is the permission check: the caller holds `flow.fca.update` nowhere, or is
+ * signed out. 403 is the ARTCC check on the FCA. A 404 never reaches here: it is `GoneError`.
+ */
+export function releaseRefusal(status: number, code?: string): string | undefined {
+  if (code && RELEASE_REFUSAL_CODES[code]) return RELEASE_REFUSAL_CODES[code];
+  if (status === 401) return "Your account can’t change releases. If you were signed out, sign in again.";
+  if (status === 403) return "You aren’t permitted to change releases on this FCA’s ARTCC.";
+  return undefined;
+}
+
+/** The refused response as a thrown error: 404 is gone, anything else is refused with its reason. */
+function refused(message: string, response: Response, error: unknown): Error {
+  if (response.status === 404) return new GoneError();
+  const code = (error as { error?: string } | undefined)?.error;
+  return new ReleaseRefusedError(message, response.status, code);
+}
+
+/** Toast a refused release write: its title, and the reason when there is one. */
+function toastRefusal(toast: ReturnType<typeof useToast>, title: string, e: unknown) {
+  const description = e instanceof ReleaseRefusedError ? releaseRefusal(e.status, e.code) : undefined;
+  toast.error(title, description ? { description } : undefined);
+}
+
 /** How much later than the typed ready time a Set's release landed (#816). The release and its
  *  crossing slot show in the panel's own rows; this is the one figure they cannot give. `edct` is
  *  the release it describes, so the panel can drop the figure once that release changes. */
@@ -542,9 +588,8 @@ export function useMarkRelease(fcaId: string) {
         "/api/v1/flow/fcas/{id}/release/{callsign}",
         { params: { path: { id: fcaId, callsign } }, body: { ready } },
       );
-      if (response.status === 404) throw new GoneError();
       if (response.status === 400 && ready) throw new ReadyRefusedError();
-      if (error || !data) throw new Error("release failed");
+      if (error || !data) throw refused("release failed", response, error);
       return data;
     },
     onSuccess: (data) => {
@@ -557,7 +602,7 @@ export function useMarkRelease(fcaId: string) {
     onError: (e) => {
       if (e instanceof GoneError) onGone();
       else if (e instanceof ReadyRefusedError) toast.error("Ready time refused", { description: READY_REFUSED });
-      else toast.error("Couldn’t issue the release");
+      else toastRefusal(toast, "Couldn’t issue the release", e);
     },
   });
 }
@@ -574,8 +619,7 @@ export function useClearRelease(fcaId: string) {
         "/api/v1/flow/fcas/{id}/release/{callsign}",
         { params: { path: { id: fcaId, callsign } } },
       );
-      if (response.status === 404) throw new GoneError();
-      if (error || !data) throw new Error("clear failed");
+      if (error || !data) throw refused("clear failed", response, error);
       return data;
     },
     onSuccess: (data) => {
@@ -583,19 +627,9 @@ export function useClearRelease(fcaId: string) {
       queryClient.invalidateQueries({ queryKey: ["idst"] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: (e) => (e instanceof GoneError ? onGone() : toast.error("Couldn’t clear the release")),
+    onError: (e) => (e instanceof GoneError ? onGone() : toastRefusal(toast, "Couldn’t clear the release", e)),
   });
 }
-
-/** Why the server refused a swap (#56, #585), in words a controller can act on. */
-const SWAP_REFUSALS: Record<string, string> = {
-  different_runway: "They depart different runways",
-  different_departure: "They depart different airports",
-  runway_unassigned: "One of them has no departure runway assigned",
-  departure_unknown: "One of them is no longer in the feed",
-  held_by_person: "A person holds one of these releases",
-  held_by_other_machine: "Another tool holds one of these releases",
-};
 
 /**
  * Trade two released flights' times (#514). The server allows it only within one FCA, off the same
@@ -611,21 +645,14 @@ export function useSwapReleases(fcaId: string) {
         params: { path: { id: fcaId } },
         body: { a, b },
       });
-      if (response.status === 404) throw new GoneError();
-      if (!response.ok) {
-        const code = (error as { error?: string } | undefined)?.error;
-        throw new Error((code && SWAP_REFUSALS[code]) ?? "Couldn’t swap the releases");
-      }
+      if (!response.ok) throw refused("swap failed", response, error);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["idst"] });
       queryClient.invalidateQueries({ queryKey: ["fca-traffic", fcaId] });
       queryClient.invalidateQueries({ queryKey: ["departures"] });
     },
-    onError: (e) =>
-      e instanceof GoneError
-        ? onGone()
-        : toast.error(e instanceof Error ? e.message : "Couldn’t swap the releases"),
+    onError: (e) => (e instanceof GoneError ? onGone() : toastRefusal(toast, "Couldn’t swap the releases", e)),
   });
 }
 

@@ -52,6 +52,7 @@ const flight = (over: Partial<IdstFlight>): IdstFlight => ({
   released_by_machine: null,
   runway: null,
   runway_source: null,
+  can_release: true,
   ...over,
 });
 
@@ -68,7 +69,7 @@ function mount(selected: IdstFlight) {
       root.render(
         <QueryClientProvider client={qc}>
           <ToastProvider>
-            <SelectedPanel selected={f} released={[]} canEdit />
+            <SelectedPanel selected={f} released={[]} />
           </ToastProvider>
         </QueryClientProvider>,
       ),
@@ -151,5 +152,31 @@ describe("IDST SelectedPanel (VATUSA/OIS#816)", () => {
     expect(host.querySelector("[data-set-result]")).toBeNull();
     render(releasedAt("2026-10-10T14:07:00Z", { callsign: "UAL2" }));
     expect(host.querySelector("[data-set-result]")).toBeNull();
+  });
+});
+
+/** VATUSA/OIS#1121 AC7: the release controls follow the server's per-flight `can_release`. */
+describe("IDST SelectedPanel release controls (VATUSA/OIS#1121)", () => {
+  const buttons = (host: HTMLElement) => [...host.querySelectorAll("button")].map((b) => b.textContent);
+  const REFUSED = "You can’t change this flight’s release.";
+
+  it("offers Set and RDY on an unreleased flight it may release, and Cancel on a released one", () => {
+    const { host, render } = mount(flight({ can_release: true }));
+    expect(buttons(host)).toEqual(expect.arrayContaining(["Set", "RDY — release earliest"]));
+    expect(host.querySelector("#idst-ready")).not.toBeNull();
+    expect(host.textContent).not.toContain(REFUSED);
+    render(flight({ released: true, can_release: true }));
+    expect(buttons(host)).toContain("Cancel release");
+    expect(host.textContent).not.toContain(REFUSED);
+  });
+
+  it("offers no release control on a flight it may not release, released or not, and says so", () => {
+    const { host, render } = mount(flight({ can_release: false }));
+    expect(buttons(host)).toEqual([]);
+    expect(host.querySelector("#idst-ready")).toBeNull();
+    expect(host.textContent).toContain(REFUSED);
+    render(flight({ released: true, can_release: false }));
+    expect(buttons(host)).toEqual([]);
+    expect(host.textContent).toContain(REFUSED);
   });
 });

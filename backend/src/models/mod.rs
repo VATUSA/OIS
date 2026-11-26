@@ -27,9 +27,11 @@ pub struct MeBody {
     pub permissions: Value,
     /// VATUSA member details, once synced (null until the first successful sync).
     pub vatusa: Option<VatusaProfile>,
-    /// True when the member holds `tmu.program.read` nationally — a DCC/national user who should see
-    /// restrictions from every ARTCC, not only their own. `permissions` is a flat name tree with no
-    /// ARTCC dimension, so without this the client can't tell the two apart (#405).
+    /// True when the member holds `tmu.program.update` nationally — a DCC/national TMU who should see
+    /// restrictions from every ARTCC, not only their own. A rostered controller reads the TMU picture
+    /// nationally but is not a national TMU, so this is false for them (#1121). `permissions` is a
+    /// flat name tree with no ARTCC dimension, so without this the client can't tell the two apart
+    /// (#405).
     pub tmu_national: bool,
 }
 
@@ -2731,6 +2733,9 @@ pub struct IdstFlight {
     /// Which rung of the ladder chose `runway`: `manual` | `rule` | `config`, so a controller can see
     /// *why* it was predicted and whether a human set it. Null exactly when `runway` is.
     pub runway_source: Option<String>,
+    /// Whether the caller may mark, clear or swap this flight's release on this FCA: the same
+    /// permission, ARTCC-scope and release-holder checks the release routes apply (#1121).
+    pub can_release: bool,
 }
 
 /// The IDST board: FCA-metered ground departures in scope, split by release state.

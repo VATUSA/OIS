@@ -32,9 +32,14 @@ const OAUTH_RETURN_TO_COOKIE: &str = "ois_oauth_return_to";
 const SESSION_COOKIE: &str = "ois_session";
 const OAUTH_STATE_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_LOGIN_REDIRECT: &str = "/api/v1/me";
-/// The permission whose scope decides whether a member reads restrictions nationally. The same one
-/// `RestrictionAlerts` gates its audience on, so the flag and the gate can't drift (#405).
+/// The permission `RestrictionAlerts` gates on: a member who holds it hears restrictions at all (#405).
+#[cfg(test)]
 const TMU_READ_PERMISSION: &str = "tmu.program.read";
+/// The permission whose scope decides whether a member is a national TMU and hears restrictions from
+/// every ARTCC (#405). The TMU write, not the read: every rostered controller reads the TMU picture
+/// nationally through `CONTROLLER` (#1121), and is still a facility audience. Every group that holds
+/// the read as a national TMU (NTMO, DCC_STAFF, VATUSA_STAFF) holds this too.
+const TMU_NATIONAL_PERMISSION: &str = "tmu.program.update";
 
 /// Set alongside the OAuth state when the desktop app starts the flow, so the callback knows to
 /// also mint a one-time code. A cookie rather than a round-trip through VATSIM's `state` because
@@ -425,7 +430,7 @@ async fn build_me_body(state: &AppState, user: &CurrentUser) -> Result<MeBody, A
     // `permissions` is a flat name tree with no ARTCC dimension, so a client can't tell a national
     // (DCC) reader from a facility-scoped one. Resolve that one question here (#405).
     let tmu_national = match state.db.as_ref() {
-        Some(pool) => access_repo::permission_scope(pool, &user.id, TMU_READ_PERMISSION)
+        Some(pool) => access_repo::permission_scope(pool, &user.id, TMU_NATIONAL_PERMISSION)
             .await?
             .is_national(),
         None => false,
@@ -779,15 +784,15 @@ mod tests {
     }
 
     /// `/me`'s `tmu_national` is what tells the client whether to scope restriction alerts to the
-    /// user's own ARTCCs (#405). It has to come from the *scope* of `tmu.program.read`, not from
+    /// user's own ARTCCs (#405). It has to come from the *scope* of `tmu.program.update`, not from
     /// `server_admin`: a DCC controller holds it nationally without being a server admin, and
     /// reading the flag off `server_admin` would silently narrow them to their home facility.
     #[sqlx::test]
     async fn tmu_national_follows_the_permission_scope_not_the_admin_flag(pool: PgPool) {
         let national = seed_user(&pool).await;
-        grant(&pool, &national, TMU_READ_PERMISSION, None).await;
+        grant(&pool, &national, TMU_NATIONAL_PERMISSION, None).await;
         let scoped = seed_user(&pool).await;
-        grant(&pool, &scoped, TMU_READ_PERMISSION, Some("ZDC")).await;
+        grant(&pool, &scoped, TMU_NATIONAL_PERMISSION, Some("ZDC")).await;
         let none = seed_user(&pool).await;
 
         let state = test_state(pool, HashMap::new());
@@ -806,6 +811,60 @@ mod tests {
 
         let body = build_me_body(&state, &current_user(&none)).await.unwrap();
         assert!(!body.tmu_national, "no grant is not national");
+    }
+
+    /// #1121 moved `tmu_national` off `tmu.program.read`, which every rostered controller now holds
+    /// nationally through `CONTROLLER`, onto the TMU write. The two signals disagree in two
+    /// directions; both are pinned. A synced controller (national read, no write) is a facility
+    /// audience; the same controller who is also a ZDC EC (write at ZDC only) still is; an NTMO
+    /// (national write) is national.
+    #[sqlx::test]
+    async fn a_rostered_controller_reads_tmu_nationally_but_is_not_a_national_tmu(pool: PgPool) {
+        async fn group(pool: &PgPool, user: &str, role: &str, artcc: Option<&str>) {
+            let mut tx = pool.begin().await.unwrap();
+            access_repo::set_user_role_scoped(
+                &mut tx,
+                user,
+                role,
+                true,
+                artcc,
+                access_repo::GrantSource::Vatusa,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let controller = seed_user(&pool).await;
+        group(&pool, &controller, "CONTROLLER", None).await;
+        let ec = seed_user(&pool).await;
+        group(&pool, &ec, "CONTROLLER", None).await;
+        group(&pool, &ec, "EC", Some("ZDC")).await;
+        let ntmo = seed_user(&pool).await;
+        group(&pool, &ntmo, "NTMO", None).await;
+        let state = test_state(pool.clone(), HashMap::new());
+
+        // Positive control: the controller really does hold the old signal nationally.
+        assert!(
+            access_repo::permission_scope(&pool, &controller, TMU_READ_PERMISSION)
+                .await
+                .unwrap()
+                .is_national(),
+            "CONTROLLER is granted nationally, so it reads tmu.program.read nationally"
+        );
+        let body = build_me_body(&state, &current_user(&controller))
+            .await
+            .unwrap();
+        assert!(
+            !body.tmu_national,
+            "a rostered controller hears their own ARTCCs"
+        );
+        let body = build_me_body(&state, &current_user(&ec)).await.unwrap();
+        assert!(
+            !body.tmu_national,
+            "a ZDC EC who is also a controller is still ZDC's"
+        );
+        let body = build_me_body(&state, &current_user(&ntmo)).await.unwrap();
+        assert!(body.tmu_national, "a national TMU hears every ARTCC");
     }
 
     /// AC3 of #544: the baseline arrives as **group membership**, not as per-user rows.
@@ -1360,7 +1419,7 @@ mod tests {
         sqlx::query(
             "insert into access.role_permissions (role_name, permission_name) values ('TMU_TEST', $1)",
         )
-        .bind(TMU_READ_PERMISSION)
+        .bind(TMU_NATIONAL_PERMISSION)
         .execute(&pool)
         .await
         .unwrap();
@@ -1369,7 +1428,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        crate::scope_test_support::deny_scoped(&pool, &user, TMU_READ_PERMISSION, None).await;
+        crate::scope_test_support::deny_scoped(&pool, &user, TMU_NATIONAL_PERMISSION, None).await;
 
         let state = test_state(pool, HashMap::new());
         let body = build_me_body(&state, &current_user(&user)).await.unwrap();
@@ -1382,7 +1441,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !names.iter().any(|n| n == TMU_READ_PERMISSION),
+            !names.iter().any(|n| n == TMU_NATIONAL_PERMISSION),
             "and it must be absent from the permission tree too — the two answers must agree"
         );
     }

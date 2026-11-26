@@ -71,7 +71,8 @@ export function useIdst(scope: IdstScope) {
 
 /**
  * Who a released flight may trade times with (#56): another released flight metered by the same FCA,
- * off the same airport, on the same assigned runway. A flight with no runway has no partners. The server
+ * off the same airport, on the same assigned runway, whose release the caller may change
+ * (`can_release`, #1121). A flight with no runway has no partners. The server
  * enforces the same rule; this only keeps the picker from offering a swap it would refuse.
  */
 export function swapPartners(selected: IdstFlight, released: IdstFlight[]): IdstFlight[] {
@@ -82,6 +83,8 @@ export function swapPartners(selected: IdstFlight, released: IdstFlight[]): Idst
       f.callsign !== selected.callsign &&
       f.fca_id === selected.fca_id &&
       f.dep.toUpperCase() === selected.dep.toUpperCase() &&
-      f.runway === selected.runway,
+      f.runway === selected.runway &&
+      // A swap writes both releases, so the caller must be able to change the partner's too (#1121).
+      f.can_release,
   );
 }

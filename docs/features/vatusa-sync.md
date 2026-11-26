@@ -130,29 +130,32 @@ unrestricted (`VATUSA_STAFF` is server-admin only). **System groups — `SERVER_
 `SERVICE_APP` — can never be mapped**, even by a server admin: `SERVER_ADMIN` has no `role_permissions`
 for the gate to check, so without that refusal VATUSA could become a source of server admins.
 
-## The roster grant: `CONTROLLER` (#730)
+## The roster grant: `CONTROLLER` (#730, #1121)
 
-Every signed-in user is in `USER`, which is unscoped and opens nothing operational. A rostered
-controller also gets **`CONTROLLER`**, the baseline operational group (migration 0126). It's granted
-**once per facility**: at their home ARTCC (`identity.users.home_facility`) and at each visiting ARTCC
-(`identity.vatusa_visits`).
+Every signed-in user is in `USER`, which is unscoped and reads FCAs and IDST (`flow.fca.read`,
+migration 0139) and nothing else operational. A rostered controller also gets **`CONTROLLER`**, the
+baseline operational group (migration 0126). It's granted **once, nationally**, to a member whose home
+facility (`identity.users.home_facility`) or any visiting facility (`identity.vatusa_visits`) is an
+ARTCC, so a visitor and a home controller alike work every ARTCC's flow tools (#1121). Migration 0139
+converted the per-facility rows the sync wrote before; a detached member's rows convert at their next
+Resync.
 
 - **Same machinery as the role mappings.** `desired_vatusa_grants` adds the roster rows beside the
   mapped ones, so sign-in, the pull, the webhook, a mapping edit and Resync all produce it. Rows carry
   `source = 'vatusa'` and come and go with the roster. A hand-made `CONTROLLER` grant survives, and a
-  detached member (#549) is left alone. The audit names the reason: `granted CONTROLLER at ZDC (holds
-  roster home ZDC)`.
-- **Never national.** A facility missing from `org.facilities` grants nothing, and so does a `ZHQ`
+  detached member (#549) is left alone. The audit names the reason: `granted CONTROLLER nationally
+  (holds roster home ZDC, roster visit ZNY)`.
+- **Only for an ARTCC.** A facility missing from `org.facilities` grants nothing, and so does a `ZHQ`
   home, which is not an ARTCC. A member with no home and no visits holds only `USER`.
 - **Lifecycle.**
-  - The pull reconciles **every** member on each run, not only those whose roles changed. So a transfer
-    or a dropped visit moves the grant on the next pull, and the first pull after a new grant source
-    ships backfills everyone.
+  - The pull reconciles **every** member on each run, not only those whose roles changed. A transfer or
+    a dropped visit changes nothing while any ARTCC remains; losing the last one removes the grant on
+    the next pull. The first pull after a new grant source ships backfills everyone.
   - An unchanged member writes and audits nothing.
   - A member who leaves the division loses their roles, visits **and** home facility, and with them the
     grant. "Left" means missing from the pull while holding any of the three: a plain controller holds
     no VATUSA role.
-- **What it grants**, each scoped to the facility:
+- **What it grants**, at every ARTCC:
   - `flow.fca.read`, `flow.fca.update`, `flow.fca.delete`;
   - `flow.route.update`;
   - `tmu.cfr.assign`;
@@ -161,11 +164,12 @@ controller also gets **`CONTROLLER`**, the baseline operational group (migration
   - `tmu.tmi.read`, `tmu.adv.read`, `tmu.ntml.read`, `tmu.gdp.read`, `tmu.groundstop.read`, `tmu.delays.read`;
   - `flow.sectors.read` (#725, migration 0129), so a controller opens Operations → Sector Monitor.
 
-  Every write among them is ARTCC-scoped in its handler. Runway writes became so with this change:
-  they're checked against the airport's ARTCC, so a ZDC grant writes only ZDC's airports. A read gate
-  is met by a grant at any scope, so `flow.sectors.read` at ZDC reads every ARTCC's sector demand (the
-  page's view-only neighbour tables) and also opens the admin sector viewer (Admin → Sectors);
-  it edits no limit or consolidation, which have their own scoped permissions. There's no Planning
+  Every write among them is ARTCC-scoped in its handler, and the national grant passes that check at
+  every ARTCC; a `CONTROLLER` granted by hand at one ARTCC still stops there. `flow.sectors.read`
+  reads every ARTCC's sector demand and also opens the admin sector viewer (Admin → Sectors); it
+  edits no limit or consolidation, which have their own scoped permissions. `/me`'s `tmu_national`
+  keys on `tmu.program.update`, which `CONTROLLER` does not hold, so a controller's restriction
+  alerts and dashboard stay on their own ARTCCs (#405). There's no Planning
   (`events.plan.*`), Historical (`stats.*`) or `*.publish` permission, and no admin permission beyond
   that one read. `the_controller_group_is_exactly_the_operational_baseline` pins the set exactly.
 

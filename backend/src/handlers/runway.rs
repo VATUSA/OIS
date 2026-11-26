@@ -440,8 +440,8 @@ mod scope_tests {
         state
     }
 
-    /// A rostered controller at `artcc`: the CONTROLLER group the VATUSA sync grants (#730), which
-    /// carries `flow.runway.update`, scoped there.
+    /// A CONTROLLER granted by hand at `artcc` only, which carries `flow.runway.update` there. The
+    /// sync grants it nationally (#1121); a hand-scoped grant still stops at its ARTCC.
     async fn controller_at(pool: &PgPool, at: &str) -> String {
         let user = seed_user(pool).await;
         let mut tx = pool.begin().await.unwrap();
@@ -451,7 +451,7 @@ mod scope_tests {
             "CONTROLLER",
             true,
             Some(at),
-            GrantSource::Vatusa,
+            GrantSource::Manual,
         )
         .await
         .unwrap();

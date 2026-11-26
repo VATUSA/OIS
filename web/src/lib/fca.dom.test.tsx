@@ -13,7 +13,15 @@ import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from "vitest
 const api = vi.hoisted(() => ({ POST: vi.fn(), PUT: vi.fn(), DELETE: vi.fn() }));
 vi.mock("@/lib/api", () => ({ ois: api, API_BASE: "", DOCS_URL: "" }));
 
-import {type FcaFlight, READY_REFUSED, useClearRelease, useMarkRelease, useReorderFca, useSwapReleases} from "./fca";
+import {
+  type FcaFlight,
+  READY_REFUSED,
+  releaseRefusal,
+  useClearRelease,
+  useMarkRelease,
+  useReorderFca,
+  useSwapReleases,
+} from "./fca";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -141,5 +149,55 @@ describe("useMarkRelease on a 400 (VATUSA/OIS#816)", () => {
     await run(() => hooks.mark.mutateAsync({ callsign: "AAL1" }));
     expect(host.textContent).toContain("Couldn’t issue the release");
     expect(host.textContent).not.toContain("Ready time refused");
+  });
+});
+
+/** VATUSA/OIS#1121 AC6: a refused mark, clear or swap says why, under its own title. */
+describe("release writes refused with 401, 403 or a code (VATUSA/OIS#1121)", () => {
+  const RELEASE_CASES = CASES.slice(0, 3);
+  const refusedWith = (status: number, code: string) => ({
+    data: undefined,
+    error: { error: code },
+    response: { status, ok: false },
+  });
+
+  it.each(RELEASE_CASES)("%s: a 403 says the FCA's ARTCC is not theirs", async (_l, verb, fire, failure) => {
+    api[verb].mockResolvedValue(refusedWith(403, "forbidden"));
+    const { hooks, host } = mount();
+    await run(() => fire(hooks));
+    expect(host.textContent).toContain(failure);
+    expect(host.textContent).toContain(releaseRefusal(403)!);
+    expect(host.textContent).toContain("this FCA’s ARTCC");
+  });
+
+  it.each(RELEASE_CASES)("%s: a 401 says the account can't change releases", async (_l, verb, fire, failure) => {
+    api[verb].mockResolvedValue(refusedWith(401, "unauthorized"));
+    const { hooks, host } = mount();
+    await run(() => fire(hooks));
+    expect(host.textContent).toContain(failure);
+    expect(host.textContent).toContain("Your account can’t change releases");
+    expect(host.textContent).not.toContain("this FCA’s ARTCC");
+  });
+
+  it.each(RELEASE_CASES)("%s: a 500 gives the title and no reason", async (_l, verb, fire, failure) => {
+    api[verb].mockResolvedValue(refusedWith(500, "internal"));
+    const { hooks, host } = mount();
+    await run(() => fire(hooks));
+    expect(host.textContent).toContain(failure);
+    expect(host.textContent).not.toContain("Your account can’t change releases");
+    expect(host.textContent).not.toContain("this FCA’s ARTCC");
+  });
+
+  it("a swap refused with a code names it", async () => {
+    api.POST.mockResolvedValue(refusedWith(409, "different_runway"));
+    const { hooks, host } = mount();
+    await run(() => hooks.swap.mutateAsync({ a: "AAL1", b: "DAL2" }));
+    expect(host.textContent).toContain("Couldn’t swap the releases");
+    expect(host.textContent).toContain("They depart different runways.");
+  });
+
+  it("gives no reason for a status it has none for", () => {
+    expect(releaseRefusal(500)).toBeUndefined();
+    expect(releaseRefusal(412, "unknown_code")).toBeUndefined();
   });
 });

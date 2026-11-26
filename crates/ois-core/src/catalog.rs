@@ -51,7 +51,7 @@ pub fn default_roles() -> Vec<&'static str> {
         "ACE",          // ACE team
         "NTMO",         // national traffic management officer
         "DCC_STAFF",    // DCC staff
-        "CONTROLLER", // rostered controller: baseline ops, granted per facility by VATUSA sync (#730)
+        "CONTROLLER", // rostered controller: baseline ops, granted nationally by VATUSA sync (#730, #1121)
         // Machine actors
         "BOT",
         "SERVICE_APP",

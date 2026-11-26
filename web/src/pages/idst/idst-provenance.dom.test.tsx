@@ -38,6 +38,7 @@ const flight = (callsign: string, released_by_machine: string | null): IdstFligh
   released_by_machine,
   runway: null,
   runway_source: null,
+  can_release: true,
 });
 
 /** VATUSA/OIS#585 AC4: a controller can see a release came from a tool, on the real IDST table. */

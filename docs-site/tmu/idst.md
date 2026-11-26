@@ -50,5 +50,5 @@ Issue a release once. Whether you set it here or on the departures board, it's t
 
 ## Permissions
 
-- **View the board** — `flow.fca.read`.
-- **Issue or cancel a release** — `flow.fca.update`.
+- **View the board** — `flow.fca.read`, which every signed-in member holds.
+- **Issue, cancel or swap a release** — `flow.fca.update` at the FCA's ARTCC. Every rostered VATUSA controller, home or visiting, holds it at every ARTCC. The release buttons show only on flights you can change.

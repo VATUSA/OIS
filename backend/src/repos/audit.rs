@@ -115,6 +115,22 @@ pub async fn fetch_api_key_actor_id(
     .map_err(|_| ApiError::Internal)
 }
 
+/// A service account's audit actor id if one exists (read-only; does not create). None if the account
+/// has never acted, so it holds no release (#1121).
+pub async fn fetch_service_account_actor_id(
+    pool: &PgPool,
+    service_account_id: &str,
+) -> Result<Option<String>, ApiError> {
+    sqlx::query_scalar::<_, String>(
+        "select id from access.actors \
+         where actor_type = 'service_account' and service_account_id = $1 limit 1",
+    )
+    .bind(service_account_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
 /// An API key's audit actor id, creating the actor row if needed. So every mutation a key makes is
 /// attributed to the key (identified by its `display_name` = name + prefix), not left unlogged.
 pub async fn resolve_api_key_actor_id(

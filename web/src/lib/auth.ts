@@ -17,14 +17,21 @@ async function fetchMe(): Promise<Me | null> {
   return data;
 }
 
-/** Current user, or `null` when signed out. Errors only when the backend is unreachable. */
-export function useMe() {
-  return useQuery({
+/** The `["me"]` query, shared by `useMe` and the route guards (`route-guard.ts`). */
+export function meQueryOptions() {
+  return {
     queryKey: ["me"],
     queryFn: fetchMe,
     // Ride out a transient blip before surfacing an error…
     retry: 2,
     staleTime: 60_000,
+  } as const;
+}
+
+/** Current user, or `null` when signed out. Errors only when the backend is unreachable. */
+export function useMe() {
+  return useQuery({
+    ...meQueryOptions(),
     // …and once unreachable, keep probing so the app recovers on its own when the backend returns.
     refetchInterval: (query) =>
       query.state.status === "error" ? 5_000 : false,
